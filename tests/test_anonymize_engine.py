@@ -423,28 +423,39 @@ def test_a_context_never_cuts_a_token():
     assert short == "⟦EMAIL_1⟧ hi"
 
 
-def test_a_new_full_name_is_not_two_known_people():
-    """A new person whose first name is one known person's and whose surname
-    is another's ("Ivan" Babić, Ana "Horvat") is a new person, "Ivan Horvat" —
-    not those two side by side (which put back as "Ivan Babić Ana Horvat")."""
+def test_one_word_is_no_known_person_when_a_model_looks():
+    """With a trusted model looking (one_word_names=False) code takes no first
+    name or surname alone for a known person: "Ivan Horvat" next to the known
+    Ivan Babić and Ana Horvat is the model's to find — never "Ivan Babić Ana
+    Horvat". Capitalised words are never people of code's making."""
     state = E.VaultState()
     E.anonymize_text("Name: Ivan Babić", state)
     E.anonymize_text("Name: Ana Horvat", state)
     babic, horvat = state.entities[0].token, state.entities[1].token
+    model = E.Options(one_word_names=False)
     text = "član društva\nIvan Horvat\nčlan društva\nAna Horvat"
-    out = E.anonymize_text(text, state)[0]
+    assert E.anonymize_text(text, state, model)[0] == f"član društva\nIvan Horvat\nčlan društva\n{horvat}"
+    found = E.Options(one_word_names=False, extra=(("Ivan Horvat", "PERSON"),))
+    out = E.anonymize_text(text, state, found)[0]
     new = out.split("\n")[1]
-    assert new not in (babic, horvat) and out.split("\n")[3] == horvat and out.count("⟦") == 2
-    assert E.restore(out, state)[0] == text
-    by = {e.token: e for e in state.entities}
-    assert by[new].original == "Ivan Horvat" and by[new].found_by == "name-run"
-    # The same person written surname first is that person; others in a row are one new person.
-    assert E.anonymize_text("HORVAT ANA, član društva", state)[0] == f"{horvat}, član društva"
-    for text in ("Ana Marija Horvat signed.", "M. Horvat called."):
-        out = E.anonymize_text(text, state)[0]
-        assert out.count("⟦") == 1 and E.restore(out, state)[0] == text
-    # Two known people side by side stay two.
-    assert E.anonymize_text("Ana Horvat Ivan Babić", state)[0] == f"{horvat} {babic}"
+    assert new not in (babic, horvat) and E.restore(out, state)[0] == text
+    nav = "Source: LinkedIn · Home · Solutions · an IT company · Thu 12 Nov · Ivan wrote"
+    assert E.anonymize_text(nav, state, model)[0] == nav
+    # A known full name the other way round is still that person.
+    assert E.anonymize_text("HORVAT ANA, član društva", state, model)[0] == f"{horvat}, član društva"
+
+
+def test_code_alone_takes_a_lone_name_but_never_guesses_next_to_another():
+    """Code only (no trusted model): a known surname standing alone is that
+    person; next to another name word it is somebody's full name — no guess."""
+    state = E.VaultState()
+    E.anonymize_text("Name: Ivan Babić", state)
+    E.anonymize_text("Name: Ana Horvat", state)
+    horvat = state.entities[1].token
+    assert E.anonymize_text("Poštovani g. Horvat,", state)[0] == f"Poštovani g. {horvat},"
+    assert "Ivan Horvat" in E.anonymize_text("član društva\nIvan Horvat", state)[0]
+    nav = "Source: LinkedIn · Home · Solutions"
+    assert E.anonymize_text(nav, state)[0] == nav
 
 
 def test_inside_a_link_a_token_puts_back_what_was_there():

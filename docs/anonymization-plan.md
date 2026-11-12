@@ -563,6 +563,25 @@ the agent sees tokens — never restored.
   Horvat", "M. Horvat"); two known full names side by side stay two. And inside a link every token puts back
   exactly what was there ("?first=Ivan" never gets the full name it stood for), mailto: and tel: included.
   Verified with Claude Haiku as the trusted model on a made-up register page: 3 of 3 runs right.
+* **Names are the trusted model's call (after "name runs" made it worse).** The fix above — a known first name
+  or surname next to another name word makes a new person — turned capitalised words into people on real pages:
+  a site's menu ("Home", "Solutions"), "LinkedIn", "IT", "Nov" in a date, 45 new "people" in one run — and they
+  spread: a made-up full name's words became known first names and surnames, so every later "LinkedIn" was that
+  person. Reverted. The lesson: code guessing people from one word is the problem; what code finds for sure is not.
+  Now, with a trusted model in the lane: code never takes a first name or surname alone for a known person (in the
+  finder or when it resolves a one-word find — the same word again is the same token, nothing more); it still
+  finds known full names, in any order ("HORVAT ANA"), their link spellings, and everything structured (emails,
+  phones, numbers with a check digit, labelled IDs, links). The trusted model reads the text as it is, not code's
+  output, so no code guess hides a name from it, and every name, company, address and product is its call. With
+  code alone (no trusted model) a known name standing alone is still that person, but never one next to another
+  name word. The trusted model marks an address's street and number, not the town after it ("Ilica 12", not
+  "Ilica 12, Zagreb"). Verified with Claude Haiku as the trusted model on a made-up register page with a site's
+  menu: 3 of 3 runs right — the new person one token, the known one hers, no menu word, "LinkedIn", "IT" or "Nov"
+  touched, everything put back exactly.
+* **Reset.** A vault can be emptied (Anonymize → Vaults → a vault → *Reset*, or *Reset the chat vault* on the
+  privacy gate): its values and their history go, its name, key and token numbers stay — a new value never gets an
+  old token, so text still holding old tokens shows them rather than somebody else's value. Agents hear of it with
+  the gate's answer (`epoch`, within a minute) and forget the texts they anonymized before.
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
   needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
   with lane "both"); map links keep a place's coordinates ("…/@45.8,15.9"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known

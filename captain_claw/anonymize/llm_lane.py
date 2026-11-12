@@ -53,7 +53,8 @@ Find everything that could identify a real private person or a private company:
 - ORG: a private company, firm, shop, association or organisation by name — and the name of its own product, app,
   service or brand: a small company's product points to the company as surely as its name does. One word, odd
   capitals or a made-up spelling count too ("Kvadrix", "ZENTROdesk")
-- ADDRESS: a street address, a house, a specific place where someone lives or works
+- ADDRESS: a street address, a house, a specific place where someone lives or works — the street and number
+  (and postcode), not the town or country after it: "Ilica 12", not "Ilica 12, Zagreb"
 - PHONE, EMAIL, DOB (date of birth), IBAN, CARD, ID_NUMBER (passport, ID, tax, OIB, JMBG, licence, policy, customer numbers), IP, PROFILE_URL (social profile link), PLATE (licence plate)
 - DETAIL: a description that points to one real person without naming them ("the only female surgeon on Vis", "the mayor's son", "our client's new wife")
 

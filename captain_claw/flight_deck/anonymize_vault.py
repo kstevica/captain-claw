@@ -172,6 +172,7 @@ def _public(row: dict[str, Any]) -> dict[str, Any]:
         "kinds": json.loads(row["kinds"] or "{}"), "created_by": row["created_by"],
         "created_at": row["created_at"], "updated_at": row["updated_at"],
         "last_used_at": row["last_used_at"], "expires_at": row["expires_at"],
+        "reset_at": row.get("reset_at"),
     }
 
 
@@ -191,6 +192,9 @@ class VaultStore:
                 db.row_factory = aiosqlite.Row
                 await db.execute("PRAGMA journal_mode=WAL")
                 await db.executescript(_DDL)
+                cur = await db.execute("PRAGMA table_info(vaults)")
+                if "reset_at" not in {r[1] for r in await cur.fetchall()}:
+                    await db.execute("ALTER TABLE vaults ADD COLUMN reset_at REAL")
                 await db.commit()
                 try:
                     os.chmod(self.path, 0o600)
@@ -385,6 +389,26 @@ class VaultStore:
         await self._delete_row(row)
         await self.log(owner, row["id"], actor, "delete", {"entities": row["entity_count"]})
         return True
+
+    async def reset(self, owner: str, vault: str, *, actor: str = "") -> dict[str, Any] | None:
+        """Empty a vault and keep it: its values and their history are gone,
+        its name, key and token numbers stay — a new value never gets an old
+        token, so text that still holds old tokens can't be put back with
+        somebody else's value (it shows the tokens)."""
+        row = await self._row(owner, vault)
+        if row is None:
+            return None
+        db = await self._conn()
+        now = time.time()
+        async with self.lock(row["id"]):
+            await db.execute("DELETE FROM entries WHERE vault_id=?", (row["id"],))
+            await db.execute("DELETE FROM token_uses WHERE vault_id=?", (row["id"],))
+            await db.execute("DELETE FROM token_stats WHERE vault_id=?", (row["id"],))
+            await db.execute("UPDATE vaults SET kinds='{}', entity_count=0, updated_at=?, reset_at=? WHERE id=?",
+                             (now, now, row["id"]))
+            await db.commit()
+        await self.log(owner, row["id"], actor, "reset", {"entities": row["entity_count"]})
+        return await self._row(owner, row["id"])
 
     async def _delete_row(self, row: dict[str, Any]) -> None:
         db = await self._conn()

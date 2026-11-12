@@ -36,3 +36,9 @@ export function anonymizable(name: string): boolean {
   const dot = name.lastIndexOf('.')
   return dot > 0 && ANON_EXTS.has(name.slice(dot).toLowerCase())
 }
+
+/** What resetting a vault does, said before it is done. */
+export const RESET_TEXT = 'Every real value in it and their history are deleted; the vault, its key and its token numbers stay. '
+  + 'Conversations and files that already hold its tokens keep them, but they can no longer be put back — they show '
+  + 'the tokens. New names get new tokens: an old token never gets a new meaning. Start new conversations afterwards. '
+  + "This can't be undone."

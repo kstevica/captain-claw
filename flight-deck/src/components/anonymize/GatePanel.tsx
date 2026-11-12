@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { ShieldCheck, Save } from 'lucide-react'
+import { ShieldCheck, Save, RotateCcw } from 'lucide-react'
 import { anonymizeApi, type GateInfo, type GateSettings } from '../../services/anonymizeApi'
-import { Card, Button, Field, Notice, Segmented, SettingRow, Switch, inputCls } from '../console/parts'
+import { Card, Button, Dialog, Field, Notice, Segmented, SettingRow, Switch, inputCls } from '../console/parts'
+import { RESET_TEXT } from './anonFormat'
 
 // The privacy gate: what their agents' models read is anonymized first — when
 // that model isn't trusted (or always). Either the sources the person picks
@@ -18,6 +19,22 @@ export function GatePanel() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [resetDone, setResetDone] = useState('')
+
+  const resetChat = async () => {
+    setResetting(true); setError('')
+    try {
+      await anonymizeApi.resetVault('Chat')
+      setResetDone('The chat vault is empty. Start a new conversation with your agents.')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : ''
+      setError(/No such vault/.test(msg) ? 'There is no chat vault yet — nothing to reset.' : msg || "Couldn't reset it")
+    } finally {
+      setResetting(false); setConfirmReset(false)
+    }
+  }
 
   useEffect(() => {
     anonymizeApi.gate()
@@ -110,10 +127,20 @@ export function GatePanel() {
 
         {error && <Notice tone="red">{error}</Notice>}
         {saved && <Notice tone="emerald">{gate.enabled ? 'Saved. Your agents follow it from their next step (within a minute).' : 'Saved. The gate is off.'}</Notice>}
-        <div className="flex justify-end">
+        {resetDone && <Notice tone="emerald">{resetDone}</Notice>}
+        <div className="flex justify-end gap-2">
+          {chat(gate) && <Button icon={RotateCcw} onClick={() => { setConfirmReset(true); setResetDone('') }} className="mr-auto">Reset the chat vault</Button>}
           <Button variant="primary" icon={Save} busy={busy} onClick={save}>Save</Button>
         </div>
       </Card>
+      {confirmReset && (
+        <Dialog title="Reset the chat vault?" icon={RotateCcw} onClose={() => setConfirmReset(false)} footer={<>
+          <Button onClick={() => setConfirmReset(false)}>Keep it</Button>
+          <Button variant="danger" icon={RotateCcw} busy={resetting} onClick={resetChat}>Reset</Button>
+        </>}>
+          <p className="text-sm leading-relaxed text-zinc-300">{RESET_TEXT}</p>
+        </Dialog>
+      )}
     </div>
   )
 }

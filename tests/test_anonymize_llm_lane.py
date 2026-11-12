@@ -163,9 +163,10 @@ async def test_shared_cases_live(case):
     m = T.TrustedModel(provider=provider, model=model,
                        base_url=os.environ.get("CAPTAIN_LIVE_ANONYMIZE_BASE_URL", ""),
                        api_key=os.environ.get("CAPTAIN_LIVE_ANONYMIZE_API_KEY", ""), basis="attested")
-    det = E.run([E.Segment(case["text"])], E.VaultState()).outputs[0]
-    found = await L.detect(det, T.completer(m))
-    out, _r = E.anonymize_text(case["text"], E.VaultState(), E.Options(extra=tuple(found.terms)))
+    # As the gate runs it: the model reads the text as it is; code adds what it finds for sure.
+    found = await L.detect(case["text"], T.completer(m))
+    out, _r = E.anonymize_text(case["text"], E.VaultState(),
+                               E.Options(extra=tuple(found.terms), one_word_names=False))
     missed = [v for v in case["must_hide"] if v in out]
     over = [v for v in case["must_keep"] if v not in out]
     assert not missed and not over, f"missed={missed} over-hid={over}\n{out}"

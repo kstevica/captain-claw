@@ -118,6 +118,10 @@ class Options:
     # tokenized (date of birth → year, address → city, age and amounts → a
     # range). AGE and AMOUNT are then also looked for.
     generalize: frozenset[str] = frozenset()
+    # Code takes a known person's first name or surname alone ("Horvat")
+    # for that person. Only when code is all there is: with a trusted model
+    # looking too, names are its call — one word is no proof of who it is.
+    one_word_names: bool = True
 
 
 @dataclass
@@ -336,6 +340,8 @@ class _Resolver:
         exact = self.state.by_key.get(("PERSON", key))
         full = [w for w in words if not _is_initial(w)]
         if len(words) == 1:
+            if not self.options.one_word_names:
+                return exact  # the same word again is the same token — never somebody's full name
             stem = stem_key(words[0])
             by_last = self.by_last.get(stem, [])
             by_first = self.by_first.get(stem, [])
@@ -384,7 +390,7 @@ _SLUG_WORD_RE = re.compile(r"%[0-9A-Fa-f]{2}|[^\W_]+")  # an escape ("%20") is a
 _SLUG_GAP_RE = re.compile(r"[_+\-]|%20|[ \t]+")
 _LINK_RE = re.compile(r"(?:https?://|www\.|mailto:|tel:)[^\s<>\"'\[\]{}|\\^`]+")
 SLUG_MIN_JOINED = 6
-# Name words in a row taken as one person's name, at most ("Ana Marija Horvat").
+# Name words in a row read as one name, at most ("Ana Marija Horvat").
 MAX_NAME_RUN = 4
 _LEGAL_AFTER_RE = re.compile(rf",?[ \t]+{d._LEGAL}(?![\w])")
 _DIGITS_RE = re.compile(r"[+(]?\d[\d \t()./\-]{4,40}\d")
@@ -407,6 +413,9 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
             table.setdefault(k, []).append(item)
 
     persons = [p for p in (_person_view(e) for e in state.entities) if p]
+    if not options.one_word_names:
+        # Full names only: a first name or surname alone is the trusted model's call.
+        persons = [p for p in persons if len(p.words) > 1]
     if options.kinds is None or "PERSON" in options.kinds:
         last_groups: dict[str, list[_Person]] = {}
         first_groups: dict[str, list[_Person]] = {}
@@ -419,6 +428,8 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
             elif len(p.stems[0]) >= 3 and fold(p.words[0]) not in d._STOP:
                 info = _WordInfo.of(p.words[0])
                 index(singles, info, (info, p.entity))
+        if not options.one_word_names:
+            last_groups, first_groups = {}, {}
         for stem, group in last_groups.items():
             surname = group[0].words[-1]
             if len(stem) < 3 or fold(surname) in d._STOP:
@@ -438,7 +449,7 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                 info = _WordInfo.of(first)
                 index(singles, info, (info, group[0].entity))
         for e in state.entities:
-            if e.kind == "PERSON" and e.key.startswith("~") and len(e.key) >= 4:
+            if options.one_word_names and e.kind == "PERSON" and e.key.startswith("~") and len(e.key) >= 4:
                 info = _WordInfo.of(e.original)
                 index(singles, info, (info, e))
 
@@ -528,32 +539,9 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                 w = words[j][2]
                 return j not in covered and not _is_initial(w) and len(w) >= 2 and fold(w) not in d._STOP
 
-            def lone(i: int, target: Target, own: list[_WordInfo]) -> None:
-                """A known first name or surname at word *i*. Alone, it is that
-                person. With name words right next to it, they are one name:
-                the same person written the other way round ("HORVAT ANA"), or
-                somebody else — "Ivan" of one known person (Ivan Babić) and
-                "Horvat" of another (Ana Horvat) make "Ivan Horvat", a new
-                person, not those two."""
-                a = b = i
-                while b + 1 < len(words) and b - a < MAX_NAME_RUN - 1 and adjacent(b) and namey(b + 1):
-                    b += 1
-                while a > 0 and b - a < MAX_NAME_RUN - 1 and adjacent(a - 1) and namey(a - 1):
-                    a -= 1
-                if a == b:
-                    emit(words[i][0], words[i][1], target, "known")
-                    return
-                e = known_by_words(a, b)
-                if e is not None:
-                    emit(words[a][0], words[b][1], e, "known")
-                elif all(any(_word_matches(keys[j], info) for info in own) for j in range(a, b + 1)):
-                    emit(words[a][0], words[b][1], target, "known")
-                else:
-                    new_person(words[a][0], words[b][1])
-
             def known_by_words(a: int, b: int) -> Entity | None:
-                """The known person whose name is exactly words a..b in another
-                order ("HORVAT ANA"), if there is one."""
+                """The known person whose full name is exactly words a..b in
+                another order ("HORVAT ANA"), if there is one."""
                 n = b - a + 1
                 for j in range(a, b + 1):
                     for e, infos in multi.get(keys[j][0], ()):
@@ -563,12 +551,30 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                             return e
                 return None
 
-            def new_person(s: int, t: int) -> None:
-                surface = text[s:t]
-                key = normalize("PERSON", surface, options.default_cc)
-                emit(s, t, lambda: state.by_key.get(("PERSON", key)) or state.add("PERSON", key, surface),
-                     "name-run")
+            # A known full name the other way round is that person too.
+            i = 0
+            while i < len(words):
+                if not namey(i):
+                    i += 1
+                    continue
+                b = i
+                while b + 1 < len(words) and b - i < MAX_NAME_RUN - 1 and adjacent(b) and namey(b + 1):
+                    b += 1
+                e = known_by_words(i, b) if b > i else None
+                if e is not None:
+                    emit(words[i][0], words[b][1], e, "known")
+                    covered.update(range(i, b + 1))
+                i = b + 1
 
+            def alone(i: int) -> bool:
+                """No other name word right next to word *i*: with one there, it
+                is somebody's full name ("Ivan" of one known person and
+                "Horvat" of another make neither) — not code's guess."""
+                return not ((i > 0 and adjacent(i - 1) and namey(i - 1))
+                            or (i + 1 < len(words) and adjacent(i) and namey(i + 1)))
+
+            # One word for a known person — only when code is all there is
+            # (Options.one_word_names), and only standing alone.
             for i, (start, end, w) in enumerate(words):
                 if _is_initial(w) or i in covered:
                     continue
@@ -576,20 +582,17 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                 for info, target, first in surnames.get(tk[0], ()):
                     if not _word_matches(tk, info):
                         continue
-                    if i > 0 and adjacent(i - 1):
+                    if first is not None and i > 0 and adjacent(i - 1):
                         pw = words[i - 1][2]
-                        if first is not None and (
-                                (_is_initial(pw) and d.strip_accents(pw[:1]).casefold() == first.initial)
-                                or (not _is_initial(pw) and _word_matches(keys[i - 1], first))):
+                        if (_is_initial(pw) and d.strip_accents(pw[:1]).casefold() == first.initial) \
+                                or (not _is_initial(pw) and _word_matches(keys[i - 1], first)):
                             emit(words[i - 1][0], end, target, "known")
                             continue
-                        if _is_initial(pw):  # "M. Horvat" is not Ana Horvat
-                            new_person(words[i - 1][0], end)
-                            continue
-                    lone(i, target, [info] if first is None else [info, first])
+                    if alone(i) and not (i > 0 and adjacent(i - 1) and _is_initial(words[i - 1][2])):
+                        emit(start, end, target, "known")
                 for info, e in singles.get(tk[0], ()):
-                    if _word_matches(tk, info):
-                        lone(i, e, [_WordInfo.of(x) for x in _name_words(e.original) if not _is_initial(x)])
+                    if _word_matches(tk, info) and alone(i):
+                        emit(start, end, e, "known")
 
         if literal:
             for m in _TEXT_TOKEN_RE.finditer(text):
