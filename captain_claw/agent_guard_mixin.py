@@ -457,7 +457,7 @@ class AgentGuardMixin:
         except Exception:
             return None
 
-    async def _gate_outgoing(self, messages: list[Message]) -> list[Message]:
+    async def _gate_outgoing(self, messages: list[Message], interaction_label: str = "") -> list[Message]:
         """*messages* as the model may read them: unchanged unless the person's
         privacy gate covers the whole chat — then anonymized (each text once,
         the history keeping the tokens) and the system prompt told so. A
@@ -467,11 +467,20 @@ class AgentGuardMixin:
         gate = await _gate.decision(self)
         if gate is None or not gate.chat:
             return messages
+        def say(n: int) -> None:
+            # Housekeeping after the turn (reflection, insights…) stays quiet,
+            # like its model calls: the agent already said it is idle.
+            if str(interaction_label or "").strip() in _BACKGROUND_MAINTENANCE_LABELS:
+                return
+            what = "your message" if n == 1 and messages and messages[-1].role == "user" else (
+                f"{n} new {'text' if n == 1 else 'texts'} before the model reads them")
+            self._gate_status(_gate.working(gate, what))
+
         try:
-            out = await _gate.anonymize_messages(self, gate, messages)
+            out = await _gate.anonymize_messages(self, gate, messages, on_work=say)
         except Exception as exc:  # noqa: BLE001 — fail closed
             raise GuardBlockedError("privacy", (
-                f"The privacy gate couldn't check what goes to the model, so nothing was sent ({exc}). "
+                f"The privacy gate couldn't check what goes to the model, so nothing was sent ({_gate.why(exc)}). "
                 "Try again in a moment; if it keeps failing, tell the person.")) from None
         if out and out[0].role == "system" and _gate.CHAT_NOTE not in (out[0].content or ""):
             out = [replace(out[0], content=f"{out[0].content}\n\n{_gate.CHAT_NOTE}"), *out[1:]]
@@ -488,7 +497,7 @@ class AgentGuardMixin:
         """Run guarded LLM completion (input + output guards)."""
         # The privacy gate's whole chat: what the model (and the input guard's
         # own model) reads is anonymized first.
-        messages = await self._gate_outgoing(messages)
+        messages = await self._gate_outgoing(messages, interaction_label)
         guard_payload = self._serialize_messages_for_guard(messages)
         allowed_input, input_error = await self._enforce_guard(
             guard_type="input",
@@ -813,11 +822,13 @@ class AgentGuardMixin:
             gate = None  # its result goes to Flight Deck, not to the model
         restored = 0
         if gate is not None and gate.egress(name):
+            if self._has_tokens(arguments):
+                self._gate_status(_gate.restoring(name))
             try:
                 arguments, restored = await _gate.restore_args(gate, arguments)
             except Exception as exc:  # noqa: BLE001 — nothing leaves with half its values
                 return _ToolResult(success=False, error=(
-                    f"Nothing was sent: the privacy gate couldn't put the real values back into it ({exc}). "
+                    f"Nothing was sent: the privacy gate couldn't put the real values back into it ({_gate.why(exc)}). "
                     "Try again in a moment; if it keeps failing, tell the person."))
 
         result = await self.tools.execute(
@@ -833,5 +844,20 @@ class AgentGuardMixin:
             stream_callback=getattr(self, "_tool_stream_callback", None),
         )
         if gate is not None and (restored or gate.covers(name, arguments)):
+            if (result.content or "").strip() or (result.error or "").strip():
+                self._gate_status(_gate.working(gate, f"what {name} returned"))
             result = await _gate.gate_result(gate, name, result)
         return result
+
+    def _gate_status(self, text: str) -> None:
+        """The live status line while the privacy gate works."""
+        setter = getattr(self, "_set_runtime_status", None)
+        if setter is not None:
+            setter(text)
+
+    @staticmethod
+    def _has_tokens(arguments: dict[str, Any]) -> bool:
+        from captain_claw.anonymize.engine import TOKEN_RE
+
+        return any(not k.startswith("_") and TOKEN_RE.search(json.dumps(v, ensure_ascii=False))
+                   for k, v in arguments.items())

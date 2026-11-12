@@ -70,6 +70,21 @@ class LaneFailed(RuntimeError):
     the message — they may quote the document)."""
 
 
+class AnswerCut(RuntimeError):  # noqa: N818 — like LaneFailed
+    """The model stopped at its answer limit (``finish_reason`` "length"):
+    what it wrote is cut off. The lane asks again in smaller pieces."""
+
+    def __init__(self, limit: int = 0) -> None:
+        super().__init__(f"the answer hit the {limit:,}-token limit" if limit else "the answer was cut off")
+        self.limit = limit
+
+
+# A piece the model's answer still runs past its limit on is split again, down
+# to this size; past that the lane fails (a model that thinks without end).
+MIN_SPLIT_CHARS = 1000
+MAX_SPLITS = 2
+
+
 @dataclass
 class LaneResult:
     terms: list[tuple[str, str]] = field(default_factory=list)  # (text, kind)
@@ -176,27 +191,42 @@ async def detect(text: str, complete: Complete, *, kinds: frozenset[str] | None 
     sem = asyncio.Semaphore(max(1, concurrency))
     found: list[list[tuple[str, str]]] = [[] for _ in parts]
 
+    async def ask(i: int, part: str, splits: int = 0) -> list[tuple[str, str]]:
+        for attempt in (1, 2):
+            try:
+                answer, used = await complete(SYSTEM, user_prompt(part, i + 1, len(parts)))
+            except LaneFailed:
+                raise
+            except AnswerCut as cut:
+                # It wrote (or thought) until its limit: a smaller piece needs
+                # a shorter answer. Never a half answer taken as a whole one.
+                halves = chunks(part, max(MIN_SPLIT_CHARS // 2, len(part) // 2 + 1))
+                if splits >= MAX_SPLITS or len(part) < MIN_SPLIT_CHARS or len(halves) < 2:
+                    raise LaneFailed(
+                        f"the trusted model kept writing until its answer limit ({cut}) — it may think too "
+                        "long for this; turn its thinking down or raise the limit") from None
+                out: list[tuple[str, str]] = []
+                for half in halves:
+                    out.extend(await ask(i, half, splits + 1))
+                return out
+            except Exception as exc:  # noqa: BLE001 — any failure fails the lane
+                if attempt == 2:
+                    raise LaneFailed(f"the trusted model didn't answer ({type(exc).__name__})") from None
+                continue
+            result.tokens += int(used or 0)
+            try:
+                terms, dropped = parse(answer, part, kinds)
+            except ValueError:
+                if attempt == 2:
+                    raise LaneFailed("the trusted model's answer wasn't the JSON asked for") from None
+                continue
+            result.dropped += dropped
+            return terms
+        return []
+
     async def one(i: int, part: str) -> None:
         async with sem:
-            for attempt in (1, 2):
-                try:
-                    answer, used = await complete(SYSTEM, user_prompt(part, i + 1, len(parts)))
-                except LaneFailed:
-                    raise
-                except Exception as exc:  # noqa: BLE001 — any failure fails the lane
-                    if attempt == 2:
-                        raise LaneFailed(f"the trusted model didn't answer ({type(exc).__name__})") from None
-                    continue
-                result.tokens += int(used or 0)
-                try:
-                    terms, dropped = parse(answer, part, kinds)
-                except ValueError:
-                    if attempt == 2:
-                        raise LaneFailed("the trusted model's answer wasn't the JSON asked for") from None
-                    continue
-                found[i] = terms
-                result.dropped += dropped
-                return
+            found[i] = await ask(i, part)
 
     try:
         async with asyncio.TaskGroup() as tg:

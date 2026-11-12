@@ -108,12 +108,13 @@ async def decide(person: str, provider: str, model: str, base_url: str) -> dict[
     if settings.when == "untrusted" and await model_trusted(provider, model, base_url):
         return {"active": False, "reason": "trusted model"}
     lane = settings.lane
-    if lane == "both" and await trusted.usable(get_db()) is None:
+    model = await trusted.usable(get_db()) if lane == "both" else None
+    if model is None:
         lane = "deterministic"
     chat = settings.coverage == "chat"
     return {"active": True, "chat": chat, "groups": [] if chat else settings.groups,
             "folders": [] if chat else settings.folders, "vault": G.GATE_VAULT, "lane": lane,
-            "reason": settings.when}
+            "model": model.label if model else "", "reason": settings.when}
 
 
 async def chat_restores(person: str) -> bool:

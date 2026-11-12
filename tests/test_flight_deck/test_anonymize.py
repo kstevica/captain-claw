@@ -984,6 +984,105 @@ class TestWholeChat:
         assert await anonymize_chat.ChatRestorer(ALICE).frame(frame) == frame  # someone else: tokens
         assert await anonymize_chat.ChatRestorer("").frame(frame) == frame
 
+    async def test_the_status_line_says_the_gate_is_working(self, gate_env):
+        from captain_claw.agent import Agent
+        from captain_claw.llm import Message
+
+        _gate(_client(), coverage="chat")
+        agent = _agent("anthropic", "claude-x", TestGateOnTheAgent.MAIL)
+        said: list[str] = []
+        agent._set_runtime_status = said.append
+        await Agent._gate_user_text(agent, "Pozovi Klausa, OIB 52601815906")
+        fetched = await self._run(agent, "web_fetch", {"url": "https://x.example"})
+        email = re.search(r"⟦EMAIL_\d+⟧", fetched.content).group(0)
+        await self._run(agent, "send_mail", {"to": email, "body": "hi"})
+        await agent._gate_outgoing([Message(role="system", content="Owner: Ivan Horvat, ivan.horvat@acme.hr")])
+        await agent._gate_outgoing([Message(role="system", content="Owner: Ivan Horvat, ivan.horvat@acme.hr")])
+        assert said[0] == "🛡️ Anonymizing your message — code is looking for private data…"
+        assert "🛡️ Anonymizing what web_fetch returned — code is looking for private data…" in said
+        assert "🛡️ Putting the real values back into send_mail…" in said
+        assert said.count("🛡️ Anonymizing your message — code is looking for private data…") == 1
+        assert [s for s in said if "before the model reads them" in s] == [
+            "🛡️ Anonymizing 1 new text before the model reads them — code is looking for private data…"]  # once
+        # Housekeeping after the turn stays quiet (the agent said it is idle).
+        before = len(said)
+        await agent._gate_outgoing([Message(role="system", content="Reflection on Ana Kovač, ana@x.hr")], "reflection")
+        assert len(said) == before
+
+    def test_the_status_names_the_trusted_model(self):
+        from captain_claw import anonymize_gate_client as gate
+
+        d = gate.Decision(True, lane="both", chat=True, model="ollama · ornith:9b")
+        assert gate.working(d, "your message") == (
+            "🛡️ Anonymizing your message — the trusted model (ollama · ornith:9b) is looking for private data…")
+
+    def test_a_failure_says_what_went_wrong(self):
+        from captain_claw import anonymize_gate_client as gate
+
+        assert gate.why(httpx.ReadTimeout("")) == f"it took longer than {gate.CALL_TIMEOUT / 60:g} minutes"
+        assert gate.why(httpx.ConnectError("")) == "Flight Deck couldn't be reached"
+        assert gate.why(gate.GateFailed("")) == "GateFailed"
+        assert gate.CALL_TIMEOUT >= 1800  # a local trusted model reads the system prompt in minutes
+
+    async def test_the_trusted_model_call_gets_the_long_cap(self, monkeypatch):
+        import types
+
+        from captain_claw import llm
+        from captain_claw.flight_deck import anonymize_trusted as trusted
+
+        made = []
+
+        class Provider:
+            request_timeout = None
+
+            async def complete(self, **kw):
+                made.append(self.request_timeout)
+                assert self.log_content is False  # its answer is the private data: never in a log line
+                return types.SimpleNamespace(content="[]", usage={"total_tokens": 3})
+
+        kwargs = {}
+
+        def make(**kw):
+            kwargs.update(kw)
+            return Provider()
+
+        monkeypatch.setattr(llm, "create_provider", make)
+        monkeypatch.delenv("FD_ANONYMIZE_MODEL_THINK", raising=False)
+        m = trusted.TrustedModel(provider="ollama", model="ornith:9b", base_url="", api_key="",
+                                 attested=False, on_failure="refuse", enabled=True, source="settings")
+        assert await trusted.completer(m)("system", "user") == ("[]", 3)
+        assert made == [trusted.CALL_TIMEOUT] and trusted.CALL_TIMEOUT >= 600
+        assert kwargs["max_tokens"] == trusted.MAX_TOKENS >= 32000 and kwargs["think"] is None  # the model's own
+        monkeypatch.setenv("FD_ANONYMIZE_MODEL_THINK", "off")
+        await trusted.completer(m)("system", "user")
+        assert kwargs["think"] is False
+
+    def test_a_provider_can_keep_model_output_out_of_its_logs(self):
+        from captain_claw.llm import OllamaProvider
+
+        p = OllamaProvider(model="ornith:9b")
+        assert p._content_preview("Name: Ivan Horvat\nx", 10) == "Name: Ivan"
+        p.log_content = False
+        assert p._content_preview("Name: Ivan Horvat", 10) == ""
+
+    async def test_an_answer_cut_at_the_limit_is_said_so(self, monkeypatch):
+        import types
+
+        from captain_claw import llm
+        from captain_claw.anonymize.llm_lane import AnswerCut
+        from captain_claw.flight_deck import anonymize_trusted as trusted
+
+        class Provider:
+            request_timeout = None
+
+            async def complete(self, **kw):
+                return types.SimpleNamespace(content='{"spans": [{"text": "Mar', usage={}, finish_reason="length")
+
+        monkeypatch.setattr(llm, "create_provider", lambda **kw: Provider())
+        m = trusted.TrustedModel(provider="ollama", model="ornith:9b")
+        with pytest.raises(AnswerCut):
+            await trusted.completer(m)("system", "user")
+
     async def test_telegram_restores_for_the_owners_chat(self, gate_env):
         from captain_claw import anonymize_gate_client as gate
         from captain_claw.web import telegram

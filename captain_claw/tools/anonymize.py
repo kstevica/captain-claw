@@ -79,7 +79,9 @@ def default_vault(kwargs: dict[str, Any]) -> str:
 
 class AnonymizeTool(Tool):
     name = "anonymize"
-    timeout_seconds = 240.0
+    # A trusted model that looks too reads a long file chunk by chunk: on a
+    # local model that is minutes (anonymize_gate_client.CALL_TIMEOUT).
+    timeout_seconds = 1800.0
     description = (
         "Take PRIVATE DATA out of a file, web page or text: people's names, dates of birth, bank accounts "
         "(IBAN), card numbers, emails, phone numbers, street addresses, OIB/JMBG/passport/tax numbers, IPs, "

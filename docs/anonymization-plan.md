@@ -478,6 +478,25 @@ the agent sees tokens — never restored.
 * Telegram: the owner's own private chat (reply and live narration) — `_tg_restorer`; other users and
   groups keep the tokens.
 
+**While it works** (added 2026-11-12, after a real deck's trusted model took minutes):
+
+* The live status line says so — "🛡️ Anonymizing your message / what web_fetch returned / 6 new texts before
+  the model reads them — the trusted model (ollama/ornith:9b) is looking for private data…" and "🛡️ Putting
+  the real values back into send_mail…" — instead of "thinking". Only when Flight Deck is actually asked
+  (cached texts say nothing), and never for housekeeping after the turn (reflection, insights: the agent
+  already said it is idle). The decision carries the trusted model's name (`model`).
+* Caps: the agent waits up to **30 minutes** for one check (`CLAW_ANONYMIZE_GATE_TIMEOUT`, was 180 s — a
+  local model reading the system prompt chunk by chunk ran past it); one trusted-model call up to
+  **10 minutes** (`FD_ANONYMIZE_MODEL_TIMEOUT`, was 240 s, now also the provider's own request timeout,
+  which was 120–180 s); the `anonymize` tool 30 minutes. A failure names what happened ("it took longer
+  than 30 minutes", "Flight Deck couldn't be reached") instead of an empty "()".
+* The answer limit: **32,000** tokens (`FD_ANONYMIZE_MODEL_MAX_TOKENS`, was 16,000). An answer cut at the
+  limit (`finish_reason` "length" — a thinking model that ran on: 16,000 tokens for a 1,743-token chunk) is
+  asked again in halves, twice at most, then the lane fails saying so. `FD_ANONYMIZE_MODEL_THINK`
+  (`off`/`low`/`medium`/`high`/`on`) sets the trusted model's thinking on Ollama; unset keeps the model's own.
+* The trusted model's answers are the private data it found: its provider no longer quotes model output in
+  log lines (`LLMProvider.log_content = False`; the Ollama provider logged a 200-character preview at INFO).
+
 **Not covered yet** (tokens stay): WhatsApp, Messenger and devices (the channel bus can carry other allowed
 people), cron deliveries, public pages, the Line and notifications; model calls an agent makes with
 another provider (e.g. task naming).
