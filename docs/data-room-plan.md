@@ -12,7 +12,7 @@ never gets the real names back: no restored text goes out through the connector.
 Status: P0 spike done (2026-11-13, Cowork on a throwaway deck; results in P0 below). P1 built (branch
 `feat/data-rooms-p1`, PR #539, see "P1 as built"). P2 built (branch `feat/data-rooms-p2`, PR #540, see
 "P2 as built"; not yet tried with real Claude). P3 built (branch `feat/data-rooms-p3`, PR #541, see "P3 as
-built"). P4 built (branch `feat/data-rooms-p4`, PR #542). P5 built (branch `feat/data-rooms-p5`, PR #543). P6 built (branch `feat/data-rooms-p6`, see "P6 as built"). P7 not built. Builds on the anonymizer
+built"). P4 built (branch `feat/data-rooms-p4`, PR #542). P5 built (branch `feat/data-rooms-p5`, PR #543). P6 built (branch `feat/data-rooms-p6`, PR #544). P7 built (branch `feat/data-rooms-p7`, see "P7 as built"). Builds on the anonymizer
 (`docs/anonymization-plan.md`, all merged) and the inbound MCP server
 (`flight_deck/mcp_server_routes.py`, `flight_deck/mcp_oauth_routes.py`).
 
@@ -579,6 +579,63 @@ names:
 
 It is on by default for Croatian ("Fix grammar" per delivery). Language is
 detected from diacritics and common words.
+
+**P7 as built (2026-11-13, branch `feat/data-rooms-p7`, stacked on P6):**
+
+- **`rooms_grammar`:** only people's names (PERSON tokens whose value reads as
+  a name; not a link's slug, not inside a URL or e-mail). Companies and places
+  stay as written.
+- **Language:** told from Claude's own text in tokens (Croatian names restored
+  into an English memo don't count): common Croatian vs English words, plus
+  diacritics.
+- **The model gives forms, not sentences.** One item per (sentence, name): the
+  name's surroundings (~160 characters before, ~100 after, cut at a line break)
+  with the name marked «like this». The answer is JSON id → form, 40 items a
+  call, at most 600 per delivery (the rest stay as stored). The prompt names
+  which case follows which word (s → instrumental, o → locative, od →
+  genitive, za → accusative, prema → dative). Without that guide a 9B local
+  model got 3 of 4 right ("o Ane" instead of "o Ani"). With it, all of a
+  9-name memo was right: six cases changed, three nominatives kept.
+- **Guard, per word** (hyphenated parts too): the same word count and order;
+  initials, numbers and punctuation never change; the same capitals; the new
+  word is a stem of the old one plus a Croatian case ending. Allowed stems:
+  - the word itself;
+  - the word without its final vowel (Marko → Mark-a);
+  - a fleeting a in -ar, -ac, -aj (Petar → Petr-om);
+  - Pavao → Pavl-a;
+  - Luka → Luc-i (only with -i).
+
+  Anything else ("Ivica" for "Ivan", "Marta" for "Marko", a word added) keeps
+  the name as stored. The guard makes sure the name stays the same name. It
+  can't tell whether the case is the right one.
+- **After the delivery, not in Claude's call:**
+  - The plain restore is stored at once, exactly as before.
+    `report.grammar.state` is "waiting", "done" (names, changed, refused,
+    left, model), "failed" (error type only) or "unavailable" (no trusted
+    model).
+  - The fixed version goes into the same encrypted payload (`title_fixed`,
+    `body_fixed`). A file's fixed copy is saved as
+    `inbox/<seq>.fixed.<ext>.enc`, built by the same office restore with the
+    case-fixed edits; Claude's own text files work too.
+  - One delivery at a time per deck. A deck restart resumes the waiting ones
+    (`grammar_waiting`).
+  - Tokens used by a non-local model count toward the owner's usage.
+- **Routes:**
+  - Downloads give the fixed version; `?plain=1` gives the names as stored.
+  - `POST /fd/rooms/{id}/deliveries/{seq}/grammar` runs it on request, for a
+    delivery that wasn't taken for Croatian or came in before a trusted model
+    was set up (409 without one).
+  - Deleting a delivery removes all of its files, including Claude's own md,
+    csv and json files, which P5 left behind.
+- **UI:**
+  - The list shows a "case endings…" pill while the model works.
+  - The delivery dialog has a line saying how many names were changed and by
+    which model, with a switch between "In their case" and "As stored"; the
+    switch also picks which version the downloads give.
+  - A "Fix case endings" button appears when the run failed, when there was no
+    trusted model, or when the delivery wasn't taken for Croatian.
+- **Tested** on the throwaway deck with a local 9B model (ornith:9b through
+  Ollama): a 9-name memo took about 50 s, and a workbook took 20 s.
 
 ## Later
 

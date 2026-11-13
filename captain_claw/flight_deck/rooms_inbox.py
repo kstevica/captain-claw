@@ -32,6 +32,7 @@ from typing import Any
 
 from captain_claw.anonymize import engine, usage
 from captain_claw.flight_deck import anonymize_vault as av
+from captain_claw.flight_deck import rooms_grammar as rg
 from captain_claw.flight_deck import rooms_job as rj
 from captain_claw.flight_deck import rooms_store as rs
 from captain_claw.logging import get_logger
@@ -111,10 +112,14 @@ async def deliver(room: dict[str, Any], client_id: str, *, title: Any, content: 
     real_values = rj.leaks(f"{title}\n{content}", rj.needles(state))
     report = {"restored": n_title + n_body, "not_in_room": not_in_room[:200], "real_values": real_values[:200],
               "parts": total, "characters": len(content), "format": fmt}
+    grammar = await rg.first_report(f"{title}\n{content}", state)
+    if grammar:
+        report["grammar"] = grammar
     payload = json.dumps({"title_tokens": title, "title": restored_title, "body_tokens": content,
                           "body": restored_body, "format": fmt}, ensure_ascii=False)
     seq = await store.add_delivery(room["id"], room["owner_id"], client_id,
                                    cipher.encrypt(payload.encode("utf-8")).decode("ascii"), len(content), report)
+    _after(room, seq, grammar)
     if real_values:
         await store.add_alarm(room["id"], room["owner_id"], client_id, "room_deliver", real_values)
         log.warning("Data room delivery holds real values Claude wrote", room=room["id"], tokens=len(real_values))
@@ -136,6 +141,12 @@ async def deliver(room: dict[str, Any], client_id: str, *, title: Any, content: 
         receipt["not_in_room"] = not_in_room[:50]
         receipt["note"] += " Tokens not in this room stay as you wrote them — use only tokens from the room."
     return receipt
+
+
+def _after(room: dict[str, Any], seq: int, grammar: dict[str, Any] | None) -> None:
+    """Once a delivery is in: its case endings fixed in the background (P7)."""
+    if grammar and grammar.get("state") == "waiting":
+        rg.queue(room["id"], seq)
 
 
 async def _tell_owner(room: dict[str, Any], seq: int) -> None:
@@ -338,6 +349,9 @@ async def deliver_file(room: dict[str, Any], client_id: str, *, kind: str, title
     report = {"restored": n_file + n_title, "not_in_room": not_in_room[:200], "real_values": real_values[:200],
               "parts": 1, "characters": len(token_text), "format": "markdown", "kind": kind, "file": ext,
               "notes": notes[:30]}
+    grammar = await rg.first_report(f"{title}\n{token_text}", state)
+    if grammar:
+        report["grammar"] = grammar
     payload = json.dumps({"title_tokens": title, "title": restored_title, "body_tokens": view_tokens,
                           "body": view, "format": "markdown", "kind": kind, "file": ext}, ensure_ascii=False)
     store = rs.store()
@@ -345,8 +359,10 @@ async def deliver_file(room: dict[str, Any], client_id: str, *, kind: str, title
                                    cipher.encrypt(payload.encode("utf-8")).decode("ascii"), len(token_text), report)
     inbox = store.room_dir(room["id"]) / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
-    await asyncio.to_thread((inbox / f"{seq}.{ext}.enc").write_bytes, cipher.encrypt(restored_blob))
-    await asyncio.to_thread((inbox / f"{seq}.tokens.{ext}.enc").write_bytes, cipher.encrypt(token_blob))
+    remove_files(room["id"], seq)  # a number used before, by a delivery since deleted
+    await asyncio.to_thread(file_path(room["id"], seq, ext).write_bytes, cipher.encrypt(restored_blob))
+    await asyncio.to_thread(file_path(room["id"], seq, ext, tokens=True).write_bytes, cipher.encrypt(token_blob))
+    _after(room, seq, grammar)
     if real_values:
         await store.add_alarm(room["id"], room["owner_id"], client_id, f"room_deliver_{kind}", real_values)
         log.warning("Data room file delivery holds real values Claude wrote", room=room["id"], tokens=len(real_values))
@@ -370,9 +386,18 @@ async def deliver_file(room: dict[str, Any], client_id: str, *, kind: str, title
     return receipt
 
 
-def file_path(room_id: str, seq: int, ext: str, *, tokens: bool = False) -> Any:
+def file_path(room_id: str, seq: int, ext: str, *, tokens: bool = False, fixed: bool = False) -> Any:
+    """A delivery's file: the names back (``fixed``: in their case, P7), or as Claude sent it (``tokens``)."""
     folder = rs.store().room_dir(room_id) / "inbox"
-    return folder / (f"{seq}.tokens.{ext}.enc" if tokens else f"{seq}.{ext}.enc")
+    return folder / (f"{seq}.tokens.{ext}.enc" if tokens else f"{seq}.fixed.{ext}.enc" if fixed else f"{seq}.{ext}.enc")
+
+
+def remove_files(room_id: str, seq: int) -> None:
+    """Every file a delivery left in the Inbox folder."""
+    folder = rs.store().room_dir(room_id) / "inbox"
+    if folder.is_dir():
+        for path in folder.glob(f"{seq}.*.enc"):
+            path.unlink(missing_ok=True)
 
 
 # ── Files Claude made itself (P5) ───────────────────────────────────
@@ -437,6 +462,9 @@ async def take_file(room: dict[str, Any], client_id: str, *, name: str, blob: by
     report = {"restored": restored, "not_in_room": not_in_room[:200], "real_values": real_values[:200], "parts": 1,
               "characters": len(token_text), "format": "markdown", "kind": "file", "file": ext, "source": source,
               "no_tokens": restored == 0, "notes": []}
+    grammar = await rg.first_report(f"{name}\n{token_text}", state) if restored else None
+    if grammar:
+        report["grammar"] = grammar
     payload = json.dumps({"title_tokens": name, "title": safe_filename(stem, ext), "body_tokens": view_tokens,
                           "body": view, "format": "markdown", "kind": "file", "file": ext}, ensure_ascii=False)
     store = rs.store()
@@ -444,8 +472,10 @@ async def take_file(room: dict[str, Any], client_id: str, *, name: str, blob: by
                                    cipher.encrypt(payload.encode("utf-8")).decode("ascii"), len(token_text), report)
     inbox = store.room_dir(room["id"]) / "inbox"
     inbox.mkdir(parents=True, exist_ok=True)
+    remove_files(room["id"], seq)  # a number used before, by a delivery since deleted
     await asyncio.to_thread(file_path(room["id"], seq, ext).write_bytes, cipher.encrypt(restored_blob))
     await asyncio.to_thread(file_path(room["id"], seq, ext, tokens=True).write_bytes, cipher.encrypt(blob))
+    _after(room, seq, grammar)
     if real_values:
         await store.add_alarm(room["id"], room["owner_id"], client_id, "room_deliver_file", real_values)
     try:

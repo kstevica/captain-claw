@@ -47,6 +47,21 @@ export interface RoomSummary {
   inbox: { total: number; unseen: number }
 }
 
+/** P7: the names put into the case their sentence needs, by the trusted model (Croatian). */
+export interface GrammarReport {
+  state: 'waiting' | 'done' | 'failed' | 'unavailable'
+  language?: string
+  /** People's names looked at, how many now in another case, forms the check turned down, names over the cap. */
+  names?: number
+  changed?: number
+  refused?: number
+  left?: number
+  model?: string
+  error?: string
+  /** The owner asked for it (not a delivery taken for Croatian). */
+  asked?: boolean
+}
+
 /** What the deck found putting the names back into a delivery — tokens only. */
 export interface DeliveryReport {
   restored: number
@@ -64,6 +79,7 @@ export interface DeliveryReport {
   source?: 'claude' | 'owner'
   /** Nothing could be put back: Claude wrote no tokens into it (a codename, say). */
   no_tokens?: boolean
+  grammar?: GrammarReport
 }
 
 export interface DeliverySummary {
@@ -86,6 +102,9 @@ export interface Delivery {
   body: string
   body_tokens: string
   format: 'markdown' | 'text'
+  /** P7: with the names in their case — null until the trusted model changed any. */
+  title_fixed: string | null
+  body_fixed: string | null
 }
 
 export interface Seed {
@@ -254,9 +273,13 @@ export const roomsApi = {
   revokeAccess: (clientId: string) => api<{ ok: boolean }>(`/fd/rooms-access/${enc(clientId)}`, { method: 'DELETE' }),
   deliveries: (id: string) => api<{ deliveries: DeliverySummary[] }>(`/fd/rooms/${enc(id)}/deliveries`),
   delivery: (id: string, seq: number) => api<Delivery>(`/fd/rooms/${enc(id)}/deliveries/${seq}`),
-  downloadDelivery: (id: string, seq: number, as: 'md' | 'docx' | 'file', title: string, ext?: string) =>
-    download(`/fd/rooms/${enc(id)}/deliveries/${seq}/download?as=${as}`,
+  /** `plain`: the names as stored, not put into their case (P7). */
+  downloadDelivery: (id: string, seq: number, as: 'md' | 'docx' | 'file', title: string, ext?: string, plain = false) =>
+    download(`/fd/rooms/${enc(id)}/deliveries/${seq}/download?as=${as}${plain ? '&plain=1' : ''}`,
       `${title.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'delivery'}.${as === 'file' ? ext || 'bin' : as}`),
+  /** Fix the case endings of a delivery's names now (P7). */
+  fixGrammar: (id: string, seq: number) =>
+    api<{ grammar: GrammarReport }>(`/fd/rooms/${enc(id)}/deliveries/${seq}/grammar`, { method: 'POST' }),
   deleteDelivery: (id: string, seq: number) =>
     api<{ deleted: boolean }>(`/fd/rooms/${enc(id)}/deliveries/${seq}`, { method: 'DELETE' }),
   /** “Download for Claude”: build a ZIP of the released room (P6). */
