@@ -48,6 +48,20 @@ router = APIRouter(tags=["mcp-oauth"])
 MAX_REDIRECT_URIS = 10
 MAX_REDIRECT_URI_LEN = 2048
 RESOURCE_PATH = "/fd/mcp-server"
+# The data-room connector (rooms_mcp.py): its own resource and scope. A token
+# for it reads only the rooms the person picked, and the fleet endpoint
+# refuses it (and the room endpoint refuses a fleet token).
+ROOMS_PATH = "/fd/mcp-rooms"
+ROOMS_SCOPE = "rooms"
+
+
+def scope_for(scope: str, resource: str) -> str:
+    """The scope a sign-in is for: the room connector's when the client names
+    its resource (or asks for the rooms scope), else the fleet's."""
+    res = (resource or "").split("?", 1)[0].rstrip("/")
+    if res.endswith(ROOMS_PATH) or ROOMS_SCOPE in (scope or "").split():
+        return ROOMS_SCOPE
+    return "mcp"
 
 
 def _public_base(request: Request) -> str:
@@ -69,12 +83,12 @@ def _json_no_store(data: dict, status_code: int = 200) -> JSONResponse:
 
 # ── Discovery (RFC 9728 / RFC 8414) ──────────────────────────────────
 
-def _protected_resource(request: Request) -> dict:
+def _protected_resource(request: Request, path: str = RESOURCE_PATH) -> dict:
     base = _public_base(request)
     return {
-        "resource": f"{base}{RESOURCE_PATH}",
+        "resource": f"{base}{path}",
         "authorization_servers": [base],
-        "scopes_supported": ["mcp"],
+        "scopes_supported": [ROOMS_SCOPE if path == ROOMS_PATH else "mcp"],
         "bearer_methods_supported": ["header"],
     }
 
@@ -87,8 +101,10 @@ def protected_resource(request: Request) -> JSONResponse:
 @router.get("/.well-known/oauth-protected-resource/{rest:path}")
 def protected_resource_variant(rest: str, request: Request) -> JSONResponse:
     # RFC 9728 clients insert the well-known path BEFORE the resource path, e.g.
-    # /.well-known/oauth-protected-resource/fd/mcp-server — answer the same.
-    return _json_no_store(_protected_resource(request))
+    # /.well-known/oauth-protected-resource/fd/mcp-server. The room connector
+    # has its own; anything else answers as the fleet endpoint, as before.
+    path = ROOMS_PATH if "/" + rest.strip("/") == ROOMS_PATH else RESOURCE_PATH
+    return _json_no_store(_protected_resource(request, path))
 
 
 @router.get("/.well-known/oauth-authorization-server")
@@ -103,7 +119,7 @@ def authorization_server(request: Request) -> JSONResponse:
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
-        "scopes_supported": ["mcp"],
+        "scopes_supported": ["mcp", ROOMS_SCOPE],
     })
 
 
@@ -174,6 +190,8 @@ _PAGE_CSS = (
     ".approve{background:#7c3aed;border-color:#7c3aed;color:#fff}.deny{background:transparent;color:#a1a1aa}"
     ".err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.4);color:#fca5a5;"
     "border-radius:8px;padding:8px 10px;font-size:12px;margin-bottom:14px}"
+    ".opts{max-height:50vh;overflow:auto}.opt{display:flex;gap:10px;align-items:flex-start;margin:10px 0;"
+    "font-size:14px;color:#e4e4e7}.opt input{width:auto;margin-top:3px}.opt small{color:#a1a1aa;font-size:12px}"
 )
 
 
@@ -191,12 +209,14 @@ def _error_page(title: str, detail: str, status_code: int = 400) -> HTMLResponse
     return _page(f"<h1>{html.escape(title)}</h1><p>{html.escape(detail)}</p>", status_code)
 
 
-def _consent_page(client_name: str, blob: str, error: str = "") -> HTMLResponse:
+def _consent_page(client_name: str, blob: str, error: str = "", scope: str = "mcp") -> HTMLResponse:
     name = html.escape(client_name or "an application")
     err = f"<div class=err>{html.escape(error)}</div>" if error else ""
+    what = ("wants to read the data rooms you choose next — their anonymized text only, never the real names."
+            if scope == ROOMS_SCOPE else "wants to access your Flight Deck agents (list, send tasks, read results).")
     inner = (
         f"<h1>Connect to Flight Deck</h1>"
-        f"<p>{name} wants to access your Flight Deck agents (list, send tasks, read results).</p>"
+        f"<p>{name} {what}</p>"
         f"{err}"
         f"<form method=post action='/authorize'>"
         f"<input type=hidden name=request value='{html.escape(blob)}'>"
@@ -248,12 +268,13 @@ async def authorize_get(
         return RedirectResponse(_append_query(redirect_uri, {"error": "unsupported_response_type", "state": state}), 302)
     if not code_challenge or code_challenge_method != "S256":
         return RedirectResponse(_append_query(redirect_uri, {"error": "invalid_request", "error_description": "PKCE S256 required", "state": state}), 302)
+    granted = scope_for(scope, resource)
     blob = A.make_oauth_request({
         "client_id": client_id, "redirect_uri": redirect_uri,
         "code_challenge": code_challenge, "state": state,
-        "scope": scope or "mcp", "resource": resource or None,
+        "scope": granted, "resource": resource or None,
     })
-    return _consent_page(client.get("client_name") or "", blob)
+    return _consent_page(client.get("client_name") or "", blob, scope=granted)
 
 
 async def _read_form(request: Request) -> dict:
@@ -275,7 +296,7 @@ async def authorize_post(request: Request):
     form = await _read_form(request)
     blob = form.get("request", "")
     req = A.decode_oauth_request(blob) if blob else None
-    if not req:
+    if not req or req.get("step"):
         return _error_page("Session expired", "Please start the connection again.", 400)
 
     db = get_db()
@@ -300,16 +321,89 @@ async def authorize_post(request: Request):
             ok = False
     if not user or not ok:
         # Re-render the consent page with the SAME signed blob (still valid).
-        return _consent_page(client.get("client_name") or "", blob, "Incorrect email or password")
+        return _consent_page(client.get("client_name") or "", blob, "Incorrect email or password",
+                             scope=req.get("scope", "mcp"))
 
+    if req.get("scope") == ROOMS_SCOPE:
+        # Second step: which rooms this app may read (signed in now, so the
+        # person's own rooms can be listed).
+        step = A.make_oauth_request({**{k: v for k, v in req.items() if k not in ("type", "iat", "exp")},
+                                     "step": "rooms", "user_id": user["id"]})
+        return await _rooms_page(client.get("client_name") or "", step, user["id"])
+
+    return await _issue_code(db, req, user["id"])
+
+
+async def _issue_code(db, req: dict, user_id: str) -> RedirectResponse:
+    redirect_uri, state = req.get("redirect_uri", ""), req.get("state", "")
     raw_code = A.new_oauth_code()
     expires_at = (datetime.now(timezone.utc) + A.OAUTH_CODE_TTL).isoformat()
     await db.create_oauth_code(
-        A.hash_token(raw_code), client_id, user["id"], redirect_uri,
+        A.hash_token(raw_code), req.get("client_id", ""), user_id, redirect_uri,
         req.get("code_challenge", ""), req.get("scope", "mcp"),
         req.get("resource"), expires_at,
     )
     return RedirectResponse(_append_query(redirect_uri, {"code": raw_code, "state": state}), 302)
+
+
+# ── The room connector's second step: which rooms ────────────────────
+
+
+async def _rooms_page(client_name: str, blob: str, user_id: str, error: str = "") -> HTMLResponse:
+    from captain_claw.flight_deck import rooms_store
+
+    name = html.escape(client_name or "This application")
+    err = f"<div class=err>{html.escape(error)}</div>" if error else ""
+    rooms = await rooms_store.store().list_rooms(user_id)
+    items = []
+    for r in rooms:
+        files = await rooms_store.store().files(r["id"], released_only=True)
+        note = f"{len(files)} released file{'s' if len(files) != 1 else ''}" if files else "nothing released yet"
+        own = f" · {html.escape(r['name'])}" if r.get("name") else ""
+        items.append(
+            f"<label class=opt><input type=checkbox name=room value='{html.escape(r['id'])}'>"
+            f"<span><b>{html.escape(r['codename'])}</b>{own}<br><small>{note}</small></span></label>")
+    listing = "".join(items) or "<p>You have no data rooms yet — make one in Flight Deck first.</p>"
+    inner = (
+        f"<h1>Which data rooms?</h1>"
+        f"<p>{name} will read only the released files of the rooms you tick, with every name replaced by a "
+        f"token. You can change this later in Flight Deck → Data rooms.</p>{err}"
+        f"<form method=post action='/authorize/rooms'>"
+        f"<input type=hidden name=request value='{html.escape(blob)}'>"
+        f"<div class=opts>{listing}</div>"
+        f"<label class=opt><input type=checkbox name=all value=1><span>All my data rooms, and new ones "
+        f"<br><small>rooms you make later too</small></span></label>"
+        f"<div class=row><button class=deny name=decision value=deny>Deny</button>"
+        f"<button class=approve name=decision value=approve>Allow</button></div></form>"
+    )
+    return _page(inner)
+
+
+@router.post("/authorize/rooms")
+async def authorize_rooms(request: Request):
+    from captain_claw.flight_deck import rooms_store
+
+    raw = (await request.body()).decode("utf-8", "replace")
+    form = parse_qs(raw)
+    blob = (form.get("request") or [""])[0]
+    req = A.decode_oauth_request(blob) if blob else None
+    if not req or req.get("step") != "rooms" or req.get("scope") != ROOMS_SCOPE or not req.get("user_id"):
+        return _error_page("Session expired", "Please start the connection again.", 400)
+    db = get_db()
+    client_id, redirect_uri, state = req.get("client_id", ""), req.get("redirect_uri", ""), req.get("state", "")
+    client = await db.get_oauth_client(client_id)
+    if not client or redirect_uri not in (client.get("redirect_uris") or []):
+        return _error_page("Invalid request", "Client or redirect_uri is no longer valid.", 400)
+    if (form.get("decision") or [""])[0] != "approve":
+        return RedirectResponse(_append_query(redirect_uri, {"error": "access_denied", "state": state}), 302)
+    user_id = str(req["user_id"])
+    own = {r["id"] for r in await rooms_store.store().list_rooms(user_id)}
+    chosen = [r for r in form.get("room") or [] if r in own]
+    all_rooms = (form.get("all") or [""])[0] == "1"
+    if not chosen and not all_rooms:
+        return await _rooms_page(client.get("client_name") or "", blob, user_id, "Tick at least one room.")
+    await rooms_store.store().set_grant(user_id, client_id, chosen, all_rooms)
+    return await _issue_code(db, req, user_id)
 
 
 # ── Token endpoint ───────────────────────────────────────────────────

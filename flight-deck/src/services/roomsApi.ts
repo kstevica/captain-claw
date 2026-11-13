@@ -107,6 +107,29 @@ export interface FileText {
 
 export interface SearchHit { file_id: string; path: string; page: string; snippet: string }
 
+/** A connected app (a Claude connector) and the rooms it may read. */
+export interface RoomGrant {
+  client_id: string
+  app: string
+  all_rooms: boolean
+  rooms: { id: string; codename: string }[]
+  created_at: number
+  updated_at: number
+}
+
+export interface RoomRead {
+  at: number
+  tool: string
+  path: string
+  page: number
+  chars: number
+  alarm: boolean
+  app: string
+}
+
+/** A real value from the vault found in what Claude sent (it got there some other way). */
+export interface RoomAlarm { id: number; at: number; tool: string; tokens: string[]; seen: boolean; app: string }
+
 const enc = encodeURIComponent
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) })
 
@@ -170,4 +193,10 @@ export const roomsApi = {
     api<{ deleted: boolean }>(`/fd/rooms/${enc(id)}/files/${enc(fileId)}`, { method: 'DELETE' }),
   release: (id: string) => api<{ released_now: number; room: Room }>(`/fd/rooms/${enc(id)}/release`, { method: 'POST' }),
   search: (id: string, q: string) => api<{ results: SearchHit[] }>(`/fd/rooms/${enc(id)}/search?q=${enc(q)}`),
+  reads: (id: string) => api<{ reads: RoomRead[]; alarms: RoomAlarm[] }>(`/fd/rooms/${enc(id)}/reads`),
+  alarmsSeen: (id: string) => api<{ ok: boolean }>(`/fd/rooms/${enc(id)}/alarms/seen`, { method: 'POST' }),
+  access: () => api<{ grants: RoomGrant[]; connector_url: string }>('/fd/rooms-access'),
+  setAccess: (clientId: string, rooms: string[], allRooms: boolean) =>
+    api<{ ok: boolean }>(`/fd/rooms-access/${enc(clientId)}`, json('PUT', { rooms, all_rooms: allRooms })),
+  revokeAccess: (clientId: string) => api<{ ok: boolean }>(`/fd/rooms-access/${enc(clientId)}`, { method: 'DELETE' }),
 }

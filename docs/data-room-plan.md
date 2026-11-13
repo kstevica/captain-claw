@@ -10,7 +10,8 @@ back **on the deck**, and the person reads or downloads the result there. Claude
 never gets the real names back: no restored text goes out through the connector.
 
 Status: P0 spike done (2026-11-13, Cowork on a throwaway deck; results in P0 below). P1 built (branch
-`feat/data-rooms-p1`, see "P1 as built"). P2–P7 not built. Builds on the anonymizer
+`feat/data-rooms-p1`, PR #539, see "P1 as built"). P2 built (branch `feat/data-rooms-p2`, see "P2 as
+built"; not yet tried with real Claude). P3–P7 not built. Builds on the anonymizer
 (`docs/anonymization-plan.md`, all merged) and the inbound MCP server
 (`flight_deck/mcp_server_routes.py`, `flight_deck/mcp_oauth_routes.py`).
 
@@ -347,6 +348,41 @@ check blocks a file, resume after restart. Only made-up names in fixtures.
   vault values. A hit means a real value reached Claude some other way (for
   example, the person typed it in the chat). The call still answers (the value is
   already out), and the room shows an alert.
+
+**P2 as built (2026-11-13, branch `feat/data-rooms-p2`, stacked on P1):**
+
+- **Tokens are bound by scope, not `aud`:** a sign-in for `/fd/mcp-rooms` (the
+  client's `resource`, or `scope=rooms`) gets scope `rooms`. A JWT `aud` would have
+  broken today's token decoding, and the scope was already stored with every code
+  and refresh token. The fleet's `get_mcp_user`, which also guards firmware, browser
+  clips and browser hands, refuses `rooms` tokens. `rooms_mcp.caller` accepts only
+  those, so a browser JWT, a PAT or a fleet token is refused there. The room
+  endpoint has its own protected-resource metadata (`scopes_supported: ["rooms"]`),
+  and its 401 points there through `FD_PUBLIC_URL`.
+- **Consent in two steps:** email and password, then "Which data rooms?" with
+  checkboxes and "All my data rooms, and new ones". The grant
+  (`rooms.db mcp_grants`) is checked on every call, so changing it or
+  disconnecting on the Data rooms page takes effect at once, before the 1-hour
+  token expires. Revoking the app under Connected apps drops the grant too.
+- **Tools:** `room_list`, `room_overview` (roles, folders, kinds, characters),
+  `room_list_files`, `room_read` (50,000-character pages ending on a line break,
+  with a header line "File · page n of N · characters"), `room_search` (FTS5,
+  every word must appear; each hit gives the `room_read` page). Tools are marked
+  read-only. Only released files that are clean (`done`) are served. There are
+  no xlsx sheet/row arguments: a sheet's markdown pages like any text.
+- **Protocol:** the client's version is answered when known (2025-11-25,
+  2025-06-18, 2025-03-26), else 2025-03-26. `server/discover` → method not found
+  (clients fall back). GET/DELETE → 405, on the fleet endpoint too (the P0 fix).
+- **Log and history:** `room_reads` keeps tool, file, page and sizes, never text
+  or queries, up to 2,000 per room. Text sent goes into the tokens' history as
+  "out" to "Claude (data-room connector)". Alarms keep tokens only, with a seen
+  flag.
+- **UI:** a "Claude's access" card (connector address with copy, each connected
+  app with room checkboxes, Disconnect). Per room, an alarm notice and a "What
+  Claude read" card.
+- **Not checked live yet:** the browser check and the scripted client both pass,
+  but a run with real Claude through a tunnel was blocked by the session's
+  safety check. It needs the person's OK, or staging after deploy.
 
 ### P3 — Deliveries: text back
 

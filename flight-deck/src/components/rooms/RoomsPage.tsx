@@ -11,6 +11,8 @@ import { useAuthStore } from '../../stores/authStore'
 import { Button, Card, Dialog, EmptyState, Field, Notice, Page, PageHeader, Pill, Segmented, inputCls } from '../console/parts'
 import { TokenText } from '../anonymize/anonParts'
 import { kindLabel, kindTone, when } from '../anonymize/anonFormat'
+import { AlarmsNotice, ClaudeAccessCard, ReadsCard } from './RoomsAccess'
+import type { RoomAlarm, RoomRead } from '../../services/roomsApi'
 
 // Data rooms: a virtual data room — a ZIP or a folder of files — anonymized
 // into one vault. The person checks what came out, gives the parties roles,
@@ -119,6 +121,7 @@ export function RoomsPage({ phone = false, onClose }: { phone?: boolean; onClose
             </Button>
           </div>
         </Card>
+        {rooms && rooms.length > 0 && <ClaudeAccessCard rooms={rooms} />}
         {rooms === null ? null : rooms.length === 0 ? (
           <EmptyState icon={FolderLock} title="No data rooms yet">
             Create one above, then add a ZIP or a folder.
@@ -171,6 +174,8 @@ function RoomView({ id, phone, onBack, onClose }: {
   const [rolesOpen, setRolesOpen] = useState(false)
   const [filter, setFilter] = useState<FileFilter>('all')
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [reads, setReads] = useState<RoomRead[]>([])
+  const [alarms, setAlarms] = useState<RoomAlarm[]>([])
 
   const reload = useCallback(async () => {
     try {
@@ -180,6 +185,7 @@ function RoomView({ id, phone, onBack, onClose }: {
     } catch (e) {
       setError(errorText(e))
     }
+    roomsApi.reads(id).then((x) => { setReads(x.reads); setAlarms(x.alarms) }).catch(() => {})
   }, [id])
 
   useEffect(() => { void reload() }, [reload])
@@ -259,7 +265,7 @@ function RoomView({ id, phone, onBack, onClose }: {
             <Button icon={Send} busy={busy === 'release'} disabled={!canRelease || pending <= 0}
               onClick={() => act('release', async () => {
                 const r = await roomsApi.release(id)
-                setNotice(`${count(r.released_now, 'file')} released — only released files are ever shown to Claude. Blocked and failed files stay here.`)
+                setNotice(`${count(r.released_now, 'file')} released. Claude reads them through the Captain Data Rooms connector, if you gave it this room; blocked and failed files stay here.`)
               })}>
               Release{pending > 0 ? ` ${pending}` : ''}
             </Button>
@@ -268,6 +274,7 @@ function RoomView({ id, phone, onBack, onClose }: {
         />
         {error && <Notice tone="red">{error}</Notice>}
         {notice && <Notice tone="emerald">{notice}</Notice>}
+        <AlarmsNotice roomId={id} alarms={alarms} onSeen={() => void reload()} />
         {!room.trusted_model && (
           <Notice tone="amber">
             No trusted model is set up, so code alone looks for private data: emails, IBANs, ID numbers, labelled
@@ -331,6 +338,8 @@ function RoomView({ id, phone, onBack, onClose }: {
             </div>
           )}
         </Card>
+
+        {(c.released > 0 || reads.length > 0) && <ReadsCard reads={reads} />}
 
         {compare && <CompareDialog roomId={id} f={compare} onClose={() => setCompare(null)} />}
         {rolesOpen && (

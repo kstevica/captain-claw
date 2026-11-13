@@ -87,7 +87,42 @@ CREATE VIRTUAL TABLE IF NOT EXISTS room_text USING fts5(
     room_id UNINDEXED, file_id UNINDEXED, page UNINDEXED, body,
     tokenize = 'unicode61 remove_diacritics 2'
 );
+CREATE TABLE IF NOT EXISTS mcp_grants (
+    owner_id    TEXT NOT NULL,
+    client_id   TEXT NOT NULL,
+    rooms       TEXT NOT NULL DEFAULT '[]',
+    all_rooms   INTEGER NOT NULL DEFAULT 0,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (owner_id, client_id)
+);
+CREATE TABLE IF NOT EXISTS room_reads (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id      TEXT NOT NULL,
+    owner_id     TEXT NOT NULL,
+    client_id    TEXT NOT NULL DEFAULT '',
+    at           REAL NOT NULL,
+    tool         TEXT NOT NULL,
+    file_id      TEXT NOT NULL DEFAULT '',
+    page         INTEGER NOT NULL DEFAULT 0,
+    chars        INTEGER NOT NULL DEFAULT 0,
+    query_chars  INTEGER NOT NULL DEFAULT 0,
+    alarm        INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_reads_room ON room_reads(room_id, id);
+CREATE TABLE IF NOT EXISTS room_alarms (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id    TEXT NOT NULL,
+    owner_id   TEXT NOT NULL,
+    client_id  TEXT NOT NULL DEFAULT '',
+    at         REAL NOT NULL,
+    tool       TEXT NOT NULL,
+    tokens     TEXT NOT NULL DEFAULT '[]',
+    seen       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_alarms_room ON room_alarms(room_id, id);
 """
+READS_KEPT = 2000  # per room; older reads are dropped
 
 
 class RoomError(ValueError):
@@ -282,8 +317,8 @@ class RoomStore:
         if not cur.rowcount:
             await db.commit()
             return False
-        await db.execute("DELETE FROM room_files WHERE room_id=?", (room_id,))
-        await db.execute("DELETE FROM room_text WHERE room_id=?", (room_id,))
+        for table in ("room_files", "room_text", "room_reads", "room_alarms"):
+            await db.execute(f"DELETE FROM {table} WHERE room_id=?", (room_id,))
         await db.commit()
         await asyncio.to_thread(shutil.rmtree, self.room_dir(room_id), True)
         return True
@@ -415,6 +450,93 @@ class RoomStore:
             return []
         return [{"file_id": r["file_id"], "path": r["clean_path"], "page": r["page"], "snippet": r["snip"]}
                 for r in await cur.fetchall()]
+
+
+    # ── Claude's access (the room connector, P2) ────────────────────
+
+    async def set_grant(self, owner: str, client_id: str, rooms: list[str], all_rooms: bool) -> None:
+        """Which rooms one connected app (a Claude connector) may read."""
+        db = await self._conn()
+        now = time.time()
+        await db.execute(
+            """INSERT INTO mcp_grants (owner_id, client_id, rooms, all_rooms, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(owner_id, client_id)
+               DO UPDATE SET rooms=excluded.rooms, all_rooms=excluded.all_rooms, updated_at=excluded.updated_at""",
+            (owner, client_id, json.dumps(sorted(set(rooms))), 1 if all_rooms else 0, now, now))
+        await db.commit()
+
+    async def grant(self, owner: str, client_id: str) -> dict[str, Any] | None:
+        db = await self._conn()
+        cur = await db.execute("SELECT * FROM mcp_grants WHERE owner_id=? AND client_id=?", (owner, client_id))
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        g = dict(row)
+        g["rooms"] = json.loads(g["rooms"] or "[]")
+        g["all_rooms"] = bool(g["all_rooms"])
+        return g
+
+    async def grants(self, owner: str) -> list[dict[str, Any]]:
+        db = await self._conn()
+        cur = await db.execute("SELECT * FROM mcp_grants WHERE owner_id=? ORDER BY created_at DESC", (owner,))
+        out = []
+        for row in await cur.fetchall():
+            g = dict(row)
+            g["rooms"] = json.loads(g["rooms"] or "[]")
+            g["all_rooms"] = bool(g["all_rooms"])
+            out.append(g)
+        return out
+
+    async def delete_grant(self, owner: str, client_id: str) -> bool:
+        db = await self._conn()
+        cur = await db.execute("DELETE FROM mcp_grants WHERE owner_id=? AND client_id=?", (owner, client_id))
+        await db.commit()
+        return bool(cur.rowcount)
+
+    async def log_read(self, room_id: str, owner: str, client_id: str, tool: str, *, file_id: str = "",
+                       page: int = 0, chars: int = 0, query_chars: int = 0, alarm: bool = False) -> None:
+        """What Claude read: tool, file, page and sizes — never the text, never a query."""
+        db = await self._conn()
+        await db.execute(
+            """INSERT INTO room_reads (room_id, owner_id, client_id, at, tool, file_id, page, chars, query_chars,
+                                       alarm) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (room_id, owner, client_id, time.time(), tool, file_id, page, chars, query_chars, 1 if alarm else 0))
+        await db.execute(
+            """DELETE FROM room_reads WHERE room_id=? AND id <= (
+                   SELECT id FROM room_reads WHERE room_id=? ORDER BY id DESC LIMIT 1 OFFSET ?)""",
+            (room_id, room_id, READS_KEPT))
+        await db.commit()
+
+    async def reads(self, room_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        db = await self._conn()
+        cur = await db.execute("SELECT * FROM room_reads WHERE room_id=? ORDER BY id DESC LIMIT ?",
+                               (room_id, max(1, min(int(limit), 1000))))
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def add_alarm(self, room_id: str, owner: str, client_id: str, tool: str, tokens: list[str]) -> None:
+        db = await self._conn()
+        await db.execute(
+            "INSERT INTO room_alarms (room_id, owner_id, client_id, at, tool, tokens) VALUES (?, ?, ?, ?, ?, ?)",
+            (room_id, owner, client_id, time.time(), tool, json.dumps(tokens[:50])))
+        await db.commit()
+
+    async def alarms(self, room_id: str, *, unseen_only: bool = False) -> list[dict[str, Any]]:
+        db = await self._conn()
+        sql = "SELECT * FROM room_alarms WHERE room_id=?" + (" AND seen=0" if unseen_only else "") + \
+            " ORDER BY id DESC LIMIT 100"
+        cur = await db.execute(sql, (room_id,))
+        out = []
+        for row in await cur.fetchall():
+            a = dict(row)
+            a["tokens"] = json.loads(a["tokens"] or "[]")
+            a["seen"] = bool(a["seen"])
+            out.append(a)
+        return out
+
+    async def mark_alarms_seen(self, room_id: str) -> None:
+        db = await self._conn()
+        await db.execute("UPDATE room_alarms SET seen=1 WHERE room_id=?", (room_id,))
+        await db.commit()
 
 
 def new_room_id() -> str:
