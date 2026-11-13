@@ -11,8 +11,8 @@ never gets the real names back: no restored text goes out through the connector.
 
 Status: P0 spike done (2026-11-13, Cowork on a throwaway deck; results in P0 below). P1 built (branch
 `feat/data-rooms-p1`, PR #539, see "P1 as built"). P2 built (branch `feat/data-rooms-p2`, PR #540, see
-"P2 as built"; not yet tried with real Claude). P3 built (branch `feat/data-rooms-p3`, see "P3 as built").
-P4–P7 not built. Builds on the anonymizer
+"P2 as built"; not yet tried with real Claude). P3 built (branch `feat/data-rooms-p3`, PR #541, see "P3 as
+built"). P4 built (branch `feat/data-rooms-p4`, see "P4 as built"). P5–P7 not built. Builds on the anonymizer
 (`docs/anonymization-plan.md`, all merged) and the inbound MCP server
 (`flight_deck/mcp_server_routes.py`, `flight_deck/mcp_oauth_routes.py`).
 
@@ -449,6 +449,38 @@ builds the file, so the file is born with the real names. Numbers aren't touched
   No PDF output (decided).
 - The tool schemas mirror the existing agent tools, so one spec is documented
   once.
+
+**P4 as built (2026-11-13, branch `feat/data-rooms-p4`, stacked on P3):**
+
+- **Build from tokens, then restore inside the file.** Each file is built from
+  Claude's token spec (`xlsx_ops.build_workbook`, `pptx_ops.build_deck`,
+  `docx_ops.build_document`), so every build error and note Claude gets back holds
+  tokens only. The real names then go in through the anonymizer's own Office
+  restore (`office.prepare(scrub=False)` + `restore_edits`). That one path covers
+  cells, sheet names (formulas follow, Excel's 31-character cap), chart titles,
+  slide text, notes and paragraphs, with no spec-walking of my own. This changes
+  the plan's "restore the strings first, then build".
+- **Tools:** `room_deliver_workbook` (sheets + edits, the agents' `xlsx` schema),
+  `room_deliver_deck` (slides without `image`/`images`, plus look options),
+  `room_deliver_document` (markdown). Rule 6 in the connector instructions: don't
+  make the file yourself, send its content.
+- **Nothing reaches out of a restored file:**
+  - workbook formulas that would fetch or link (`WEBSERVICE`, `IMAGE`, `RTD`,
+    `DDE`, `HYPERLINK`, `FILTERXML`, `STOCKHISTORY`, web or `file:` addresses,
+    other workbooks) are refused, telling Claude where;
+  - pictures are stripped from slides and markdown (with a note to Claude);
+  - links in slides and documents become their text (with a note), because once
+    restored, a click would send the names out.
+- **Storage:** the restored file and the token-built one, each encrypted with the
+  room vault's key, under `rooms/<id>/inbox/` (removed on delete). The delivery
+  row holds the text views of both, for the reading dialog. Download with
+  `as=file`.
+- **The receipt keeps its shape**: `delivered`, `file`, `restored`, `note`, plus
+  `notes` / `not_in_room` when there are any. Real values Claude wrote into a file
+  go to the owner's report and an alarm, as in P3.
+- **UI:** an Excel / PowerPoint / Word badge in the Inbox list. The dialog says
+  the file was built here, lists the build notes, shows the file's text in both
+  views, and offers the file as the main download.
 
 ### P5 — Files Claude made in its own sandbox
 

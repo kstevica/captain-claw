@@ -40,6 +40,8 @@ function InertPicture({ alt }: { alt?: string }) {
   return <span className="text-zinc-500">[picture{alt ? `: ${alt}` : ''}]</span>
 }
 
+const KIND_LABEL: Record<string, string> = { workbook: 'Excel', deck: 'PowerPoint', document: 'Word' }
+
 export function InboxCard({ roomId, onChanged, onDialog }: {
   roomId: string
   onChanged: () => void
@@ -78,6 +80,7 @@ export function InboxCard({ roomId, onChanged, onDialog }: {
                 {!d.seen && <span className="h-2 w-2 shrink-0 rounded-full bg-violet-500" aria-label="new" />}
                 <span className="font-mono text-xs text-zinc-500">#{d.seq}</span>
                 <span className="min-w-0 flex-1 truncate font-medium text-zinc-200">{d.title}</span>
+                {d.report.kind && <Pill tone="sky" icon={FileText}>{KIND_LABEL[d.report.kind]}</Pill>}
                 {d.report.real_values.length > 0 && <Pill tone="red" icon={AlertTriangle}>real values</Pill>}
                 {d.report.not_in_room.length > 0 && <Pill tone="amber">{d.report.not_in_room.length} unknown</Pill>}
                 <Pill>{d.report.restored} put back</Pill>
@@ -130,10 +133,19 @@ function DeliveryDialog({ roomId, seq, onClose, onDeleted }: {
           ) : (
             <>
               <Button variant="danger" icon={Trash2} className="mr-auto" onClick={() => setConfirm(true)}>Delete</Button>
-              <Button icon={Download} busy={busy === 'md'}
-                onClick={() => act('md', () => roomsApi.downloadDelivery(roomId, d.seq, 'md', d.title))}>Markdown</Button>
-              <Button variant="primary" icon={Download} busy={busy === 'docx'}
-                onClick={() => act('docx', () => roomsApi.downloadDelivery(roomId, d.seq, 'docx', d.title))}>Word</Button>
+              {d.report.kind ? (
+                <Button variant="primary" icon={Download} busy={busy === 'file'}
+                  onClick={() => act('file', () => roomsApi.downloadDelivery(roomId, d.seq, 'file', d.title, d.report.file))}>
+                  {KIND_LABEL[d.report.kind]} file
+                </Button>
+              ) : (
+                <>
+                  <Button icon={Download} busy={busy === 'md'}
+                    onClick={() => act('md', () => roomsApi.downloadDelivery(roomId, d.seq, 'md', d.title))}>Markdown</Button>
+                  <Button variant="primary" icon={Download} busy={busy === 'docx'}
+                    onClick={() => act('docx', () => roomsApi.downloadDelivery(roomId, d.seq, 'docx', d.title))}>Word</Button>
+                </>
+              )}
             </>
           )}
         </div>
@@ -157,6 +169,16 @@ function DeliveryDialog({ roomId, seq, onClose, onDeleted }: {
                 Claude wrote the real value of <Tokens list={d.report.real_values} /> itself — it was told it some
                 other way, or guessed it. It wasn't told it was right.
               </div>
+            </Notice>
+          )}
+          {d.report.kind && (
+            <Notice tone="zinc">
+              {d.report.kind === 'workbook' ? 'An' : 'A'} {KIND_LABEL[d.report.kind]} file, built here from what Claude
+              sent, with the real names put back inside.
+              Below is its text.
+              {d.report.notes && d.report.notes.length > 0 && (
+                <ul className="mt-1 space-y-0.5 text-xs opacity-80">{d.report.notes.slice(0, 8).map((n, i) => <li key={i}>· {n}</li>)}</ul>
+              )}
             </Notice>
           )}
           {d.report.not_in_room.length > 0 && (

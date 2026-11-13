@@ -56,6 +56,10 @@ export interface DeliveryReport {
   parts: number
   characters: number
   format: 'markdown' | 'text'
+  /** A file built on the deck (P4): what it is, and the build's notes (tokens only). */
+  kind?: 'workbook' | 'deck' | 'document'
+  file?: 'xlsx' | 'pptx' | 'docx'
+  notes?: string[]
 }
 
 export interface DeliverySummary {
@@ -235,9 +239,9 @@ export const roomsApi = {
   revokeAccess: (clientId: string) => api<{ ok: boolean }>(`/fd/rooms-access/${enc(clientId)}`, { method: 'DELETE' }),
   deliveries: (id: string) => api<{ deliveries: DeliverySummary[] }>(`/fd/rooms/${enc(id)}/deliveries`),
   delivery: (id: string, seq: number) => api<Delivery>(`/fd/rooms/${enc(id)}/deliveries/${seq}`),
-  downloadDelivery: (id: string, seq: number, as: 'md' | 'docx', title: string) =>
+  downloadDelivery: (id: string, seq: number, as: 'md' | 'docx' | 'file', title: string, ext?: string) =>
     download(`/fd/rooms/${enc(id)}/deliveries/${seq}/download?as=${as}`,
-      `${title.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'delivery'}.${as}`),
+      `${title.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'delivery'}.${as === 'file' ? ext || 'bin' : as}`),
   deleteDelivery: (id: string, seq: number) =>
     api<{ deleted: boolean }>(`/fd/rooms/${enc(id)}/deliveries/${seq}`, { method: 'DELETE' }),
 }
