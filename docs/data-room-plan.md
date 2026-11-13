@@ -12,7 +12,7 @@ never gets the real names back: no restored text goes out through the connector.
 Status: P0 spike done (2026-11-13, Cowork on a throwaway deck; results in P0 below). P1 built (branch
 `feat/data-rooms-p1`, PR #539, see "P1 as built"). P2 built (branch `feat/data-rooms-p2`, PR #540, see
 "P2 as built"; not yet tried with real Claude). P3 built (branch `feat/data-rooms-p3`, PR #541, see "P3 as
-built"). P4 built (branch `feat/data-rooms-p4`, see "P4 as built"). P5–P7 not built. Builds on the anonymizer
+built"). P4 built (branch `feat/data-rooms-p4`, PR #542). P5 built (branch `feat/data-rooms-p5`, see "P5 as built"). P6–P7 not built. Builds on the anonymizer
 (`docs/anonymization-plan.md`, all merged) and the inbound MCP server
 (`flight_deck/mcp_server_routes.py`, `flight_deck/mcp_oauth_routes.py`).
 
@@ -494,6 +494,41 @@ builds the file, so the file is born with the real names. Numbers aren't touched
     and it is restored the same way into the Inbox.
   - `room_file_link(room, path)` → a one-time download URL for a **clean** copy,
     so Claude can analyse the anonymized xlsx with code in its sandbox.
+
+**P5 as built (2026-11-13, branch `feat/data-rooms-p5`, stacked on P4):**
+
+- **Why the path changed:** P0 measured about 20,000 characters per call from
+  Claude, so base64 in a call only works for small files (about 15 KB). The main
+  path for bigger files Claude makes is the person: Claude hands over the file,
+  and the person drops it into the room's Inbox ("Add a file Claude made").
+  Upload/download links were not built: P0 showed Cowork's proxy blocks the deck
+  unless allowlisted.
+- **`room_deliver_file(room, name, content_base64, part?, of?)`:** Word, Excel,
+  PowerPoint, markdown, text, CSV or JSON, up to 3 MB decoded. Parts are joined
+  in order, encrypted while waiting (P3's parts store). PDFs are refused ("ask
+  for Word").
+- **Owner drop:** `PUT /fd/rooms/{id}/deliveries/file?name=…` (raw body, 25 MB).
+  It shows in the Inbox as "Added by you" and rings no bell.
+- **Same restore everywhere (`rooms_inbox.take_file`):** Office files through the
+  Office restore (as P4), the text kinds through `engine.restore`. The file name's
+  tokens are restored too. Both versions are stored encrypted under `inbox/`.
+  Real values Claude wrote raise the alarm, never mentioned to Claude.
+- **No tokens flagged:** P0 found Claude's own workbook came back with a codename
+  instead of tokens. A file where nothing could be put back is marked
+  `no_tokens`: an amber badge and notice for the owner. Claude's receipt says
+  "keep the tokens in files you make" (no values involved).
+- **`room_get_file(room, path)`** (read-only): a released clean copy as base64,
+  up to 10 MB, for Claude to open with code. Cowork saves results over ~100k
+  characters to a workspace file, so big files arrive whole. Every piece of text
+  in the file (chart caches, comments, properties, not only the text view) is
+  leak-checked again before it goes out. A hit holds the file back ("read it with
+  `room_read`") and raises an alarm "room_get_file (held back)". Logged as a read,
+  with history "out".
+- **Instructions rule 7:** `room_get_file` for working with code; keep tokens in
+  files you make; `room_deliver_file`, or hand the file to the person.
+- **UI:** "Add a file Claude made" on the From Claude card; labels by type
+  (Excel, Word, Markdown, CSV …); the "no tokens" badge and notice; the file as
+  the main download.
 
 ### P6 — "Download for Claude" (Claude Project)
 

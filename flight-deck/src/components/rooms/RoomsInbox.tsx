@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { AlertTriangle, Download, FileText, Inbox, Trash2 } from 'lucide-react'
+import { AlertTriangle, Download, FileText, FileUp, Inbox, Trash2 } from 'lucide-react'
 import { roomsApi, type Delivery, type DeliverySummary } from '../../services/roomsApi'
 import { untrustedUrlTransform } from '../../utils/untrustedContent'
 import { Button, Card, Dialog, Notice, Pill, Segmented } from '../console/parts'
@@ -41,6 +41,16 @@ function InertPicture({ alt }: { alt?: string }) {
 }
 
 const KIND_LABEL: Record<string, string> = { workbook: 'Excel', deck: 'PowerPoint', document: 'Word' }
+const EXT_LABEL: Record<string, string> = {
+  xlsx: 'Excel', pptx: 'PowerPoint', docx: 'Word', md: 'Markdown', markdown: 'Markdown', csv: 'CSV', tsv: 'TSV',
+  txt: 'Text', json: 'JSON',
+}
+const DROP_ACCEPT = '.docx,.xlsx,.pptx,.md,.markdown,.txt,.csv,.tsv,.json'
+
+function kindLabelOf(r: { kind?: string; file?: string }): string {
+  if (r.kind === 'file') return EXT_LABEL[r.file || ''] || (r.file || 'File').toUpperCase()
+  return KIND_LABEL[r.kind || ''] || ''
+}
 
 export function InboxCard({ roomId, onChanged, onDialog }: {
   roomId: string
@@ -53,6 +63,7 @@ export function InboxCard({ roomId, onChanged, onDialog }: {
   const setOpen = (seq: number | null) => { setOpenRaw(seq); onDialog?.(seq !== null) }
   const [error, setError] = useState('')
   const [tick, setTick] = useState(0)
+  const [dropping, setDropping] = useState(false)
 
   useEffect(() => {
     roomsApi.deliveries(roomId).then((r) => setItems(r.deliveries)).catch((e) => setError(errorText(e)))
@@ -60,9 +71,31 @@ export function InboxCard({ roomId, onChanged, onDialog }: {
 
   const refresh = () => { setTick((t) => t + 1); onChanged() }
 
+  const drop = async (file: File | undefined) => {
+    if (!file) return
+    setDropping(true); setError('')
+    try {
+      const r = await roomsApi.dropFile(roomId, file)
+      refresh()
+      setOpen(r.seq)
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setDropping(false)
+    }
+  }
+
   return (
     <Card title="From Claude" icon={Inbox}
-      hint="What Claude delivered with room_deliver, with the real names put back here — for you alone."
+      hint="What Claude delivered, with the real names put back here — for you alone. A file Claude made itself can be added here too: download it from Claude, then add it."
+      action={
+        <label className={`inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-zinc-700 bg-zinc-900/60 px-3.5 py-2 text-sm font-medium text-zinc-200 hover:border-zinc-600 hover:bg-zinc-800 ${dropping ? 'pointer-events-none opacity-50' : ''}`}>
+          <FileUp className="h-4 w-4" />
+          {dropping ? 'Putting the names back…' : 'Add a file Claude made'}
+          <input type="file" className="sr-only" accept={DROP_ACCEPT} disabled={dropping}
+            onChange={(e) => { void drop(e.target.files?.[0]); e.target.value = '' }} />
+        </label>
+      }
       bodyClassName="p-0">
       {error && <div className="px-5 pt-4"><Notice tone="red">{error}</Notice></div>}
       {items === null ? (
@@ -80,7 +113,8 @@ export function InboxCard({ roomId, onChanged, onDialog }: {
                 {!d.seen && <span className="h-2 w-2 shrink-0 rounded-full bg-violet-500" aria-label="new" />}
                 <span className="font-mono text-xs text-zinc-500">#{d.seq}</span>
                 <span className="min-w-0 flex-1 truncate font-medium text-zinc-200">{d.title}</span>
-                {d.report.kind && <Pill tone="sky" icon={FileText}>{KIND_LABEL[d.report.kind]}</Pill>}
+                {d.report.kind && <Pill tone="sky" icon={FileText}>{kindLabelOf(d.report)}</Pill>}
+                {d.report.no_tokens && <Pill tone="amber">no tokens</Pill>}
                 {d.report.real_values.length > 0 && <Pill tone="red" icon={AlertTriangle}>real values</Pill>}
                 {d.report.not_in_room.length > 0 && <Pill tone="amber">{d.report.not_in_room.length} unknown</Pill>}
                 <Pill>{d.report.restored} put back</Pill>
@@ -136,7 +170,7 @@ function DeliveryDialog({ roomId, seq, onClose, onDeleted }: {
               {d.report.kind ? (
                 <Button variant="primary" icon={Download} busy={busy === 'file'}
                   onClick={() => act('file', () => roomsApi.downloadDelivery(roomId, d.seq, 'file', d.title, d.report.file))}>
-                  {KIND_LABEL[d.report.kind]} file
+                  {kindLabelOf(d.report)} file
                 </Button>
               ) : (
                 <>
@@ -171,11 +205,18 @@ function DeliveryDialog({ roomId, seq, onClose, onDeleted }: {
               </div>
             </Notice>
           )}
+          {d.report.no_tokens && (
+            <Notice tone="amber">
+              No tokens were found in this file, so nothing could be put back. Claude probably wrote a codename or
+              descriptions instead of the tokens — ask it to keep the tokens (⟦ORG_7⟧ …) in files it makes.
+            </Notice>
+          )}
           {d.report.kind && (
             <Notice tone="zinc">
-              {d.report.kind === 'workbook' ? 'An' : 'A'} {KIND_LABEL[d.report.kind]} file, built here from what Claude
-              sent, with the real names put back inside.
-              Below is its text.
+              {d.report.kind === 'file'
+                ? `${/^[AEIOU]/.test(kindLabelOf(d.report)) ? 'An' : 'A'} ${kindLabelOf(d.report)} file Claude made itself${d.report.source === 'owner' ? ', added by you' : ''}, with the real names put back inside.`
+                : `${d.report.kind === 'workbook' ? 'An' : 'A'} ${kindLabelOf(d.report)} file, built here from what Claude sent, with the real names put back inside.`}
+              {' '}Below is its text.
               {d.report.notes && d.report.notes.length > 0 && (
                 <ul className="mt-1 space-y-0.5 text-xs opacity-80">{d.report.notes.slice(0, 8).map((n, i) => <li key={i}>· {n}</li>)}</ul>
               )}

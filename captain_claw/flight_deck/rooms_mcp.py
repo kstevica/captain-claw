@@ -66,7 +66,11 @@ INSTRUCTIONS = (
     "room_deliver_workbook (Excel: sheets, rows, formulas, formats, charts), room_deliver_deck (PowerPoint) or "
     "room_deliver_document (Word, from markdown). The file is built and the names put back in Flight Deck. Keep "
     "tokens in every cell, sheet name, title and note; formulas stay inside the workbook (no web addresses, other "
-    "files, WEBSERVICE, IMAGE or HYPERLINK)."
+    "files, WEBSERVICE, IMAGE or HYPERLINK).\n"
+    "7. To work on a released file with code (an Excel model, say), room_get_file gives you the anonymized file "
+    "itself as base64 — decode it in your workspace. If you do make a file yourself, keep the tokens in it (never a "
+    "codename or a description) and send it with room_deliver_file (base64; about 15 KB fits in one call, more in "
+    "parts), or give it to the person to drop into Flight Deck → Data rooms → From Claude."
 )
 
 _ANNOT = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
@@ -377,6 +381,63 @@ async def _room_deliver(owner: str, client_id: str, args: dict[str, Any]) -> dic
     return receipt
 
 
+async def _room_deliver_file(owner: str, client_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    from captain_claw.flight_deck import rooms_inbox
+
+    room = await _room(owner, client_id, args.get("room"))
+    try:
+        receipt = await rooms_inbox.deliver_claude_file(room, client_id, name=args.get("name"),
+                                                        content_base64=args.get("content_base64"),
+                                                        part=args.get("part"), of=args.get("of"))
+    except rooms_inbox.DeliveryError as exc:
+        raise ToolError(str(exc)) from None
+    await rs.store().log_read(room["id"], owner, client_id, "room_deliver_file",
+                              chars=len(str(args.get("content_base64") or "")))
+    return receipt
+
+
+MAX_GET_FILE = 10 * 1024 * 1024
+
+
+async def _room_get_file(owner: str, client_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    """A released clean copy, whole. The text Claude reads was leak-checked when
+    the room ran; a file carries more (charts' caches, comments, properties), so
+    every piece of text in it is checked again before it goes out."""
+    import asyncio
+    import base64
+
+    room = await _room(owner, client_id, args.get("room"))
+    alarm = await _alarm(room, client_id, "room_get_file", args)
+    f = _find_file(await _released(room["id"]), str(args.get("path") or ""))
+    path = rs.store().clean_file(room["id"], f["id"], PurePosixPath(f["clean_path"]).suffix)
+    if not path.exists():
+        raise ToolError("That file isn't available as a file — read it with room_read.")
+    blob = await asyncio.to_thread(path.read_bytes)
+    if len(blob) > MAX_GET_FILE:
+        raise ToolError(f"{f['clean_path']} is over {MAX_GET_FILE // (1024 * 1024)} MB — read it with room_read.")
+    ext = PurePosixPath(f["clean_path"]).suffix.lower().lstrip(".")
+    if ext in ("docx", "xlsx", "pptx"):
+        from captain_claw.anonymize import office
+
+        def every_text() -> str:
+            return "\n".join(s.text for s in office.prepare(blob, ext, scrub=False).segments)
+
+        text = await asyncio.to_thread(every_text)
+    else:
+        text = blob.decode("utf-8", errors="replace")
+    _row, needle_list, _tokens = await _vault(room)
+    hits = await asyncio.to_thread(rj.leaks, text + "\n" + f["clean_path"], needle_list)
+    if hits:
+        await rs.store().add_alarm(room["id"], room["owner_id"], client_id, "room_get_file (held back)", hits)
+        raise ToolError(f"{f['clean_path']} can't be handed out as a file — read it with room_read.")
+    await rs.store().log_read(room["id"], owner, client_id, "room_get_file", file_id=f["id"], chars=len(blob),
+                              alarm=alarm)
+    await _history(room, client_id, [text], f"file {f['clean_path']}")
+    return {"path": f["clean_path"], "kind": ext, "bytes": len(blob),
+            "base64": base64.b64encode(blob).decode("ascii"),
+            "note": "Decode the base64 in your workspace. Tokens are inside, as in the text — keep them."}
+
+
 def _file_handler(kind: str, spec_keys: tuple[str, ...]):
     async def handler(owner: str, client_id: str, args: dict[str, Any]) -> dict[str, Any]:
         from captain_claw.flight_deck import rooms_inbox
@@ -438,6 +499,22 @@ def file_tools() -> list[dict[str, Any]]:
                                                           "markdown": {"type": "string"},
                                                           "page_numbers": {"type": "boolean"}},
                          "required": ["room", "title", "markdown"]}, "annotations": _WRITE},
+        {"name": "room_deliver_file", "description": "Give the person a file you made yourself (Word, Excel, "
+         "PowerPoint, markdown, text, CSV or JSON), with tokens inside, as base64. About 15 KB fits in one call; "
+         "send bigger ones in parts (same name; part 1 of N …), or give the file to the person to drop into Flight "
+         "Deck. The names are put back inside it there; you get a receipt.",
+         "inputSchema": {"type": "object", "properties": {
+             "room": room,
+             "name": {"type": "string", "description": "The file's name with its extension, e.g. model.xlsx."},
+             "content_base64": {"type": "string", "description": "The file (or this part of it), base64."},
+             "part": {"type": "integer"}, "of": {"type": "integer"}},
+             "required": ["room", "name", "content_base64"]}, "annotations": _WRITE},
+        {"name": "room_get_file", "description": "A released file of a room as the file itself (base64) — the "
+         "anonymized copy, tokens inside — to open with code in your workspace (an Excel model, say). Big files "
+         "come back long: decode the base64 from wherever your tools put the result.",
+         "inputSchema": {"type": "object", "properties": {
+             "room": room, "path": {"type": "string", "description": "The file's path, as room_list_files gives it."}},
+             "required": ["room", "path"]}, "annotations": _ANNOT},
     ])
     return _FILE_TOOLS
 
@@ -453,6 +530,8 @@ _HANDLERS = {
     "room_deliver_deck": _file_handler("deck", ("slides", "page_numbers", "font", "heading_font", "heading_color",
                                                 "accent_color")),
     "room_deliver_document": _file_handler("document", ("markdown", "page_numbers")),
+    "room_deliver_file": _room_deliver_file,
+    "room_get_file": _room_get_file,
 }
 
 

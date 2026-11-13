@@ -465,7 +465,10 @@ async def _app_names(client_ids: set[str]) -> dict[str, str]:
     db = get_db()
     out = {}
     for cid in client_ids:
-        client = await db.get_oauth_client(cid) if cid else None
+        if not cid:
+            out[cid] = "Added by you"  # a file Claude made that the person dropped in
+            continue
+        client = await db.get_oauth_client(cid)
         out[cid] = (client or {}).get("client_name") or "A connected app"
     return out
 
@@ -488,6 +491,30 @@ async def list_deliveries(room_id: str, request: Request, user: dict = Depends(g
         out.append({"seq": d["seq"], "at": d["at"], "title": title, "chars": d["chars"], "report": d["report"],
                     "seen": d["seen"], "app": names[d["client_id"]]})
     return {"deliveries": out}
+
+
+@router.put("/{room_id}/deliveries/file")
+async def drop_claude_file(room_id: str, request: Request, name: str = Query(..., min_length=1, max_length=200),
+                           user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """A file Claude made (in tokens) that the person downloaded from Claude and
+    drops here: the names go back inside it and it joins the Inbox."""
+    from captain_claw.flight_deck import rooms_inbox
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    if int(request.headers.get("content-length") or 0) > rooms_inbox.MAX_OWN_FILE:
+        raise HTTPException(413, f"The file is over {rooms_inbox.MAX_OWN_FILE // (1024 * 1024)} MB.")
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > rooms_inbox.MAX_OWN_FILE:
+            raise HTTPException(413, f"The file is over {rooms_inbox.MAX_OWN_FILE // (1024 * 1024)} MB.")
+        chunks.append(chunk)
+    try:
+        seq, report = await rooms_inbox.take_file(room, "", name=name, blob=b"".join(chunks), source="owner")
+    except rooms_inbox.DeliveryError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return {"seq": seq, "report": report}
 
 
 async def _delivery(owner: str, room: dict[str, Any], seq: int) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -535,10 +562,13 @@ async def download_delivery(room_id: str, seq: int, request: Request, as_: str =
             raise HTTPException(404, "The file is missing.")
         cipher = await _cipher(owner, room)
         blob = cipher.decrypt(await asyncio.to_thread(path.read_bytes))
-        name = rooms_inbox.safe_filename(p["title"], ext)
+        stem = p["title"].rsplit(".", 1)[0] if p["title"].lower().endswith(f".{ext}") else p["title"]
+        name = rooms_inbox.safe_filename(stem, ext)
         media = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                  "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                 "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[ext]
+                 "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                 "json": "application/json", "csv": "text/csv; charset=utf-8",
+                 "tsv": "text/tab-separated-values; charset=utf-8"}.get(ext, "text/plain; charset=utf-8")
     elif as_ == "file":
         raise HTTPException(422, "This delivery is text — download it as md or docx.")
     elif as_ == "docx":
