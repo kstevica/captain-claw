@@ -12,7 +12,7 @@ never gets the real names back: no restored text goes out through the connector.
 Status: P0 spike done (2026-11-13, Cowork on a throwaway deck; results in P0 below). P1 built (branch
 `feat/data-rooms-p1`, PR #539, see "P1 as built"). P2 built (branch `feat/data-rooms-p2`, PR #540, see
 "P2 as built"; not yet tried with real Claude). P3 built (branch `feat/data-rooms-p3`, PR #541, see "P3 as
-built"). P4 built (branch `feat/data-rooms-p4`, PR #542). P5 built (branch `feat/data-rooms-p5`, see "P5 as built"). P6–P7 not built. Builds on the anonymizer
+built"). P4 built (branch `feat/data-rooms-p4`, PR #542). P5 built (branch `feat/data-rooms-p5`, PR #543). P6 built (branch `feat/data-rooms-p6`, see "P6 as built"). P7 not built. Builds on the anonymizer
 (`docs/anonymization-plan.md`, all merged) and the inbound MCP server
 (`flight_deck/mcp_server_routes.py`, `flight_deck/mcp_oauth_routes.py`).
 
@@ -542,6 +542,28 @@ The room page builds a ZIP for the person to download on their own machine:
 A "text only" option keeps large rooms under Claude Project limits. Each export
 is logged on the room. Results still come back through `room_deliver`; the tokens
 are the same vault, so restoring works the same.
+
+**P6 as built (2026-11-13, branch `feat/data-rooms-p6`, stacked on P5):**
+
+- **`rooms_export.build`:** a ZIP under a folder named after the codename:
+  - the released clean copies at their anonymized paths (Office files as files;
+    PDFs and scans as the markdown they became). With "Text only", every Office
+    file is its markdown text view instead (`<path>.md`);
+  - `ROLES.md` (token | role);
+  - `README-for-Claude.md`: the connector's own `INSTRUCTIONS`, plus how to give
+    results back (the connector, or a file with tokens the person adds under
+    From Claude).
+- **Checked once more:** every piece of text in every file, all Office segments
+  and not only the text view, is looked through for the vault's real values. A
+  file with a hit is left out; the owner sees its path and the room gets an alarm
+  "export (held back)". Nothing about it goes into the ZIP.
+- **Two steps:** `POST /fd/rooms/{id}/export {text_only}` builds it and returns
+  `{token, files, held_back, size}`. `GET /fd/rooms/{id}/export/{token}`
+  downloads it once (deleted after sending; unclaimed ZIPs are pruned after an
+  hour). Owner only, act-as refused. Capped at 300 MB ("try text only").
+- **Logged** with the room's reads as "Download for Claude · You".
+- **UI:** a "Download for Claude" card in the room (Text only, Download ZIP, a
+  summary with size, the held-back list).
 
 ### P7 — Croatian grammar after restoring
 

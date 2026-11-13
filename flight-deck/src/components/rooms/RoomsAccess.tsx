@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { AlertTriangle, BookOpen, Check, Copy, Plug, Unplug } from 'lucide-react'
-import { roomsApi, type RoomAlarm, type RoomGrant, type RoomRead, type RoomSummary } from '../../services/roomsApi'
+import { AlertTriangle, BookOpen, Check, Copy, Download, Plug, Unplug } from 'lucide-react'
+import { roomsApi, type RoomAlarm, type RoomExport, type RoomGrant, type RoomRead, type RoomSummary } from '../../services/roomsApi'
 import { Button, Card, Notice, Pill } from '../console/parts'
 import { kindLabel, kindTone } from '../anonymize/anonFormat'
 
@@ -27,6 +27,60 @@ function Token({ token }: { token: string }) {
 
 const TOOL_LABEL: Record<string, string> = {
   room_overview: 'Overview', room_list_files: 'File list', room_read: 'Read', room_search: 'Search',
+  room_get_file: 'File', room_deliver: 'Delivered', room_deliver_workbook: 'Delivered Excel',
+  room_deliver_deck: 'Delivered PowerPoint', room_deliver_document: 'Delivered Word',
+  room_deliver_file: 'Delivered a file', export: 'Download for Claude',
+}
+
+function size(bytes: number): string {
+  return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+export function ExportCard({ roomId, released, onDone }: { roomId: string; released: number; onDone?: () => void }) {
+  const [textOnly, setTextOnly] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [done, setDone] = useState<RoomExport | null>(null)
+
+  const run = async () => {
+    setBusy(true); setError(''); setDone(null)
+    try {
+      const e = await roomsApi.exportRoom(roomId, textOnly)
+      setDone(e)
+      await roomsApi.downloadExport(roomId, e)
+      onDone?.()
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Card title="Download for Claude" icon={Download}
+      hint="The released files as a ZIP to add to a Claude Project — anonymized, with the roles and a README telling Claude the rules."
+      action={<Button variant="primary" icon={Download} busy={busy} disabled={released === 0} onClick={run}>Download ZIP</Button>}>
+      <label className="flex items-start gap-2 text-sm text-zinc-300">
+        <input type="checkbox" className="mt-0.5" checked={textOnly} onChange={(e) => setTextOnly(e.target.checked)} />
+        <span>Text only <span className="text-zinc-500">— Word, Excel and PowerPoint as markdown: smaller, and every Claude reads it.</span></span>
+      </label>
+      {error && <div className="mt-3"><Notice tone="red">{error}</Notice></div>}
+      {done && (
+        <div className="mt-3 space-y-2">
+          <Notice tone="emerald">
+            {done.files} file(s) in the ZIP ({size(done.size)}). Results come back through the
+            connector, or as a file you add under From Claude.
+          </Notice>
+          {done.held_back.length > 0 && (
+            <Notice tone="red">
+              Left out, because they still hold a real value: {done.held_back.slice(0, 8).join(', ')}
+              {done.held_back.length > 8 ? ' …' : ''}. Check them, then run the room again.
+            </Notice>
+          )}
+        </div>
+      )}
+    </Card>
+  )
 }
 
 export function ClaudeAccessCard({ rooms }: { rooms: RoomSummary[] }) {

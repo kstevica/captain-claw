@@ -169,6 +169,17 @@ export interface RoomRead {
   app: string
 }
 
+/** A built “Download for Claude” ZIP: one download, within an hour. */
+export interface RoomExport {
+  token: string
+  files: number
+  /** Files left out because they still hold a real value (paths only). */
+  held_back: string[]
+  size: number
+  text_only: boolean
+  filename: string
+}
+
 /** A real value from the vault found in what Claude sent (it got there some other way). */
 export interface RoomAlarm { id: number; at: number; tool: string; tokens: string[]; seen: boolean; app: string }
 
@@ -248,6 +259,10 @@ export const roomsApi = {
       `${title.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'delivery'}.${as === 'file' ? ext || 'bin' : as}`),
   deleteDelivery: (id: string, seq: number) =>
     api<{ deleted: boolean }>(`/fd/rooms/${enc(id)}/deliveries/${seq}`, { method: 'DELETE' }),
+  /** “Download for Claude”: build a ZIP of the released room (P6). */
+  exportRoom: (id: string, textOnly: boolean) =>
+    api<RoomExport>(`/fd/rooms/${enc(id)}/export`, json('POST', { text_only: textOnly })),
+  downloadExport: (id: string, e: RoomExport) => download(`/fd/rooms/${enc(id)}/export/${enc(e.token)}`, e.filename),
   /** A file Claude made (in tokens), downloaded from Claude and dropped here: the names go back inside. */
   dropFile: (id: string, file: File) =>
     putFile<{ seq: number; report: DeliveryReport }>(`/fd/rooms/${enc(id)}/deliveries/file?name=${enc(file.name)}`, file,

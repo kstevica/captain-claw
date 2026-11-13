@@ -428,8 +428,11 @@ async def room_reads(room_id: str, request: Request, user: dict = Depends(get_cu
 
     async def app_name(client_id: str) -> str:
         if client_id not in names:
-            client = await db.get_oauth_client(client_id) if client_id else None
-            names[client_id] = (client or {}).get("client_name") or "A connected app"
+            if not client_id:
+                names[client_id] = "You"  # an export, or a check of your own
+            else:
+                client = await db.get_oauth_client(client_id)
+                names[client_id] = (client or {}).get("client_name") or "A connected app"
         return names[client_id]
 
     reads = [{"at": r["at"], "tool": r["tool"], "path": files.get(r["file_id"], ""), "page": r["page"],
@@ -438,6 +441,38 @@ async def room_reads(room_id: str, request: Request, user: dict = Depends(get_cu
     alarms = [{"id": a["id"], "at": a["at"], "tool": a["tool"], "tokens": a["tokens"], "seen": a["seen"],
                "app": await app_name(a["client_id"])} for a in await store.alarms(room_id)]
     return {"reads": reads, "alarms": alarms}
+
+
+@router.post("/{room_id}/export")
+async def export_room(room_id: str, request: Request, body: dict[str, Any] = Body(default={}),
+                      user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """“Download for Claude”: build the ZIP of the released room (P6); the
+    download is one GET away, for an hour."""
+    from captain_claw.flight_deck import rooms_export
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    _not_running(room)
+    try:
+        return await rooms_export.build(room, text_only=bool((body or {}).get("text_only")))
+    except rooms_export.ExportError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@router.get("/{room_id}/export/{token}")
+async def download_export(room_id: str, token: str, request: Request, user: dict = Depends(get_current_user)):
+    from starlette.background import BackgroundTask
+
+    from captain_claw.flight_deck import rooms_export
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    path = rooms_export.export_path(room_id, token)
+    if path is None:
+        raise HTTPException(404, "That download is gone — make a new one.")
+    name = re.sub(r"[^\w\- ]+", "_", room["codename"]).strip() or "data-room"
+    return FileResponse(path, media_type="application/zip", filename=f"{name} - for Claude.zip",
+                        background=BackgroundTask(path.unlink, missing_ok=True))
 
 
 @router.post("/{room_id}/alarms/seen")
