@@ -57,9 +57,13 @@ export interface DeliveryReport {
   characters: number
   format: 'markdown' | 'text'
   /** A file built on the deck (P4): what it is, and the build's notes (tokens only). */
-  kind?: 'workbook' | 'deck' | 'document'
-  file?: 'xlsx' | 'pptx' | 'docx'
+  kind?: 'workbook' | 'deck' | 'document' | 'file'
+  file?: string
   notes?: string[]
+  /** P5: a file Claude made itself — sent through the connector, or dropped in by the person. */
+  source?: 'claude' | 'owner'
+  /** Nothing could be put back: Claude wrote no tokens into it (a codename, say). */
+  no_tokens?: boolean
 }
 
 export interface DeliverySummary {
@@ -172,7 +176,7 @@ const enc = encodeURIComponent
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) })
 
 /** A raw upload (the ZIP as the request body), with the same sign-in as `api`. */
-async function putFile<T>(path: string, file: File): Promise<T> {
+async function putFile<T>(path: string, file: File, contentType = 'application/zip'): Promise<T> {
   const send = () => {
     const jwt = useAuthStore.getState().token
     return fetch(path, {
@@ -180,7 +184,7 @@ async function putFile<T>(path: string, file: File): Promise<T> {
       body: file,
       cache: 'no-store',
       credentials: 'include',
-      headers: { 'Content-Type': 'application/zip', ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) },
+      headers: { 'Content-Type': contentType, ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}) },
     })
   }
   let r = await send()
@@ -244,4 +248,8 @@ export const roomsApi = {
       `${title.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'delivery'}.${as === 'file' ? ext || 'bin' : as}`),
   deleteDelivery: (id: string, seq: number) =>
     api<{ deleted: boolean }>(`/fd/rooms/${enc(id)}/deliveries/${seq}`, { method: 'DELETE' }),
+  /** A file Claude made (in tokens), downloaded from Claude and dropped here: the names go back inside. */
+  dropFile: (id: string, file: File) =>
+    putFile<{ seq: number; report: DeliveryReport }>(`/fd/rooms/${enc(id)}/deliveries/file?name=${enc(file.name)}`, file,
+      'application/octet-stream'),
 }

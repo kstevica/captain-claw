@@ -373,3 +373,146 @@ async def deliver_file(room: dict[str, Any], client_id: str, *, kind: str, title
 def file_path(room_id: str, seq: int, ext: str, *, tokens: bool = False) -> Any:
     folder = rs.store().room_dir(room_id) / "inbox"
     return folder / (f"{seq}.tokens.{ext}.enc" if tokens else f"{seq}.{ext}.enc")
+
+
+# ── Files Claude made itself (P5) ───────────────────────────────────
+#
+# A file Claude built in its own workspace, in tokens: sent inside a call as
+# base64 (small files; parts for more), or handed to the person, who drops it
+# into the room's Inbox. Office files get the names back inside (the same
+# restore as P4); markdown, text, CSV and JSON as text. P0 found Claude's own
+# file can come back with no tokens at all (a codename instead): that is
+# flagged, since nothing could be put back.
+
+OWN_KINDS = {"docx": "Word document", "xlsx": "Excel workbook", "pptx": "PowerPoint deck", "md": "Markdown",
+             "markdown": "Markdown", "txt": "text", "csv": "CSV", "tsv": "TSV", "json": "JSON"}
+MAX_OWN_FILE = 25 * 1024 * 1024        # dropped in by the person
+MAX_B64_FILE = 3 * 1024 * 1024         # sent by Claude inside calls (decoded)
+
+
+def own_kind(name: str) -> str:
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext not in OWN_KINDS:
+        raise DeliveryError(f"A .{ext or '?'} file can't have its names put back — send Word, Excel, PowerPoint, "
+                            "markdown, text, CSV or JSON. (A PDF can't: ask for Word instead.)")
+    return ext
+
+
+def _restore_text_file(blob: bytes, state: engine.VaultState) -> tuple[bytes, int, list[str], str]:
+    from captain_claw.anonymize import formats
+
+    text = formats.decode_text(blob)
+    restored, n, unknown = engine.restore(text, state)
+    return restored.encode("utf-8"), n, unknown, text
+
+
+async def take_file(room: dict[str, Any], client_id: str, *, name: str, blob: bytes,
+                    source: str) -> tuple[int, dict[str, Any]]:
+    """Put the names back into a file Claude made and keep it in the Inbox.
+    ``source`` is "claude" (sent through the connector) or "owner" (dropped in)."""
+    import asyncio
+
+    name = re.sub(r"[\\/]+", "_", str(name or "")).strip()[:200]
+    ext = own_kind(name)
+    if not blob:
+        raise DeliveryError("The file is empty.")
+    row, cipher, state = await _vault(room)
+    office_ext = ext if ext in ("docx", "xlsx", "pptx") else ""
+    try:
+        if office_ext:
+            restored_blob, n_file, unknown_file, token_text = await asyncio.to_thread(
+                _restore_file, blob, office_ext, state)
+        else:
+            restored_blob, n_file, unknown_file, token_text = await asyncio.to_thread(
+                _restore_text_file, blob, state)
+    except Exception as exc:  # noqa: BLE001 — a damaged file: say so, never what's in it
+        raise DeliveryError(f"The file can't be opened ({type(exc).__name__}).") from None
+    restored_name, n_name, unknown_name = engine.restore(name, state)
+    stem = restored_name.rsplit(".", 1)[0] if "." in restored_name else restored_name
+    not_in_room = sorted(set(unknown_file) | set(unknown_name))
+    real_values = rj.leaks(f"{name}\n{token_text}", rj.needles(state))
+    view_tokens = await asyncio.to_thread(rj.text_view, name, blob)
+    view = await asyncio.to_thread(rj.text_view, safe_filename(stem, ext), restored_blob)
+    restored = n_file + n_name
+    report = {"restored": restored, "not_in_room": not_in_room[:200], "real_values": real_values[:200], "parts": 1,
+              "characters": len(token_text), "format": "markdown", "kind": "file", "file": ext, "source": source,
+              "no_tokens": restored == 0, "notes": []}
+    payload = json.dumps({"title_tokens": name, "title": safe_filename(stem, ext), "body_tokens": view_tokens,
+                          "body": view, "format": "markdown", "kind": "file", "file": ext}, ensure_ascii=False)
+    store = rs.store()
+    seq = await store.add_delivery(room["id"], room["owner_id"], client_id,
+                                   cipher.encrypt(payload.encode("utf-8")).decode("ascii"), len(token_text), report)
+    inbox = store.room_dir(room["id"]) / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(file_path(room["id"], seq, ext).write_bytes, cipher.encrypt(restored_blob))
+    await asyncio.to_thread(file_path(room["id"], seq, ext, tokens=True).write_bytes, cipher.encrypt(blob))
+    if real_values:
+        await store.add_alarm(room["id"], room["owner_id"], client_id, "room_deliver_file", real_values)
+    try:
+        found = usage.token_contexts([name, token_text], set(state.by_token))
+        if found:
+            await av.store().record_uses(
+                row, [av.TokenUse(t, "back", n, c, model=TO_MODEL if source == "claude" else "")
+                      for t, (n, c) in found.items()],
+                channel="data-room:file", actor=f"mcp:{client_id}" if client_id else "person",
+                label=f"delivery #{seq} ({ext})")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Data room file: token history not written", error=type(exc).__name__)
+    if source == "claude":
+        await _tell_owner(room, seq)
+    return seq, report
+
+
+async def deliver_claude_file(room: dict[str, Any], client_id: str, *, name: Any, content_base64: Any,
+                              part: Any = None, of: Any = None) -> dict[str, Any]:
+    """Claude sends a file it made, base64 (in parts when it's bigger); the receipt."""
+    import base64
+    import binascii
+
+    name = str(name or "").strip()
+    own_kind(name)
+    piece = re.sub(r"\s+", "", str(content_base64 or ""))
+    if not piece:
+        raise DeliveryError("content_base64 is empty.")
+    if len(piece) > MAX_PART_CHARS:
+        raise DeliveryError(f"One call takes at most {MAX_PART_CHARS:,} characters — send the base64 in parts.")
+    total = 1
+    if of not in (None, "", 0, 1, "1"):
+        try:
+            total, part = int(of), int(part or 0)
+        except (TypeError, ValueError):
+            raise DeliveryError("part and of are numbers (part 1 of 3 …).") from None
+        if not 1 <= total <= MAX_PARTS or not 1 <= part <= total:
+            raise DeliveryError(f"part must be between 1 and of, and of at most {MAX_PARTS}.")
+    if total > 1:
+        _row, cipher, _state = await _vault(room)
+        key = hashlib.sha256(f"file\n{name}\n{total}".encode()).hexdigest()[:32]
+        store = rs.store()
+        have = await store.add_part(room["id"], client_id, key, part, total,
+                                    cipher.encrypt(piece.encode("ascii")).decode("ascii"))
+        missing = [n for n in range(1, total + 1) if n not in have]
+        if missing:
+            return {"received": f"part {part} of {total}", "waiting_for_parts": missing,
+                    "note": "Send the other parts with the same name and of; the base64 is joined in order."}
+        piece = "".join(cipher.decrypt(p.encode("ascii")).decode("ascii")
+                        for p in await store.take_parts(room["id"], client_id, key, total))
+    try:
+        blob = base64.b64decode(piece, validate=True)
+    except (binascii.Error, ValueError):
+        raise DeliveryError("content_base64 isn't valid base64 (or a part is missing).") from None
+    if len(blob) > MAX_B64_FILE:
+        raise DeliveryError(f"Over {MAX_B64_FILE // (1024 * 1024)} MB — give the file to the person instead; they "
+                            "drop it into Flight Deck → Data rooms → From Claude.")
+    seq, report = await take_file(room, client_id, name=name, blob=blob, source="claude")
+    receipt: dict[str, Any] = {"delivered": f"#{seq}", "file": f"{OWN_KINDS[report['file']]} (.{report['file']})",
+                               "restored": report["restored"],
+                               "note": "The person gets the file in Flight Deck with the real names. You don't get "
+                                       "the restored file."}
+    if total > 1:
+        receipt["parts_joined"] = total
+    if report["no_tokens"]:
+        receipt["note"] += (" No tokens were found in it, so nothing could be put back — keep the tokens "
+                            "(⟦ORG_7⟧ …) in files you make, never a codename or a description.")
+    if report["not_in_room"]:
+        receipt["not_in_room"] = report["not_in_room"][:50]
+    return receipt
