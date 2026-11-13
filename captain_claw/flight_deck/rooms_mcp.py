@@ -70,8 +70,13 @@ INSTRUCTIONS = (
     "7. To work on a released file with code (an Excel model, say), room_get_file gives you the anonymized file "
     "itself as base64 — decode it in your workspace. If you do make a file yourself, keep the tokens in it (never a "
     "codename or a description) and send it with room_deliver_file (base64; about 15 KB fits in one call, more in "
-    "parts), or give it to the person to drop into Flight Deck → Data rooms → From Claude."
+    "parts), or give it to the person to drop into Flight Deck → Data rooms → From Claude.\n"
+    "8. The person can leave you tasks in a room (room_list counts them). When they ask you to check Captain or "
+    "their tasks, call room_tasks, do each one, and deliver each answer with task=<its number> on the deliver "
+    "tool, so it lands next to the task. A task may be about an earlier delivery: it comes along in tokens "
+    "(room_get_delivery has the rest)."
 )
+_TASK = {"type": "integer", "description": "The task this answers (from room_tasks), if it answers one."}
 
 _ANNOT = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
 TOOLS = [
@@ -112,10 +117,23 @@ TOOLS = [
          "content": {"type": "string", "description": "The result: markdown with tokens, no pictures."},
          "format": {"type": "string", "enum": ["markdown", "text"]},
          "part": {"type": "integer", "description": "This part's number, when sending in parts."},
-         "of": {"type": "integer", "description": "How many parts in all, when sending in parts."}},
+         "of": {"type": "integer", "description": "How many parts in all, when sending in parts."},
+         "task": _TASK},
          "required": ["room", "title", "content"]},
      "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False,
                      "openWorldHint": False}},
+    {"name": "room_tasks", "description": "Tasks the person left for you in a room (or in all your rooms): what "
+     "to do, in tokens, and the earlier delivery it is about. Deliver each answer with task=<its number>.",
+     "inputSchema": {"type": "object", "properties": {
+         "room": {"type": "string", "description": "One room's id or codename (optional; default: all)."}},
+         "required": []}, "annotations": _ANNOT},
+    {"name": "room_get_delivery", "description": "One of your earlier deliveries to a room, as you wrote it "
+     "(tokens), page by page — the context a task refers to.",
+     "inputSchema": {"type": "object", "properties": {
+         "room": {"type": "string"},
+         "delivery": {"type": "integer", "description": "The delivery's number (#n in its receipt or a task)."},
+         "page": {"type": "integer", "description": "Which page (1 = the first; default 1)."}},
+         "required": ["room", "delivery"]}, "annotations": _ANNOT},
 ]
 
 
@@ -266,12 +284,71 @@ async def _room_list(owner: str, client_id: str, args: dict[str, Any]) -> dict[s
     out = []
     for r in await allowed_rooms(owner, client_id):
         files = await _released(r["id"])
-        out.append({"room": r["id"], "codename": r["codename"], "released_files": len(files),
-                    "released_at": time.strftime("%Y-%m-%d", time.gmtime(r["released_at"])) if r["released_at"]
-                    else None})
+        entry = {"room": r["id"], "codename": r["codename"], "released_files": len(files),
+                 "released_at": time.strftime("%Y-%m-%d", time.gmtime(r["released_at"])) if r["released_at"]
+                 else None}
+        waiting = len(await rs.store().open_tasks(r["id"]))
+        if waiting:
+            entry["tasks_waiting"] = waiting
+        out.append(entry)
     note = "" if any(r["released_files"] for r in out) else (
         "Nothing is released to this connector yet — the person releases rooms in Flight Deck → Data rooms.")
+    if any(r.get("tasks_waiting") for r in out):
+        note = (note + " " if note else "") + "The person left you tasks: call room_tasks."
     return {"rooms": out, **({"note": note} if note else {})}
+
+
+async def _room_tasks(owner: str, client_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    from captain_claw.flight_deck import rooms_tasks
+
+    rooms = [await _room(owner, client_id, args["room"])] if args.get("room") else await allowed_rooms(owner, client_id)
+    out = []
+    for room in rooms:
+        tasks = await rooms_tasks.for_claude(room, client_id)
+        if tasks:
+            out.append({"room": room["id"], "codename": room["codename"], "tasks": tasks})
+            await rs.store().log_read(room["id"], owner, client_id, "room_tasks", chars=sum(len(t["prompt"]) for t in tasks))
+    if not out:
+        return {"tasks": [], "note": "No tasks are waiting."}
+    return {"rooms": out, "note": "Do each task and deliver the answer with task=<its number>. Keep every token "
+                                  "exactly as written."}
+
+
+async def _room_get_delivery(owner: str, client_id: str, args: dict[str, Any]) -> str:
+    from captain_claw.flight_deck import rooms_inbox
+
+    room = await _room(owner, client_id, args.get("room"))
+    try:
+        seq = int(args.get("delivery"))
+    except (TypeError, ValueError):
+        raise ToolError("delivery is a number (#n from a receipt or a task).") from None
+    d = await rs.store().delivery(room["id"], seq)
+    row, _needles, _tokens = await _vault(room)
+    if d is None or row is None:
+        raise ToolError(f"There is no delivery #{seq} in this room.")
+    try:
+        p = rooms_inbox.open_payload(av.store().cipher(row), d)
+    except Exception:  # noqa: BLE001
+        raise ToolError(f"Delivery #{seq} can't be opened.") from None
+    text = f"# {p.get('title_tokens') or ''}\n\n{p.get('body_tokens') or ''}"
+    bounds = page_bounds(text)
+    page = max(1, int(args.get("page") or 1))
+    if page > len(bounds):
+        raise ToolError(f"Delivery #{seq} has {len(bounds)} page(s).")
+    start, end = bounds[page - 1]
+    await rs.store().log_read(room["id"], owner, client_id, "room_get_delivery", page=page, chars=end - start)
+    head = f"Delivery #{seq} · page {page} of {len(bounds)} · characters {start + 1:,}–{end:,} of {len(text):,}\n\n"
+    return head + text[start:end]
+
+
+async def _close_task(room: dict[str, Any], client_id: str, args: dict[str, Any], receipt: dict[str, Any]) -> None:
+    """A delivery that answers a task closes it (when it is in — not for a part)."""
+    from captain_claw.flight_deck import rooms_tasks
+
+    if args.get("task") in (None, "") or "delivered" not in receipt:
+        return
+    seq = int(str(receipt["delivered"]).lstrip("#"))
+    receipt["task"] = await rooms_tasks.close(room, args.get("task"), seq, client_id)
 
 
 async def _room_overview(owner: str, client_id: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -378,6 +455,7 @@ async def _room_deliver(owner: str, client_id: str, args: dict[str, Any]) -> dic
         raise ToolError(str(exc)) from None
     await rs.store().log_read(room["id"], owner, client_id, "room_deliver",
                               chars=len(str(args.get("content") or "")))
+    await _close_task(room, client_id, args, receipt)
     return receipt
 
 
@@ -393,6 +471,7 @@ async def _room_deliver_file(owner: str, client_id: str, args: dict[str, Any]) -
         raise ToolError(str(exc)) from None
     await rs.store().log_read(room["id"], owner, client_id, "room_deliver_file",
                               chars=len(str(args.get("content_base64") or "")))
+    await _close_task(room, client_id, args, receipt)
     return receipt
 
 
@@ -450,6 +529,7 @@ def _file_handler(kind: str, spec_keys: tuple[str, ...]):
             raise ToolError(str(exc)) from None
         await rs.store().log_read(room["id"], owner, client_id, f"room_deliver_{kind}",
                                   chars=len(json.dumps(spec, ensure_ascii=False, default=str)))
+        await _close_task(room, client_id, args, receipt)
         return receipt
     return handler
 
@@ -484,20 +564,20 @@ def file_tools() -> list[dict[str, Any]]:
          "widths, charts, tables). The person gets the .xlsx with the real names put back; you get a receipt with "
          "any formula errors, never the restored file. Keep tokens exactly, sheet names too.",
          "inputSchema": {"type": "object", "properties": {"room": room, "title": title, "sheets": xp["sheets"],
-                                                          "edits": xp["edits"]},
+                                                          "edits": xp["edits"], "task": _TASK},
                          "required": ["room", "title", "sheets"]}, "annotations": _WRITE},
         {"name": "room_deliver_deck", "description": "Give the person a PowerPoint deck built from your spec, in "
          "tokens: slides with title, body (- for bullets), table, chart and notes. No pictures. The person gets the "
          ".pptx with the real names put back; you get a receipt with anything that doesn't fit.",
          "inputSchema": {"type": "object", "properties": {"room": room, "title": title, "slides": slides,
-                                                          "page_numbers": {"type": "boolean"}, **look},
+                                                          "page_numbers": {"type": "boolean"}, "task": _TASK, **look},
                          "required": ["room", "title", "slides"]}, "annotations": _WRITE},
         {"name": "room_deliver_document", "description": "Give the person a Word document built from markdown in "
          "tokens (headings, lists, tables, bold). No pictures. The person gets the .docx with the real names put "
          "back; you get a receipt.",
          "inputSchema": {"type": "object", "properties": {"room": room, "title": title,
                                                           "markdown": {"type": "string"},
-                                                          "page_numbers": {"type": "boolean"}},
+                                                          "page_numbers": {"type": "boolean"}, "task": _TASK},
                          "required": ["room", "title", "markdown"]}, "annotations": _WRITE},
         {"name": "room_deliver_file", "description": "Give the person a file you made yourself (Word, Excel, "
          "PowerPoint, markdown, text, CSV or JSON), with tokens inside, as base64. About 15 KB fits in one call; "
@@ -507,7 +587,7 @@ def file_tools() -> list[dict[str, Any]]:
              "room": room,
              "name": {"type": "string", "description": "The file's name with its extension, e.g. model.xlsx."},
              "content_base64": {"type": "string", "description": "The file (or this part of it), base64."},
-             "part": {"type": "integer"}, "of": {"type": "integer"}},
+             "part": {"type": "integer"}, "of": {"type": "integer"}, "task": _TASK},
              "required": ["room", "name", "content_base64"]}, "annotations": _WRITE},
         {"name": "room_get_file", "description": "A released file of a room as the file itself (base64) — the "
          "anonymized copy, tokens inside — to open with code in your workspace (an Excel model, say). Big files "
@@ -532,6 +612,8 @@ _HANDLERS = {
     "room_deliver_document": _file_handler("document", ("markdown", "page_numbers")),
     "room_deliver_file": _room_deliver_file,
     "room_get_file": _room_get_file,
+    "room_tasks": _room_tasks,
+    "room_get_delivery": _room_get_delivery,
 }
 
 

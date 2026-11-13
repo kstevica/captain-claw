@@ -658,6 +658,52 @@ detected from diacritics and common words.
 - **Still the person's call:** a name the vault never learned (the fund's own
   short name, here) has to be added to the room's names to hide.
 
+**Room UI and tasks for Claude (2026-11-13, branch `feat/data-rooms-ui`):**
+
+- **Room layout:** a left rail with two groups.
+  - **Room:** Files (a folder tree, or one list), Add files, Names to hide,
+    Roles (edited inline).
+  - **Claude:** From Claude, Tasks for Claude, Claude's activity, Download for
+    Claude.
+  - The rail shows counts and alarms, plus the trusted model and OCR status at
+    the bottom. The room's bar holds Run / Check again, Release, Delete,
+    fullscreen and close. A thin progress strip shows while a run goes. On a
+    phone the sections are a strip of chips.
+- **Fullscreen:** every room dialog (the file viewer and the delivery reader)
+  can fill the window, and so can the kiosk's Data rooms dialog. Escape closes
+  only the top dialog. A picker that is open, or a task box with text in it,
+  keeps its Escape.
+- **File viewer:**
+  - The original and what Claude reads, side by side, scrolling together line
+    by line (in proportion when the line counts differ).
+  - Search by text (both sides), by token, or by real name, the last two as a
+    searchable picker grouped by kind. The token on Claude's side and every
+    spelling of the real name on yours light up yellow, the current match
+    brighter, with previous/next.
+  - Clicking a token shows it everywhere.
+- **Delivery reader:**
+  - A centred document; real names or as Claude wrote it; the case-endings
+    switch.
+  - Search with highlights inside the rendered markdown, through a rehype
+    plugin; the current match comes from React context, so a re-render
+    doesn't drop it.
+  - An "Ask Claude about this" side panel.
+- **Tasks for Claude** (the person's choice: queued for Claude Desktop, not run
+  through the API):
+  - **Queuing:** the person's words are anonymized with the room's own vault
+    and settings (`anonymize_blob`), and the person sees "Claude will read"
+    first. A known real value still in it refuses the task. Both versions are
+    stored encrypted with the vault key (`room_tasks` table).
+  - **Picking up:** `room_list` shows `tasks_waiting` and a note. `room_tasks`
+    lists open tasks in tokens, with the delivery each is about (up to 20,000
+    characters; `room_get_delivery` pages the rest), and marks them taken.
+    Every deliver tool takes `task=<n>`, which marks the task answered and
+    links the delivery (`report.task`).
+  - **Routes:** `GET/POST /fd/rooms/{id}/tasks`, `POST …/tasks/preview`,
+    `DELETE …/tasks/{seq}` (cancel).
+  - **Instructions:** rule 8 tells Claude to check tasks when asked ("Check
+    my Captain data room tasks").
+
 ## Later
 
 - **Fleet side door.** If the person turns on both connectors in one Claude chat,

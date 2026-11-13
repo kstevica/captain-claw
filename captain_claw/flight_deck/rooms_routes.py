@@ -67,10 +67,12 @@ async def _summary(room: dict[str, Any]) -> dict[str, Any]:
     job = dict(room.get("job") or {})
     job["running"] = rj.running(room["id"])
     deliveries = await rs.store().deliveries(room["id"])
+    tasks = await rs.store().tasks(room["id"])
     return {"id": room["id"], "codename": room["codename"], "name": room["name"], "state": room["state"],
             "counts": _counts(files), "job": job, "created_at": room["created_at"],
             "updated_at": room["updated_at"], "released_at": room["released_at"],
-            "inbox": {"total": len(deliveries), "unseen": sum(1 for d in deliveries if not d["seen"])}}
+            "inbox": {"total": len(deliveries), "unseen": sum(1 for d in deliveries if not d["seen"])},
+            "tasks": {"total": len(tasks), "open": sum(1 for t in tasks if t["state"] in ("waiting", "taken"))}}
 
 
 def _vault_name(codename: str, room_id: str) -> str:
@@ -580,6 +582,61 @@ async def get_delivery(room_id: str, seq: int, request: Request,
             "body_tokens": p["body_tokens"], "format": p["format"],
             # P7: the names in the case their sentence needs, when the trusted model changed any.
             "title_fixed": p.get("title_fixed"), "body_fixed": p.get("body_fixed")}
+
+
+# ── tasks for Claude, asked from the Inbox ──────────────────────────
+
+
+@router.get("/{room_id}/tasks")
+async def list_tasks(room_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    from captain_claw.flight_deck import rooms_tasks
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    try:
+        return {"tasks": await rooms_tasks.owner_list(room)}
+    except Exception:  # noqa: BLE001 — the vault is gone: nothing to show
+        raise HTTPException(409, "This room's vault is gone — its tasks can't be opened.") from None
+
+
+@router.post("/{room_id}/tasks/preview")
+async def preview_task(room_id: str, request: Request, body: dict[str, Any] = Body(...),
+                       user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """What Claude will read of a task: the person's words, anonymized with the room's vault."""
+    from captain_claw.flight_deck import rooms_tasks
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    try:
+        return await rooms_tasks.anonymize_prompt(room, body.get("prompt"))
+    except rooms_tasks.TaskError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+@router.post("/{room_id}/tasks")
+async def create_task(room_id: str, request: Request, body: dict[str, Any] = Body(...),
+                      user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Leave Claude a task in this room; Claude picks it up when asked to check (room_tasks)."""
+    from captain_claw.flight_deck import rooms_tasks
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    try:
+        return await rooms_tasks.queue(room, body.get("prompt"), body.get("about"))
+    except rooms_tasks.TaskError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+@router.delete("/{room_id}/tasks/{seq}")
+async def cancel_task(room_id: str, seq: int, request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    from captain_claw.flight_deck import rooms_tasks
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    try:
+        return {"cancelled": await rooms_tasks.cancel(room, seq)}
+    except rooms_tasks.TaskError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @router.post("/{room_id}/deliveries/{seq}/grammar")
