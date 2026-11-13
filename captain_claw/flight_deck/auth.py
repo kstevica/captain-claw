@@ -386,6 +386,10 @@ async def get_mcp_user(
     # (2) OAuth mcp-purpose access token (claude.ai custom connector).
     mcp_payload = decode_mcp_access_token(token_str)
     if mcp_payload is not None:
+        if mcp_payload.get("scope") == "rooms":
+            # A data-room connector token reads chosen rooms only (rooms_mcp.py) —
+            # never the fleet, its agents or anything else this dependency guards.
+            raise _unauth("This token is for the data-room connector only")
         user_id = mcp_payload.get("sub")
         user = await db.get_user_by_id(user_id) if user_id else None
         if not user:

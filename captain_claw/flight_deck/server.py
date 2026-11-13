@@ -2109,6 +2109,11 @@ from captain_claw.flight_deck import rooms_store as _rooms_store  # noqa: E402
 
 _rooms_store.configure(data_dir=DATA_DIR)
 app.include_router(_rooms_routes.router)
+app.include_router(_rooms_routes.access_router)
+# The data-room connector for Claude: POST /fd/mcp-rooms (rooms-scope OAuth only).
+from captain_claw.flight_deck import rooms_mcp as _rooms_mcp  # noqa: E402
+
+app.include_router(_rooms_mcp.router)
 app.include_router(tool_audit_routes.router)
 app.include_router(agent_sharing_router)
 app.include_router(context_pack_router)

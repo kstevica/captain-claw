@@ -412,3 +412,79 @@ async def search_room(room_id: str, request: Request, q: str = Query(..., min_le
     owner = _owner(request, user)
     await _room(owner, room_id)
     return {"results": await rs.store().search(room_id, q, released_only=False)}
+
+
+@router.get("/{room_id}/reads")
+async def room_reads(room_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """What Claude read of this room, and any alarm (a real value in what Claude sent)."""
+    owner = _owner(request, user)
+    await _room(owner, room_id)
+    store = rs.store()
+    files = {f["id"]: f["clean_path"] for f in await store.files(room_id)}
+    names: dict[str, str] = {}
+    db = get_db()
+
+    async def app_name(client_id: str) -> str:
+        if client_id not in names:
+            client = await db.get_oauth_client(client_id) if client_id else None
+            names[client_id] = (client or {}).get("client_name") or "A connected app"
+        return names[client_id]
+
+    reads = [{"at": r["at"], "tool": r["tool"], "path": files.get(r["file_id"], ""), "page": r["page"],
+              "chars": r["chars"], "alarm": bool(r["alarm"]), "app": await app_name(r["client_id"])}
+             for r in await store.reads(room_id)]
+    alarms = [{"id": a["id"], "at": a["at"], "tool": a["tool"], "tokens": a["tokens"], "seen": a["seen"],
+               "app": await app_name(a["client_id"])} for a in await store.alarms(room_id)]
+    return {"reads": reads, "alarms": alarms}
+
+
+@router.post("/{room_id}/alarms/seen")
+async def room_alarms_seen(room_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    owner = _owner(request, user)
+    await _room(owner, room_id)
+    await rs.store().mark_alarms_seen(room_id)
+    return {"ok": True}
+
+
+# ── Claude's access: which connected app reads which rooms ──────────
+
+access_router = APIRouter(prefix="/fd/rooms-access", tags=["data-rooms"])
+
+
+@access_router.get("")
+async def list_access(request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    from captain_claw.flight_deck.mcp_oauth_routes import ROOMS_PATH, _public_base
+
+    owner = _owner(request, user)
+    db = get_db()
+    rooms = {r["id"]: r["codename"] for r in await rs.store().list_rooms(owner)}
+    out = []
+    for g in await rs.store().grants(owner):
+        client = await db.get_oauth_client(g["client_id"])
+        out.append({"client_id": g["client_id"], "app": (client or {}).get("client_name") or "A connected app",
+                    "all_rooms": g["all_rooms"],
+                    "rooms": [{"id": rid, "codename": rooms[rid]} for rid in g["rooms"] if rid in rooms],
+                    "created_at": g["created_at"], "updated_at": g["updated_at"]})
+    return {"grants": out, "connector_url": f"{_public_base(request)}{ROOMS_PATH}"}
+
+
+@access_router.put("/{client_id}")
+async def set_access(client_id: str, request: Request, body: dict[str, Any] = Body(...),
+                     user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    owner = _owner(request, user)
+    if await rs.store().grant(owner, client_id) is None:
+        raise HTTPException(404, "No such connected app")
+    own = {r["id"] for r in await rs.store().list_rooms(owner)}
+    rooms = [str(r) for r in body.get("rooms") or [] if str(r) in own]
+    all_rooms = bool(body.get("all_rooms"))
+    await rs.store().set_grant(owner, client_id, rooms, all_rooms)
+    return {"ok": True, "rooms": rooms, "all_rooms": all_rooms}
+
+
+@access_router.delete("/{client_id}")
+async def revoke_access(client_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Disconnect the app from the rooms at once (its sign-in stops working too)."""
+    owner = _owner(request, user)
+    deleted = await rs.store().delete_grant(owner, client_id)
+    revoked = await get_db().revoke_oauth_grant(owner, client_id)
+    return {"ok": True, "deleted": deleted, "revoked_tokens": revoked}

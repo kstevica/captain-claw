@@ -474,6 +474,14 @@ async def _dispatch_one(msg: dict, user: dict) -> dict | None:
     return await handler(req_id, params, user)
 
 
+@router.api_route("/mcp-server", methods=["GET", "DELETE"])
+async def mcp_server_no_stream(request: Request):
+    """Streamable HTTP: no server-initiated SSE stream and no sessions here, so a
+    GET (open a stream) or DELETE (end a session) gets 405, as the spec asks —
+    a 404 would read as "session gone" to a client."""
+    return Response(status_code=405, headers={"Allow": "POST"})
+
+
 @router.post("/mcp-server")
 async def mcp_server(request: Request, user: dict = Depends(get_mcp_user)):
     """Inbound MCP JSON-RPC endpoint (Streamable HTTP, JSON responses)."""
@@ -543,7 +551,11 @@ async def list_oauth_grants(user: dict = Depends(get_current_user)):
 
 @router.delete("/oauth-grants/{client_id}")
 async def revoke_oauth_grant(client_id: str, user: dict = Depends(get_current_user)):
-    """Disconnect an app: revoke all its refresh tokens for this user."""
+    """Disconnect an app: revoke all its refresh tokens for this user (and, for
+    a data-room connector, its access to the rooms, at once)."""
     db = get_db()
     n = await db.revoke_oauth_grant(user["id"], client_id)
+    from captain_claw.flight_deck import rooms_store
+
+    await rooms_store.store().delete_grant(str(user["id"]), client_id)
     return {"ok": True, "revoked": n}
