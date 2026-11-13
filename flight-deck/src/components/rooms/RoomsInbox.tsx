@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { AlertTriangle, Download, FileText, FileUp, Inbox, Trash2 } from 'lucide-react'
-import { roomsApi, type Delivery, type DeliverySummary } from '../../services/roomsApi'
+import { AlertTriangle, Download, FileText, FileUp, Inbox, Languages, Loader2, Trash2 } from 'lucide-react'
+import { roomsApi, type Delivery, type DeliverySummary, type GrammarReport } from '../../services/roomsApi'
 import { untrustedUrlTransform } from '../../utils/untrustedContent'
 import { Button, Card, Dialog, Notice, Pill, Segmented } from '../console/parts'
 import { TokenText } from '../anonymize/anonParts'
@@ -69,6 +69,14 @@ export function InboxCard({ roomId, onChanged, onDialog }: {
     roomsApi.deliveries(roomId).then((r) => setItems(r.deliveries)).catch((e) => setError(errorText(e)))
   }, [roomId, tick])
 
+  // A delivery whose case endings are being fixed: look again shortly.
+  const waiting = !!items?.some((d) => d.report.grammar?.state === 'waiting')
+  useEffect(() => {
+    if (!waiting || open !== null) return
+    const t = setTimeout(() => setTick((n) => n + 1), 3000)
+    return () => clearTimeout(t)
+  }, [waiting, open, items])
+
   const refresh = () => { setTick((t) => t + 1); onChanged() }
 
   const drop = async (file: File | undefined) => {
@@ -115,6 +123,7 @@ export function InboxCard({ roomId, onChanged, onDialog }: {
                 <span className="min-w-0 flex-1 truncate font-medium text-zinc-200">{d.title}</span>
                 {d.report.kind && <Pill tone="sky" icon={FileText}>{kindLabelOf(d.report)}</Pill>}
                 {d.report.no_tokens && <Pill tone="amber">no tokens</Pill>}
+                {d.report.grammar?.state === 'waiting' && <Pill tone="violet" icon={Loader2}>case endings…</Pill>}
                 {d.report.real_values.length > 0 && <Pill tone="red" icon={AlertTriangle}>real values</Pill>}
                 {d.report.not_in_room.length > 0 && <Pill tone="amber">{d.report.not_in_room.length} unknown</Pill>}
                 <Pill>{d.report.restored} put back</Pill>
@@ -140,13 +149,30 @@ function DeliveryDialog({ roomId, seq, onClose, onDeleted }: {
 }) {
   const [d, setD] = useState<Delivery | null>(null)
   const [view, setView] = useState<'names' | 'tokens'>('names')
+  const [names, setNames] = useState<'fixed' | 'plain'>('fixed')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [confirm, setConfirm] = useState(false)
+  const [tick, setTick] = useState(0)
 
   useEffect(() => {
     roomsApi.delivery(roomId, seq).then(setD).catch((e) => setError(errorText(e)))
-  }, [roomId, seq])
+  }, [roomId, seq, tick])
+
+  // The trusted model is still fixing the case endings: look again shortly.
+  const waiting = d?.report.grammar?.state === 'waiting'
+  useEffect(() => {
+    if (!waiting) return
+    const t = setTimeout(() => setTick((n) => n + 1), 2500)
+    return () => clearTimeout(t)
+  }, [waiting, d])
+
+  const hasFixed = !!d && (d.body_fixed !== null || d.title_fixed !== null)
+  const plain = !hasFixed || names === 'plain'
+  const title = d ? (plain ? d.title : d.title_fixed || d.title) : ''
+  const body = d ? (plain ? d.body : d.body_fixed || d.body) : ''
+  const canFix = !!d && d.report.restored > 0 && !d.report.no_tokens && !waiting &&
+    (!d.report.grammar || d.report.grammar.state === 'failed' || d.report.grammar.state === 'unavailable')
 
   const act = async (label: string, work: () => Promise<unknown>) => {
     setBusy(label); setError('')
@@ -154,7 +180,7 @@ function DeliveryDialog({ roomId, seq, onClose, onDeleted }: {
   }
 
   return (
-    <Dialog title={d ? `#${d.seq} · ${view === 'names' ? d.title : d.title_tokens}` : `#${seq}`} icon={FileText}
+    <Dialog title={d ? `#${d.seq} · ${view === 'names' ? title : d.title_tokens}` : `#${seq}`} icon={FileText}
       onClose={onClose} wide large footer={d && (
         <div className="flex flex-wrap items-center justify-end gap-2">
           {confirm ? (
@@ -169,15 +195,15 @@ function DeliveryDialog({ roomId, seq, onClose, onDeleted }: {
               <Button variant="danger" icon={Trash2} className="mr-auto" onClick={() => setConfirm(true)}>Delete</Button>
               {d.report.kind ? (
                 <Button variant="primary" icon={Download} busy={busy === 'file'}
-                  onClick={() => act('file', () => roomsApi.downloadDelivery(roomId, d.seq, 'file', d.title, d.report.file))}>
+                  onClick={() => act('file', () => roomsApi.downloadDelivery(roomId, d.seq, 'file', title, d.report.file, plain))}>
                   {kindLabelOf(d.report)} file
                 </Button>
               ) : (
                 <>
                   <Button icon={Download} busy={busy === 'md'}
-                    onClick={() => act('md', () => roomsApi.downloadDelivery(roomId, d.seq, 'md', d.title))}>Markdown</Button>
+                    onClick={() => act('md', () => roomsApi.downloadDelivery(roomId, d.seq, 'md', title, undefined, plain))}>Markdown</Button>
                   <Button variant="primary" icon={Download} busy={busy === 'docx'}
-                    onClick={() => act('docx', () => roomsApi.downloadDelivery(roomId, d.seq, 'docx', d.title))}>Word</Button>
+                    onClick={() => act('docx', () => roomsApi.downloadDelivery(roomId, d.seq, 'docx', title, undefined, plain))}>Word</Button>
                 </>
               )}
             </>
@@ -197,6 +223,9 @@ function DeliveryDialog({ roomId, seq, onClose, onDeleted }: {
               ]} />
             </div>
           </div>
+          <GrammarLine grammar={d.report.grammar} hasFixed={hasFixed} names={names} onNames={setNames}
+            canFix={canFix} busy={busy === 'grammar'}
+            onFix={() => act('grammar', async () => { await roomsApi.fixGrammar(roomId, d.seq); setTick((n) => n + 1) })} />
           {d.report.real_values.length > 0 && (
             <Notice tone="red">
               <div className="flex flex-wrap items-center gap-1">
@@ -237,16 +266,80 @@ function DeliveryDialog({ roomId, seq, onClose, onDeleted }: {
             <div className="fd-file-markdown max-h-[60vh] overflow-auto rounded-xl border border-zinc-800 bg-zinc-950 p-5">
               <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform}
                 components={{ a: InertLink, img: InertPicture }}>
-                {d.body}
+                {body}
               </Markdown>
             </div>
           ) : (
             <div className="max-h-[60vh] overflow-auto whitespace-pre-wrap break-words rounded-xl border border-zinc-800 bg-zinc-950 p-5 text-sm text-zinc-200">
-              {d.body}
+              {body}
             </div>
           )}
         </div>
       )}
     </Dialog>
   )
+}
+
+/** P7: where the names' case endings stand, and the switch between fixed and as stored. */
+function GrammarLine({ grammar, hasFixed, names, onNames, canFix, busy, onFix }: {
+  grammar?: GrammarReport
+  hasFixed: boolean
+  names: 'fixed' | 'plain'
+  onNames: (v: 'fixed' | 'plain') => void
+  canFix: boolean
+  busy: boolean
+  onFix: () => void
+}) {
+  const fix = canFix && (
+    <Button icon={Languages} busy={busy} onClick={onFix}>Fix case endings</Button>
+  )
+  if (grammar?.state === 'waiting') {
+    return (
+      <div className="flex items-center gap-2 text-sm text-zinc-400">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Putting the names into the case each sentence needs… Until then they read as stored.
+      </div>
+    )
+  }
+  if (grammar?.state === 'done' && hasFixed) {
+    const n = grammar.changed || 0
+    return (
+      <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+        <Languages className="h-4 w-4" />
+        <span>
+          {n} name{n === 1 ? '' : 's'} put into the case {n === 1 ? 'its' : 'their'} sentence needs ({grammar.model}).
+          {grammar.refused ? ` ${grammar.refused} suggested form${grammar.refused === 1 ? '' : 's'} didn't pass the check and stay as stored.` : ''}
+          {grammar.left ? ` ${grammar.left} more stay as stored (too many to ask about).` : ''}
+        </span>
+        <div className="ml-auto">
+          <Segmented label="Names" value={names} onChange={onNames} options={[
+            { value: 'fixed', label: 'In their case' },
+            { value: 'plain', label: 'As stored' },
+          ]} />
+        </div>
+      </div>
+    )
+  }
+  if (grammar?.state === 'done') {
+    return <div className="text-xs text-zinc-500">Case endings checked ({grammar.model}) — every name already fits its sentence.</div>
+  }
+  if (grammar?.state === 'failed') {
+    return (
+      <Notice tone="amber">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="min-w-0 flex-1">The trusted model couldn't fix the case endings ({grammar.error || 'error'}), so the names read as stored.</span>
+          {fix}
+        </div>
+      </Notice>
+    )
+  }
+  if (grammar?.state === 'unavailable') {
+    return (
+      <Notice tone="zinc">
+        The names read as stored, whatever case the sentence needs — no trusted model is set up to fix
+        case endings (an admin sets it under Anonymization).
+      </Notice>
+    )
+  }
+  return fix ? <div className="flex justify-end">{fix}</div> : null
 }

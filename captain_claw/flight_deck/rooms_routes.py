@@ -520,7 +520,8 @@ async def list_deliveries(room_id: str, request: Request, user: dict = Depends(g
     out = []
     for d in items:
         try:
-            title = rooms_inbox.open_payload(cipher, d)["title"]
+            p = rooms_inbox.open_payload(cipher, d)
+            title = p.get("title_fixed") or p["title"]
         except Exception:  # noqa: BLE001 — a payload this key can't open is listed, never guessed
             title = "(can't be opened)"
         out.append({"seq": d["seq"], "at": d["at"], "title": title, "chars": d["chars"], "report": d["report"],
@@ -576,12 +577,38 @@ async def get_delivery(room_id: str, seq: int, request: Request,
     names = await _app_names({d["client_id"]})
     return {"seq": d["seq"], "at": d["at"], "app": names[d["client_id"]], "report": d["report"],
             "title": p["title"], "title_tokens": p["title_tokens"], "body": p["body"],
-            "body_tokens": p["body_tokens"], "format": p["format"]}
+            "body_tokens": p["body_tokens"], "format": p["format"],
+            # P7: the names in the case their sentence needs, when the trusted model changed any.
+            "title_fixed": p.get("title_fixed"), "body_fixed": p.get("body_fixed")}
+
+
+@router.post("/{room_id}/deliveries/{seq}/grammar")
+async def fix_delivery_grammar(room_id: str, seq: int, request: Request,
+                               user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Fix the case endings of a delivery's names now (P7) — one that wasn't
+    taken for Croatian, or came in before a trusted model was set up."""
+    from captain_claw.flight_deck import anonymize_trusted as trusted
+    from captain_claw.flight_deck import rooms_grammar
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    d, _p = await _delivery(owner, room, seq)
+    if rooms_grammar.running(room_id, seq):
+        return {"grammar": d["report"].get("grammar") or {"state": "waiting"}}
+    if await trusted.usable(get_db()) is None:
+        raise HTTPException(409, "No trusted model is set up — an admin sets one under Anonymization, then "
+                                 "case endings can be fixed.")
+    report = dict(d["report"])
+    report["grammar"] = {"state": "waiting", "language": (report.get("grammar") or {}).get("language") or "hr",
+                         "asked": True}
+    await rs.store().update_delivery(room_id, seq, report=report)
+    rooms_grammar.queue(room_id, seq)
+    return {"grammar": report["grammar"]}
 
 
 @router.get("/{room_id}/deliveries/{seq}/download")
 async def download_delivery(room_id: str, seq: int, request: Request, as_: str = Query("md", alias="as"),
-                            user: dict = Depends(get_current_user)):
+                            plain: bool = Query(False), user: dict = Depends(get_current_user)):
     from fastapi.responses import Response as RawResponse
 
     from captain_claw.flight_deck import rooms_inbox
@@ -589,10 +616,15 @@ async def download_delivery(room_id: str, seq: int, request: Request, as_: str =
     owner = _owner(request, user)
     room = await _room(owner, room_id)
     _d, p = await _delivery(owner, room, seq)
+    if not plain:
+        # P7: the names in their case, when the trusted model changed any; ?plain=1 as restored.
+        p = {**p, "title": p.get("title_fixed") or p["title"], "body": p.get("body_fixed") or p["body"]}
     kind, ext = p.get("kind"), p.get("file")
     if kind and (as_ == "file" or (as_ == "docx" and ext == "docx")):
         # A file built on the deck (P4): the copy with the names back, decrypted for the owner.
-        path = rooms_inbox.file_path(room_id, seq, ext)
+        path = rooms_inbox.file_path(room_id, seq, ext, fixed=True)
+        if plain or not path.exists():
+            path = rooms_inbox.file_path(room_id, seq, ext)
         if not path.exists():
             raise HTTPException(404, "The file is missing.")
         cipher = await _cipher(owner, room)
@@ -630,9 +662,7 @@ async def delete_delivery(room_id: str, seq: int, request: Request,
     await _room(owner, room_id)
     if not await rs.store().delete_delivery(room_id, seq):
         raise HTTPException(404, "No such delivery")
-    for ext in ("xlsx", "pptx", "docx"):
-        for tokens in (False, True):
-            rooms_inbox.file_path(room_id, seq, ext, tokens=tokens).unlink(missing_ok=True)
+    rooms_inbox.remove_files(room_id, seq)
     return {"deleted": True}
 
 

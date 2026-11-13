@@ -1189,9 +1189,10 @@ async def lifespan(app: FastAPI):
         pass
     # Data rooms that were running when the deck stopped carry on.
     try:
-        from captain_claw.flight_deck import rooms_job
+        from captain_claw.flight_deck import rooms_grammar, rooms_job
 
         await rooms_job.resume_all()
+        await rooms_grammar.resume_all()  # deliveries whose case endings were still to be fixed
     except Exception:
         pass
     # ── Agent backups: each person's scheduled backups of their agents (agent_bundle.backups). ──

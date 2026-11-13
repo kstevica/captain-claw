@@ -621,6 +621,31 @@ class RoomStore:
         row = await cur.fetchone()
         return self._delivery_view(row) if row is not None else None
 
+    async def update_delivery(self, room_id: str, seq: int, *, report: dict[str, Any] | None = None,
+                              payload: str | None = None) -> bool:
+        db = await self._conn()
+        sets, args = [], []
+        if report is not None:
+            sets.append("report=?")
+            args.append(json.dumps(report, ensure_ascii=False))
+        if payload is not None:
+            sets.append("payload=?")
+            args.append(payload)
+        if not sets:
+            return False
+        cur = await db.execute(f"UPDATE deliveries SET {', '.join(sets)} WHERE room_id=? AND seq=?",
+                               (*args, room_id, seq))
+        await db.commit()
+        return bool(cur.rowcount)
+
+    async def grammar_waiting(self) -> list[tuple[str, int]]:
+        """Deliveries whose case endings (P7) were still to be fixed."""
+        db = await self._conn()
+        cur = await db.execute(
+            "SELECT room_id, seq FROM deliveries WHERE json_extract(report, '$.grammar.state') = 'waiting' "
+            "ORDER BY at")
+        return [(r[0], int(r[1])) for r in await cur.fetchall()]
+
     async def mark_delivery_seen(self, room_id: str, seq: int) -> None:
         db = await self._conn()
         await db.execute("UPDATE deliveries SET seen=1 WHERE room_id=? AND seq=?", (room_id, seq))
