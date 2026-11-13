@@ -161,6 +161,55 @@ async def test_rooms_sign_in_asks_which_rooms_and_gives_a_rooms_only_token():
         assert (await _tool(c, bearer, "room_list"))["rooms"] == []  # at once, before the token expires
 
 
+@pytest.mark.usefixtures("deck")
+async def test_a_fleet_sign_in_asking_for_every_scope_still_gets_the_fleet():
+    """A client may ask for every scope a server lists. Naming the fleet's
+    address, it gets a fleet token whose tools work — never a rooms-only one
+    (that was a connector "with no tools")."""
+    await auth._db._db.execute("UPDATE users SET password_hash=? WHERE id=?", (auth.hash_password(PASSWORD), ALICE))
+    await auth._db._db.commit()
+    async with _client() as c:
+        meta = (await c.get("/.well-known/oauth-authorization-server")).json()
+        assert meta["scopes_supported"] == ["mcp"]  # as before the room connector
+        assert (await c.get("/.well-known/oauth-protected-resource")).json()["scopes_supported"] == ["mcp"]
+
+        cid = (await c.post("/register", json={"redirect_uris": [CALLBACK], "client_name": "Claude"})).json()["client_id"]
+        verifier = secrets.token_urlsafe(40)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+        q = urlencode({"response_type": "code", "client_id": cid, "redirect_uri": CALLBACK, "state": "s",
+                       "code_challenge": challenge, "code_challenge_method": "S256", "scope": "mcp rooms",
+                       "resource": f"{BASE}/fd/mcp-server"})
+        page = (await c.get(f"/authorize?{q}")).text
+        assert "Flight Deck agents" in page and "data rooms" not in page
+        blob = html.unescape(re.search(r"name=request value='([^']+)'", page).group(1))
+        done = await c.post("/authorize", content=urlencode({"request": blob, "decision": "approve",
+                                                             "email": "alice@x.co", "password": PASSWORD}),
+                            headers={"Content-Type": "application/x-www-form-urlencoded"})
+        assert done.status_code == 302  # no room step
+        code = parse_qs(urlsplit(done.headers["location"]).query)["code"][0]
+        tok = (await c.post("/token", content=urlencode({"grant_type": "authorization_code", "code": code,
+                                                          "redirect_uri": CALLBACK, "client_id": cid,
+                                                          "code_verifier": verifier}),
+                            headers={"Content-Type": "application/x-www-form-urlencoded"})).json()
+        assert tok["scope"] == "mcp"
+        r = await c.post("/fd/mcp-server", headers={"Authorization": f"Bearer {tok['access_token']}"},
+                         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        assert r.status_code == 200 and {t["name"] for t in r.json()["result"]["tools"]} >= {"list_agents", "send_task"}
+
+
+def test_the_named_resource_decides_the_scope():
+    from captain_claw.flight_deck.mcp_oauth_routes import scope_for
+
+    fleet, rooms = "https://deck.example/fd/mcp-server", "https://deck.example/fd/mcp-rooms"
+    assert scope_for("mcp rooms", fleet) == "mcp"
+    assert scope_for("rooms", fleet) == "mcp"
+    assert scope_for("mcp", rooms) == "rooms"
+    assert scope_for("", rooms + "/") == "rooms"
+    assert scope_for("mcp rooms", "") == "mcp"  # no resource: rooms only when that's all it asked for
+    assert scope_for("rooms", "") == "rooms"
+    assert scope_for("", "") == "mcp"
+
+
 # ── the tools ───────────────────────────────────────────────────────
 
 

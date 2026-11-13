@@ -56,12 +56,16 @@ ROOMS_SCOPE = "rooms"
 
 
 def scope_for(scope: str, resource: str) -> str:
-    """The scope a sign-in is for: the room connector's when the client names
-    its resource (or asks for the rooms scope), else the fleet's."""
+    """The scope a sign-in is for. The resource the client names decides
+    (RFC 8707): the room connector's address gets "rooms", any other the
+    fleet's "mcp" — whatever scopes it asked for. A client may ask for every
+    scope a server lists ("mcp rooms"); a sign-in for the fleet must never end
+    as a rooms-only token the fleet then refuses. Without a resource, "rooms"
+    only when that is all it asked for."""
     res = (resource or "").split("?", 1)[0].rstrip("/")
-    if res.endswith(ROOMS_PATH) or ROOMS_SCOPE in (scope or "").split():
-        return ROOMS_SCOPE
-    return "mcp"
+    if res:
+        return ROOMS_SCOPE if res.endswith(ROOMS_PATH) else "mcp"
+    return ROOMS_SCOPE if set((scope or "").split()) == {ROOMS_SCOPE} else "mcp"
 
 
 def _public_base(request: Request) -> str:
@@ -119,7 +123,11 @@ def authorization_server(request: Request) -> JSONResponse:
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
-        "scopes_supported": ["mcp", ROOMS_SCOPE],
+        # The fleet's scope only, as before the room connector: clients that ask
+        # for every scope listed here would otherwise ask for "rooms" too. The
+        # room connector's own metadata (…/oauth-protected-resource/fd/mcp-rooms)
+        # names "rooms", and its sign-ins name its resource.
+        "scopes_supported": ["mcp"],
     })
 
 
