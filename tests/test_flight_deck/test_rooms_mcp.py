@@ -175,10 +175,12 @@ async def test_protocol_instructions_and_no_stream():
         assert (await _rpc(c, _rooms_token(), "server/discover")).json()["error"]["code"] == -32601
         assert (await c.get("/fd/mcp-rooms")).status_code == 405
         tools = (await _rpc(c, _rooms_token(), "tools/list")).json()["result"]["tools"]
-        assert {t["name"] for t in tools} == {"room_list", "room_overview", "room_list_files", "room_read",
-                                              "room_search", "room_deliver"}
-        writes = [t["name"] for t in tools if not t["annotations"]["readOnlyHint"]]
-        assert writes == ["room_deliver"]  # the only tool that changes anything
+        reads = {"room_list", "room_overview", "room_list_files", "room_read", "room_search"}
+        delivers = {"room_deliver", "room_deliver_workbook", "room_deliver_deck", "room_deliver_document"}
+        assert {t["name"] for t in tools} == reads | delivers
+        writes = {t["name"] for t in tools if not t["annotations"]["readOnlyHint"]}
+        assert writes == delivers  # only the deliveries change anything
+        assert "image" not in json.dumps(tools)  # no tool takes a picture
 
 
 @pytest.mark.usefixtures("deck")

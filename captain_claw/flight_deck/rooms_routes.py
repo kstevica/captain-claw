@@ -527,7 +527,21 @@ async def download_delivery(room_id: str, seq: int, request: Request, as_: str =
     owner = _owner(request, user)
     room = await _room(owner, room_id)
     _d, p = await _delivery(owner, room, seq)
-    if as_ == "docx":
+    kind, ext = p.get("kind"), p.get("file")
+    if kind and (as_ == "file" or (as_ == "docx" and ext == "docx")):
+        # A file built on the deck (P4): the copy with the names back, decrypted for the owner.
+        path = rooms_inbox.file_path(room_id, seq, ext)
+        if not path.exists():
+            raise HTTPException(404, "The file is missing.")
+        cipher = await _cipher(owner, room)
+        blob = cipher.decrypt(await asyncio.to_thread(path.read_bytes))
+        name = rooms_inbox.safe_filename(p["title"], ext)
+        media = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                 "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                 "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}[ext]
+    elif as_ == "file":
+        raise HTTPException(422, "This delivery is text — download it as md or docx.")
+    elif as_ == "docx":
         blob = await asyncio.to_thread(rooms_inbox.docx_bytes, p["title"], p["body"])
         name = rooms_inbox.safe_filename(p["title"], "docx")
         media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -535,7 +549,7 @@ async def download_delivery(room_id: str, seq: int, request: Request, as_: str =
         blob = f"# {p['title']}\n\n{p['body']}\n".encode()
         name, media = rooms_inbox.safe_filename(p["title"], "md"), "text/markdown; charset=utf-8"
     else:
-        raise HTTPException(422, "as is 'md' or 'docx'")
+        raise HTTPException(422, "as is 'md', 'docx' or 'file'")
     from urllib.parse import quote
 
     return RawResponse(blob, media_type=media, headers={
@@ -545,10 +559,15 @@ async def download_delivery(room_id: str, seq: int, request: Request, as_: str =
 @router.delete("/{room_id}/deliveries/{seq}")
 async def delete_delivery(room_id: str, seq: int, request: Request,
                           user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    from captain_claw.flight_deck import rooms_inbox
+
     owner = _owner(request, user)
     await _room(owner, room_id)
     if not await rs.store().delete_delivery(room_id, seq):
         raise HTTPException(404, "No such delivery")
+    for ext in ("xlsx", "pptx", "docx"):
+        for tokens in (False, True):
+            rooms_inbox.file_path(room_id, seq, ext, tokens=tokens).unlink(missing_ok=True)
     return {"deleted": True}
 
 

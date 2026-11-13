@@ -61,7 +61,12 @@ INSTRUCTIONS = (
     "5. To give the person a result (a memo, an answer, a summary), call room_deliver with markdown in tokens. "
     "Up to about 20,000 characters a call; longer → parts with the same title (part 1 of N, part 2 of N …), "
     "joined exactly as sent, so end each part at a line break. The person reads it in Flight Deck with the real "
-    "names; you get a receipt, never the restored text. Don't put pictures or links in a delivery."
+    "names; you get a receipt, never the restored text. Don't put pictures or links in a delivery.\n"
+    "6. When the person wants a file, don't make it yourself — the names would be missing: send its content with "
+    "room_deliver_workbook (Excel: sheets, rows, formulas, formats, charts), room_deliver_deck (PowerPoint) or "
+    "room_deliver_document (Word, from markdown). The file is built and the names put back in Flight Deck. Keep "
+    "tokens in every cell, sheet name, title and note; formulas stay inside the workbook (no web addresses, other "
+    "files, WEBSERVICE, IMAGE or HYPERLINK)."
 )
 
 _ANNOT = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
@@ -372,6 +377,71 @@ async def _room_deliver(owner: str, client_id: str, args: dict[str, Any]) -> dic
     return receipt
 
 
+def _file_handler(kind: str, spec_keys: tuple[str, ...]):
+    async def handler(owner: str, client_id: str, args: dict[str, Any]) -> dict[str, Any]:
+        from captain_claw.flight_deck import rooms_inbox
+
+        room = await _room(owner, client_id, args.get("room"))
+        spec = {k: args[k] for k in spec_keys if k in args}
+        try:
+            receipt = await rooms_inbox.deliver_file(room, client_id, kind=kind, title=args.get("title"), spec=spec)
+        except rooms_inbox.DeliveryError as exc:
+            raise ToolError(str(exc)) from None
+        await rs.store().log_read(room["id"], owner, client_id, f"room_deliver_{kind}",
+                                  chars=len(json.dumps(spec, ensure_ascii=False, default=str)))
+        return receipt
+    return handler
+
+
+_WRITE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
+_FILE_TOOLS: list[dict[str, Any]] = []
+
+
+def file_tools() -> list[dict[str, Any]]:
+    """The three file tools, their specs taken from the agents' own xlsx and
+    pptx tools (pictures removed) so one spec is documented once."""
+    if _FILE_TOOLS:
+        return _FILE_TOOLS
+    import copy
+
+    from captain_claw.tools.pptx_tool import PptxTool
+    from captain_claw.tools.xlsx_tool import XlsxTool
+
+    xp = XlsxTool.parameters["properties"]
+    slides = copy.deepcopy(PptxTool.parameters["properties"]["slides"])
+    for key in ("image", "images"):
+        slides["items"]["properties"].pop(key, None)
+    slides["description"] = "The slides, in order. No pictures."
+    look = {k: {"type": "string", "description": d} for k, d in (
+        ("font", "Body font"), ("heading_font", "Heading font"), ("heading_color", "Heading colour, hex"),
+        ("accent_color", "Accent colour, hex"))}
+    room = {"type": "string", "description": "The room's id or codename."}
+    title = {"type": "string", "description": "The file's title, in tokens like the rest."}
+    _FILE_TOOLS.extend([
+        {"name": "room_deliver_workbook", "description": "Give the person an Excel workbook built from your spec, in "
+         "tokens: sheets with rows (values; =… is a formula) and optional edits (formats, number formats, column "
+         "widths, charts, tables). The person gets the .xlsx with the real names put back; you get a receipt with "
+         "any formula errors, never the restored file. Keep tokens exactly, sheet names too.",
+         "inputSchema": {"type": "object", "properties": {"room": room, "title": title, "sheets": xp["sheets"],
+                                                          "edits": xp["edits"]},
+                         "required": ["room", "title", "sheets"]}, "annotations": _WRITE},
+        {"name": "room_deliver_deck", "description": "Give the person a PowerPoint deck built from your spec, in "
+         "tokens: slides with title, body (- for bullets), table, chart and notes. No pictures. The person gets the "
+         ".pptx with the real names put back; you get a receipt with anything that doesn't fit.",
+         "inputSchema": {"type": "object", "properties": {"room": room, "title": title, "slides": slides,
+                                                          "page_numbers": {"type": "boolean"}, **look},
+                         "required": ["room", "title", "slides"]}, "annotations": _WRITE},
+        {"name": "room_deliver_document", "description": "Give the person a Word document built from markdown in "
+         "tokens (headings, lists, tables, bold). No pictures. The person gets the .docx with the real names put "
+         "back; you get a receipt.",
+         "inputSchema": {"type": "object", "properties": {"room": room, "title": title,
+                                                          "markdown": {"type": "string"},
+                                                          "page_numbers": {"type": "boolean"}},
+                         "required": ["room", "title", "markdown"]}, "annotations": _WRITE},
+    ])
+    return _FILE_TOOLS
+
+
 _HANDLERS = {
     "room_list": _room_list,
     "room_overview": _room_overview,
@@ -379,6 +449,10 @@ _HANDLERS = {
     "room_read": _room_read,
     "room_search": _room_search,
     "room_deliver": _room_deliver,
+    "room_deliver_workbook": _file_handler("workbook", ("sheets", "edits")),
+    "room_deliver_deck": _file_handler("deck", ("slides", "page_numbers", "font", "heading_font", "heading_color",
+                                                "accent_color")),
+    "room_deliver_document": _file_handler("document", ("markdown", "page_numbers")),
 }
 
 
@@ -429,7 +503,7 @@ async def _dispatch(msg: Any, user: dict[str, Any], client_id: str) -> dict[str,
             "instructions": INSTRUCTIONS,
         })
     if method == "tools/list":
-        return _result(req_id, {"tools": TOOLS})
+        return _result(req_id, {"tools": TOOLS + file_tools()})
     if method == "tools/call":
         return await _call(user, client_id, req_id, params if isinstance(params, dict) else {})
     if method == "ping":

@@ -163,10 +163,213 @@ def safe_filename(title: str, ext: str) -> str:
 
 def docx_bytes(title: str, markdown: str) -> bytes:
     """The restored markdown as a Word file, built here — no pictures at all."""
+    return _build_docx(title, markdown)[0]
+
+
+def _build_docx(title: str, markdown: str, page_numbers: bool = False) -> tuple[bytes, list[str]]:
     from captain_claw import docx_ops
 
     text = _IMAGE_MD.sub(lambda m: f"[picture: {m.group(1)}]" if m.group(1) else "[picture]", markdown)
-    doc, _notes = docx_ops.build_document(text, title=title, image_root=lambda _src: None)
+    doc, notes = docx_ops.build_document(text, title=title, page_numbers=page_numbers, image_root=lambda _src: None)
     buf = io.BytesIO()
     doc.save(buf)
-    return buf.getvalue()
+    return buf.getvalue(), [n for n in notes if "Picture" not in n]
+
+
+# ── Files built here (P4): a workbook, a deck, a document ───────────
+#
+# Claude sends the content as a spec, in tokens. The file is built from that
+# token spec first — so every error or note Claude gets back holds tokens
+# only — and the real names are then put back inside the finished file with
+# the anonymizer's own Office restore (cells, sheet names with formulas
+# following and Excel's 31-character cap, chart titles, slides, notes, text).
+# Pictures never go in: a link would be fetched, a path read from the disk.
+
+FILE_KINDS = {"workbook": ("xlsx", "Excel workbook"), "deck": ("pptx", "PowerPoint deck"),
+              "document": ("docx", "Word document")}
+MAX_SPEC_CHARS = 600_000
+LOOK_KEYS = ("font", "heading_font", "heading_color", "accent_color")
+# Formulas that reach outside the workbook: once the names are back, Excel
+# would send them out (WEBSERVICE, IMAGE …) or a click would (HYPERLINK).
+_OUTSIDE_FORMULA = re.compile(
+    r"\b(WEBSERVICE|IMAGE|RTD|DDE|DDEAUTO|HYPERLINK|CALL|REGISTER|EXEC|FILTERXML|STOCKHISTORY)\s*\("
+    r"|https?:|ftp:|file:|\\\\|\[[^\]]*\.(xls[xmb]?|csv|ods)\b[^\]]*\]|'?\[\d+\]", re.I)
+_MD_LINK = re.compile(r"\[([^\]]*)\]\((?:https?|mailto|ftp|file):[^)]*\)|<(?:https?|mailto):[^>]*>", re.I)
+
+
+def _strings(value: Any, path: str = "") -> Any:
+    """Every (path, string) in a spec."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _strings(v, f"{path}.{k}" if path else str(k))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            yield from _strings(v, f"{path}[{i}]")
+
+
+def _check_formulas(spec: dict[str, Any]) -> None:
+    for where, text in _strings(spec):
+        if (text.lstrip().startswith("=") or where.endswith("refers_to")) and _OUTSIDE_FORMULA.search(text):
+            raise DeliveryError(f"{where}: formulas that reach outside the workbook (web addresses, other files, "
+                                "WEBSERVICE, IMAGE, HYPERLINK …) aren't allowed in a data-room delivery.")
+
+
+def _unlink(value: Any, counter: list[int]) -> Any:
+    """Links become their text: in a restored file a click would send the names out."""
+    if isinstance(value, str):
+        def drop(m: re.Match[str]) -> str:
+            counter[0] += 1
+            return m.group(1) or ""
+        return _MD_LINK.sub(drop, value)
+    if isinstance(value, dict):
+        return {k: _unlink(v, counter) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_unlink(v, counter) for v in value]
+    return value
+
+
+def _build_workbook(title: str, spec: dict[str, Any]) -> tuple[bytes, list[str]]:
+    from captain_claw import xlsx_ops
+
+    sheets = spec.get("sheets")
+    if not isinstance(sheets, list) or not sheets:
+        raise DeliveryError("sheets is required: a list of {name, rows, header}.")
+    edits = spec.get("edits") or []
+    if not isinstance(edits, list):
+        raise DeliveryError("edits is a list of changes ({op, …}).")
+    _check_formulas({"sheets": sheets, "edits": edits})
+    try:
+        book, report = xlsx_ops.build_workbook(sheets, edits=edits, title=title, author="Captain")
+        data = book.to_bytes()
+    except xlsx_ops.XlsxError as exc:
+        raise DeliveryError(f"The workbook can't be built: {exc}") from None
+    notes = list(report.notes)
+    notes += [f"{s}!{c}: {code} from {text}" for s, c, code, text in report.new_errors[:20]]
+    return data, notes
+
+
+def _strip_pictures(slide: dict[str, Any], notes: list[str], n: int) -> dict[str, Any]:
+    if slide.get("image") or slide.get("images"):
+        notes.append(f"Slide {n}: pictures were left out — a data-room delivery takes none.")
+    return {k: v for k, v in slide.items() if k not in ("image", "images", "at")}
+
+
+def _build_deck(title: str, spec: dict[str, Any]) -> tuple[bytes, list[str]]:
+    from captain_claw import pptx_ops
+
+    slides = spec.get("slides")
+    if not isinstance(slides, list) or not slides:
+        raise DeliveryError("slides is required: a list of {layout, title, body, table, chart, notes}.")
+    notes: list[str] = []
+    clean = [_strip_pictures(s, notes, i) if isinstance(s, dict) else s for i, s in enumerate(slides, 1)]
+    look = {k: str(spec[k]) for k in LOOK_KEYS if spec.get(k)}
+    try:
+        prs, report = pptx_ops.build_deck(clean, title=title, author="Captain", page_numbers=bool(spec.get("page_numbers")),
+                                   look=look or None, image_root=None)
+        data = pptx_ops.deck_bytes(prs)
+    except pptx_ops.PptxError as exc:
+        raise DeliveryError(f"The deck can't be built: {exc}") from None
+    notes += [f"{i.where}: {i.what}" for i in report.fit if i.level in ("error", "warn")][:30]
+    notes += list(report.notes)
+    return data, notes
+
+
+def _build_document(title: str, spec: dict[str, Any]) -> tuple[bytes, list[str]]:
+    markdown = str(spec.get("markdown") or "")
+    if not markdown.strip():
+        raise DeliveryError("markdown is required: the document's text.")
+    if _IMAGE_MD.search(markdown):
+        notes = ["Pictures were left out — a data-room delivery takes none."]
+    else:
+        notes = []
+    data, more = _build_docx(title, markdown, page_numbers=bool(spec.get("page_numbers")))
+    return data, notes + more
+
+
+_BUILDERS = {"workbook": _build_workbook, "deck": _build_deck, "document": _build_document}
+
+
+def _restore_file(blob: bytes, ext: str, state: engine.VaultState) -> tuple[bytes, int, list[str], str]:
+    """(file with the names back, how many, unknown tokens, the token text of it all)."""
+    from captain_claw.anonymize import office
+
+    prep = office.prepare(blob, ext, scrub=False)
+    edits, total, unknown = [], 0, []
+    for seg in prep.segments:
+        e, n, unk = engine.restore_edits(seg.text, state)
+        edits.append(e)
+        total += n
+        unknown += [u for u in unk if u not in unknown]
+    return prep.rebuild(edits), total, unknown, "\n".join(s.text for s in prep.segments)
+
+
+async def deliver_file(room: dict[str, Any], client_id: str, *, kind: str, title: Any,
+                       spec: dict[str, Any]) -> dict[str, Any]:
+    """Build a file from Claude's token spec, put the names back inside it, and
+    take it into the Inbox; the receipt for Claude (tokens and notes only)."""
+    import asyncio
+
+    if kind not in FILE_KINDS:
+        raise DeliveryError("unknown kind of file")
+    title = _clean_title(title)
+    if len(json.dumps(spec, ensure_ascii=False, default=str)) > MAX_SPEC_CHARS:
+        raise DeliveryError(f"The file's content is over {MAX_SPEC_CHARS:,} characters — split it into several "
+                            "deliveries.")
+    ext, label = FILE_KINDS[kind]
+    link_notes: list[str] = []
+    if kind in ("deck", "document"):
+        dropped = [0]
+        spec = _unlink(spec, dropped)
+        if dropped[0]:
+            link_notes.append(f"{dropped[0]} link(s) were turned into plain text — a data-room delivery takes no "
+                              "links.")
+    token_blob, notes = await asyncio.to_thread(_BUILDERS[kind], title, spec)
+    notes = link_notes + notes
+    row, cipher, state = await _vault(room)
+    restored_blob, n_file, unknown_file, token_text = await asyncio.to_thread(_restore_file, token_blob, ext, state)
+    restored_title, n_title, unknown_title = engine.restore(title, state)
+    not_in_room = sorted(set(unknown_file) | set(unknown_title))
+    real_values = rj.leaks(f"{title}\n{token_text}", rj.needles(state))
+    name = safe_filename(restored_title, ext)
+    view_tokens = await asyncio.to_thread(rj.text_view, f"{title}.{ext}", token_blob)
+    view = await asyncio.to_thread(rj.text_view, name, restored_blob)
+    report = {"restored": n_file + n_title, "not_in_room": not_in_room[:200], "real_values": real_values[:200],
+              "parts": 1, "characters": len(token_text), "format": "markdown", "kind": kind, "file": ext,
+              "notes": notes[:30]}
+    payload = json.dumps({"title_tokens": title, "title": restored_title, "body_tokens": view_tokens,
+                          "body": view, "format": "markdown", "kind": kind, "file": ext}, ensure_ascii=False)
+    store = rs.store()
+    seq = await store.add_delivery(room["id"], room["owner_id"], client_id,
+                                   cipher.encrypt(payload.encode("utf-8")).decode("ascii"), len(token_text), report)
+    inbox = store.room_dir(room["id"]) / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread((inbox / f"{seq}.{ext}.enc").write_bytes, cipher.encrypt(restored_blob))
+    await asyncio.to_thread((inbox / f"{seq}.tokens.{ext}.enc").write_bytes, cipher.encrypt(token_blob))
+    if real_values:
+        await store.add_alarm(room["id"], room["owner_id"], client_id, f"room_deliver_{kind}", real_values)
+        log.warning("Data room file delivery holds real values Claude wrote", room=room["id"], tokens=len(real_values))
+    try:
+        found = usage.token_contexts([title, token_text], set(state.by_token))
+        if found:
+            await av.store().record_uses(
+                row, [av.TokenUse(t, "back", n, c, model=TO_MODEL) for t, (n, c) in found.items()],
+                channel="data-room:delivery", actor=f"mcp:{client_id}", label=f"delivery #{seq} ({ext})")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Data room delivery: token history not written", error=type(exc).__name__)
+    await _tell_owner(room, seq)
+    receipt: dict[str, Any] = {"delivered": f"#{seq}", "file": f"{label} (.{ext})", "restored": report["restored"],
+                               "note": "The person gets the file in Flight Deck with the real names. You don't get "
+                                       "the restored file."}
+    if notes:
+        receipt["notes"] = notes[:30]
+    if not_in_room:
+        receipt["not_in_room"] = not_in_room[:50]
+        receipt["note"] += " Tokens not in this room stay as you wrote them — use only tokens from the room."
+    return receipt
+
+
+def file_path(room_id: str, seq: int, ext: str, *, tokens: bool = False) -> Any:
+    folder = rs.store().room_dir(room_id) / "inbox"
+    return folder / (f"{seq}.tokens.{ext}.enc" if tokens else f"{seq}.{ext}.enc")
