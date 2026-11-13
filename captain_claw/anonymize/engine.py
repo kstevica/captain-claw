@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import bisect
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -451,7 +451,7 @@ _LEGAL_AFTER_RE = re.compile(rf",?[ \t]+{d._LEGAL}(?![\w])")
 _DIGITS_RE = re.compile(r"[+(]?\d[\d \t()./\-]{4,40}\d")
 
 
-def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], list[tuple[Span, Entity]]]:
+def _known_spans_finder(state: VaultState, options: Options) -> Callable[..., list[tuple[Span, Entity]]]:
     """A function that finds every known entity in a text: people by their
     name words (case endings, initials, spellings without diacritics), other
     values as written (case-insensitive), numbers whatever their spacing.
@@ -467,42 +467,58 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
         for k in info.keys:
             table.setdefault(k, []).append(item)
 
-    persons = [p for p in (_person_view(e) for e in state.entities) if p]
-    if not options.one_word_names:
-        # Full names only: a first name or surname alone is the trusted model's call.
-        persons = [p for p in persons if len(p.words) > 1]
-    if options.kinds is None or "PERSON" in options.kinds:
+    def one_word_index(people: list[_Person]) -> tuple[dict, dict]:
+        """Full names' surnames and first names alone, indexed: a surname two
+        of them share is "a Horvat" (a person of its own), a shared first
+        name is nobody."""
+        last_names: dict = {}
+        first_names: dict = {}
         last_groups: dict[str, list[_Person]] = {}
         first_groups: dict[str, list[_Person]] = {}
-        for p in persons:
+        for p in people:
             if len(p.words) > 1:
-                infos = [_WordInfo.of(w) for w in p.words]
-                index(multi, infos[0], (p.entity, infos))
                 last_groups.setdefault(p.stems[-1], []).append(p)
                 first_groups.setdefault(p.stems[0], []).append(p)
-            elif len(p.stems[0]) >= 3 and fold(p.words[0]) not in d._STOP:
-                info = _WordInfo.of(p.words[0])
-                index(singles, info, (info, p.entity))
-        if not options.one_word_names:
-            last_groups, first_groups = {}, {}
         for stem, group in last_groups.items():
             surname = group[0].words[-1]
             if len(stem) < 3 or fold(surname) in d._STOP:
                 continue
             info = _WordInfo.of(surname)
             if len(group) == 1:
-                index(surnames, info, (info, group[0].entity, _WordInfo.of(group[0].words[0])))
+                index(last_names, info, (info, group[0].entity, _WordInfo.of(group[0].words[0])))
             else:
                 def make(stem: str = stem, word: str = surname) -> Entity:
                     skey = "~" + stem
                     return state.by_key.get(("PERSON", skey)) or state.add("PERSON", skey, word)
 
-                index(surnames, info, (info, make, None))
+                index(last_names, info, (info, make, None))
         for stem, group in first_groups.items():
             first = group[0].words[0]
             if len(group) == 1 and len(stem) >= 3 and fold(first) not in d._STOP:
                 info = _WordInfo.of(first)
-                index(singles, info, (info, group[0].entity))
+                index(first_names, info, (info, group[0].entity))
+        return last_names, first_names
+
+    persons = [p for p in (_person_view(e) for e in state.entities) if p]
+    if not options.one_word_names:
+        # Full names only: a first name or surname alone is the trusted model's
+        # call — or the one person named in full in the same text (find()).
+        persons = [p for p in persons if len(p.words) > 1]
+    want_people = options.kinds is None or "PERSON" in options.kinds
+    if want_people:
+        for p in persons:
+            if len(p.words) > 1:
+                infos = [_WordInfo.of(w) for w in p.words]
+                index(multi, infos[0], (p.entity, infos))
+            elif len(p.stems[0]) >= 3 and fold(p.words[0]) not in d._STOP:
+                info = _WordInfo.of(p.words[0])
+                index(singles, info, (info, p.entity))
+        if options.one_word_names:
+            last_names, first_names = one_word_index(persons)
+            for k, v in last_names.items():
+                surnames.setdefault(k, []).extend(v)
+            for k, v in first_names.items():
+                singles.setdefault(k, []).extend(v)
         for e in state.entities:
             if options.one_word_names and e.kind == "PERSON" and e.key.startswith("~") and len(e.key) >= 4:
                 info = _WordInfo.of(e.original)
@@ -510,6 +526,19 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
 
     literal: dict[str, list[tuple[str, int, Entity, bool]]] = {}
     digit_keys: dict[str, Entity] = {}
+    org_words: dict[str, list[tuple[Entity, list[_WordInfo]]]] = {}
+    # A one-word name the trusted model gave for this text ("Bubi", "Babić"):
+    # its case forms are that person too — here only, never from the vault.
+    model_singles: dict[str, list[tuple[_WordInfo, Entity]]] = {}
+    if not options.one_word_names and want_people:
+        for term, kind in options.extra:
+            words_ = [w for w in _name_words(term) if not _is_initial(w)]
+            if kind != "PERSON" or len(words_) != 1 or len(stem_key(words_[0])) < 3 or fold(words_[0]) in d._STOP:
+                continue
+            e = state.by_key.get(("PERSON", normalize("PERSON", term)))
+            if e is not None:
+                info = _WordInfo.of(words_[0])
+                index(model_singles, info, (info, e))
 
     def add_literal(form: str, e: Entity, upper_first: bool) -> None:
         tokens = _TEXT_TOKEN_RE.findall(form.casefold())
@@ -527,6 +556,14 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
             core = d.LEGAL_SUFFIX_RE.sub("", e.original).strip()
             if len(core) >= 3:
                 add_literal(core, e, core[:1].isupper() or core[:1].isdigit())
+            # Its other case forms too, from whichever form was found: "Nebula
+            # Robotika" → "Nebule Robotike", the product "Taru" → "Tarom".
+            # Only a name of capitalised words, each with a stem of 3+ letters.
+            cw = core.split()
+            if 1 <= len(cw) <= MAX_NAME_RUN and all(re.fullmatch(NAME_WORD, w) for w in cw) \
+                    and all(len(name_stem(w)) >= 3 for w in cw) and any(fold(w) not in d._STOP for w in cw):
+                infos = [_WordInfo.of(w) for w in cw]
+                index(org_words, infos[0], (e, infos))
             continue
         if e.kind in ("CVV", "CARD_EXPIRY"):
             continue  # "123" / "03/27" mean something only next to a card
@@ -557,7 +594,10 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
         elif e.kind == "PERSON" and not e.key.startswith("~"):
             add_slug(tuple(_slug_fold(w) for w in _name_words(e.original) if not _is_initial(w)), e, False)
 
-    def find(text: str) -> list[tuple[Span, Entity]]:
+    def find(text: str, here: Sequence[Entity] = ()) -> list[tuple[Span, Entity]]:
+        """*here*: the people named in full in this text already (tokens, or
+        found by other means) — their surnames and first names alone are
+        theirs too, even when code knows no one by a single word."""
         out: list[tuple[Span, Entity]] = []
 
         def emit(start: int, end: int, target: Target, source: str) -> None:
@@ -567,7 +607,7 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
         def slug(start: int, end: int, base: Entity) -> None:
             emit(start, end, base, "known-slug")  # the spelling gets its place when it is written
 
-        if multi or surnames or singles:
+        if multi or surnames or singles or org_words or model_singles or (here and want_people):
             words = [(m.start(), m.end(), m.group(0)) for m in _NAME_TOKEN_RE.finditer(text)
                      if not (m.start() > 0 and (text[m.start() - 1].isalnum() or text[m.start() - 1] in "@."))]
             keys = [_text_word_key(w) for _s, _e, w in words]
@@ -577,6 +617,7 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
 
             # Known full names first: their words are theirs.
             covered: set[int] = set()
+            named: list[Entity] = list(here)
             for i, (start, _end, w) in enumerate(words):
                 if _is_initial(w):
                     continue
@@ -587,6 +628,7 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                             for k in range(n)) and all(adjacent(i + k) for k in range(n - 1)):
                         emit(start, words[i + n - 1][1], e, "known")
                         covered.update(range(i, i + n))
+                        named.append(e)
 
             def namey(j: int) -> bool:  # a word that can be part of a name
                 w = words[j][2]
@@ -617,6 +659,7 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                 if e is not None:
                     emit(words[i][0], words[b][1], e, "known")
                     covered.update(range(i, b + 1))
+                    named.append(e)
                 i = b + 1
 
             def alone(i: int) -> bool:
@@ -626,13 +669,20 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                 return not ((i > 0 and adjacent(i - 1) and namey(i - 1))
                             or (i + 1 < len(words) and adjacent(i) and namey(i + 1)))
 
-            # One word for a known person — only when code is all there is
-            # (Options.one_word_names), and only standing alone.
+            # One word for a known person — when code is all there is
+            # (Options.one_word_names), or for a person named in full in this
+            # same text ("Vidović said" after "Marin Vidović"); standing alone.
+            last_names, first_names = surnames, singles
+            if not options.one_word_names:
+                last_names, first_names = one_word_index(
+                    list({p.entity.token: p for p in map(_person_view, named) if p and len(p.words) > 1}.values()))
+                for k, v in model_singles.items():
+                    first_names.setdefault(k, []).extend(v)
             for i, (start, end, w) in enumerate(words):
                 if _is_initial(w) or i in covered:
                     continue
                 tk = keys[i]
-                for info, target, first in surnames.get(tk[0], ()):
+                for info, target, first in last_names.get(tk[0], ()):
                     if not _word_matches(tk, info):
                         continue
                     if first is not None and i > 0 and adjacent(i - 1):
@@ -643,9 +693,22 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                             continue
                     if alone(i) and not (i > 0 and adjacent(i - 1) and _is_initial(words[i - 1][2])):
                         emit(start, end, target, "known")
-                for info, e in singles.get(tk[0], ()):
+                for info, e in first_names.get(tk[0], ()):
                     if _word_matches(tk, info) and alone(i):
                         emit(start, end, e, "known")
+
+            # A known company or product in another case form.
+            for i, (start, _end, w) in enumerate(words):
+                if i in covered or _is_initial(w):
+                    continue
+                for e, infos in org_words.get(keys[i][0], ()):
+                    n = len(infos)
+                    if i + n <= len(words) and all(
+                            _word_matches(keys[i + k], infos[k]) and (i + k) not in covered for k in range(n)) \
+                            and all(adjacent(i + k) for k in range(n - 1)):
+                        end = words[i + n - 1][1]
+                        suffix = _LEGAL_AFTER_RE.match(text, end)
+                        emit(start, suffix.end() if suffix else end, e, "known")
 
         if literal:
             for m in _TEXT_TOKEN_RE.finditer(text):
@@ -933,7 +996,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         new_texts: list[str] = []
         for i, text in enumerate(texts):
             masked, token_ranges = _mask_tokens(text)
-            known = finder(masked)
+            known = finder(masked, _full_names_in(text, [pending[(i, sp.start, sp.end)] for sp in found[i]], state))
             by_span: dict[tuple[int, int], Entity] = {}
             spans = []
             for sp in found[i]:
@@ -1012,7 +1075,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             masked, token_ranges = _mask_tokens(text)
             spans = (d.detect(masked, options.kinds, opt_in=options.generalize & set(d.OPT_IN_KINDS), ner=False)
                      if options.deterministic else []) \
-                + _extra_spans(masked, options.extra) + [sp for sp, _e in finder(masked)]
+                + _extra_spans(masked, options.extra) \
+                + [sp for sp, _e in finder(masked, _full_names_in(text, [], state))]
             for sp in _select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep)):
                 leftover[sp.kind] = leftover.get(sp.kind, 0) + 1
         if leftover:
