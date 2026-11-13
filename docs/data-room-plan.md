@@ -637,6 +637,27 @@ detected from diacritics and common words.
 - **Tested** on the throwaway deck with a local 9B model (ornith:9b through
   Ollama): a 9-name memo took about 50 s, and a workbook took 20 s.
 
+**After the first real run (2026-11-13, staging, a real term sheet):**
+
+- **A logo's OCR text leaked a company name.** The text read from a removed
+  logo kept the fund manager's name in plain text, in a variant with a word
+  put in ("X Y ABC Z" for "X Y Z"). Exact matching missed it, and the leak
+  check missed it the same way.
+- **Fix (engine):** a known company of two words or more is also found with its
+  words in order, at most one short word (≤ 6 letters) between two of them and
+  two in all, punctuated or across a line break. The capital rule is the same
+  as for the exact name. The text's own spelling gets its own place in the
+  token, so it restores exactly. A one-word company isn't matched this loosely.
+- **Fix (leak check):** `rooms_job.needles` adds the same pattern for such
+  companies, so the run, the export, `room_get_file` and Claude's deliveries
+  all see the variant.
+- **"Check again":** a room with nothing new can be run again. It sweeps every
+  file with the final vault and the names to hide, then checks it. A released
+  file that changes is taken back until it is released again. Before this, a
+  name added to hide after a run could only reach new files.
+- **Still the person's call:** a name the vault never learned (the fund's own
+  short name, here) has to be added to the room's names to hide.
+
 ## Later
 
 - **Fleet side door.** If the person turns on both connectors in one Claude chat,

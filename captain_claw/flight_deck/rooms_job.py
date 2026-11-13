@@ -39,7 +39,7 @@ from typing import Any
 from fastapi import HTTPException
 from lxml import etree
 
-from captain_claw.anonymize import detectors
+from captain_claw.anonymize import detectors, engine
 from captain_claw.flight_deck import anonymize_routes as ar
 from captain_claw.flight_deck import anonymize_vault as av
 from captain_claw.flight_deck import rooms_intake as ri
@@ -85,9 +85,11 @@ def _fold_loose(text: str) -> str:
     return re.sub(r"\s+", " ", text).casefold()
 
 
-def needles(state: Any) -> list[tuple[str, str]]:
-    """(token, folded real value) for every value worth looking for."""
-    out: list[tuple[str, str]] = []
+def needles(state: Any) -> list[tuple[str, str | re.Pattern[str]]]:
+    """(token, folded real value) for every value worth looking for — and, for a
+    company of two words or more, (token, pattern) for its name with a short
+    word put in ("plava rijeka prc capital"), as the anonymizer matches it too."""
+    out: list[tuple[str, str | re.Pattern[str]]] = []
     seen: set[tuple[str, str]] = set()
     for e in state.entities:
         for value in [e.original, *e.forms, *getattr(e, "spellings", [])]:
@@ -96,15 +98,26 @@ def needles(state: Any) -> list[tuple[str, str]]:
                 continue
             seen.add((e.token, folded))
             out.append((e.token, folded))
+        if e.kind == "ORG":
+            words = engine.loose_name_words(e.original)
+            if words:
+                between = rf"\W{{1,3}}(?:\w{{1,{engine.LOOSE_INSERTED_LEN}}}\W{{1,3}})?"
+                out.append((e.token, re.compile(r"(?<!\w)" + between.join(map(re.escape, words)) + r"(?!\w)")))
     return out
 
 
-def leaks(text: str, needle_list: list[tuple[str, str]]) -> list[str]:
+def leaks(text: str, needle_list: list[tuple[str, str | re.Pattern[str]]]) -> list[str]:
     """Tokens whose real value is still in *text* (as a whole word)."""
     hay = _fold_loose(text)
     hits: list[str] = []
     for token, needle in needle_list:
-        if needle not in hay or token in hits:
+        if token in hits:
+            continue
+        if isinstance(needle, re.Pattern):
+            if needle.search(hay):
+                hits.append(token)
+            continue
+        if needle not in hay:
             continue
         if re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", hay):
             hits.append(token)

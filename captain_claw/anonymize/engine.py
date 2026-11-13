@@ -449,6 +449,30 @@ SLUG_MIN_JOINED = 6
 MAX_NAME_RUN = 4
 _LEGAL_AFTER_RE = re.compile(rf",?[ \t]+{d._LEGAL}(?![\w])")
 _DIGITS_RE = re.compile(r"[+(]?\d[\d \t()./\-]{4,40}\d")
+# A company's name with a word put in or punctuated otherwise — a logo read by
+# OCR ("PLAVA RIJEKA PRC CAPITAL" for Plava Rijeka Capital), a letterhead ("Acme –
+# Group – Holding"): its own words in order, at most one short word between
+# two of them and two in all. Only names of two words or more; the stored
+# spelling stays the value, the text's own comes back exactly (its own place).
+_LOOSE_WORD_RE = re.compile(r"[^\W_]+")
+_LOOSE_GAP_RE = re.compile(r"(?:[ \t \-–—.,&/·|]|\r?\n){1,3}")
+LOOSE_MAX_INSERTED = 2
+LOOSE_INSERTED_LEN = 6
+LOOSE_MIN_LETTERS = 6
+
+
+def loose_fold(word: str) -> str:
+    return d.strip_accents(word).casefold()
+
+
+def loose_name_words(org_value: str) -> tuple[str, ...]:
+    """A company's own words, folded, for matching it loosely ("" when it is
+    one word, or too short to be told apart)."""
+    core = d.LEGAL_SUFFIX_RE.sub("", org_value).strip()
+    words = tuple(loose_fold(w) for w in _LOOSE_WORD_RE.findall(core))
+    if len(words) < 2 or sum(len(w) for w in words) < LOOSE_MIN_LETTERS or any(len(w) < 2 for w in words):
+        return ()
+    return words
 
 
 def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], list[tuple[Span, Entity]]]:
@@ -534,6 +558,16 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
             digits = re.sub(r"\D", "", form)
             if len(form) >= 4 and not (digits == re.sub(r"[\s.\-/]", "", form) and len(digits) < 6):
                 add_literal(form, e, False)
+
+    # Companies matched loosely: their words in order, a short word put in.
+    loose: dict[str, list[tuple[tuple[str, ...], Entity, bool]]] = {}
+    for e in state.entities:
+        if e.kind != "ORG" or e.key.startswith("/") or (options.kinds is not None and "ORG" not in options.kinds):
+            continue
+        words = loose_name_words(e.original)
+        if words:
+            core = d.LEGAL_SUFFIX_RE.sub("", e.original).strip()
+            loose.setdefault(words[0], []).append((words, e, core[:1].isupper() or core[:1].isdigit()))
 
     # Slug spellings of companies (and products) and of people's full names.
     slug_multi: dict[str, list[tuple[tuple[str, ...], Entity]]] = {}
@@ -667,6 +701,36 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                         suffix = _LEGAL_AFTER_RE.match(text, end)
                         end = suffix.end() if suffix else end
                     emit(pos, end, e, "known")
+
+        if loose:
+            lw = [(m.start(), m.end(), loose_fold(m.group(0))) for m in _LOOSE_WORD_RE.finditer(text)]
+
+            def gap(a: int, b: int) -> bool:  # words a and b stand next to each other
+                return bool(_LOOSE_GAP_RE.fullmatch(text, lw[a][1], lw[b][0]))
+
+            for i, (start, _end, w) in enumerate(lw):
+                cands = loose.get(w)
+                if not cands or (start > 0 and (text[start - 1].isalnum() or text[start - 1] in "@./")):
+                    continue
+                for words, e, upper_first in cands:
+                    if upper_first and not (text[start].isupper() or text[start].isdigit()):
+                        continue
+                    j, inserted = i, 0
+                    for want in words[1:]:
+                        if j + 1 < len(lw) and lw[j + 1][2] == want and gap(j, j + 1):
+                            j += 1
+                        elif (inserted < LOOSE_MAX_INSERTED and j + 2 < len(lw) and lw[j + 2][2] == want
+                              and len(lw[j + 1][2]) <= LOOSE_INSERTED_LEN and gap(j, j + 1) and gap(j + 1, j + 2)):
+                            j += 2
+                            inserted += 1
+                        else:
+                            break
+                    else:
+                        end = lw[j][1]
+                        if end < len(text) and (text[end].isalnum() or text[end] == "@"):
+                            continue
+                        suffix = _LEGAL_AFTER_RE.match(text, end)
+                        emit(start, suffix.end() if suffix else end, e, "known")
 
         if slug_multi or slug_joined or slug_single:
             links = _link_ranges(text) if slug_single else []
