@@ -300,4 +300,4 @@ export function saveFile(name: string, content: { base64: string; type?: string 
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-export const TOKEN_RE = /⟦([A-Z][A-Z0-9_]*?)_(\d{1,6})(?::[a-z]{1,3})?⟧/g
+export const TOKEN_RE = /⟦([A-Z][A-Z0-9_]*?)_(\d{1,6})(?::[a-z0-9]{1,3})?⟧/g

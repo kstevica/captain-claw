@@ -130,8 +130,10 @@ def _options(data: dict[str, Any]) -> engine.Options:
     if generalize and str(data.get("mode") or "reversible") != "one_way":
         raise HTTPException(status_code=422, detail=(
             "generalize needs mode 'one_way': coarser values (a year, a city, a range) can't be put back"))
+    # one_word_names=False: code never takes a lone first name or surname for a
+    # known person (a data room's final sweep: it only looks for the vault's values).
     return engine.Options(kinds=kinds, keep=tuple(_str_list(data.get("keep"), "keep")), extra=tuple(extra),
-                          default_cc=cc, generalize=generalize)
+                          default_cc=cc, generalize=generalize, one_word_names=data.get("one_word_names") is not False)
 
 
 def _content(data: dict[str, Any]) -> tuple[str, str]:
@@ -166,7 +168,9 @@ MAX_FILE_BYTES = 25 * 1024 * 1024
 _TEXT_EXT = {".txt": "text", ".text": "text", ".log": "text", ".md": "md", ".markdown": "md", ".csv": "csv",
              ".tsv": "tsv", ".json": "json", ".jsonl": "jsonl", ".ndjson": "jsonl", ".xml": "text",
              ".yaml": "text", ".yml": "text", ".eml": "text", ".ini": "text", ".srt": "text", ".vtt": "text"}
-FILE_KINDS = sorted({*_TEXT_EXT, ".html", ".htm", ".pdf", ".docx", ".xlsx", ".pptx"})
+_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp", ".gif")  # read with local OCR
+FILE_KINDS = sorted({*_TEXT_EXT, ".html", ".htm", ".pdf", ".docx", ".xlsx", ".pptx", *_IMAGE_EXT})
+PICTURE_MODES = ("keep", "strip")
 
 
 @dataclasses.dataclass
@@ -203,25 +207,39 @@ def _file_input(data: dict[str, Any]) -> tuple[str, bytes]:
     return filename, blob
 
 
-async def _file_doc(filename: str, blob: bytes, *, scrub: bool) -> _Doc:
+async def _file_doc(filename: str, blob: bytes, *, scrub: bool, pictures: str = "keep") -> _Doc:
     from pathlib import Path
 
-    from captain_claw.anonymize import office
+    from captain_claw.anonymize import office, scans
 
     ext = Path(filename).suffix.lower()
     kind = office.kind_of(filename)
     if kind:
+        reader = await asyncio.to_thread(scans.picture_reader) if scrub and pictures == "strip" else None
         try:
-            prep = await asyncio.to_thread(office.prepare, blob, kind, scrub=scrub)
+            prep = await asyncio.to_thread(office.prepare, blob, kind, scrub=scrub, pictures=pictures,
+                                           picture_reader=reader)
         except office.OfficeError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from None
         if len(prep.segments) > MAX_SEGMENTS:
             raise HTTPException(status_code=413, detail=f"over {MAX_SEGMENTS:,} pieces of text — split it")
-        return _Doc(kind, prep.segments, lambda _outs, eds: prep.rebuild(eds), prep.warnings, ext)
+        warnings = list(prep.warnings)
+        if scrub and pictures == "strip" and reader is None:
+            warnings.append("No OCR engine is installed, so text in the pictures wasn't read before they "
+                            "were removed.")
+        return _Doc(kind, prep.segments, lambda _outs, eds: prep.rebuild(eds), warnings, ext)
     if ext == ".pdf":
-        text = await asyncio.to_thread(_pdf_text, blob)
+        text, notes = await asyncio.to_thread(_pdf_text, blob)
         return _text_doc(text, "md", out_ext=".md", warnings=[
-            "A PDF comes back as markdown text — its layout and pictures aren't kept (real PDF redaction isn't built)."])
+            "A PDF comes back as markdown text — its layout and pictures aren't kept (real PDF redaction isn't built).",
+            *notes])
+    if ext in _IMAGE_EXT:
+        try:
+            text = await asyncio.to_thread(scans.image_text, blob, ext)
+        except scans.ScanError as exc:
+            raise HTTPException(status_code=422, detail=f"Can't read the picture: {exc}") from None
+        return _text_doc(text or "", "md", out_ext=".md", warnings=[
+            "A picture comes back as the text read from it with OCR (local, no model), as markdown."])
     if ext in (".html", ".htm"):
         from captain_claw.tools.web_fetch import _extract_readable_text
 
@@ -232,22 +250,33 @@ async def _file_doc(filename: str, blob: bytes, *, scrub: bool) -> _Doc:
             raise HTTPException(status_code=422, detail=f"{filename} isn't a text file")
         return _text_doc(formats.decode_text(blob), _TEXT_EXT[ext], out_ext=ext)
     raise HTTPException(status_code=415, detail=(
-        f"Can't anonymize {ext or 'files without an extension'} — text, csv, json, docx, xlsx, pptx, pdf or html."))
+        f"Can't anonymize {ext or 'files without an extension'} — text, csv, json, docx, xlsx, pptx, pdf, html or a picture (png, jpg, tif …)."))
 
 
-def _pdf_text(blob: bytes) -> str:
+def _pdf_text(blob: bytes) -> tuple[str, list[str]]:
+    """A PDF as markdown. Pages without a usable text layer (a scan) are read
+    with local OCR when an engine is installed; the rest keep their text."""
     import tempfile
     from pathlib import Path
 
+    from captain_claw.anonymize import scans
     from captain_claw.tools import document_extract as dx
 
+    ocr = scans.available()
+    if ocr and scans.pdf_needs_ocr(blob):
+        try:
+            text, pages = scans.pdf_text(blob)
+        except scans.ScanError as exc:
+            raise HTTPException(status_code=422, detail=f"Can't read the scanned PDF: {exc}") from None
+        return text, [f"{pages} scanned page(s) were read with OCR (local, no model)."] if pages else []
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "document.pdf"
         path.write_bytes(blob)
         content, err = dx._extract_pdf_markdown(path, 5000)
     if err or content is None:
-        raise HTTPException(status_code=422, detail=f"Can't read the PDF: {err or 'no text in it'}")
-    return content
+        hint = "" if ocr else " (scanned pages need an OCR engine — none is installed)"
+        raise HTTPException(status_code=422, detail=f"Can't read the PDF: {err or 'no text in it'}{hint}")
+    return content, []
 
 
 # ── token history ───────────────────────────────────────────────────
@@ -412,7 +441,10 @@ async def anonymize_blob(person: str, filename: str, blob: bytes, data: dict[str
 
     if len(blob) > MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail=f"the file is over {MAX_FILE_BYTES // (1024 * 1024)} MB")
-    doc = await _file_doc(filename, blob, scrub=True)
+    pictures = str(data.get("pictures") or "keep")
+    if pictures not in PICTURE_MODES:
+        raise HTTPException(status_code=422, detail=f"pictures must be one of {', '.join(PICTURE_MODES)}")
+    doc = await _file_doc(filename, blob, scrub=True, pictures=pictures)
     out = await _anonymize(person, doc, data, actor=actor, source=source, stem=Path(filename).stem,
                            one_way_state=one_way_state)
     result = out.pop("_result")

@@ -211,7 +211,10 @@ _JOBS: dict[str, FolderJob] = {}
 
 
 def _supported(name: str) -> bool:
-    return PurePosixPath(name).suffix.lower() in ar.FILE_KINDS
+    """Files a folder run copies. Pictures stay out (a folder of photos would
+    come back as files of OCR text); a data room reads them on purpose."""
+    suffix = PurePosixPath(name).suffix.lower()
+    return suffix in ar.FILE_KINDS and suffix not in ar._IMAGE_EXT
 
 
 def _a_copy(rel: str) -> bool:
