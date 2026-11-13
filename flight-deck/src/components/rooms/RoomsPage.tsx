@@ -12,6 +12,7 @@ import { Button, Card, Dialog, EmptyState, Field, Notice, Page, PageHeader, Pill
 import { TokenText } from '../anonymize/anonParts'
 import { kindLabel, kindTone, when } from '../anonymize/anonFormat'
 import { AlarmsNotice, ClaudeAccessCard, ReadsCard } from './RoomsAccess'
+import { InboxCard } from './RoomsInbox'
 import type { RoomAlarm, RoomRead } from '../../services/roomsApi'
 
 // Data rooms: a virtual data room — a ZIP or a folder of files — anonymized
@@ -143,6 +144,7 @@ export function RoomsPage({ phone = false, onClose }: { phone?: boolean; onClose
                   {r.counts.released > 0 && <Pill tone="emerald">{r.counts.released} released</Pill>}
                   {r.counts.blocked > 0 && <Pill tone="red">{r.counts.blocked} blocked</Pill>}
                   {r.counts.failed > 0 && <Pill tone="amber">{r.counts.failed} failed</Pill>}
+                  {r.inbox.unseen > 0 && <Pill tone="sky">{r.inbox.unseen} new from Claude</Pill>}
                   <span className="ml-auto">{when(r.updated_at)}</span>
                 </div>
               </button>
@@ -176,6 +178,7 @@ function RoomView({ id, phone, onBack, onClose }: {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [reads, setReads] = useState<RoomRead[]>([])
   const [alarms, setAlarms] = useState<RoomAlarm[]>([])
+  const [inboxOpen, setInboxOpen] = useState(false)
 
   const reload = useCallback(async () => {
     try {
@@ -198,11 +201,11 @@ function RoomView({ id, phone, onBack, onClose }: {
   }, [running, reload])
 
   useEffect(() => {
-    if (compare || rolesOpen || confirmDelete) return
+    if (compare || rolesOpen || confirmDelete || inboxOpen) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') (onClose || onBack)() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [compare, rolesOpen, confirmDelete, onBack, onClose])
+  }, [compare, rolesOpen, confirmDelete, inboxOpen, onBack, onClose])
 
   const act = async (label: string, work: () => Promise<unknown>) => {
     setBusy(label); setError(''); setNotice('')
@@ -275,6 +278,7 @@ function RoomView({ id, phone, onBack, onClose }: {
         {error && <Notice tone="red">{error}</Notice>}
         {notice && <Notice tone="emerald">{notice}</Notice>}
         <AlarmsNotice roomId={id} alarms={alarms} onSeen={() => void reload()} />
+        {room.inbox.total > 0 && <InboxCard roomId={id} onChanged={() => void reload()} onDialog={setInboxOpen} />}
         {!room.trusted_model && (
           <Notice tone="amber">
             No trusted model is set up, so code alone looks for private data: emails, IBANs, ID numbers, labelled
@@ -339,6 +343,7 @@ function RoomView({ id, phone, onBack, onClose }: {
           )}
         </Card>
 
+        {room.inbox.total === 0 && c.released > 0 && <InboxCard roomId={id} onChanged={() => void reload()} onDialog={setInboxOpen} />}
         {(c.released > 0 || reads.length > 0) && <ReadsCard reads={reads} />}
 
         {compare && <CompareDialog roomId={id} f={compare} onClose={() => setCompare(null)} />}
