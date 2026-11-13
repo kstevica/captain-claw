@@ -11,7 +11,7 @@ import { useAuthStore } from '../../stores/authStore'
 import { Button, Card, Dialog, EmptyState, Field, Notice, Page, PageHeader, Pill, Segmented, inputCls } from '../console/parts'
 import { TokenText } from '../anonymize/anonParts'
 import { kindLabel, kindTone, when } from '../anonymize/anonFormat'
-import { AlarmsNotice, ClaudeAccessCard, ReadsCard } from './RoomsAccess'
+import { AlarmsNotice, ClaudeAccessCard, ExportCard, ReadsCard } from './RoomsAccess'
 import { InboxCard } from './RoomsInbox'
 import type { RoomAlarm, RoomRead } from '../../services/roomsApi'
 
@@ -344,6 +344,7 @@ function RoomView({ id, phone, onBack, onClose }: {
         </Card>
 
         {room.inbox.total === 0 && c.released > 0 && <InboxCard roomId={id} onChanged={() => void reload()} onDialog={setInboxOpen} />}
+        {c.released > 0 && <ExportCard roomId={id} released={c.released} onDone={() => void reload()} />}
         {(c.released > 0 || reads.length > 0) && <ReadsCard reads={reads} />}
 
         {compare && <CompareDialog roomId={id} f={compare} onClose={() => setCompare(null)} />}

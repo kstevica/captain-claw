@@ -56,7 +56,8 @@ async def test_a_workbook_is_built_and_the_names_go_back_inside():
         assert wb["Sažetak"]["B1"].value == "='Ana Kovač model'!B2*2"  # the formula followed the sheet
         # The copy at rest is encrypted.
         files = list((rooms_store.store().room_dir(room["id"]) / "inbox").iterdir())
-        assert files and all(b"Ana" not in f.read_bytes() for f in files)
+        # Encrypted base64 can hold "Ana" by chance; "č" never appears in base64.
+        assert files and all("Ana Kovač".encode() not in f.read_bytes() for f in files)
 
 
 @pytest.mark.usefixtures("deck")
