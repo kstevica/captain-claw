@@ -259,10 +259,13 @@ function RoomView({ id, phone, onBack, onClose }: {
             {running ? (
               <Button icon={Square} busy={busy === 'stop'} onClick={() => act('stop', () => roomsApi.stop(id))}>Stop</Button>
             ) : (
-              <Button variant="primary" icon={Play} busy={busy === 'run'} disabled={c.files === 0 || (c.new === 0 && c.blocked === 0)}
-                title={c.blocked > 0 && c.new === 0 ? 'Run the sweep and the check again over the blocked files' : undefined}
+              <Button variant="primary" icon={Play} busy={busy === 'run'}
+                disabled={c.files === 0 || (c.new === 0 && c.blocked === 0 && c.done === 0)}
+                title={c.new === 0 && (c.done > 0 || c.blocked > 0)
+                  ? 'Go over every file again with the names this room knows now (and the names to hide), then check it for real names. A released file that changes is taken back until you release it again.'
+                  : undefined}
                 onClick={() => act('run', () => roomsApi.run(id))}>
-                {c.done > 0 ? 'Run new files' : 'Run'}
+                {c.new > 0 ? (c.done > 0 ? 'Run new files' : 'Run') : 'Check again'}
               </Button>
             )}
             <Button icon={Send} busy={busy === 'release'} disabled={!canRelease || pending <= 0}

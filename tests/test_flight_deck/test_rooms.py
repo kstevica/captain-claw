@@ -255,6 +255,33 @@ async def test_seed_terms_reach_the_anonymizer(deck):
         assert "Sokol" not in text and "Babić" not in text and "⟦ORG_" in text and "⟦PERSON_" in text
 
 
+async def test_check_again_applies_new_names_to_hide_and_takes_changed_files_back(deck):
+    """With nothing new, a run goes over every file again ("Check again"): a
+    name added to hide after release is replaced, and the file is taken back
+    until it is released again. A company's logo variant is caught as well."""
+    async with _client() as c:
+        room = await _new_room(c)
+        await c.put(f"/fd/rooms/{room['id']}/zip", headers=ALICE_H, content=_zip({
+            "memo.txt": "Ugovor potpisuju Sokol Softver d.o.o. i fond Galeb3.\n"
+                        "Text in the picture: SOKOL SSG SOFTVER"}))
+        await c.post(f"/fd/rooms/{room['id']}/run", headers=ALICE_H, json={"retry_failed": False})
+        await _wait(c, room["id"])
+        f = (await _files(c, room["id"]))["memo.txt"]
+        text = (await c.get(f"/fd/rooms/{room['id']}/files/{f['id']}/text", headers=ALICE_H)).json()["clean"]
+        assert "Sokol" not in text and "SOKOL" not in text  # the logo's variant too
+        assert "Galeb3" in text  # nobody said to hide it yet
+        await c.post(f"/fd/rooms/{room['id']}/release", headers=ALICE_H)
+
+        await c.patch(f"/fd/rooms/{room['id']}", headers=ALICE_H, json={"seed": {"orgs": ["Galeb3"]}})
+        assert (await c.post(f"/fd/rooms/{room['id']}/run", headers=ALICE_H, json={})).status_code == 200
+        done = await _wait(c, room["id"])
+        f = (await _files(c, room["id"]))["memo.txt"]
+        text = (await c.get(f"/fd/rooms/{room['id']}/files/{f['id']}/text", headers=ALICE_H)).json()["clean"]
+        assert "Galeb3" not in text and f["state"] == "done"
+        assert f["released"] is False and any("Release it again" in w for w in f["warnings"])
+        assert done["state"] == "review"
+
+
 async def test_a_role_that_names_a_real_value_is_refused(deck):
     async with _client() as c:
         room = await _new_room(c)
