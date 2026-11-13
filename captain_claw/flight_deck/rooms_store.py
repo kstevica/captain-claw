@@ -143,7 +143,23 @@ CREATE TABLE IF NOT EXISTS delivery_parts (
     payload    TEXT NOT NULL,
     PRIMARY KEY (room_id, client_id, key, part)
 );
+CREATE TABLE IF NOT EXISTS room_tasks (
+    room_id       TEXT NOT NULL,
+    seq           INTEGER NOT NULL,
+    owner_id      TEXT NOT NULL,
+    created_at    REAL NOT NULL,
+    about         INTEGER,
+    prompt        TEXT NOT NULL,
+    prompt_tokens TEXT NOT NULL,
+    state         TEXT NOT NULL DEFAULT 'waiting',
+    client_id     TEXT NOT NULL DEFAULT '',
+    taken_at      REAL,
+    done_at       REAL,
+    delivery      INTEGER,
+    PRIMARY KEY (room_id, seq)
+);
 """
+TASK_STATES = ("waiting", "taken", "done", "cancelled")
 PART_TTL = 24 * 3600.0  # parts of a delivery that never completed are dropped after this
 READS_KEPT = 2000  # per room; older reads are dropped
 
@@ -340,7 +356,8 @@ class RoomStore:
         if not cur.rowcount:
             await db.commit()
             return False
-        for table in ("room_files", "room_text", "room_reads", "room_alarms", "deliveries", "delivery_parts"):
+        for table in ("room_files", "room_text", "room_reads", "room_alarms", "deliveries", "delivery_parts",
+                      "room_tasks"):
             await db.execute(f"DELETE FROM {table} WHERE room_id=?", (room_id,))
         await db.commit()
         await asyncio.to_thread(shutil.rmtree, self.room_dir(room_id), True)
@@ -645,6 +662,51 @@ class RoomStore:
             "SELECT room_id, seq FROM deliveries WHERE json_extract(report, '$.grammar.state') = 'waiting' "
             "ORDER BY at")
         return [(r[0], int(r[1])) for r in await cur.fetchall()]
+
+    # ── tasks the person leaves for Claude (asked from the Inbox) ───────
+    #
+    # ``prompt`` is the person's own words and ``prompt_tokens`` what Claude
+    # reads, both encrypted with the room vault's key by the caller.
+
+    async def add_task(self, room_id: str, owner: str, prompt: str, prompt_tokens: str, about: int | None) -> int:
+        db = await self._conn()
+        cur = await db.execute("SELECT COALESCE(MAX(seq), 0) FROM room_tasks WHERE room_id=?", (room_id,))
+        seq = int((await cur.fetchone())[0]) + 1
+        await db.execute(
+            """INSERT INTO room_tasks (room_id, seq, owner_id, created_at, about, prompt, prompt_tokens)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (room_id, seq, owner, time.time(), about, prompt, prompt_tokens))
+        await db.commit()
+        return seq
+
+    async def tasks(self, room_id: str) -> list[dict[str, Any]]:
+        db = await self._conn()
+        cur = await db.execute("SELECT * FROM room_tasks WHERE room_id=? ORDER BY seq DESC", (room_id,))
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def task(self, room_id: str, seq: int) -> dict[str, Any] | None:
+        db = await self._conn()
+        cur = await db.execute("SELECT * FROM room_tasks WHERE room_id=? AND seq=?", (room_id, seq))
+        row = await cur.fetchone()
+        return dict(row) if row is not None else None
+
+    async def open_tasks(self, room_id: str) -> list[dict[str, Any]]:
+        """Waiting or taken (not answered yet), oldest first."""
+        db = await self._conn()
+        cur = await db.execute("SELECT * FROM room_tasks WHERE room_id=? AND state IN ('waiting', 'taken') "
+                               "ORDER BY seq", (room_id,))
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def set_task(self, room_id: str, seq: int, **fields: Any) -> bool:
+        allowed = {"state", "client_id", "taken_at", "done_at", "delivery"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            return False
+        db = await self._conn()
+        cur = await db.execute(f"UPDATE room_tasks SET {', '.join(f'{k}=?' for k in sets)} WHERE room_id=? AND seq=?",
+                               (*sets.values(), room_id, seq))
+        await db.commit()
+        return bool(cur.rowcount)
 
     async def mark_delivery_seen(self, room_id: str, seq: int) -> None:
         db = await self._conn()

@@ -29,14 +29,17 @@ const TOOL_LABEL: Record<string, string> = {
   room_overview: 'Overview', room_list_files: 'File list', room_read: 'Read', room_search: 'Search',
   room_get_file: 'File', room_deliver: 'Delivered', room_deliver_workbook: 'Delivered Excel',
   room_deliver_deck: 'Delivered PowerPoint', room_deliver_document: 'Delivered Word',
-  room_deliver_file: 'Delivered a file', export: 'Download for Claude',
+  room_deliver_file: 'Delivered a file', export: 'Download for Claude', room_tasks: 'Took tasks',
+  room_get_delivery: 'Read a delivery',
 }
 
 function size(bytes: number): string {
   return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }
 
-export function ExportCard({ roomId, released, onDone }: { roomId: string; released: number; onDone?: () => void }) {
+export function ExportCard({ roomId, released, onDone, headless = false }: {
+  roomId: string; released: number; onDone?: () => void; headless?: boolean
+}) {
   const [textOnly, setTextOnly] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -56,14 +59,22 @@ export function ExportCard({ roomId, released, onDone }: { roomId: string; relea
     }
   }
 
+  const button = <Button variant="primary" icon={Download} busy={busy} disabled={released === 0} onClick={run}>Download ZIP</Button>
   return (
-    <Card title="Download for Claude" icon={Download}
-      hint="The released files as a ZIP to add to a Claude Project — anonymized, with the roles and a README telling Claude the rules."
-      action={<Button variant="primary" icon={Download} busy={busy} disabled={released === 0} onClick={run}>Download ZIP</Button>}>
+    <Card title={headless ? undefined : 'Download for Claude'} icon={headless ? undefined : Download}
+      hint={headless ? undefined : 'The released files as a ZIP to add to a Claude Project — anonymized, with the roles and a README telling Claude the rules.'}
+      action={headless ? undefined : button}>
+      {headless && (
+        <p className="mb-4 text-sm text-zinc-400">
+          {released} released file{released === 1 ? '' : 's'}, anonymized, with the roles and a README telling Claude
+          the rules. Add the ZIP to a Claude Project.
+        </p>
+      )}
       <label className="flex items-start gap-2 text-sm text-zinc-300">
         <input type="checkbox" className="mt-0.5" checked={textOnly} onChange={(e) => setTextOnly(e.target.checked)} />
         <span>Text only <span className="text-zinc-500">— Word, Excel and PowerPoint as markdown: smaller, and every Claude reads it.</span></span>
       </label>
+      {headless && <div className="mt-4 flex justify-end">{button}</div>}
       {error && <div className="mt-3"><Notice tone="red">{error}</Notice></div>}
       {done && (
         <div className="mt-3 space-y-2">
@@ -199,12 +210,12 @@ export function AlarmsNotice({ roomId, alarms, onSeen }: { roomId: string; alarm
   )
 }
 
-export function ReadsCard({ reads }: { reads: RoomRead[] }) {
+export function ReadsCard({ reads, headless = false }: { reads: RoomRead[]; headless?: boolean }) {
   const [all, setAll] = useState(false)
-  const shown = all ? reads : reads.slice(0, 12)
+  const shown = all ? reads : reads.slice(0, headless ? 40 : 12)
   return (
-    <Card title="What Claude read" icon={BookOpen}
-      hint="Every call through the connector: which file and page, never the text Claude got or what it searched for."
+    <Card title={headless ? undefined : 'What Claude read'} icon={headless ? undefined : BookOpen}
+      hint={headless ? undefined : 'Every call through the connector: which file and page, never the text Claude got or what it searched for.'}
       bodyClassName="p-0">
       {reads.length === 0 ? (
         <div className="px-5 py-6 text-sm text-zinc-500">Nothing yet.</div>
@@ -221,7 +232,7 @@ export function ReadsCard({ reads }: { reads: RoomRead[] }) {
               </li>
             ))}
           </ul>
-          {reads.length > 12 && (
+          {reads.length > (headless ? 40 : 12) && (
             <div className="border-t border-zinc-800/80 px-5 py-2">
               <button type="button" className="text-xs text-zinc-400 hover:text-zinc-200" onClick={() => setAll(!all)}>
                 {all ? 'Show fewer' : `Show all ${reads.length}`}

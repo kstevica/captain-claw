@@ -45,6 +45,25 @@ export interface RoomSummary {
   updated_at: number
   released_at: number | null
   inbox: { total: number; unseen: number }
+  /** Tasks left for Claude; open = waiting or picked up, not answered yet. */
+  tasks?: { total: number; open: number }
+}
+
+/** A task the person left for Claude in a room (asked from the Inbox). */
+export interface RoomTask {
+  seq: number
+  created_at: number
+  /** The delivery it is about, if any. */
+  about: number | null
+  state: 'waiting' | 'taken' | 'done' | 'cancelled'
+  /** The person's own words (only they see these). */
+  prompt: string
+  /** What Claude reads: the same, anonymized with the room's vault. */
+  prompt_tokens: string
+  taken_at: number | null
+  done_at: number | null
+  /** The delivery that answered it. */
+  delivery: number | null
 }
 
 /** P7: the names put into the case their sentence needs, by the trusted model (Croatian). */
@@ -80,6 +99,8 @@ export interface DeliveryReport {
   /** Nothing could be put back: Claude wrote no tokens into it (a codename, say). */
   no_tokens?: boolean
   grammar?: GrammarReport
+  /** The task this delivery answers. */
+  task?: number
 }
 
 export interface DeliverySummary {
@@ -286,6 +307,15 @@ export const roomsApi = {
   exportRoom: (id: string, textOnly: boolean) =>
     api<RoomExport>(`/fd/rooms/${enc(id)}/export`, json('POST', { text_only: textOnly })),
   downloadExport: (id: string, e: RoomExport) => download(`/fd/rooms/${enc(id)}/export/${enc(e.token)}`, e.filename),
+  tasks: (id: string) => api<{ tasks: RoomTask[] }>(`/fd/rooms/${enc(id)}/tasks`),
+  /** What Claude would read of a task: the words anonymized with the room's vault. */
+  previewTask: (id: string, prompt: string) =>
+    api<{ prompt_tokens: string; still_real: string[]; found: Record<string, number> }>(
+      `/fd/rooms/${enc(id)}/tasks/preview`, json('POST', { prompt })),
+  createTask: (id: string, prompt: string, about?: number | null) =>
+    api<RoomTask>(`/fd/rooms/${enc(id)}/tasks`, json('POST', { prompt, about: about ?? null })),
+  cancelTask: (id: string, seq: number) =>
+    api<{ cancelled: boolean }>(`/fd/rooms/${enc(id)}/tasks/${seq}`, { method: 'DELETE' }),
   /** A file Claude made (in tokens), downloaded from Claude and dropped here: the names go back inside. */
   dropFile: (id: string, file: File) =>
     putFile<{ seq: number; report: DeliveryReport }>(`/fd/rooms/${enc(id)}/deliveries/file?name=${enc(file.name)}`, file,
