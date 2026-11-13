@@ -33,6 +33,8 @@ import asyncio
 import dataclasses
 import re
 import time
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -52,6 +54,22 @@ from captain_claw.flight_deck.auth import _LOCAL_USER, _fd_auth_enabled, get_cur
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
+
+# Where a long anonymization stands, for a caller that shows it (a data room's
+# run): set it around anonymize_blob; it gets {"step": "reading" | "model" |
+# "replacing", "chunk", "chunks"}. Nothing private goes through it.
+PROGRESS: ContextVar[Callable[[dict[str, Any]], Awaitable[None]] | None] = ContextVar("anonymize_progress",
+                                                                                      default=None)
+
+
+async def _progress(**event: Any) -> None:
+    hook = PROGRESS.get()
+    if hook is None:
+        return
+    try:
+        await hook(event)
+    except Exception:  # noqa: BLE001 — showing progress never stops the work
+        pass
 
 router = APIRouter(prefix="/fd/anonymize", tags=["anonymize"])
 
@@ -368,6 +386,8 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
 
                     await usage_quota.record_tokens(get_db(), person, found.tokens)
 
+        await _progress(step="replacing")
+
         def work(state: engine.VaultState) -> tuple[engine.RunResult, str]:
             result = engine.run(doc.segments, state, options)
             if options.generalize:
@@ -444,6 +464,7 @@ async def anonymize_blob(person: str, filename: str, blob: bytes, data: dict[str
     pictures = str(data.get("pictures") or "keep")
     if pictures not in PICTURE_MODES:
         raise HTTPException(status_code=422, detail=f"pictures must be one of {', '.join(PICTURE_MODES)}")
+    await _progress(step="reading")
     doc = await _file_doc(filename, blob, scrub=True, pictures=pictures)
     out = await _anonymize(person, doc, data, actor=actor, source=source, stem=Path(filename).stem,
                            one_way_state=one_way_state)
@@ -507,7 +528,11 @@ async def _llm_terms(segments: list[engine.Segment], options: engine.Options,
     ("Ivan Horvat" as two other people's tokens) — and names are its call."""
     texts = [s.text for s in segments]
     joined = "\n".join(t for t in texts if t.strip())
-    return await llm_lane.detect(joined, trusted.completer(model), kinds=options.kinds)
+
+    async def chunk_done(done: int, total: int) -> None:
+        await _progress(step="model", chunk=done, chunks=total)
+
+    return await llm_lane.detect(joined, trusted.completer(model), kinds=options.kinds, on_progress=chunk_done)
 
 
 async def _vault_state(person: str, data: dict[str, Any]) -> tuple[dict[str, Any], engine.VaultState]:

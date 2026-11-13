@@ -300,12 +300,12 @@ async def run_room(room_id: str, request: Request, body: dict[str, Any] = Body(d
 async def stop_room(room_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     owner = _owner(request, user)
     await _room(owner, room_id)
-    return {"stopping": rj.stop(room_id)}
+    return {"stopping": await rj.stop(room_id)}
 
 
 def _file_view(f: dict[str, Any]) -> dict[str, Any]:
-    return {k: f[k] for k in ("id", "origin", "path", "clean_path", "kind", "size", "state", "warnings", "error",
-                              "entities", "text_chars", "released", "updated_at")}
+    return {k: f.get(k) for k in ("id", "origin", "path", "clean_path", "kind", "size", "state", "warnings", "error",
+                                  "entities", "text_chars", "released", "updated_at", "info")}
 
 
 @router.get("/{room_id}/files")

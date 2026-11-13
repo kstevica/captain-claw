@@ -704,6 +704,33 @@ detected from diacritics and common words.
   - **Instructions:** rule 8 tells Claude to check tasks when asked ("Check
     my Captain data room tasks").
 
+**Big rooms: progress, ETA, sizes, Stop (2026-11-14, branch `feat/rooms-progress-detail`):**
+
+- **Progress:**
+  - **The hook:** `anonymize_routes.PROGRESS` (a context variable) receives
+    the steps reading → model (chunk n of N, from `llm_lane.detect`'s
+    `on_progress`) → replacing.
+  - **The job record:** the room job sets the hook around each file and keeps
+    the current file, its size, its place, the step, the chunks and the
+    timestamps in the job. The sweep and the check say which file they are
+    on.
+  - **The log:** a line per step and per chunk (file id and size, never its
+    path).
+- **ETA, worked out on the page each second:**
+  - **This file:** time per chunk so far × chunks left.
+  - **The room:** time so far ÷ bytes done (the current file counted by its
+    chunks) × bytes left. Shown once there's enough to go on ("estimating…"
+    before).
+- **Sizes:** each file shows its size. Excel shows rows with something in
+  them and its sheets; CSV/TSV show rows (`room_files.info`). They are counted
+  at ZIP intake, or when the run reads the file, or in the sweep for files done
+  before.
+- **Stop:** it now cancels the run at once, the trusted model's calls
+  included, and waits up to 10 s for it to wind down. The file it was on stays
+  "not run yet"; files done stay done. The room shows "Stopped by you — N files
+  not run yet". A cancel from the deck shutting down still keeps the room
+  "running", so it resumes at the next start.
+
 ## Later
 
 - **Fleet side door.** If the person turns on both connectors in one Claude chat,

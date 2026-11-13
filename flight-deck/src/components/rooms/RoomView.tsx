@@ -15,7 +15,7 @@ import { AlarmsNotice, ExportCard, ReadsCard } from './RoomsAccess'
 import { InboxSection, SectionHead, TasksSection } from './RoomsInbox'
 import { RoomFileViewer } from './RoomFileViewer'
 import { IconBtn, SearchField, TokenChip } from './roomParts'
-import { STATE_LABEL, STATE_TONE, count, errorText } from './roomText'
+import { STATE_LABEL, STATE_TONE, clock, count, duration, errorText, fileSize, runEta } from './roomText'
 
 // One data room: a left rail with what the room has (its files, as folders),
 // what you tell it (names to hide, roles) and what Claude did with it (its
@@ -164,7 +164,9 @@ export function RoomView({ id, onBack, onClose }: {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {running ? (
-            <Button icon={Square} busy={busy === 'stop'} onClick={() => act('stop', () => roomsApi.stop(id))}>Stop</Button>
+            <Button icon={Square} busy={busy === 'stop'} onClick={() => act('stop', () => roomsApi.stop(id))}>
+              {busy === 'stop' ? 'Stopping…' : 'Stop'}
+            </Button>
           ) : (
             <Button variant="primary" icon={Play} busy={busy === 'run'}
               disabled={c.files === 0 || (c.new === 0 && c.blocked === 0 && c.done === 0)}
@@ -192,7 +194,7 @@ export function RoomView({ id, onBack, onClose }: {
           )}
         </div>
       </header>
-      {(running || (room.job.phase && room.job.phase !== 'done')) && <RunStrip room={room} />}
+      {(running || (room.job.phase && room.job.phase !== 'done')) && <RunStrip room={room} files={files} />}
 
       {/* phones: the sections as a strip */}
       <div className="flex gap-1 overflow-x-auto border-b border-zinc-800 px-2 py-2 md:hidden">
@@ -228,6 +230,14 @@ export function RoomView({ id, onBack, onClose }: {
             {error && <Notice tone="red">{error}</Notice>}
             {notice && <Notice tone="emerald">{notice}</Notice>}
             <AlarmsNotice roomId={id} alarms={alarms} onSeen={() => void reload()} />
+            {!running && room.job.phase === 'done' && room.job.message && (
+              <Notice tone="amber">
+                <div className="flex items-center gap-2">
+                  <Square className="h-3.5 w-3.5 shrink-0" />
+                  <span>{room.job.message}</span>
+                </div>
+              </Notice>
+            )}
             {current === 'files' && (
               <FilesSection room={room} files={files} running={running} busy={busy} onOpen={setViewing}
                 onRetry={() => act('retry', () => roomsApi.run(id, true))}
@@ -316,25 +326,75 @@ function Health({ room }: { room: Room }) {
   )
 }
 
-function RunStrip({ room }: { room: Room }) {
+const STEP_LABEL: Record<string, string> = {
+  reading: 'Reading the file', model: 'Finding names', replacing: 'Replacing names',
+}
+
+/** Where a run stands: the phase, the file it's on (size, step, the trusted
+ *  model's chunk n of N), and how long the file and the room still take. */
+function RunStrip({ room, files }: { room: Room; files: RoomFile[] }) {
   const job = room.job
+  const [now, setNow] = useState(() => Date.now() / 1000)
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now() / 1000), 1000)
+    return () => clearInterval(t)
+  }, [])
   const total = job.total || 0
   const done = (job.done || 0) + (job.failed || 0)
-  const pct = total ? Math.round((done / total) * 100) : 0
+  const anonymizing = job.phase === 'anonymizing'
+  const eta = runEta(job, now)
+  const overall = anonymizing && (job.bytes_total || 0) > 0
+    ? Math.min(100, (((job.bytes_done || 0) + (job.current_size || 0) * eta.fileShare) / job.bytes_total!) * 100)
+    : total ? (done / total) * 100 : 0
+  const file = job.current ? files.find((f) => f.id === job.current) : undefined
+  const index = job.file_index
+  const count = anonymizing ? total : job.file_count
+  const chunks = job.chunks || 0
+  const filePct = job.step === 'model' && chunks ? ((job.chunk || 0) / chunks) * 100 : job.step === 'replacing' ? 100 : 0
+  const since = job.file_started_at ? now - job.file_started_at : 0
+
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-zinc-800 bg-violet-500/[0.04] px-4 py-2 text-xs">
-      <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-500" />
-      <span className="font-medium text-zinc-200">{PHASE_LABEL[job.phase || ''] || job.phase || 'Starting'}</span>
-      {job.phase === 'anonymizing' && total > 0 && <span className="text-zinc-500">{done} of {total}</span>}
-      {job.phase === 'sweeping' && job.sweep_round && <span className="text-zinc-500">round {job.sweep_round}</span>}
-      {job.phase === 'anonymizing' && total > 0 && (
-        <span className="h-1.5 w-40 overflow-hidden rounded-full bg-zinc-800">
-          <span className="block h-full rounded-full bg-violet-500 transition-all" style={{ width: `${pct}%` }} />
-        </span>
-      )}
-      {(job.failed || 0) > 0 && <Pill tone="amber">{job.failed} failed</Pill>}
-      {room.trusted_model && job.phase === 'anonymizing' && (
-        <span className="ml-auto hidden text-zinc-500 lg:inline">The trusted model reads every file — you can close this; it keeps going.</span>
+    <div className="space-y-1.5 border-b border-zinc-800 bg-violet-500/[0.04] px-4 py-2.5 text-xs">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-500" />
+        <span className="font-medium text-zinc-100">{PHASE_LABEL[job.phase || ''] || job.phase || 'Starting'}</span>
+        {anonymizing && total > 0 && <span className="text-zinc-500">{done} of {total} done</span>}
+        {job.phase === 'sweeping' && job.sweep_round && <span className="text-zinc-500">round {job.sweep_round}</span>}
+        {(anonymizing || job.phase === 'sweeping' || job.phase === 'checking') && (
+          <span className="h-1.5 w-48 overflow-hidden rounded-full bg-zinc-800">
+            <span className="block h-full rounded-full bg-violet-500 transition-all duration-700" style={{ width: `${overall}%` }} />
+          </span>
+        )}
+        {anonymizing && eta.run !== null && <span className="text-zinc-400">{duration(eta.run)} left for the room</span>}
+        {(job.failed || 0) > 0 && <Pill tone="amber">{job.failed} failed</Pill>}
+        {room.trusted_model && anonymizing && (
+          <span className="ml-auto hidden text-zinc-500 xl:inline">You can close this; it keeps going.</span>
+        )}
+      </div>
+      {file && (
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 pl-[26px] text-zinc-500">
+          {index && count ? <span className="tabular-nums">File {index} of {count}</span> : null}
+          <span className="max-w-[28rem] truncate font-medium text-zinc-300" title={file.path}>{file.path.split('/').pop()}</span>
+          <span>{fileSize(file.size)}{file.info?.rows ? ` · ${file.info.rows.toLocaleString()} rows` : ''}</span>
+          {anonymizing && job.step && (
+            <>
+              <span className="text-zinc-600">·</span>
+              <span className="text-zinc-300">{STEP_LABEL[job.step] || job.step}</span>
+              {job.step === 'model' && chunks > 0 && (
+                <>
+                  <span className="tabular-nums">chunk {Math.min((job.chunk || 0) + 1, chunks)} of {chunks}</span>
+                  <span className="h-1 w-24 overflow-hidden rounded-full bg-zinc-800">
+                    <span className="block h-full rounded-full bg-sky-500 transition-all duration-700" style={{ width: `${filePct}%` }} />
+                  </span>
+                </>
+              )}
+              {eta.file !== null
+                ? <span>{duration(eta.file)} left on this file</span>
+                : job.step === 'model' && chunks > 0 && <span>estimating…</span>}
+              {since >= 1 && <span className="tabular-nums text-zinc-500">· running {clock(since)}</span>}
+            </>
+          )}
+        </div>
       )}
     </div>
   )
@@ -502,7 +562,12 @@ function FileRow({ f, depth, flat, running, onOpen, onDownload, onRemove }: {
           {f.error && <span className={`block truncate text-[11px] ${f.state === 'blocked' ? 'text-red-600 dark:text-red-400' : 'text-amber-700 dark:text-amber-300'}`}>{f.error}</span>}
         </button>
         <div className="flex shrink-0 items-center gap-1.5">
-          {replaced > 0 && <span className="hidden text-[11px] tabular-nums text-zinc-500 sm:inline">{replaced} hidden</span>}
+          <span className="hidden whitespace-nowrap text-right text-[11px] tabular-nums text-zinc-500 md:inline">
+            {fileSize(f.size)}
+            {f.info?.rows !== undefined && <> · {count(f.info.rows, 'row')}</>}
+            {(f.info?.sheets || 0) > 1 && <> · {f.info!.sheets} sheets</>}
+          </span>
+          {replaced > 0 && <span className="hidden text-[11px] tabular-nums text-zinc-500 lg:inline">· {replaced} hidden</span>}
           {f.warnings.length > 0 && <span title={f.warnings.join('\n')}><AlertTriangle className="h-3.5 w-3.5 text-amber-500" /></span>}
           {f.released
             ? <Pill tone="emerald" icon={CheckCircle2}>Released</Pill>

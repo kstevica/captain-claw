@@ -153,6 +153,35 @@ def _read_bounded(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
     return out.getvalue()
 
 
+TABLE_KINDS = (".xlsx", ".xlsm", ".csv", ".tsv")
+
+
+def table_info(name: str, blob: bytes) -> dict[str, int]:
+    """How big a table file is: {"rows", "sheets"} for Excel, {"rows"} for CSV/TSV
+    (data rows, the header included); {} for anything else or a file that can't
+    be opened. Never fails."""
+    ext = PurePosixPath(name).suffix.lower()
+    try:
+        if ext in (".xlsx", ".xlsm"):
+            import openpyxl
+
+            wb = openpyxl.load_workbook(io.BytesIO(blob), read_only=True, data_only=True)
+            try:
+                # Rows with something in them: Excel's own "used range" counts
+                # formatted empty rows too.
+                rows = sum(1 for ws in wb.worksheets for row in ws.iter_rows(values_only=True)
+                           if any(v is not None and v != "" for v in row))
+                return {"rows": rows, "sheets": len(wb.worksheets)}
+            finally:
+                wb.close()
+        if ext in (".csv", ".tsv"):
+            text = blob.decode("utf-8", "replace")
+            return {"rows": sum(1 for line in text.splitlines() if line.strip())}
+    except Exception:  # noqa: BLE001 — a size note is a nicety; the run reports a broken file
+        return {}
+    return {}
+
+
 async def _keep(room: dict[str, Any], rel: str, blob: bytes, cipher: Any, report: Report) -> None:
     store = rs.store()
     sha = hashlib.sha256(blob).hexdigest()
@@ -172,6 +201,8 @@ async def _keep(room: dict[str, Any], rel: str, blob: bytes, cipher: Any, report
     raw = store.raw_path(room["id"], fid)
     if replaced or not raw.exists():
         await asyncio.to_thread(store.write_raw, room["id"], fid, blob, cipher)
+        if PurePosixPath(rel).suffix.lower() in TABLE_KINDS:
+            await store.set_file(room["id"], fid, info=await asyncio.to_thread(table_info, rel, blob))
         if replaced:
             report.replaced += 1
         else:

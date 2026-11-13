@@ -32,6 +32,20 @@ export interface RoomJob {
   message?: string
   started_at?: number
   finished_at?: number
+  /** Sizes of the files to anonymize, and of those finished (for a run's ETA). */
+  bytes_total?: number
+  bytes_done?: number
+  /** The file being worked on: its size, its place in this phase, and how far it is. */
+  current_size?: number
+  file_index?: number
+  file_count?: number
+  step?: 'reading' | 'model' | 'replacing'
+  /** The trusted model's chunks of the current file: done of total. */
+  chunk?: number
+  chunks?: number
+  file_started_at?: number
+  chunks_started_at?: number | null
+  chunk_at?: number | null
 }
 
 export interface RoomSummary {
@@ -165,6 +179,8 @@ export interface RoomFile {
   text_chars: number
   released: boolean
   updated_at: number
+  /** For Excel: rows with something in them, and sheets; for CSV/TSV: rows. */
+  info?: { rows?: number; sheets?: number }
 }
 
 export interface IntakeReport {

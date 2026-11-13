@@ -229,10 +229,22 @@ async def start(room: dict[str, Any], *, retry_failed: bool = False) -> None:
     _TASKS[room["id"]] = asyncio.get_running_loop().create_task(_run(room["id"]))
 
 
-def stop(room_id: str) -> bool:
-    if not running(room_id):
+STOP_WAIT = 10.0  # seconds a stop waits for the run to wind down before answering
+
+
+async def stop(room_id: str) -> bool:
+    """Stop a room's run now — mid-file too (the trusted model's calls are
+    cancelled). The file it was on goes back to "not run yet"; files already
+    done stay done. Waits (briefly) until the room says it stopped."""
+    task = _TASKS.get(room_id)
+    if task is None or task.done():
         return False
     _STOP.add(room_id)
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), STOP_WAIT)
+    except (asyncio.CancelledError, TimeoutError, Exception):  # noqa: BLE001 — the run tidies itself up
+        pass
     return True
 
 
@@ -274,7 +286,13 @@ async def _run(room_id: str) -> None:
             await _work(room, job)
             final = "review"
     except asyncio.CancelledError:
-        raise
+        if room_id not in _STOP:
+            raise  # the deck is shutting down: the room stays "running" and carries on at the next start
+        # The person stopped it: wind down like a finished run.
+        task = asyncio.current_task()
+        if task is not None and hasattr(task, "uncancel"):
+            task.uncancel()
+        final = "review"
     except Exception as exc:  # noqa: BLE001 — shown on the room, never the file contents
         log.warning("Data room run failed", room=room_id, error=type(exc).__name__)
         job["message"] = f"Stopped: {getattr(exc, 'detail', None) or type(exc).__name__}"
@@ -284,7 +302,13 @@ async def _run(room_id: str) -> None:
     stopped = room_id in _STOP
     _STOP.discard(room_id)
     if stopped:
-        job["message"] = job.get("message") or "Stopped."
+        left = sum(1 for f in await store.files(room_id) if f["state"] == "new")
+        job["message"] = (f"Stopped by you — {left} file{'s' if left != 1 else ''} not run yet. Run the room to "
+                          "finish them." if left else "Stopped by you.")
+        log.info("Data room run stopped", room=room_id, files_left=left)
+    for key in ("current", "step", "chunk", "chunks", "file_started_at", "chunks_started_at", "chunk_at",
+                "current_size", "file_index", "file_count"):
+        job.pop(key, None)
     job["phase"] = "done"
     job["finished_at"] = time.time()
     files = await store.files(room_id)
@@ -292,6 +316,38 @@ async def _run(room_id: str) -> None:
         final = "setup"
     await _set_job(room_id, job)
     await store.update(room_id, state=final)
+
+
+async def _file_start(room_id: str, job: dict[str, Any], f: dict[str, Any]) -> None:
+    """A file begins: which one, how big, nothing read yet."""
+    now = time.time()
+    job.update({"current": f["id"], "current_size": int(f["size"] or 0), "step": "reading", "chunk": 0,
+                "chunks": 0, "file_started_at": now, "chunks_started_at": None, "chunk_at": None,
+                "file_index": job.get("done", 0) + job.get("failed", 0) + 1})
+    log.info("Data room file started", room=room_id, file=f["id"], size=int(f["size"] or 0),
+             index=job["file_index"], of=job.get("total", 0))
+    await _set_job(room_id, job)
+
+
+def _file_progress(room_id: str, job: dict[str, Any], f: dict[str, Any]):
+    """The hook anonymize_blob reports through: the step, and the trusted
+    model's chunks (n of N), kept in the job for the page — and logged."""
+    async def hook(event: dict[str, Any]) -> None:
+        step = str(event.get("step") or "")
+        now = time.time()
+        if step == "model":
+            done, total = int(event.get("chunk") or 0), int(event.get("chunks") or 0)
+            if job.get("step") != "model":
+                job["chunks_started_at"] = now
+            job.update({"step": "model", "chunk": done, "chunks": total, "chunk_at": now})
+            log.info("Data room file chunk", room=room_id, file=f["id"], chunk=done, chunks=total,
+                     seconds=round(now - (job.get("chunks_started_at") or now), 1))
+        elif step:
+            if step != job.get("step"):
+                log.info("Data room file step", room=room_id, file=f["id"], step=step)
+            job["step"] = step
+        await _set_job(room_id, job)
+    return hook
 
 
 async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
@@ -307,39 +363,52 @@ async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
 
     # 1. anonymize the new files
     todo = [f for f in await store.files(room_id) if f["state"] == "new"]
-    job.update({"total": len(todo), "done": 0, "failed": 0})
+    job.update({"total": len(todo), "done": 0, "failed": 0, "bytes_total": sum(int(f["size"] or 0) for f in todo),
+                "bytes_done": 0})
     for f in todo:
         if room_id in _STOP:
             return
-        job["current"] = f["id"]
-        await _set_job(room_id, job)
+        await _file_start(room_id, job, f)
+        hook = ar.PROGRESS.set(_file_progress(room_id, job, f))
         try:
-            raw = await read_original(room, f, cipher)
-            blob, info = await ar.anonymize_blob(owner, posixpath.basename(f["path"]), raw, data, actor=actor,
-                                                 source="data-room")
-        except HTTPException as exc:
-            await store.set_file(room_id, f["id"], state="failed", error=str(exc.detail)[:300])
-            job["failed"] += 1
-            continue
-        except (ri.IntakeError, OSError, rs.RoomError) as exc:
-            await store.set_file(room_id, f["id"], state="failed", error=str(exc)[:300])
-            job["failed"] += 1
-            continue
-        except Exception as exc:  # noqa: BLE001 — one file never stops the room
-            log.warning("Data room file failed", room=room_id, file=f["id"], error=type(exc).__name__)
-            await store.set_file(room_id, f["id"], state="failed", error=type(exc).__name__)
-            job["failed"] += 1
-            continue
-        name = _clean_name(info["filename"])
-        ext = PurePosixPath(name).suffix
-        path = store.clean_file(room_id, f["id"], ext)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(path.write_bytes, blob)
-        await store.set_file(room_id, f["id"], state="done", error="", clean_path=name,
-                             kind=ext.lstrip(".").lower(), warnings=list(info.get("warnings") or []),
-                             entities=dict(info.get("summary") or {}))
-        job["done"] += 1
-    job.pop("current", None)
+            try:
+                raw = await read_original(room, f, cipher)
+                if not f.get("info") and PurePosixPath(f["path"]).suffix.lower() in ri.TABLE_KINDS:
+                    await store.set_file(room_id, f["id"], info=await asyncio.to_thread(ri.table_info, f["path"], raw))
+                blob, info = await ar.anonymize_blob(owner, posixpath.basename(f["path"]), raw, data, actor=actor,
+                                                     source="data-room")
+            except HTTPException as exc:
+                await store.set_file(room_id, f["id"], state="failed", error=str(exc.detail)[:300])
+                job["failed"] += 1
+                continue
+            except (ri.IntakeError, OSError, rs.RoomError) as exc:
+                await store.set_file(room_id, f["id"], state="failed", error=str(exc)[:300])
+                job["failed"] += 1
+                continue
+            except Exception as exc:  # noqa: BLE001 — one file never stops the room
+                log.warning("Data room file failed", room=room_id, file=f["id"], error=type(exc).__name__)
+                await store.set_file(room_id, f["id"], state="failed", error=type(exc).__name__)
+                job["failed"] += 1
+                continue
+            name = _clean_name(info["filename"])
+            ext = PurePosixPath(name).suffix
+            path = store.clean_file(room_id, f["id"], ext)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(path.write_bytes, blob)
+            await store.set_file(room_id, f["id"], state="done", error="", clean_path=name,
+                                 kind=ext.lstrip(".").lower(), warnings=list(info.get("warnings") or []),
+                                 entities=dict(info.get("summary") or {}))
+            job["done"] += 1
+        finally:
+            ar.PROGRESS.reset(hook)
+            if room_id not in _STOP:  # a file stopped half way stays "not run yet"
+                job["bytes_done"] = job.get("bytes_done", 0) + int(f["size"] or 0)
+                log.info("Data room file finished", room=room_id, file=f["id"], size=int(f["size"] or 0),
+                         seconds=round(time.time() - job.get("file_started_at", time.time()), 1),
+                         chunks=job.get("chunks", 0), files_left=len(todo) - job["done"] - job["failed"])
+    for key in ("current", "step", "chunk", "chunks", "file_started_at", "chunks_started_at", "chunk_at",
+                "current_size", "file_index"):
+        job.pop(key, None)
     if room_id in _STOP:
         return
 
@@ -370,10 +439,15 @@ async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
         job["sweep_round"] = round_no
         await _set_job(room_id, job)
         changed = 0
-        for f in files:
+        for i, f in enumerate(files, 1):
+            job.update({"current": f["id"], "file_index": i, "file_count": len(files)})
+            await _set_job(room_id, job)
             path = store.clean_file(room_id, f["id"], PurePosixPath(f["clean_path"]).suffix)
             try:
                 blob = await asyncio.to_thread(path.read_bytes)
+                if not f.get("info") and PurePosixPath(f["path"]).suffix.lower() in ri.TABLE_KINDS:
+                    # Rows and sheets for a file done before they were counted (same in the copy).
+                    await store.set_file(room_id, f["id"], info=await asyncio.to_thread(ri.table_info, f["path"], blob))
                 out, info = await ar.anonymize_blob(owner, posixpath.basename(f["clean_path"]), blob, sweep,
                                                     actor=actor, source="data-room-sweep")
             except Exception as exc:  # noqa: BLE001 — the leak check below still looks at this file
@@ -397,9 +471,11 @@ async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
         state = await vaults.load_state(vault_row)
     needle_list = needles(state)
     blocked = 0
-    for f in files:
+    for i, f in enumerate(files, 1):
         if room_id in _STOP:
             return
+        job.update({"current": f["id"], "file_index": i, "file_count": len(files)})
+        await _set_job(room_id, job)
         path = store.clean_file(room_id, f["id"], PurePosixPath(f["clean_path"]).suffix)
         blob = await asyncio.to_thread(path.read_bytes)
         text = await asyncio.to_thread(text_view, f["clean_path"], blob)
@@ -417,3 +493,5 @@ async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
         await store.set_file(room_id, f["id"], state="done", error="", text_chars=len(text))
         await store.index_text(room_id, f["id"], pages_of(text))
     job["blocked"] = blocked
+    for key in ("current", "file_index", "file_count"):
+        job.pop(key, None)

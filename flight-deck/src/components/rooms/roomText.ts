@@ -21,6 +21,50 @@ export function plural(word: string, n: number): string {
   return `${word}s`
 }
 
+export function fileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`
+  return `${(bytes / 1024 / 1024).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MB`
+}
+
+/** "about 3 min", "about 1 h 20 min", "under a minute". */
+export function duration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return ''
+  if (seconds < 60) return 'under a minute'
+  const m = Math.round(seconds / 60)
+  if (m < 60) return `about ${m} min`
+  const h = Math.floor(m / 60), rest = m % 60
+  return `about ${h} h${rest ? ` ${rest} min` : ''}`
+}
+
+/** 42 → "0:42", 3725 → "1:02:05". */
+export function clock(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds))
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}` : `${m}:${String(r).padStart(2, '0')}`
+}
+
+/** Time left for the current file and the whole run, from how fast it went so far
+ *  (null where there isn't enough to go on yet). */
+export function runEta(job: {
+  step?: string; chunk?: number; chunks?: number; chunks_started_at?: number | null; started_at?: number
+  bytes_total?: number; bytes_done?: number; current_size?: number
+}, now: number): { file: number | null; run: number | null; fileShare: number } {
+  const chunks = job.chunks || 0, chunk = job.chunk || 0
+  const fileShare = job.step === 'replacing' ? 0.95 : job.step === 'model' && chunks ? (chunk / chunks) * 0.9 + 0.05 : 0.02
+  let file: number | null = null
+  if (job.step === 'model' && chunk > 0 && job.chunks_started_at) {
+    const per = (now - job.chunks_started_at) / chunk
+    file = Math.max(0, (chunks - chunk) * per)
+  }
+  let run: number | null = null
+  const total = job.bytes_total || 0
+  const done = (job.bytes_done || 0) + (job.current_size || 0) * fileShare
+  const spent = job.started_at ? now - job.started_at : 0
+  if (total > 0 && done > total * 0.02 && spent > 10) run = Math.max(0, ((total - done) * spent) / done)
+  return { file, run, fileShare }
+}
+
 export function tokenKind(token: string): string {
   return token.replace(/^⟦|⟧$/g, '').replace(/_\d+(:[a-z0-9]+)?$/, '')
 }

@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS room_files (
     text_chars  INTEGER NOT NULL DEFAULT 0,
     released    INTEGER NOT NULL DEFAULT 0,
     updated_at  REAL NOT NULL,
+    info        TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (room_id, id),
     UNIQUE (room_id, path_key)
 );
@@ -215,6 +216,10 @@ class RoomStore:
                 db.row_factory = aiosqlite.Row
                 await db.execute("PRAGMA journal_mode=WAL")
                 await db.executescript(_DDL)
+                # Columns added after a room store was first made.
+                cur = await db.execute("PRAGMA table_info(room_files)")
+                if "info" not in {r[1] for r in await cur.fetchall()}:
+                    await db.execute("ALTER TABLE room_files ADD COLUMN info TEXT NOT NULL DEFAULT '{}'")
                 await db.commit()
                 try:
                     os.chmod(self.path, 0o600)
@@ -371,6 +376,7 @@ class RoomStore:
         f.pop("path_key", None)
         f["warnings"] = json.loads(f["warnings"] or "[]")
         f["entities"] = json.loads(f["entities"] or "{}")
+        f["info"] = json.loads(f.get("info") or "{}")
         f["released"] = bool(f["released"])
         return f
 
@@ -392,7 +398,8 @@ class RoomStore:
                 return row["id"], False
             await db.execute(
                 """UPDATE room_files SET kind=?, size=?, sha256=?, state=?, error=?, warnings='[]',
-                   entities='{}', text_chars=0, released=0, clean_path='', updated_at=? WHERE room_id=? AND id=?""",
+                   entities='{}', info='{}', text_chars=0, released=0, clean_path='', updated_at=?
+                   WHERE room_id=? AND id=?""",
                 (kind, size, sha256, state, error, now, room_id, row["id"]))
             await db.execute("DELETE FROM room_text WHERE room_id=? AND file_id=?", (room_id, row["id"]))
             await db.commit()
@@ -421,7 +428,7 @@ class RoomStore:
     async def set_file(self, room_id: str, file_id: str, **fields: Any) -> None:
         cols, values = [], []
         for key, value in fields.items():
-            if key in ("warnings", "entities"):
+            if key in ("warnings", "entities", "info"):
                 value = json.dumps(value, ensure_ascii=False)
             elif key == "released":
                 value = 1 if value else 0
