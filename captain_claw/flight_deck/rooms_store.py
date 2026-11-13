@@ -121,7 +121,30 @@ CREATE TABLE IF NOT EXISTS room_alarms (
     seen       INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_alarms_room ON room_alarms(room_id, id);
+CREATE TABLE IF NOT EXISTS deliveries (
+    room_id    TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    owner_id   TEXT NOT NULL,
+    client_id  TEXT NOT NULL DEFAULT '',
+    at         REAL NOT NULL,
+    chars      INTEGER NOT NULL DEFAULT 0,
+    payload    TEXT NOT NULL,
+    report     TEXT NOT NULL DEFAULT '{}',
+    seen       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (room_id, seq)
+);
+CREATE TABLE IF NOT EXISTS delivery_parts (
+    room_id    TEXT NOT NULL,
+    client_id  TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    part       INTEGER NOT NULL,
+    total      INTEGER NOT NULL,
+    at         REAL NOT NULL,
+    payload    TEXT NOT NULL,
+    PRIMARY KEY (room_id, client_id, key, part)
+);
 """
+PART_TTL = 24 * 3600.0  # parts of a delivery that never completed are dropped after this
 READS_KEPT = 2000  # per room; older reads are dropped
 
 
@@ -317,7 +340,7 @@ class RoomStore:
         if not cur.rowcount:
             await db.commit()
             return False
-        for table in ("room_files", "room_text", "room_reads", "room_alarms"):
+        for table in ("room_files", "room_text", "room_reads", "room_alarms", "deliveries", "delivery_parts"):
             await db.execute(f"DELETE FROM {table} WHERE room_id=?", (room_id,))
         await db.commit()
         await asyncio.to_thread(shutil.rmtree, self.room_dir(room_id), True)
@@ -537,6 +560,77 @@ class RoomStore:
         db = await self._conn()
         await db.execute("UPDATE room_alarms SET seen=1 WHERE room_id=?", (room_id,))
         await db.commit()
+
+    # ── the Inbox: what Claude sent back (P3) ───────────────────────
+    # Payloads are encrypted by the caller with the room vault's key: the
+    # restored text is the most private thing a room holds.
+
+    async def add_part(self, room_id: str, client_id: str, key: str, part: int, total: int,
+                       payload: str) -> list[int]:
+        """Keep one part of a delivery; returns the part numbers held so far."""
+        db = await self._conn()
+        now = time.time()
+        await db.execute("DELETE FROM delivery_parts WHERE at < ?", (now - PART_TTL,))
+        await db.execute(
+            """INSERT INTO delivery_parts (room_id, client_id, key, part, total, at, payload)
+               VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(room_id, client_id, key, part)
+               DO UPDATE SET payload=excluded.payload, at=excluded.at, total=excluded.total""",
+            (room_id, client_id, key, part, total, now, payload))
+        await db.commit()
+        cur = await db.execute("SELECT part FROM delivery_parts WHERE room_id=? AND client_id=? AND key=? AND total=?"
+                               " ORDER BY part", (room_id, client_id, key, total))
+        return [r[0] for r in await cur.fetchall()]
+
+    async def take_parts(self, room_id: str, client_id: str, key: str, total: int) -> list[str]:
+        """The parts' payloads in order, removed from the waiting list."""
+        db = await self._conn()
+        cur = await db.execute("SELECT payload FROM delivery_parts WHERE room_id=? AND client_id=? AND key=? AND total=?"
+                               " ORDER BY part", (room_id, client_id, key, total))
+        out = [r[0] for r in await cur.fetchall()]
+        await db.execute("DELETE FROM delivery_parts WHERE room_id=? AND client_id=? AND key=?",
+                         (room_id, client_id, key))
+        await db.commit()
+        return out
+
+    async def add_delivery(self, room_id: str, owner: str, client_id: str, payload: str, chars: int,
+                           report: dict[str, Any]) -> int:
+        db = await self._conn()
+        cur = await db.execute("SELECT COALESCE(MAX(seq), 0) FROM deliveries WHERE room_id=?", (room_id,))
+        seq = int((await cur.fetchone())[0]) + 1
+        await db.execute(
+            """INSERT INTO deliveries (room_id, seq, owner_id, client_id, at, chars, payload, report)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (room_id, seq, owner, client_id, time.time(), chars, payload, json.dumps(report, ensure_ascii=False)))
+        await db.commit()
+        return seq
+
+    def _delivery_view(self, row: Any) -> dict[str, Any]:
+        d = dict(row)
+        d["report"] = json.loads(d["report"] or "{}")
+        d["seen"] = bool(d["seen"])
+        return d
+
+    async def deliveries(self, room_id: str) -> list[dict[str, Any]]:
+        db = await self._conn()
+        cur = await db.execute("SELECT * FROM deliveries WHERE room_id=? ORDER BY seq DESC", (room_id,))
+        return [self._delivery_view(r) for r in await cur.fetchall()]
+
+    async def delivery(self, room_id: str, seq: int) -> dict[str, Any] | None:
+        db = await self._conn()
+        cur = await db.execute("SELECT * FROM deliveries WHERE room_id=? AND seq=?", (room_id, seq))
+        row = await cur.fetchone()
+        return self._delivery_view(row) if row is not None else None
+
+    async def mark_delivery_seen(self, room_id: str, seq: int) -> None:
+        db = await self._conn()
+        await db.execute("UPDATE deliveries SET seen=1 WHERE room_id=? AND seq=?", (room_id, seq))
+        await db.commit()
+
+    async def delete_delivery(self, room_id: str, seq: int) -> bool:
+        db = await self._conn()
+        cur = await db.execute("DELETE FROM deliveries WHERE room_id=? AND seq=?", (room_id, seq))
+        await db.commit()
+        return bool(cur.rowcount)
 
 
 def new_room_id() -> str:

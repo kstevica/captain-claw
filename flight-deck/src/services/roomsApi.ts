@@ -44,6 +44,40 @@ export interface RoomSummary {
   created_at: number
   updated_at: number
   released_at: number | null
+  inbox: { total: number; unseen: number }
+}
+
+/** What the deck found putting the names back into a delivery — tokens only. */
+export interface DeliveryReport {
+  restored: number
+  not_in_room: string[]
+  /** Tokens whose real value Claude wrote itself (it was told, or guessed). Never told to Claude. */
+  real_values: string[]
+  parts: number
+  characters: number
+  format: 'markdown' | 'text'
+}
+
+export interface DeliverySummary {
+  seq: number
+  at: number
+  title: string
+  chars: number
+  report: DeliveryReport
+  seen: boolean
+  app: string
+}
+
+export interface Delivery {
+  seq: number
+  at: number
+  app: string
+  report: DeliveryReport
+  title: string
+  title_tokens: string
+  body: string
+  body_tokens: string
+  format: 'markdown' | 'text'
 }
 
 export interface Seed {
@@ -199,4 +233,11 @@ export const roomsApi = {
   setAccess: (clientId: string, rooms: string[], allRooms: boolean) =>
     api<{ ok: boolean }>(`/fd/rooms-access/${enc(clientId)}`, json('PUT', { rooms, all_rooms: allRooms })),
   revokeAccess: (clientId: string) => api<{ ok: boolean }>(`/fd/rooms-access/${enc(clientId)}`, { method: 'DELETE' }),
+  deliveries: (id: string) => api<{ deliveries: DeliverySummary[] }>(`/fd/rooms/${enc(id)}/deliveries`),
+  delivery: (id: string, seq: number) => api<Delivery>(`/fd/rooms/${enc(id)}/deliveries/${seq}`),
+  downloadDelivery: (id: string, seq: number, as: 'md' | 'docx', title: string) =>
+    download(`/fd/rooms/${enc(id)}/deliveries/${seq}/download?as=${as}`,
+      `${title.replace(/[\\/:*?"<>|]+/g, '_').slice(0, 120) || 'delivery'}.${as}`),
+  deleteDelivery: (id: string, seq: number) =>
+    api<{ deleted: boolean }>(`/fd/rooms/${enc(id)}/deliveries/${seq}`, { method: 'DELETE' }),
 }

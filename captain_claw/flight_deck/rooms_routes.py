@@ -66,9 +66,11 @@ async def _summary(room: dict[str, Any]) -> dict[str, Any]:
     files = await rs.store().files(room["id"])
     job = dict(room.get("job") or {})
     job["running"] = rj.running(room["id"])
+    deliveries = await rs.store().deliveries(room["id"])
     return {"id": room["id"], "codename": room["codename"], "name": room["name"], "state": room["state"],
             "counts": _counts(files), "job": job, "created_at": room["created_at"],
-            "updated_at": room["updated_at"], "released_at": room["released_at"]}
+            "updated_at": room["updated_at"], "released_at": room["released_at"],
+            "inbox": {"total": len(deliveries), "unseen": sum(1 for d in deliveries if not d["seen"])}}
 
 
 def _vault_name(codename: str, room_id: str) -> str:
@@ -444,6 +446,110 @@ async def room_alarms_seen(room_id: str, request: Request, user: dict = Depends(
     await _room(owner, room_id)
     await rs.store().mark_alarms_seen(room_id)
     return {"ok": True}
+
+
+# ── the Inbox: what Claude sent back, restored (P3) ─────────────────
+
+
+async def _cipher(owner: str, room: dict[str, Any]) -> Any:
+    vault = await av.store().get(owner, room["vault_id"])
+    if vault is None:
+        raise HTTPException(409, "This room's vault is gone — its deliveries can't be opened.")
+    try:
+        return av.store().cipher(vault)
+    except fd_crypto.CryptoUnavailable as exc:
+        raise HTTPException(503, str(exc)) from None
+
+
+async def _app_names(client_ids: set[str]) -> dict[str, str]:
+    db = get_db()
+    out = {}
+    for cid in client_ids:
+        client = await db.get_oauth_client(cid) if cid else None
+        out[cid] = (client or {}).get("client_name") or "A connected app"
+    return out
+
+
+@router.get("/{room_id}/deliveries")
+async def list_deliveries(room_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    from captain_claw.flight_deck import rooms_inbox
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    items = await rs.store().deliveries(room_id)
+    cipher = await _cipher(owner, room) if items else None
+    names = await _app_names({d["client_id"] for d in items})
+    out = []
+    for d in items:
+        try:
+            title = rooms_inbox.open_payload(cipher, d)["title"]
+        except Exception:  # noqa: BLE001 — a payload this key can't open is listed, never guessed
+            title = "(can't be opened)"
+        out.append({"seq": d["seq"], "at": d["at"], "title": title, "chars": d["chars"], "report": d["report"],
+                    "seen": d["seen"], "app": names[d["client_id"]]})
+    return {"deliveries": out}
+
+
+async def _delivery(owner: str, room: dict[str, Any], seq: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    from captain_claw.flight_deck import rooms_inbox
+
+    d = await rs.store().delivery(room["id"], seq)
+    if d is None:
+        raise HTTPException(404, "No such delivery")
+    try:
+        return d, rooms_inbox.open_payload(await _cipher(owner, room), d)
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001
+        raise HTTPException(409, "This delivery can't be opened with the room's key.") from None
+
+
+@router.get("/{room_id}/deliveries/{seq}")
+async def get_delivery(room_id: str, seq: int, request: Request,
+                       user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    d, p = await _delivery(owner, room, seq)
+    await rs.store().mark_delivery_seen(room_id, seq)
+    names = await _app_names({d["client_id"]})
+    return {"seq": d["seq"], "at": d["at"], "app": names[d["client_id"]], "report": d["report"],
+            "title": p["title"], "title_tokens": p["title_tokens"], "body": p["body"],
+            "body_tokens": p["body_tokens"], "format": p["format"]}
+
+
+@router.get("/{room_id}/deliveries/{seq}/download")
+async def download_delivery(room_id: str, seq: int, request: Request, as_: str = Query("md", alias="as"),
+                            user: dict = Depends(get_current_user)):
+    from fastapi.responses import Response as RawResponse
+
+    from captain_claw.flight_deck import rooms_inbox
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    _d, p = await _delivery(owner, room, seq)
+    if as_ == "docx":
+        blob = await asyncio.to_thread(rooms_inbox.docx_bytes, p["title"], p["body"])
+        name = rooms_inbox.safe_filename(p["title"], "docx")
+        media = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    elif as_ == "md":
+        blob = f"# {p['title']}\n\n{p['body']}\n".encode()
+        name, media = rooms_inbox.safe_filename(p["title"], "md"), "text/markdown; charset=utf-8"
+    else:
+        raise HTTPException(422, "as is 'md' or 'docx'")
+    from urllib.parse import quote
+
+    return RawResponse(blob, media_type=media, headers={
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}", "Cache-Control": "no-store"})
+
+
+@router.delete("/{room_id}/deliveries/{seq}")
+async def delete_delivery(room_id: str, seq: int, request: Request,
+                          user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    owner = _owner(request, user)
+    await _room(owner, room_id)
+    if not await rs.store().delete_delivery(room_id, seq):
+        raise HTTPException(404, "No such delivery")
+    return {"deleted": True}
 
 
 # ── Claude's access: which connected app reads which rooms ──────────

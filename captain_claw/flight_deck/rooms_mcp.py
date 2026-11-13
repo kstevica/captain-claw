@@ -57,7 +57,11 @@ INSTRUCTIONS = (
     "3. room_search finds passages; room_read reads a file page by page (about 50,000 characters a page). "
     "Cite files by path and page.\n"
     "4. Only released files are here. If something seems missing, say so; don't fill gaps with outside "
-    "knowledge about who the parties might be."
+    "knowledge about who the parties might be.\n"
+    "5. To give the person a result (a memo, an answer, a summary), call room_deliver with markdown in tokens. "
+    "Up to about 20,000 characters a call; longer → parts with the same title (part 1 of N, part 2 of N …), "
+    "joined exactly as sent, so end each part at a line break. The person reads it in Flight Deck with the real "
+    "names; you get a receipt, never the restored text. Don't put pictures or links in a delivery."
 )
 
 _ANNOT = {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False}
@@ -89,6 +93,20 @@ TOOLS = [
          "query": {"type": "string"},
          "limit": {"type": "integer", "description": f"At most this many passages (default 10, max {MAX_SEARCH})."}},
          "required": ["room", "query"]}, "annotations": _ANNOT},
+    {"name": "room_deliver", "description": "Give the person a result from this room: markdown (or plain text) in "
+     "tokens, with a title. The person reads it in Flight Deck with the real names put back; you get a receipt "
+     "with a number and counts, never the restored text. Up to about 20,000 characters a call — longer goes in "
+     "parts (same title; part 1 of N …), joined exactly as sent.",
+     "inputSchema": {"type": "object", "properties": {
+         "room": {"type": "string"},
+         "title": {"type": "string", "description": "A short title, in tokens like the rest."},
+         "content": {"type": "string", "description": "The result: markdown with tokens, no pictures."},
+         "format": {"type": "string", "enum": ["markdown", "text"]},
+         "part": {"type": "integer", "description": "This part's number, when sending in parts."},
+         "of": {"type": "integer", "description": "How many parts in all, when sending in parts."}},
+         "required": ["room", "title", "content"]},
+     "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False,
+                     "openWorldHint": False}},
 ]
 
 
@@ -340,12 +358,27 @@ async def _room_search(owner: str, client_id: str, args: dict[str, Any]) -> dict
             **({} if out else {"note": "Nothing found. Every word has to appear in a passage, and names are tokens here — search for ⟦ORG_7⟧, not a company name. Try fewer or other words."})}
 
 
+async def _room_deliver(owner: str, client_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    from captain_claw.flight_deck import rooms_inbox
+
+    room = await _room(owner, client_id, args.get("room"))
+    try:
+        receipt = await rooms_inbox.deliver(room, client_id, title=args.get("title"), content=args.get("content"),
+                                            fmt=args.get("format"), part=args.get("part"), of=args.get("of"))
+    except rooms_inbox.DeliveryError as exc:
+        raise ToolError(str(exc)) from None
+    await rs.store().log_read(room["id"], owner, client_id, "room_deliver",
+                              chars=len(str(args.get("content") or "")))
+    return receipt
+
+
 _HANDLERS = {
     "room_list": _room_list,
     "room_overview": _room_overview,
     "room_list_files": _room_list_files,
     "room_read": _room_read,
     "room_search": _room_search,
+    "room_deliver": _room_deliver,
 }
 
 

@@ -10,8 +10,9 @@ back **on the deck**, and the person reads or downloads the result there. Claude
 never gets the real names back: no restored text goes out through the connector.
 
 Status: P0 spike done (2026-11-13, Cowork on a throwaway deck; results in P0 below). P1 built (branch
-`feat/data-rooms-p1`, PR #539, see "P1 as built"). P2 built (branch `feat/data-rooms-p2`, see "P2 as
-built"; not yet tried with real Claude). P3–P7 not built. Builds on the anonymizer
+`feat/data-rooms-p1`, PR #539, see "P1 as built"). P2 built (branch `feat/data-rooms-p2`, PR #540, see
+"P2 as built"; not yet tried with real Claude). P3 built (branch `feat/data-rooms-p3`, see "P3 as built").
+P4–P7 not built. Builds on the anonymizer
 (`docs/anonymization-plan.md`, all merged) and the inbound MCP server
 (`flight_deck/mcp_server_routes.py`, `flight_deck/mcp_oauth_routes.py`).
 
@@ -403,6 +404,36 @@ check blocks a file, resume after restart. Only made-up names in fixtures.
   - delete;
   - a bell notice inside the deck. Line and chat channels get "Claude delivered a
     result to a data room", with no title.
+
+**P3 as built (2026-11-13, branch `feat/data-rooms-p3`, stacked on P2):**
+
+- **`room_deliver`** (`rooms_inbox.deliver`): a title and markdown or text, up to
+  200,000 characters a call. Up to 50 parts are kept encrypted until the last
+  arrives (dropped after 24 h) and joined exactly as sent. The connector's
+  instructions add rule 5: about 20,000 characters a call, parts ending at a line
+  break, no pictures or links. It is the one tool not marked read-only.
+- **The receipt never confirms a guess.** Real vault values Claude wrote itself go
+  into the owner's report and an alarm, but the receipt stays the same shape
+  (`delivered`, `restored`, `characters`, `note`, plus `not_in_room` /
+  `parts_joined` when they apply). Telling Claude it named a real value would
+  confirm the guess.
+- **Stored** in `rooms.db deliveries`: the tokens version and the restored one,
+  both encrypted with the room vault's key. Deleting the vault makes them
+  unreadable. Token history gets "back" from "Claude (data-room connector)".
+- **Bell:** "Claude delivered a result" / "Delivery #n is in the data room
+  <codename>…", with no title. The bell feeds the Line, and the Line the owner's
+  channels.
+- **Restored text is inert:** shown with no pictures and no live links (a link
+  shows its text, with the address in a tooltip). Otherwise a picture Claude
+  planted would fetch an address carrying the restored names. The browser check
+  showed no request reaching the planted host. The Word download is built with
+  `image_root` refusing everything, and markdown pictures become "[picture: …]"
+  first: without that, `docx_ops` would embed any local file path Claude named.
+- **Inbox UI:** a "From Claude" card per room (new dot, "real values" and
+  "unknown" badges, how many were put back). A reading dialog switches between
+  "With the real names" and "As Claude wrote it" and shows the report notices,
+  Markdown and Word downloads, and delete. The room list shows "N new from
+  Claude".
 
 ### P4 — Deliveries: files built on the deck
 
