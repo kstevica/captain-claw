@@ -1187,6 +1187,13 @@ async def lifespan(app: FastAPI):
         await anonymize_ner.boot(_fd_db)
     except Exception:
         pass
+    # Data rooms that were running when the deck stopped carry on.
+    try:
+        from captain_claw.flight_deck import rooms_job
+
+        await rooms_job.resume_all()
+    except Exception:
+        pass
     # ── Agent backups: each person's scheduled backups of their agents (agent_bundle.backups). ──
     from captain_claw.flight_deck.agent_bundle import backups as _agent_backups
     _backups_stop = asyncio.Event()
@@ -1563,6 +1570,12 @@ async def lifespan(app: FastAPI):
         pass
     try:
         await anonymize_vault.close()
+    except Exception:
+        pass
+    try:
+        from captain_claw.flight_deck import rooms_store
+
+        await rooms_store.close()
     except Exception:
         pass
     if hasattr(app.state, "agent_backups_stop"):
@@ -2090,6 +2103,12 @@ app.include_router(payments_routes.public_router)
 tool_audit_routes.configure(data_dir=DATA_DIR)
 external_memory_service.configure(data_dir=DATA_DIR)
 anonymize_vault.configure(data_dir=DATA_DIR)
+# Data rooms: a VDR anonymized into one vault for Claude (docs/data-room-plan.md).
+from captain_claw.flight_deck import rooms_routes as _rooms_routes  # noqa: E402
+from captain_claw.flight_deck import rooms_store as _rooms_store  # noqa: E402
+
+_rooms_store.configure(data_dir=DATA_DIR)
+app.include_router(_rooms_routes.router)
 app.include_router(tool_audit_routes.router)
 app.include_router(agent_sharing_router)
 app.include_router(context_pack_router)

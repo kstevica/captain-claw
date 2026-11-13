@@ -21,14 +21,23 @@ What is covered, beyond the visible text:
 * PowerPoint: slides, notes, layouts and masters, comments, chart labels,
   external link targets; comment authors are blanked.
 * Every kind: the document properties — author and "last modified by" are
-  emptied, title / subject / keywords / company … are anonymized or emptied.
+  emptied, title / subject / keywords / company … are anonymized or emptied;
+  the alt text and titles of pictures and shapes; text in ``customXml`` parts;
+  an embedded Office file (a chart's data workbook) is anonymized the same way,
+  inside its own zip; the thumbnail (a picture of the first page) is removed.
 
-Not changed (the caller is told): pictures and embedded files.
+Pictures stay as they are unless the caller asks for ``pictures="strip"``:
+then every picture becomes a grey "picture removed" box of the same shape
+(logos, signatures, faces, scanned tables all go), and the text a
+``picture_reader`` (OCR) finds in it becomes the picture's alt text, which is
+anonymized with the rest. Embedded objects that aren't Office files are
+emptied when stripping, else the caller is told.
 """
 
 from __future__ import annotations
 
 import io
+import posixpath
 import re
 import zipfile
 from collections.abc import Callable
@@ -56,7 +65,29 @@ EP = "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
 VT = "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"
 CUSTOM = "http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"
 TC = "http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"
+R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+VML = "urn:schemas-microsoft-com:vml"
+VML_O = "urn:schemas-microsoft-com:office:office"
+THUMBNAIL_REL = "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail"
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+
+PICTURE_MODES = ("keep", "strip")
+# (picture bytes, extension without the dot) → the text in it, "" for none.
+PictureReader = Callable[[bytes, str], str]
+MAX_DEPTH = 2  # an Office file inside an Office file inside an Office file, no deeper
+MAX_PICTURE_TEXT = 1500
+_EMBEDDED_KINDS = {".docx": "docx", ".docm": "docx", ".xlsx": "xlsx", ".xlsm": "xlsx",
+                   ".pptx": "pptx", ".pptm": "pptx"}
+# Picture formats Pillow writes, so a placeholder keeps the part's name.
+_RASTER = {"png": "PNG", "jpg": "JPEG", "jpeg": "JPEG", "jpe": "JPEG", "gif": "GIF", "bmp": "BMP",
+           "tif": "TIFF", "tiff": "TIFF", "webp": "WEBP"}
+_MEDIA_RE = re.compile(r"(word|ppt|xl)/media/[^/]+")
+_PICTURE_PARTS = {
+    "docx": r"word/(document|header\d*|footer\d*|footnotes|endnotes|comments\w*)\.xml|word/glossary/document\.xml",
+    "pptx": r"ppt/(slides|slideLayouts|slideMasters|notesSlides|notesMasters|handoutMasters)/[^/]+\.xml",
+    "xlsx": r"xl/drawings/[^/]+\.xml",
+}
 
 _PARSER = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False, remove_blank_text=False)
 
@@ -179,6 +210,9 @@ class _Package:
         self.names = [i.filename for i in infos]
         self.trees: dict[str, Any] = {}
         self.dirty: set[str] = set()
+        self.replaced: dict[str, bytes] = {}   # binary parts written anew (placeholders, nested files)
+        self.renamed: dict[str, str] = {}      # part → new name (a placeholder in another format)
+        self.removed: set[str] = set()
 
     def tree(self, name: str) -> Any | None:
         if name not in self.trees:
@@ -198,13 +232,280 @@ class _Package:
         out = io.BytesIO()
         with zipfile.ZipFile(out, "w") as zout:
             for info in self.zin.infolist():
-                if info.filename in self.dirty:
-                    data = etree.tostring(self.trees[info.filename], xml_declaration=True,
+                name = info.filename
+                if name in self.removed:
+                    continue
+                if name in self.replaced:
+                    data = self.replaced[name]
+                elif name in self.dirty:
+                    data = etree.tostring(self.trees[name], xml_declaration=True,
                                           encoding="UTF-8", standalone=True)
                 else:
-                    data = self.zin.read(info.filename)
-                zout.writestr(info, data)
+                    data = self.zin.read(name)
+                if name in self.renamed:
+                    moved = zipfile.ZipInfo(self.renamed[name], date_time=info.date_time)
+                    moved.compress_type = info.compress_type
+                    moved.external_attr = info.external_attr
+                    zout.writestr(moved, data)
+                else:
+                    zout.writestr(info, data)
         return out.getvalue()
+
+
+# ── Relationships (which part points at which) ──────────────────────
+
+
+def _rels_of(part: str) -> str:
+    """``word/document.xml`` → ``word/_rels/document.xml.rels``."""
+    folder, base = posixpath.split(part)
+    return posixpath.join(folder, "_rels", base + ".rels")
+
+
+def _rels_folder(rels: str) -> str:
+    """The folder a ``.rels`` file's relative targets start from."""
+    return posixpath.dirname(posixpath.dirname(rels))
+
+
+def _resolve(folder: str, target: str) -> str:
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(folder, target)) if folder else posixpath.normpath(target)
+
+
+def _internal_targets(pkg: _Package, part: str) -> dict[str, str]:
+    """The part's relationship ids → the parts they point at (inside the zip)."""
+    root = pkg.tree(_rels_of(part))
+    if root is None:
+        return {}
+    folder = posixpath.dirname(part)
+    out = {}
+    for rel in root.iter(f"{{{REL}}}Relationship"):
+        if rel.get("TargetMode") != "External" and rel.get("Id") and rel.get("Target"):
+            out[rel.get("Id")] = _resolve(folder, rel.get("Target"))
+    return out
+
+
+def _retarget(pkg: _Package, old: str, new: str) -> None:
+    """Every relationship pointing at part *old* points at *new* (same folder)."""
+    for rels in pkg.matching(r"(.*/)?_rels/[^/]*\.rels"):
+        root = pkg.tree(rels)
+        folder = _rels_folder(rels)
+        for rel in root.iter(f"{{{REL}}}Relationship"):
+            target = rel.get("Target") or ""
+            if rel.get("TargetMode") != "External" and target and _resolve(folder, target) == old:
+                rel.set("Target", target[: len(target) - len(posixpath.basename(target))] + posixpath.basename(new))
+                pkg.dirty.add(rels)
+
+
+def _drop_override(pkg: _Package, part: str) -> None:
+    types = pkg.tree("[Content_Types].xml")
+    if types is None:
+        return
+    for el in list(types.iter(f"{{{CT}}}Override")):
+        if (el.get("PartName") or "").lstrip("/") == part:
+            types.remove(el)
+            pkg.dirty.add("[Content_Types].xml")
+
+
+def _ensure_default(pkg: _Package, ext: str, content_type: str) -> None:
+    types = pkg.tree("[Content_Types].xml")
+    if types is None:
+        return
+    if any((el.get("Extension") or "").lower() == ext for el in types.iter(f"{{{CT}}}Default")):
+        return
+    el = etree.SubElement(types, f"{{{CT}}}Default")
+    el.set("Extension", ext)
+    el.set("ContentType", content_type)
+    pkg.dirty.add("[Content_Types].xml")
+
+
+def _remove_thumbnails(pkg: _Package) -> None:
+    """The thumbnail is a picture of the first page: it goes, with its links."""
+    thumbs = pkg.matching(r"docProps/thumbnail\.\w+")
+    if not thumbs:
+        return
+    root = pkg.tree("_rels/.rels")
+    if root is not None:
+        for rel in list(root.iter(f"{{{REL}}}Relationship")):
+            if rel.get("Type") == THUMBNAIL_REL or _resolve("", rel.get("Target") or "") in thumbs:
+                root.remove(rel)
+                pkg.dirty.add("_rels/.rels")
+    for name in thumbs:
+        pkg.removed.add(name)
+        _drop_override(pkg, name)
+
+
+# ── Pictures ────────────────────────────────────────────────────────
+
+
+def _holder_of(el: Any, prefer_docpr: bool) -> Any | None:
+    """The element carrying a picture's alt text: Word's ``wp:docPr`` (what Word
+    shows), else the nearest ``cNvPr`` (slides, sheets, shapes filled with it)."""
+    fallback = None
+    anc = el.getparent()
+    while anc is not None:
+        for ch in anc:
+            if not isinstance(ch.tag, str):
+                continue
+            local = _local(ch.tag)
+            if local == "docPr":
+                return ch
+            if fallback is None and local.startswith("nv") and local.endswith("Pr"):
+                c_nv = next((g for g in ch if isinstance(g.tag, str) and _local(g.tag) == "cNvPr"), None)
+                if c_nv is not None:
+                    fallback = c_nv
+                    if not prefer_docpr:
+                        return c_nv
+        anc = anc.getparent()
+    return fallback
+
+
+def _picture_holders(pkg: _Package, kind: str) -> dict[str, list[tuple[str, Any, str]]]:
+    """Each picture part → where it is drawn: (xml part, element, alt attribute)."""
+    out: dict[str, list[tuple[str, Any, str]]] = {}
+    for part in pkg.matching(_PICTURE_PARTS[kind]):
+        targets = _internal_targets(pkg, part)
+        if not targets:
+            continue
+        for el in pkg.tree(part).iter():
+            if not isinstance(el.tag, str):
+                continue
+            local, ns = _local(el.tag), etree.QName(el.tag).namespace
+            if local == "blip":
+                rid = el.get(f"{{{R}}}embed")
+            elif local == "imagedata" and ns == VML:
+                rid = el.get(f"{{{R}}}id")
+            else:
+                continue
+            if not rid or rid not in targets:
+                continue
+            if local == "imagedata":
+                shape = el.getparent()
+                if shape is not None:
+                    out.setdefault(targets[rid], []).append((part, shape, "alt"))
+                continue
+            holder = _holder_of(el, prefer_docpr=kind == "docx")
+            if holder is not None:
+                out.setdefault(targets[rid], []).append((part, holder, "descr"))
+    return out
+
+
+def placeholder(blob: bytes, ext: str) -> tuple[bytes, str]:
+    """A grey "picture removed" box with the picture's proportions, in the
+    picture's own format where Pillow writes it (else PNG): (bytes, extension)."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    ext = ext.lower()
+    width, height = 400, 300
+    try:
+        with Image.open(io.BytesIO(blob)) as im:  # reads the header only
+            width, height = im.size
+    except Exception:  # noqa: BLE001 — unknown or damaged picture: a 4:3 box
+        pass
+    if ext == "svg":
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
+               f'preserveAspectRatio="none"><rect width="100%" height="100%" fill="#d9d9d9"/>'
+               f'<text x="50%" y="50%" fill="#5a5a5a" font-family="sans-serif" font-size="{max(10, height // 10)}" '
+               f'text-anchor="middle" dominant-baseline="middle">picture removed</text></svg>')
+        return svg.encode("utf-8"), "svg"
+    scale = min(1.0, 600 / max(width, height, 1))
+    w, h = max(1, round(width * scale)), max(1, round(height * scale))
+    img = Image.new("RGB", (w, h), (217, 217, 217))
+    draw = ImageDraw.Draw(img)
+    label = "picture removed"
+    size = max(8, min(h // 6, w // 9))
+    font = ImageFont.load_default(size=size)
+    box = draw.textbbox((0, 0), label, font=font)
+    if box[2] - box[0] <= w and box[3] - box[1] <= h:
+        draw.text(((w - (box[2] - box[0])) / 2, (h - (box[3] - box[1])) / 2 - box[1]), label,
+                  fill=(90, 90, 90), font=font)
+    fmt = _RASTER.get(ext)
+    if fmt is None:
+        fmt, ext = "PNG", "png"
+    if fmt == "GIF":
+        img = img.convert("P")
+    buf = io.BytesIO()
+    img.save(buf, fmt)
+    return buf.getvalue(), ext
+
+
+@dataclass
+class _Stats:
+    pictures: int = 0          # replaced with a placeholder
+    pictures_read: int = 0     # of those, text found and kept as alt text
+    pictures_left: int = 0     # kept as they are
+    embedded_done: int = 0     # Office files inside, anonymized
+    embedded_emptied: int = 0
+    embedded_left: int = 0
+
+
+def _picture_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text or "").strip()
+    return text[:MAX_PICTURE_TEXT]
+
+
+def _strip_pictures(pkg: _Package, kind: str, reader: PictureReader | None, stats: _Stats) -> None:
+    holders = _picture_holders(pkg, kind)
+    for name in [n for n in pkg.names if _MEDIA_RE.fullmatch(n)]:
+        blob = pkg.zin.read(name)
+        ext = posixpath.splitext(name)[1].lstrip(".").lower()
+        text = ""
+        if reader is not None:
+            try:
+                text = _picture_text(reader(blob, ext))
+            except Exception:  # noqa: BLE001 — a picture OCR can't read just has no text
+                text = ""
+        if text:
+            stats.pictures_read += 1
+            for part, el, attr in holders.get(name, []):
+                before = (el.get(attr) or "").strip()
+                el.set(attr, f"{before} — Text in the picture: {text}" if before else f"Text in the picture: {text}")
+                pkg.dirty.add(part)
+        new_blob, new_ext = placeholder(blob, ext)
+        pkg.replaced[name] = new_blob
+        if new_ext != ext:
+            stem = posixpath.splitext(name)[0]
+            new_name = f"{stem}.{new_ext}"
+            if new_name in pkg.names:
+                new_name = f"{stem}-removed.{new_ext}"
+            pkg.renamed[name] = new_name
+            _retarget(pkg, name, new_name)
+            _drop_override(pkg, name)
+            _ensure_default(pkg, new_ext, f"image/{new_ext}")
+        stats.pictures += 1
+
+
+def _alt_units(pkg: _Package, kind: str, units: list[_Unit]) -> None:
+    """Alt text and titles of pictures and shapes."""
+    for part in pkg.matching(_PICTURE_PARTS[kind]):
+        for el in pkg.tree(part).iter():
+            if not isinstance(el.tag, str):
+                continue
+            local, ns = _local(el.tag), etree.QName(el.tag).namespace
+            if local in ("docPr", "cNvPr"):
+                attrs = ("descr", "title")
+            elif ns == VML and local == "shape":
+                attrs = ("alt",)
+            elif ns == VML and local == "imagedata":
+                attrs = (f"{{{VML_O}}}title",)
+            else:
+                continue
+            for attr in attrs:
+                if (el.get(attr) or "").strip():
+                    units.append(_Unit(part, attr=(el, attr)))
+
+
+def _custom_xml_units(pkg: _Package, units: list[_Unit]) -> None:
+    """``customXml`` parts (SharePoint fields, data bound to content controls):
+    every piece of text in them."""
+    for name in pkg.matching(r"customXml/item\d+\.xml"):
+        try:
+            root = pkg.tree(name)
+        except OfficeError:
+            continue
+        for el in root.iter():
+            if isinstance(el.tag, str) and (el.text or "").strip():
+                units.append(_Unit(name, [el]))
 
 
 def _paragraph_units(pkg: _Package, name: str, para: str, pieces: set[str], units: list[_Unit]) -> None:
@@ -272,16 +573,46 @@ def _properties(pkg: _Package, units: list[_Unit], scrub: bool) -> None:
             _single_units(pkg, "docProps/custom.xml", tag, units)
 
 
-def _warnings(pkg: _Package) -> list[str]:
+def _warnings(stats: _Stats) -> list[str]:
     out = []
-    pictures = [n for n in pkg.names if re.search(r"/media/", n)]
-    embedded = [n for n in pkg.names if re.search(r"/embeddings/", n)]
-    if pictures:
-        out.append(f"{len(pictures)} picture(s) inside were left as they are — check them for faces, "
-                   "signatures or text.")
-    if embedded:
-        out.append(f"{len(embedded)} embedded file(s) (e.g. a chart's data) were left as they are.")
+    if stats.pictures:
+        read = (f"; the text read from {stats.pictures_read} of them is kept as their alt text, anonymized"
+                if stats.pictures_read else "")
+        out.append(f"{stats.pictures} picture(s) replaced with a grey “picture removed” box{read}.")
+    if stats.pictures_left:
+        out.append(f"{stats.pictures_left} picture(s) inside were left as they are — check them for faces, "
+                   "logos, signatures or text.")
+    if stats.embedded_emptied:
+        out.append(f"{stats.embedded_emptied} embedded object(s) that aren't Office files were emptied.")
+    if stats.embedded_left:
+        out.append(f"{stats.embedded_left} embedded object(s) that aren't Office files were left as they are.")
     return out
+
+
+def _embedded(pkg: _Package, *, scrub: bool, pictures: str, reader: PictureReader | None, depth: int,
+              stats: _Stats) -> list[tuple[str, OfficePrepared]]:
+    """Office files embedded in this one (a chart's data workbook, an inserted
+    document) are prepared the same way, inside their own zip; other embedded
+    objects are emptied when stripping, else counted."""
+    nested: list[tuple[str, OfficePrepared]] = []
+    for name in pkg.matching(r"(word|ppt|xl)/embeddings/[^/]+"):
+        kind = _EMBEDDED_KINDS.get(posixpath.splitext(name)[1].lower(), "")
+        if kind and depth < MAX_DEPTH:
+            try:
+                prep = prepare(pkg.zin.read(name), kind, scrub=scrub, pictures=pictures,
+                               picture_reader=reader, _depth=depth + 1)
+            except OfficeError:
+                prep = None
+            if prep is not None:
+                nested.append((name, prep))
+                stats.embedded_done += 1
+                continue
+        if scrub and pictures == "strip":
+            pkg.replaced[name] = b""
+            stats.embedded_emptied += 1
+        elif scrub:
+            stats.embedded_left += 1
+    return nested
 
 
 # ── Word ────────────────────────────────────────────────────────────
@@ -539,14 +870,29 @@ def _groups(units: list[_Unit], kind: str) -> list[_Group]:
     return groups
 
 
-def prepare(data: bytes, kind: str, *, scrub: bool = True) -> OfficePrepared:
+def prepare(data: bytes, kind: str, *, scrub: bool = True, pictures: str = "keep",
+            picture_reader: PictureReader | None = None, _depth: int = 0) -> OfficePrepared:
     """The segments of an office file, and how to write it back with each
     segment's edits applied. *scrub* (anonymizing, not restoring) also blanks
-    authors and personal document properties."""
+    authors and personal document properties and removes the thumbnail;
+    with ``pictures="strip"`` it replaces every picture (see the module doc)."""
     kind = kind.lower()
     if kind not in OFFICE_KINDS:
         raise OfficeError(f"not an office kind: {kind}")
+    if pictures not in PICTURE_MODES:
+        raise OfficeError(f"pictures must be one of {', '.join(PICTURE_MODES)}")
     pkg = _Package(data)
+    if not any(n.startswith({"docx": "word/", "pptx": "ppt/", "xlsx": "xl/"}[kind]) for n in pkg.names):
+        raise OfficeError(f"this isn't a .{kind} file inside")
+    stats = _Stats()
+    if scrub:
+        _remove_thumbnails(pkg)
+        if pictures == "strip":
+            # Before the units: the text read from a picture becomes alt text,
+            # which is then anonymized like every other alt text.
+            _strip_pictures(pkg, kind, picture_reader, stats)
+        else:
+            stats.pictures_left = sum(1 for n in pkg.names if _MEDIA_RE.fullmatch(n))
     after: Callable[[], None] = lambda: None  # noqa: E731
     if kind == "docx":
         units = _docx(pkg, scrub)
@@ -554,11 +900,16 @@ def prepare(data: bytes, kind: str, *, scrub: bool = True) -> OfficePrepared:
         units = _pptx(pkg, scrub)
     else:
         units, after = _xlsx(pkg, scrub)
+    _alt_units(pkg, kind, units)
+    _custom_xml_units(pkg, units)
     _properties(pkg, units, scrub)
-    if not any(n.startswith({"docx": "word/", "pptx": "ppt/", "xlsx": "xl/"}[kind]) for n in pkg.names):
-        raise OfficeError(f"this isn't a .{kind} file inside")
+    nested = _embedded(pkg, scrub=scrub, pictures=pictures, reader=picture_reader, depth=_depth, stats=stats)
     groups = _groups(units, kind)
     segments = [Segment(g.text(), g.units[0].hint if len(g.units) == 1 else "") for g in groups]
+    warnings = _warnings(stats)
+    for _name, prep in nested:
+        segments.extend(prep.segments)
+        warnings.extend(f"Inside an embedded file: {w}" for w in prep.warnings)
 
     def rebuild(edits: list[list[tuple[int, int, str]]]) -> bytes:
         from captain_claw.anonymize.engine import apply_edits
@@ -574,6 +925,13 @@ def prepare(data: bytes, kind: str, *, scrub: bool = True) -> OfficePrepared:
                 elif _apply_to_pieces(unit.elements, unit_edits):
                     pkg.dirty.add(unit.part)
         after()
+        pos = len(groups)
+        for name, prep in nested:
+            n = len(prep.segments)
+            sub = list(edits[pos:pos + n])
+            sub += [[] for _ in range(n - len(sub))]
+            pkg.replaced[name] = prep.rebuild(sub)  # always: scrubbing may have changed it
+            pos += n
         return pkg.write()
 
-    return OfficePrepared(kind, segments, rebuild, _warnings(pkg))
+    return OfficePrepared(kind, segments, rebuild, warnings)

@@ -35,6 +35,7 @@ import { CodePage } from './pages/CodePage'
 import { CrewBoard } from './components/crew/CrewBoard'
 import { CustomToolsPage } from './components/customTools/CustomToolsPage'
 import { AnonymizePage } from './components/anonymize/AnonymizePage'
+import { RoomsPage } from './components/rooms/RoomsPage'
 import { DubinaPage } from './pages/DubinaPage'
 import { TodayPage } from './pages/TodayPage'
 import { SkillsPage } from './pages/SkillsPage'
@@ -413,6 +414,7 @@ function AppContent() {
       {view === 'crew' && <CrewBoard phone={isMobile} />}
       {view === 'custom-tools' && <CustomToolsPage phone={isMobile} />}
       {view === 'anonymize' && <AnonymizePage phone={isMobile} />}
+      {view === 'rooms' && <RoomsPage phone={isMobile} />}
       {view === 'dubina' && <DubinaPage />}
       {view === 'vfs' && <VFSPage />}
       {view === 'deep-memory' && <DeepMemoryPage />}

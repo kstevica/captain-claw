@@ -300,6 +300,11 @@ class VaultStore:
             raise fd_crypto.CryptoUnavailable("this vault's key can't be opened with this deck's data key")
         return Fernet(key.encode("ascii"))
 
+    def cipher(self, row: dict[str, Any]) -> Any:
+        """The vault's own key (Fernet), for data that belongs with the vault —
+        a data room's original files are encrypted with it."""
+        return self._fernet(row)
+
     async def load_state(self, row: dict[str, Any]) -> VaultState:
         f = self._fernet(row)
         db = await self._conn()

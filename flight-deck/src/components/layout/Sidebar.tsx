@@ -35,6 +35,7 @@ import {
   Code2,
   Globe,
   EyeOff,
+  FolderLock,
   Activity,
   Bug,
   IdCard,
@@ -92,6 +93,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
       { id: 'deep-memory', icon: Database, label: 'Deep Memory' },
       { id: 'hosting', icon: Globe, label: 'Hosting' },
       { id: 'anonymize', icon: EyeOff, label: 'Anonymize' },
+      { id: 'rooms', icon: FolderLock, label: 'Data rooms' },
     ],
   },
   {
