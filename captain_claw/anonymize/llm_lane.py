@@ -179,11 +179,13 @@ Complete = Callable[[str, str], Awaitable[tuple[str, int]]]
 
 
 async def detect(text: str, complete: Complete, *, kinds: frozenset[str] | None = None,
-                 concurrency: int = 2) -> LaneResult:
+                 concurrency: int = 2,
+                 on_progress: Callable[[int, int], Awaitable[None]] | None = None) -> LaneResult:
     """Ask the model about *text*, chunk by chunk. *complete(system, user)*
     returns ``(answer, tokens used)``. Raises :class:`LaneFailed` when the text
     is too long, a call fails, or an answer isn't usable after one retry —
-    a lane that half ran is a lane that failed."""
+    a lane that half ran is a lane that failed. *on_progress(done, total)* is
+    awaited before the first chunk and after each one (for a progress bar)."""
     if len(text) > MAX_CHARS:
         raise LaneFailed(f"the text is over {MAX_CHARS:,} characters — too long for the trusted model; "
                          "split it, or use the deterministic lane")
@@ -227,10 +229,23 @@ async def detect(text: str, complete: Complete, *, kinds: frozenset[str] | None 
             return terms
         return []
 
+    done = 0
+
+    async def tell() -> None:
+        if on_progress is not None:
+            try:
+                await on_progress(done, len(parts))
+            except Exception:  # noqa: BLE001 — a progress bar never stops the lane
+                pass
+
     async def one(i: int, part: str) -> None:
+        nonlocal done
         async with sem:
             found[i] = await ask(i, part)
+        done += 1
+        await tell()
 
+    await tell()
     try:
         async with asyncio.TaskGroup() as tg:
             for i, part in enumerate(parts):
