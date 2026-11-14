@@ -1159,7 +1159,7 @@ function connect() {
     connected = true;
     _errorSoundPlayed = false; // reset so next error can sound again
     $(".status-dot").classList.add("connected");
-    logEntry("system", "Connected to Captain Claw");
+    logEntry("system", "Connected to Captain");
   };
 
   ws.onclose = () => {

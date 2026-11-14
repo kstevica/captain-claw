@@ -917,7 +917,7 @@ class PlatformAdapter:
             (
                 "Pairing required.\n"
                 f"Your pairing token: `{existing_token}`\n\n"
-                "Ask the Captain Claw operator to approve you with:\n"
+                "Ask the Captain operator to approve you with:\n"
                 f"/approve user {self.platform} {existing_token}"
             ),
             reply_to=reply_to,
@@ -959,7 +959,7 @@ class PlatformAdapter:
             await self.send(
                 channel_id,
                 (
-                    "Pairing approved. You can now use Captain Claw.\n"
+                    "Pairing approved. You can now use Captain.\n"
                     "All chat and supported slash commands are available."
                 ),
             )

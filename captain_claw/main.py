@@ -45,7 +45,7 @@ def _build_runtime_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="captain-claw",
         add_help=False,
-        description="Captain Claw: self-hosted framework for orchestrating fleets of specialist AI agents — ensemble reasoning and a full agentic coding pipeline, model-agnostic and local-friendly",
+        description="Captain: self-hosted framework for orchestrating fleets of specialist AI agents — ensemble reasoning and a full agentic coding pipeline, model-agnostic and local-friendly",
     )
     parser.add_argument("-c", "--config", default="", help="Path to config file")
     parser.add_argument("-m", "--model", default="", help="Override model")
@@ -452,7 +452,7 @@ async def run_interactive() -> None:
 def version() -> None:
     """Show version information."""
     from captain_claw import __version__
-    print(f"Captain Claw v{__version__}")
+    print(f"Captain v{__version__}")
 
 
 if __name__ == "__main__":

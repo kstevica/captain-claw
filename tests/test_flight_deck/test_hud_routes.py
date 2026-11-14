@@ -153,7 +153,7 @@ class TestPwa:
         assert r.headers["content-type"].startswith("application/manifest+json")
         assert "max-age=3600" in r.headers["cache-control"]
         m = r.json()
-        assert m["name"] == "Captain Claw" and m["short_name"] == "Claw"
+        assert m["name"] == "Captain" and m["short_name"] == "Captain"
         assert m["start_url"] == "/hud/" and m["scope"] == "/hud/"
         assert m["display"] == "standalone"
         assert m["background_color"] == "#000000" and m["theme_color"] == "#000000"

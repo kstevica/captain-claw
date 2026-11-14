@@ -1142,7 +1142,7 @@ def _email_parts(title: str, text: str, when: datetime) -> tuple[str, str, str]:
 
     stamp = f"{when:%a %d %b %Y, %H:%M}"
     subject = f"⏰ {title} — {when:%a %d %b}"
-    footer = f"Scheduled task “{title}” · ran {stamp} · Captain Claw"
+    footer = f"Scheduled task “{title}” · ran {stamp} · Captain"
     plain = f"{text.strip()}\n\n—\n{footer}\n"
     html_body = (
         '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;'

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Captain Claw — Setup</title>
+    <title>Captain — Setup</title>
     <link rel="stylesheet" href="/static/onboarding.css">
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
 </head>
@@ -15,8 +15,8 @@
         <!-- Step 0: Welcome -->
         <div class="ob-step visible" data-step="0">
             <div class="ob-welcome">
-                <img src="/static/logo.svg" alt="Captain Claw">
-                <h1>Captain Claw</h1>
+                <img src="/static/logo.svg" alt="Captain">
+                <h1>Captain</h1>
                 <p>Let's get your AI agent ready. This takes about a minute.</p>
                 <button class="ob-btn ob-btn-primary" onclick="OB.next()">Get Started</button>
             </div>
@@ -95,7 +95,7 @@
         <!-- Step 5: Extra Models -->
         <div class="ob-step" data-step="5">
             <h2>Additional Models</h2>
-            <p class="ob-desc">Captain Claw comes pre-configured with 12 models across OpenAI, Anthropic, and Gemini (including image generation, OCR, and vision). You can manage them in Settings.</p>
+            <p class="ob-desc">Captain comes pre-configured with 12 models across OpenAI, Anthropic, and Gemini (including image generation, OCR, and vision). You can manage them in Settings.</p>
             <p class="ob-desc">Need more? Add custom models below, or skip to continue.</p>
             <div class="ob-extra-models" id="extra-models-list"></div>
             <button class="ob-btn-text" id="add-model-btn" onclick="OB.addExtraModel()">+ Add a model</button>
@@ -128,7 +128,7 @@
         <!-- Step 7: Telegram -->
         <div class="ob-step" data-step="7">
             <h2>Telegram Bot</h2>
-            <p class="ob-desc">Connect a Telegram bot to chat with Captain Claw from your phone. You can set this up later in Settings.</p>
+            <p class="ob-desc">Connect a Telegram bot to chat with Captain from your phone. You can set this up later in Settings.</p>
             <div class="ob-toggle-row">
                 <input type="checkbox" id="enable-telegram">
                 <label for="enable-telegram">Enable Telegram integration</label>
@@ -156,7 +156,7 @@
         <!-- Step 8: Summary + Save -->
         <div class="ob-step" data-step="8">
             <h2>Ready to Go</h2>
-            <p class="ob-desc">Review your setup and launch Captain Claw.</p>
+            <p class="ob-desc">Review your setup and launch Captain.</p>
             <table class="ob-summary-table" id="summary-table"></table>
             <div class="ob-actions">
                 <button class="ob-btn ob-btn-secondary" onclick="OB.prev()">Back</button>
@@ -172,7 +172,7 @@
             <div class="ob-done">
                 <div class="ob-check">&#10003;</div>
                 <h2>Setup Complete</h2>
-                <p>Captain Claw is configured and ready.</p>
+                <p>Captain is configured and ready.</p>
                 <a href="/chat" class="ob-btn ob-btn-primary" style="display:inline-block; text-decoration:none;">Open Chat</a>
                 <br><br>
                 <a href="/" style="color:var(--ob-text-dim); font-size:13px;">Go to Dashboard</a>

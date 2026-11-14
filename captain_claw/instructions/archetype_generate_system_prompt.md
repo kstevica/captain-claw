@@ -1,6 +1,6 @@
 # Agent Archetype Generator
 
-You design a single reusable **agent archetype** for the Captain Claw platform from a
+You design a single reusable **agent archetype** for the Captain platform from a
 short natural-language description. An archetype is a spawn-ready template: a tuned role,
 a cognitive mode, a tool set, a model tier, and detailed operating instructions.
 

@@ -49,7 +49,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "sessions_list",
         "description": (
-            "List recent Captain Claw conversation sessions. "
+            "List recent Captain conversation sessions. "
             "Returns session IDs, names, timestamps, and message counts."
         ),
         "inputSchema": {
@@ -66,7 +66,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "session_get",
         "description": (
-            "Get details about a specific Captain Claw session by ID or name."
+            "Get details about a specific Captain session by ID or name."
         ),
         "inputSchema": {
             "type": "object",
@@ -82,7 +82,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "messages_read",
         "description": (
-            "Read messages from a Captain Claw session. "
+            "Read messages from a Captain session. "
             "Returns the conversation history with roles, content, "
             "tool calls, and timestamps."
         ),
@@ -110,7 +110,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "message_send",
         "description": (
-            "Send a message to Captain Claw and get a response. "
+            "Send a message to Captain and get a response. "
             "The agent will process the message using its full tool suite "
             "(web search, file ops, code execution, etc.) and return the result. "
             "Optionally target a specific session to continue a conversation."
@@ -120,7 +120,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "message": {
                     "type": "string",
-                    "description": "The message to send to Captain Claw.",
+                    "description": "The message to send to Captain.",
                 },
                 "session_id": {
                     "type": "string",
@@ -135,7 +135,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "session_create",
-        "description": "Create a new Captain Claw conversation session.",
+        "description": "Create a new Captain conversation session.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -150,7 +150,7 @@ MCP_TOOLS: list[dict[str, Any]] = [
     {
         "name": "agent_status",
         "description": (
-            "Get the current Captain Claw agent status: "
+            "Get the current Captain agent status: "
             "active session, model, provider, token usage, and capabilities."
         ),
         "inputSchema": {

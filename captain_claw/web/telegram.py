@@ -572,7 +572,7 @@ async def _handle_telegram_message(server: WebServer, message: TelegramMessage) 
             session_name = user_agent.session.name if user_agent.session else "none"
             await _tg_send(
                 server, message.chat_id,
-                f"Captain Claw connected.\nYour session: {session_name}\nSend plain text to chat.",
+                f"Captain connected.\nYour session: {session_name}\nSend plain text to chat.",
                 reply_to_message_id=message.message_id,
             )
             return
@@ -1733,7 +1733,7 @@ async def _tg_pair_unknown_user(server: WebServer, message: TelegramMessage) -> 
         (
             "Pairing required.\n"
             f"Your pairing token: `{existing_token}`\n\n"
-            "Ask the Captain Claw operator to approve you with:\n"
+            "Ask the Captain operator to approve you with:\n"
             f"/approve user telegram {existing_token}"
         ),
         reply_to_message_id=message.message_id,
@@ -1791,7 +1791,7 @@ async def handle_approve_command(server: WebServer, args: str) -> str:
     if chat_id and server._telegram_bridge:
         await _tg_send(
             server, chat_id,
-            "Pairing approved. You can now use Captain Claw.\nSend any text to chat.",
+            "Pairing approved. You can now use Captain.\nSend any text to chat.",
         )
 
     username = str(record.get("username", "")).strip()

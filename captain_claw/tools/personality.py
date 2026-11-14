@@ -11,7 +11,7 @@ log = get_logger(__name__)
 _AGENT_DESCRIPTION = (
     "Read or update the agent personality profile. "
     "The personality defines the agent's name, description, background, "
-    "and areas of expertise. Any name is accepted; 'of the Captain Claw family' "
+    "and areas of expertise. Any name is accepted; 'of the Captain family' "
     "is automatically appended in the system prompt. "
     "Use action 'get' to view the current personality, 'update' to modify fields."
 )

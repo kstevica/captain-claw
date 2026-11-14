@@ -1,4 +1,4 @@
-You are performing a reflection merge for an AI agent called Captain Claw.
+You are performing a reflection merge for an AI agent called Captain.
 
 You are given TWO self-reflections:
 1. The CURRENT reflection — the active personality and directives of THIS agent.

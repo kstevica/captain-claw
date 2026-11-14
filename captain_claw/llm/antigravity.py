@@ -24,7 +24,7 @@ from captain_claw.llm import LLMProvider, LLMResponse, Message, TokenRateLimiter
 AGENT_NAME = "captain-claw-text"
 AGENT_PROFILE = """---
 name: captain-claw-text
-description: Text generation for Captain Claw without tools or ambient customizations.
+description: Text generation for Captain without tools or ambient customizations.
 mainAgent: true
 subagent: false
 tools: []
@@ -91,14 +91,14 @@ def resolve_cli() -> str:
         path = Path(local) / "agy" / "bin" / "agy.exe"
         if path.is_file():
             return str(path)
-    raise LLMError("Antigravity CLI not found. Install `agy` on the Captain Claw host.")
+    raise LLMError("Antigravity CLI not found. Install `agy` on the Captain host.")
 
 
 def cli_failure(diagnostics: str) -> LLMAPIError:
     """Classify errors without publishing CLI logs, credentials, or URLs."""
     text = diagnostics.lower()
     if any(word in text for word in ("authentication", "not logged", "sign in", "login")):
-        detail = "Sign in by running `agy` on the same host and OS account as Captain Claw."
+        detail = "Sign in by running `agy` on the same host and OS account as Captain."
     elif any(word in text for word in ("quota", "rate limit", "credits", "429")):
         detail = "Subscription quota unavailable. Wait for reset; API fallback and extra credits are disabled."
     elif "model" in text:

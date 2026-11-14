@@ -666,9 +666,9 @@ _PNG_ICONS = [
 ]
 
 _PWA_MANIFEST = {
-    "name": "Captain Claw — Glasses Bridge",
+    "name": "Captain — Glasses Bridge",
     "short_name": "Bridge",
-    "description": "Mobile bridge for Captain Claw glasses sessions.",
+    "description": "Mobile bridge for Captain glasses sessions.",
     "start_url": "/glasses/mobile",
     "scope": "/glasses/",
     "display": "standalone",
@@ -683,9 +683,9 @@ _PWA_MANIFEST = {
 # pick up the app icon. Distinct from the mobile bridge: different start_url,
 # darker theme, named for the glasses-side experience.
 _GLASSES_VIEW_MANIFEST = {
-    "name": "Captain Claw",
-    "short_name": "Claw",
-    "description": "Captain Claw on Meta Ray-Ban Display glasses.",
+    "name": "Captain",
+    "short_name": "Captain",
+    "description": "Captain on Meta Ray-Ban Display glasses.",
     "start_url": "/glasses/view",
     "scope": "/glasses/",
     "display": "standalone",

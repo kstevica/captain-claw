@@ -321,7 +321,7 @@ def validate_app_spec(spec: AppSpec) -> list[str]:
 
 
 _APP_PLAN_SYSTEM_PROMPT = """\
-You are an app architect for Captain Claw's code-app runtime. Given a
+You are an app architect for Captain's code-app runtime. Given a
 user description, produce a JSON spec for a small self-contained
 single-page app. The spec will be fed to a code generator that writes
 ``backend.py`` (Python, async ``handle(method, path, headers, body)``)

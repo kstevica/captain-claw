@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Personality & Personas — Captain Claw</title>
+    <title>Personality & Personas — Captain</title>
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <style>
 :root {
@@ -594,7 +594,7 @@ textarea.pp-input {
             header.innerHTML = '<span class="pp-editor-title">Agent Personality</span><span class="pp-editor-subtitle">Define the agent\'s default identity, background, and expertise areas.</span>';
             container.appendChild(header);
 
-            var nameInp = ppFormField(container, 'Name', 'text', data.name || '', 'e.g. Captain Claw');
+            var nameInp = ppFormField(container, 'Name', 'text', data.name || '', 'e.g. Captain');
             var descInp = ppFormField(container, 'Description', 'textarea', data.description || '', '', 3);
             var bgInp = ppFormField(container, 'Background', 'textarea', data.background || '', '', 5);
             var expInp = ppFormField(container, 'Expertise', 'textarea', (data.expertise || []).join('\n'), 'One expertise per line', 8);

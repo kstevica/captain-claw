@@ -24,7 +24,7 @@ log = get_logger(__name__)
 # One lock per project dir — git's index is not safe under concurrent writers.
 _locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-_AUTHOR = ("-c", "user.name=Captain Claw", "-c", "user.email=code@captain-claw.local")
+_AUTHOR = ("-c", "user.name=Captain", "-c", "user.email=code@captain-claw.local")
 
 # Things a coding agent's runtime litters into the workspace that should never
 # be versioned (shell pre-creates ``saved/`` under the workspace root).

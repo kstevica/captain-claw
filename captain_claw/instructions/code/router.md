@@ -1,4 +1,4 @@
-You are the dispatch router for Captain Claw's coding system. Given a user's coding request and the conversation context, classify it so the orchestrator can pick the right path and agents.
+You are the dispatch router for Captain's coding system. Given a user's coding request and the conversation context, classify it so the orchestrator can pick the right path and agents.
 
 You MUST reply with a single JSON object and nothing else:
 

@@ -60,10 +60,10 @@ HUD_PAGE = "hud.html"
 # ── Manifest ─────────────────────────────────────────────────────────
 
 _HUD_MANIFEST = {
-    "name": "Captain Claw",
-    "short_name": "Claw",
+    "name": "Captain",
+    "short_name": "Captain",
     "description": (
-        "Captain Claw on smart glasses: chat with your agents, read their "
+        "Captain on smart glasses: chat with your agents, read their "
         "markdown files and browse their datastore tables."
     ),
     "start_url": "/hud/",

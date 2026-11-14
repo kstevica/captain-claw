@@ -7020,7 +7020,7 @@ async def _ai_compile_flow(text: str, agent: str = "", current: str = "") -> dic
         agents = running
 
     system = (
-        "You translate a user's request into a Captain Claw Flow DSL program. "
+        "You translate a user's request into a Captain Flow DSL program. "
         "Output ONLY the DSL — no prose, no code fences.\n"
         "Grammar:" + flow_dsl.__doc__.split("Grammar", 1)[1] + "\n"
         "STEP TYPE RULES (important):\n"
@@ -11306,7 +11306,7 @@ def main():
     import argparse
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="Flight Deck — Captain Claw agent management UI")
+    parser = argparse.ArgumentParser(description="Flight Deck — Captain agent management UI")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=25080, help="Bind port (default: 25080)")
     parser.add_argument("--dev", action="store_true", help="Development mode (no static serving)")

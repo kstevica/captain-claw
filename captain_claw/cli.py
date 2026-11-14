@@ -160,18 +160,18 @@ class TerminalUI:
         """Print welcome message."""
         self._prepare_output()
         if not self._colors_enabled:
-            print("=== Captain Claw ===")
+            print("=== Captain ===")
             print("Type your message or 'exit' to quit.")
             print("Type '/help' for commands.\n")
             return
         
         try:
-            print("=== Captain Claw ===")
+            print("=== Captain ===")
             print("Console AI Agent (Ollama)")
             print()
             print("Type '/help' for commands.\n")
         except Exception:
-            print("=== Captain Claw ===")
+            print("=== Captain ===")
             print("Type '/help' for commands.\n")
 
     def print_help(self) -> None:
@@ -207,7 +207,7 @@ Commands:
   /config         - Show configuration
   /history        - Show conversation history
   /compact        - Manually compact long session history
-  /cron "<task>"  - Run one-off task through Captain Claw runtime/guards
+  /cron "<task>"  - Run one-off task through Captain runtime/guards
   /cron run script <path> - Run existing script file with guards
   /cron run tool <path> - Run existing tool file with guards
   /cron add every <Nm|Nh> <task|script|tool ...> - Schedule recurring pseudo-cron job
@@ -261,7 +261,7 @@ Commands:
   /scroll status - Show monitor pane scroll positions
   /exit, /quit    - Exit the application
   
-  Just type your message to chat with Captain Claw!
+  Just type your message to chat with Captain!
 """
         if self._monitor_mode and self._sticky_footer:
             self._append_chat_text(help_text + "\n")

@@ -1413,7 +1413,7 @@
         form.className = 'st-pp-editor-form';
 
         // Name
-        var nameInp = _ppFormField(form, 'Name', 'text', data.name || '', 'e.g. Captain Claw');
+        var nameInp = _ppFormField(form, 'Name', 'text', data.name || '', 'e.g. Captain');
 
         // Description
         var descInp = _ppFormField(form, 'Description', 'textarea', data.description || '', '', 3);
