@@ -90,6 +90,31 @@ def roles_md(room: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def files_md(room: dict[str, Any], files: list[tuple[str, dict[str, Any]]], needle_list: list[Any]) -> str:
+    """What each file in the ZIP is about (``rooms_describe``), checked once
+    more for real values; "" when no file has a description."""
+    from captain_claw.flight_deck import rooms_describe as rd
+
+    blocks: list[str] = []
+    for name, about in files:
+        if not rd.has(about) or rj.leaks(rd.every_text(about), needle_list):
+            continue
+        block = [f"## {name}", "", f"**{about['one']}**", ""]
+        if about.get("paragraph"):
+            block += [about["paragraph"], ""]
+        if about.get("keywords"):
+            block.append("Keywords: " + "; ".join(about["keywords"]))
+        if about.get("topics"):
+            block.append("Topics: " + "; ".join(about["topics"]))
+        blocks.append("\n".join(block).rstrip() + "\n")
+    if not blocks:
+        return ""
+    head = [f"# Files in {room['codename']}", "",
+            "What each file is about, written by a model from the anonymized text — pick files with it, then read "
+            "the file itself before relying on a detail.", ""]
+    return "\n".join(head) + "\n" + "\n".join(blocks)
+
+
 def readme_md(room: dict[str, Any], files: int, text_only: bool) -> str:
     from captain_claw.flight_deck.rooms_mcp import INSTRUCTIONS
 
@@ -98,7 +123,7 @@ def readme_md(room: dict[str, Any], files: int, text_only: bool) -> str:
         "",
         f"{files} file(s), exported {time.strftime('%Y-%m-%d')}"
         + (" as text (Office files as markdown)." if text_only else "."),
-        "Read ROLES.md first: it says what each token is.",
+        "Read ROLES.md first: it says what each token is. FILES.md, when there, says what each file is about.",
         "",
         "## Rules",
         "",
@@ -131,6 +156,7 @@ async def build(room: dict[str, Any], *, text_only: bool) -> dict[str, Any]:
     def make() -> tuple[bytes, list[str], int, list[str]]:
         held: list[str] = []
         held_tokens: list[str] = []
+        described: list[tuple[str, dict[str, Any]]] = []
         count = 0
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -154,8 +180,12 @@ async def build(room: dict[str, Any], *, text_only: bool) -> dict[str, Any]:
                     data, name = blob, f["clean_path"]
                 z.writestr(f"{root}/{name}", data)
                 count += 1
+                described.append((name, f.get("about") or {}))
                 if buf.tell() > MAX_EXPORT_BYTES:
                     raise ExportError(f"The ZIP would be over {MAX_EXPORT_BYTES // (1024 * 1024)} MB — try text only.")
+            index = files_md(room, described, needle_list)
+            if index:
+                z.writestr(f"{root}/FILES.md", index)
             z.writestr(f"{root}/ROLES.md", roles_md(room))
             z.writestr(f"{root}/README-for-Claude.md", readme_md(room, count, text_only))
         return buf.getvalue(), held, count, held_tokens

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
-  Activity, AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Combine, Download, EyeOff, File, FileImage,
+  Activity, AlertTriangle, BookOpenText, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Combine, Download, EyeOff, File, FileImage,
   FileSpreadsheet, FileText, FileUp, Folder, FolderLock, FolderOpen, FolderTree, Inbox, List, ListTodo, Loader2, Play,
   Presentation, RotateCcw, ScanText, Send, ShieldCheck, Square, Tag, Trash2, X,
 } from 'lucide-react'
@@ -14,6 +14,7 @@ import { FullscreenButton } from '../library/libraryParts'
 import { AlarmsNotice, ExportCard, ReadsCard } from './RoomsAccess'
 import { InboxSection, SectionHead, TasksSection } from './RoomsInbox'
 import { AlikeSection } from './RoomsAlike'
+import { DescribeActions, DescribeStrip, withNames } from './RoomsAbout'
 import { RoomFileViewer } from './RoomFileViewer'
 import { IconBtn, SearchField, TokenChip } from './roomParts'
 import { STATE_LABEL, STATE_TONE, clock, compact, count, duration, errorText, fileSize, runEta } from './roomText'
@@ -83,6 +84,7 @@ export function RoomView({ id, onBack, onClose }: {
   }, [vaultId, roomUpdated])
 
   const running = !!room && (room.job.running || room.state === 'running')
+  const describing = !!room?.describing
   const doneFiles = room?.counts.done || 0
   // How many "same party?" questions wait — for the rail's badge.
   useEffect(() => {
@@ -90,10 +92,10 @@ export function RoomView({ id, onBack, onClose }: {
     roomsApi.alike(id).then((r) => setAlikeCount(r.suggestions.length)).catch(() => {})
   }, [id, running, doneFiles, roomUpdated])
   useEffect(() => {
-    if (!running) return
-    const t = setInterval(() => { void reload() }, 2000)
+    if (!running && !describing) return
+    const t = setInterval(() => { void reload() }, running ? 2000 : 3000)
     return () => clearInterval(t)
-  }, [running, reload])
+  }, [running, describing, reload])
 
   // Escape leaves the room — a dialog open on top handles its own first.
   useEffect(() => {
@@ -204,6 +206,10 @@ export function RoomView({ id, onBack, onClose }: {
         </div>
       </header>
       {(running || (room.job.phase && room.job.phase !== 'done')) && <RunStrip room={room} files={files} />}
+      {room.describing && (
+        <DescribeStrip room={room} files={files} stopping={busy === 'describe-stop'}
+          onStop={() => act('describe-stop', () => roomsApi.stopDescribing(id))} />
+      )}
 
       {/* phones: the sections as a strip */}
       <div className="flex gap-1 overflow-x-auto border-b border-zinc-800 px-2 py-2 md:hidden">
@@ -248,8 +254,9 @@ export function RoomView({ id, onBack, onClose }: {
               </Notice>
             )}
             {current === 'files' && (
-              <FilesSection room={room} files={files} running={running} busy={busy} onOpen={setViewing}
+              <FilesSection room={room} files={files} entries={entries} running={running} busy={busy} onOpen={setViewing}
                 onRetry={() => act('retry', () => roomsApi.run(id, true))}
+                onDescribe={(again) => act(again ? 'describe-all' : 'describe', () => roomsApi.describe(id, { again }))}
                 onDownload={(f) => act('dl', () => roomsApi.downloadClean(id, f))}
                 onRemove={(f) => act('rm', () => roomsApi.removeFile(id, f.id))}
                 onAdd={() => setSection('add')} />
@@ -285,7 +292,7 @@ export function RoomView({ id, onBack, onClose }: {
       </div>
 
       {viewing && <RoomFileViewer roomId={id} file={viewing} entries={entries} onClose={() => setViewing(null)}
-        onChanged={() => void reload()} />}
+        canDescribe={!!room.trusted_model} onChanged={() => void reload()} />}
       {confirmDelete && <DeleteDialog room={room} onClose={() => setConfirmDelete(false)} onDeleted={onBack} />}
     </div>
   )
@@ -333,6 +340,9 @@ function Health({ room }: { room: Room }) {
     <div className="space-y-2 border-t border-zinc-800 p-3">
       {row(<ShieldCheck className={tone(!!room.trusted_model)} />, 'Trusted model', room.trusted_model || 'None — code alone looks for names')}
       {row(<ScanText className={tone(room.ocr)} />, 'OCR', room.ocr ? 'Scans and pictures are read' : 'Not installed — scans only removed')}
+      {room.counts.done > 0 && row(<BookOpenText className={tone(!!room.trusted_model && (room.counts.described || 0) >= room.counts.done)} />,
+        'Descriptions', !room.trusted_model ? 'Need a trusted model'
+          : `${room.counts.described || 0} of ${count(room.counts.done, 'clean file')}${room.counts.describe_failed ? ` · ${room.counts.describe_failed} failed` : ''}`)}
     </div>
   )
 }
@@ -521,13 +531,15 @@ function FileIcon({ f }: { f: RoomFile }) {
   return <File className={`${cls} text-zinc-500`} />
 }
 
-function FilesSection({ room, files, running, busy, onOpen, onRetry, onDownload, onRemove, onAdd }: {
+function FilesSection({ room, files, entries, running, busy, onOpen, onRetry, onDescribe, onDownload, onRemove, onAdd }: {
   room: Room
   files: RoomFile[]
+  entries: VaultEntry[] | null
   running: boolean
   busy: string
   onOpen: (f: RoomFile) => void
   onRetry: () => void
+  onDescribe: (again: boolean) => void
   onDownload: (f: RoomFile) => void
   onRemove: (f: RoomFile) => void
   onAdd: () => void
@@ -537,13 +549,17 @@ function FilesSection({ room, files, running, busy, onOpen, onRetry, onDownload,
   const [q, setQ] = useState('')
   const [asTree, setAsTree] = useState(true)
   const [closed, setClosed] = useState<Set<string>>(new Set())
+  const byToken = useMemo(() => new Map((entries || []).map((e) => [e.token, e])), [entries])
+  // What each file is about, with the real names (your page; Claude reads the tokens).
+  const abouts = useMemo(() => new Map(files.filter((f) => f.about?.one).map((f) => [f.id, withNames(f.about!.one, byToken)])),
+    [files, byToken])
 
   const shown = useMemo(() => files.filter((f) => {
-    if (q.trim() && !`${f.path} ${f.clean_path}`.toLowerCase().includes(q.trim().toLowerCase())) return false
+    if (q.trim() && !`${f.path} ${f.clean_path} ${abouts.get(f.id) || ''}`.toLowerCase().includes(q.trim().toLowerCase())) return false
     if (filter === 'all') return true
     if (filter === 'warnings') return f.state === 'done' && f.warnings.length > 0
     return f.state === filter
-  }), [files, filter, q])
+  }), [files, filter, q, abouts])
   const root = useMemo(() => tree(shown), [shown])
   const hasFolders = root.folders.size > 0
 
@@ -554,7 +570,7 @@ function FilesSection({ room, files, running, busy, onOpen, onRetry, onDownload,
   }
 
   const row = (f: RoomFile, depth: number) => (
-    <FileRow key={f.id} f={f} depth={depth} flat={!asTree || !hasFolders} running={running}
+    <FileRow key={f.id} f={f} about={abouts.get(f.id) || ''} depth={depth} flat={!asTree || !hasFolders} running={running}
       onOpen={() => onOpen(f)} onDownload={() => onDownload(f)} onRemove={() => onRemove(f)} />
   )
   const folder = (node: Folder, depth: number): ReactNode[] => {
@@ -583,8 +599,13 @@ function FilesSection({ room, files, running, busy, onOpen, onRetry, onDownload,
   return (
     <div className="space-y-4">
       <SectionHead icon={FolderTree} title="Files"
-        hint="Open a file to see the original next to what Claude reads. Blocked files still hold a real value and are never released."
-        actions={c.failed > 0 && !running && <Button icon={RotateCcw} busy={busy === 'retry'} onClick={onRetry}>Retry failed</Button>} />
+        hint="Open a file to see the original next to what Claude reads, and what it is about. Blocked files still hold a real value and are never released."
+        actions={!running && (
+          <>
+            {c.failed > 0 && <Button icon={RotateCcw} busy={busy === 'retry'} onClick={onRetry}>Retry failed</Button>}
+            <DescribeActions room={room} busy={busy} onDescribe={onDescribe} />
+          </>
+        )} />
       {files.length === 0 ? (
         <EmptyState icon={FolderTree} title="No files yet">
           <button type="button" onClick={onAdd} className="text-violet-600 hover:underline dark:text-violet-400">Add a ZIP or a folder</button> to start.
@@ -592,7 +613,7 @@ function FilesSection({ room, files, running, busy, onOpen, onRetry, onDownload,
       ) : (
         <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/30">
           <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-3 py-2.5">
-            <SearchField value={q} onChange={setQ} placeholder="Find a file" className="min-w-[12rem] flex-1" />
+            <SearchField value={q} onChange={setQ} placeholder="Find a file by its name or what it's about" className="min-w-[12rem] flex-1" />
             <Segmented label="Show" value={filter} onChange={setFilter} options={[
               { value: 'all', label: 'All', count: c.files },
               ...(c.blocked ? [{ value: 'blocked' as const, label: 'Blocked', count: c.blocked }] : []),
@@ -620,8 +641,9 @@ function FilesSection({ room, files, running, busy, onOpen, onRetry, onDownload,
   )
 }
 
-function FileRow({ f, depth, flat, running, onOpen, onDownload, onRemove }: {
+function FileRow({ f, about, depth, flat, running, onOpen, onDownload, onRemove }: {
   f: RoomFile
+  about: string
   depth: number
   flat: boolean
   running: boolean
@@ -638,6 +660,7 @@ function FileRow({ f, depth, flat, running, onOpen, onDownload, onRemove }: {
         <FileIcon f={f} />
         <button type="button" onClick={onOpen} className="min-w-0 flex-1 text-left">
           <span className="block truncate text-sm text-zinc-100 group-hover:text-violet-700 dark:group-hover:text-violet-300" title={f.path}>{name}</span>
+          {about && <span className="block truncate text-xs text-zinc-400" title={about}>{about}</span>}
           {claudeName && claudeName !== name && (
             <span className="block truncate text-[11px] text-zinc-500" title={f.clean_path}>Claude sees {claudeName}</span>
           )}

@@ -17,6 +17,8 @@ and indexed, and a leak check blocks any file that still holds a real value.
 * **Leak check** — every real value in the vault (its spellings too, diacritic
   and case tolerant) is looked for in every text. A hit blocks the file; the
   report names tokens, never values.
+* **Describe** — when the run is over, the clean files that are new or
+  changed are described in the background (``rooms_describe``).
 
 One room runs at a time on a deck (the trusted model is the bottleneck); the
 others wait. Progress is kept in ``rooms.db``, so a deck restart resumes.
@@ -44,6 +46,7 @@ from lxml import etree
 from captain_claw.anonymize import detectors, engine
 from captain_claw.flight_deck import anonymize_routes as ar
 from captain_claw.flight_deck import anonymize_vault as av
+from captain_claw.flight_deck import rooms_describe as rd
 from captain_claw.flight_deck import rooms_intake as ri
 from captain_claw.flight_deck import rooms_store as rs
 from captain_claw.logging import get_logger
@@ -455,6 +458,11 @@ async def _run(room_id: str) -> None:
         final = "setup"
     await _set_job(room_id, job)
     await store.update(room_id, state=final)
+    # What each file is about, in the background: new files, and files whose text changed.
+    try:
+        await rd.after_run(room_id)
+    except Exception as exc:  # noqa: BLE001 — the run is done either way
+        log.warning("Data room describing not started", room=room_id, error=type(exc).__name__)
 
 
 # What the job says about the file it is on; gone between phases and at the end.
@@ -772,14 +780,15 @@ async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
             job["blocked"] = blocked
             tokens = list(dict.fromkeys(x["token"] for x in left))
             await store.set_file(room_id, f["id"], state="blocked", released=False, text_chars=len(text),
-                                 leftovers=leftovers,
+                                 leftovers=leftovers, text_sha=rd.text_sha(text),
                                  error=f"Still holds the real value of {', '.join(tokens[:12])}"
                                        + (f" and {len(tokens) - 12} more" if len(tokens) > 12 else ""))
             await store.index_text(room_id, f["id"], [])
         else:
             pages = pages_of(text)
             await _step(room_id, job, "indexing", pages=len(pages))
-            await store.set_file(room_id, f["id"], state="done", error="", text_chars=len(text), leftovers=leftovers)
+            await store.set_file(room_id, f["id"], state="done", error="", text_chars=len(text), leftovers=leftovers,
+                                 text_sha=rd.text_sha(text))
             await store.index_text(room_id, f["id"], pages)
         job["bytes_done"] = job.get("bytes_done", 0) + size
         log.info("Data room check file", room=room_id, file=f["id"], index=i, of=len(files), size=size,

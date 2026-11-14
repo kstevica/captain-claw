@@ -17,6 +17,45 @@ export interface RoomCounts {
   failed: number
   unread: number
   warnings: number
+  /** Clean files with a description; waiting for one; whose description failed or was held back; that need one. */
+  described?: number
+  describe_waiting?: number
+  describe_failed?: number
+  describe_needed?: number
+}
+
+/** Where describing a room's files stands (null when it isn't running). */
+export interface RoomDescribing {
+  done: number
+  failed: number
+  of: number
+  started_at?: number
+  current?: string
+  file_started_at?: number
+  /** Waiting for a room's run to finish: runs go first. */
+  waiting_for_slot?: boolean
+  model?: string
+}
+
+export type AboutState = '' | 'done' | 'waiting' | 'failed' | 'held' | 'unavailable'
+
+/** What a file is about, as Claude reads it (tokens). */
+export interface FileAbout {
+  state: AboutState
+  one?: string
+  paragraph?: string
+  summary?: string
+  keywords?: string[]
+  topics?: string[]
+  error?: string
+  model?: string
+  at?: number
+  /** Made from parts of a long file. */
+  cut?: boolean
+  /** Its text changed since: it's described again on the next pass. */
+  stale?: boolean
+  /** The same with the real names put back (only its owner sees this). */
+  real?: { one: string; paragraph: string; summary: string; keywords: string[]; topics: string[] }
 }
 
 export interface RoomJob {
@@ -85,6 +124,7 @@ export interface RoomSummary {
   inbox: { total: number; unseen: number }
   /** Tasks left for Claude; open = waiting or picked up, not answered yet. */
   tasks?: { total: number; open: number }
+  describing?: RoomDescribing | null
 }
 
 /** A task the person left for Claude in a room (asked from the Inbox). */
@@ -239,6 +279,8 @@ export interface RoomFile {
   info?: { rows?: number; sheets?: number }
   /** How many leftovers the check hid in this file, and how many are still there (they block it). */
   leftovers?: { hidden: number; left: number }
+  /** Its one line (tokens) and where describing it stands; the rest comes with its text. */
+  about?: { state: AboutState; one: string; stale: boolean }
 }
 
 export interface IntakeReport {
@@ -264,6 +306,7 @@ export interface FileText {
   original_cut?: boolean
   /** Real values the check found here: hidden after the check, and still there. */
   leftovers?: { hidden: Leftover[]; left: Leftover[] }
+  about?: FileAbout | null
 }
 
 export interface SearchHit { file_id: string; path: string; page: string; snippet: string }
@@ -356,6 +399,12 @@ export const roomsApi = {
     api<{ report: IntakeReport; room: Room }>(`/fd/rooms/${enc(id)}/folder`, json('POST', body)),
   run: (id: string, retryFailed = false) => api<Room>(`/fd/rooms/${enc(id)}/run`, json('POST', { retry_failed: retryFailed })),
   stop: (id: string) => api<{ stopping: boolean }>(`/fd/rooms/${enc(id)}/stop`, { method: 'POST' }),
+  /** Describe the room's clean files in the background: the ones that need it, or
+   *  every one (`again`); only `files` when given. */
+  describe: (id: string, body: { again?: boolean; files?: string[] } = {}) =>
+    api<{ waiting: number; room: Room }>(`/fd/rooms/${enc(id)}/describe`, json('POST', body)),
+  stopDescribing: (id: string) =>
+    api<{ stopping: boolean; room: Room }>(`/fd/rooms/${enc(id)}/describe/stop`, { method: 'POST' }),
   files: (id: string) => api<{ files: RoomFile[] }>(`/fd/rooms/${enc(id)}/files`),
   text: (id: string, fileId: string, original: boolean) =>
     api<FileText>(`/fd/rooms/${enc(id)}/files/${enc(fileId)}/text?original=${original}`),

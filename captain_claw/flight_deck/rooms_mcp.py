@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, Response
 from captain_claw.anonymize import usage
 from captain_claw.flight_deck import anonymize_vault as av
 from captain_claw.flight_deck import auth as fd_auth
+from captain_claw.flight_deck import rooms_describe as rd
 from captain_claw.flight_deck import rooms_job as rj
 from captain_claw.flight_deck import rooms_store as rs
 from captain_claw.flight_deck.mcp_oauth_routes import ROOMS_PATH, ROOMS_SCOPE, _public_base
@@ -43,6 +44,8 @@ SERVER_VERSION = "1.0.0"
 PROTOCOLS = ("2025-11-25", "2025-06-18", "2025-03-26")  # newest first; a client's own is answered when known
 READ_PAGE = 50_000      # P0: whole results reach Claude up to ~100k characters
 MAX_SEARCH = 25
+MAX_FIND = 30
+MAX_SUMMARIES = 20
 TO_MODEL = "Claude (data-room connector)"
 
 INSTRUCTIONS = (
@@ -60,10 +63,14 @@ INSTRUCTIONS = (
     "1. Keep every token exactly as written, brackets included, in answers and in every file you make — "
     "titles, sheet names, notes and file names too. Never replace a token with a codename, a role or a "
     "description, and never guess who a token is.\n"
-    "2. Start with room_list, then room_overview: it gives each token's role (Target, Buyer, CFO …) — use "
-    "the roles to reason, keep the tokens when you write.\n"
-    "3. room_search finds passages; room_read reads a file page by page (about 50,000 characters a page). "
-    "Cite files by path and page.\n"
+    "2. Start with room_list, then room_overview: it gives each token's role (Target, Buyer, CFO …) and the "
+    "room's main topics — use the roles to reason, keep the tokens when you write.\n"
+    "3. To pick files: room_list_files gives every file with a one-line description; room_find_files finds the "
+    "files about something (ranked by their descriptions, keywords and topics, then by their text); "
+    "room_file_summaries gives a paragraph, a summary of 3–5 paragraphs, keywords and topics for up to 20 files. "
+    "Choose with them, then read what matters: a description is made by a model from the anonymized text and can "
+    "miss things, so don't cite one as the file. room_search finds passages; room_read reads a file page by page "
+    "(about 50,000 characters a page). Cite files by path and page.\n"
     "4. Only released files are here. If something seems missing, say so; don't fill gaps with outside "
     "knowledge about who the parties might be.\n"
     "5. To give the person a result (a memo, an answer, a summary), call room_deliver with markdown in tokens. "
@@ -97,10 +104,28 @@ TOOLS = [
          "room": {"type": "string", "description": "The room's id or codename (from room_list)."}},
          "required": ["room"]}, "annotations": _ANNOT},
     {"name": "room_list_files", "description": "The released files of a room (or of one folder in it): path, kind, "
-     "characters and pages.", "inputSchema": {"type": "object", "properties": {
+     "characters, pages and what each is about in one line.", "inputSchema": {"type": "object", "properties": {
          "room": {"type": "string"},
          "folder": {"type": "string", "description": "Only files under this folder (optional)."}},
          "required": ["room"]}, "annotations": _ANNOT},
+    {"name": "room_find_files", "description": "Find the files of a room that are about something, best first: "
+     "ranked by their descriptions (one line, paragraph, summary, keywords, topics), then by their text. Each "
+     "comes with its one line, paragraph, keywords and topics — enough to pick which to read. Any word of the "
+     "query can match; tokens like ⟦ORG_7⟧ work.",
+     "inputSchema": {"type": "object", "properties": {
+         "room": {"type": "string"},
+         "query": {"type": "string", "description": "What the files should be about: words, terms, tokens."},
+         "folder": {"type": "string", "description": "Only files under this folder (optional)."},
+         "limit": {"type": "integer", "description": f"At most this many files (default 10, max {MAX_FIND})."}},
+         "required": ["room", "query"]}, "annotations": _ANNOT},
+    {"name": "room_file_summaries", "description": "What files of a room are about, before you read them: for each "
+     "(up to 20), a one line, a paragraph, a summary of 3–5 paragraphs, keywords and topics. Made by a model from "
+     "the anonymized text — read the file itself before relying on a detail.",
+     "inputSchema": {"type": "object", "properties": {
+         "room": {"type": "string"},
+         "paths": {"type": "array", "items": {"type": "string"}, "maxItems": MAX_SUMMARIES,
+                   "description": "The files' paths, as room_list_files or room_find_files gives them."}},
+         "required": ["room", "paths"]}, "annotations": _ANNOT},
     {"name": "room_read", "description": "Read a file of a room, one page at a time (about 50,000 characters a "
      "page; the answer says how many pages there are). Word, Excel, PowerPoint and PDF come as markdown.",
      "inputSchema": {"type": "object", "properties": {
@@ -367,17 +392,37 @@ async def _room_overview(owner: str, client_id: str, args: dict[str, Any]) -> di
     files = await _released(room["id"])
     folders = Counter(str(PurePosixPath(f["clean_path"]).parent) for f in files)
     kinds = Counter(f["kind"] for f in files)
-    await rs.store().log_read(room["id"], owner, client_id, "room_overview", alarm=alarm)
-    return {
+    # The room's main topics: how many files have each (as the first file wrote it).
+    topics: Counter[str] = Counter()
+    shown: dict[str, str] = {}
+    described = 0
+    for f in files:
+        about = f.get("about") or {}
+        if not rd.has(about):
+            continue
+        described += 1
+        for t in about.get("topics") or []:
+            shown.setdefault(t.casefold(), t)
+        for t in dict.fromkeys(x.casefold() for x in about.get("topics") or []):
+            topics[t] += 1
+    out: dict[str, Any] = {
         "room": room["id"], "codename": room["codename"], "released_files": len(files),
         "characters": sum(f["text_chars"] for f in files),
         "roles": room["roles"] or {},
         "folders": {("(top)" if k == "." else k): v for k, v in sorted(folders.items())},
         "kinds": dict(kinds),
+        "described_files": described,
+        **({"topics": {shown[t]: n for t, n in topics.most_common(30)}} if topics else {}),
         "read_page_characters": READ_PAGE,
         "note": "Tokens stand for real names the person can see and you can't — keep them exactly, brackets "
-                "included, in everything you write." + ("" if room["roles"] else " No roles are set for this room."),
+                "included, in everything you write." + ("" if room["roles"] else " No roles are set for this room.")
+                + (" room_find_files finds the files about a topic; room_file_summaries says what files are about."
+                   if described else ""),
     }
+    await rs.store().log_read(room["id"], owner, client_id, "room_overview", alarm=alarm)
+    if topics:
+        await _history(room, client_id, list(out["topics"]), "overview")
+    return out
 
 
 async def _room_list_files(owner: str, client_id: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -386,11 +431,97 @@ async def _room_list_files(owner: str, client_id: str, args: dict[str, Any]) -> 
     folder = str(args.get("folder") or "").strip().strip("/")
     out = []
     for f in await _released(room["id"]):
-        if folder and not (f["clean_path"] == folder or f["clean_path"].startswith(folder + "/")):
+        if not _in_folder(f, folder):
             continue
-        pages = max(1, -(-f["text_chars"] // READ_PAGE)) if f["text_chars"] else 1
-        out.append({"path": f["clean_path"], "kind": f["kind"], "characters": f["text_chars"], "pages": pages})
+        entry = {"path": f["clean_path"], "kind": f["kind"], "characters": f["text_chars"], "pages": _pages(f)}
+        about = rd.public(f.get("about"), full=False)
+        if about:
+            entry["about"] = about["one"]
+        out.append(entry)
     await rs.store().log_read(room["id"], owner, client_id, "room_list_files", alarm=alarm)
+    await _history(room, client_id, [e["about"] for e in out if e.get("about")], "list files")
+    return {"room": room["id"], "files": out}
+
+
+def _pages(f: dict[str, Any]) -> int:
+    return max(1, -(-f["text_chars"] // READ_PAGE)) if f["text_chars"] else 1
+
+
+def _in_folder(f: dict[str, Any], folder: str) -> bool:
+    return not folder or f["clean_path"] == folder or f["clean_path"].startswith(folder + "/")
+
+
+async def _room_find_files(owner: str, client_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    room = await _room(owner, client_id, args.get("room"))
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise ToolError("query is required — what the files should be about.")
+    alarm = await _alarm(room, client_id, "room_find_files", args)
+    try:
+        limit = max(1, min(int(args.get("limit") or 10), MAX_FIND))
+    except (TypeError, ValueError):
+        limit = 10
+    folder = str(args.get("folder") or "").strip().strip("/")
+    files = {f["id"]: f for f in await _released(room["id"])}
+    hits = await rs.store().find_files(room["id"], query, limit=limit * 4 if folder else limit, released_only=True)
+    out = []
+    for h in hits:
+        f = files.get(h["file_id"])
+        if f is None or not _in_folder(f, folder):
+            continue
+        entry: dict[str, Any] = {"path": f["clean_path"], "kind": f["kind"], "pages": _pages(f),
+                                 "matched_in": h["matched"]}
+        about = rd.public(f.get("about"))
+        if about:
+            entry.update({"about": about["one"], "paragraph": about["paragraph"], "keywords": about["keywords"],
+                          "topics": about["topics"]})
+        out.append(entry)
+        if len(out) >= limit:
+            break
+    texts = [json.dumps(e, ensure_ascii=False) for e in out]
+    await rs.store().log_read(room["id"], owner, client_id, "room_find_files", chars=sum(map(len, texts)),
+                              query_chars=len(query), alarm=alarm)
+    await _history(room, client_id, texts, "find files")
+    result: dict[str, Any] = {"room": room["id"], "files": out}
+    if not out:
+        result["note"] = ("No file matches. Try other words or a token (⟦ORG_7⟧, not a company's name), or "
+                          "room_list_files for every file.")
+    elif not any(rd.has(f.get("about")) for f in files.values()):
+        result["note"] = "This room's files have no descriptions yet, so they were matched on their text."
+    return result
+
+
+async def _room_file_summaries(owner: str, client_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    room = await _room(owner, client_id, args.get("room"))
+    paths = args.get("paths")
+    if isinstance(paths, str):
+        paths = [paths]
+    if not isinstance(paths, list) or not paths:
+        raise ToolError("paths is a list of file paths (from room_list_files or room_find_files).")
+    if len(paths) > MAX_SUMMARIES:
+        raise ToolError(f"At most {MAX_SUMMARIES} files a call.")
+    alarm = await _alarm(room, client_id, "room_file_summaries", {"paths": "\n".join(map(str, paths))})
+    released = await _released(room["id"])
+    out = []
+    for path in paths:
+        try:
+            f = _find_file(released, str(path or ""))
+        except ToolError as exc:
+            out.append({"path": str(path)[:200], "error": str(exc)})
+            continue
+        entry: dict[str, Any] = {"path": f["clean_path"], "kind": f["kind"], "pages": _pages(f)}
+        about = rd.public(f.get("about"))
+        if about:
+            entry.update({"about": about["one"], "paragraph": about["paragraph"], "summary": about["summary"],
+                          "keywords": about["keywords"], "topics": about["topics"],
+                          **({"note": about["note"]} if about.get("note") else {})})
+        else:
+            entry["note"] = "No description yet — read it with room_read."
+        out.append(entry)
+    texts = [json.dumps(e, ensure_ascii=False) for e in out]
+    await rs.store().log_read(room["id"], owner, client_id, "room_file_summaries", chars=sum(map(len, texts)),
+                              alarm=alarm)
+    await _history(room, client_id, texts, "file summaries")
     return {"room": room["id"], "files": out}
 
 
@@ -613,6 +744,8 @@ _HANDLERS = {
     "room_list": _room_list,
     "room_overview": _room_overview,
     "room_list_files": _room_list_files,
+    "room_find_files": _room_find_files,
+    "room_file_summaries": _room_file_summaries,
     "room_read": _room_read,
     "room_search": _room_search,
     "room_deliver": _room_deliver,
