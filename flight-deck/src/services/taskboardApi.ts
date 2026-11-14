@@ -374,7 +374,7 @@ const BASE = '/fd/taskboard'
 
 export type PeopleSort = 'count' | 'name'
 /** Pending tasks, as the People filter asks: exactly one, a range, or that many or more. */
-export type PeoplePending = '' | '1' | '2-5' | '10+'
+export type PeoplePending = '' | '1' | '2-5' | '6-9' | '10+'
 export interface PeopleQuery { q?: string; sort?: PeopleSort; pending?: PeoplePending; limit?: number; offset?: number }
 /** Someone on the user's tasks: how many tasks they are on, how many of those
  *  are done, and how many are still pending (open). */

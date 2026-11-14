@@ -23,6 +23,7 @@ const PENDING: { id: PeoplePending; label: string; hint: string }[] = [
   { id: '', label: 'All', hint: 'Everyone, however many tasks are pending' },
   { id: '1', label: '1', hint: 'One pending task' },
   { id: '2-5', label: '2–5', hint: 'Two to five pending tasks' },
+  { id: '6-9', label: '6–9', hint: 'Six to nine pending tasks' },
   { id: '10+', label: '10+', hint: 'Ten or more pending tasks' },
 ]
 
@@ -116,16 +117,31 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose, covered])
 
-  // A person's latest tasks.
+  // The open person, for effects that read their tasks again.
+  const openIdRef = useRef(openId)
+  openIdRef.current = openId
+
+  // A person's tasks under them: their latest five, or — filtered by pending
+  // tasks — only the pending ones (still in play: open or maybe), newest first.
   const readTasks = useCallback(async (id: string) => {
     setTasks((t) => ({ ...t, [id]: 'loading' }))
     try {
-      const page = await taskboardApi.tasks({ view: 'all', party: [id], sort: 'recent', limit: 5 })
+      const page = await taskboardApi.tasks(pending
+        ? { view: 'all', party: [id], status: ['open', 'maybe'], sort: 'recent', limit: 50 }
+        : { view: 'all', party: [id], sort: 'recent', limit: 5 })
       setTasks((t) => ({ ...t, [id]: page.items }))
     } catch {
       setTasks((t) => ({ ...t, [id]: 'failed' }))
     }
-  }, [])
+  }, [pending])
+
+  // The filter changed what the lists hold: read the open one again.
+  const firstPending = useRef(true)
+  useEffect(() => {
+    if (firstPending.current) { firstPending.current = false; return }
+    setTasks({})
+    if (openIdRef.current) void readTasks(openIdRef.current)
+  }, [readTasks])
 
   const toggle = async (id: string) => {
     if (openId === id) { setOpenId(null); return }
@@ -272,11 +288,11 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
                   {open && (
                     <div className="border-t border-[var(--fd-line)] px-4 py-2">
                       {list === 'loading' || list === undefined ? (
-                        <div className="flex items-center gap-2 py-2 text-xs text-zinc-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Their latest tasks…</div>
+                        <div className="flex items-center gap-2 py-2 text-xs text-zinc-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> {pending ? 'Their pending tasks…' : 'Their latest tasks…'}</div>
                       ) : list === 'failed' ? (
                         <p className="py-2 text-xs text-zinc-500">Their tasks didn't load. Close and open them again to retry.</p>
                       ) : list.length === 0 ? (
-                        <p className="py-2 text-xs text-zinc-500">No tasks with them right now.</p>
+                        <p className="py-2 text-xs text-zinc-500">{pending ? 'No pending tasks with them right now.' : 'No tasks with them right now.'}</p>
                       ) : (
                         <ul>
                           {list.map((t) => (
