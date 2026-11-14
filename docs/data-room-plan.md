@@ -923,6 +923,38 @@ detected from diacritics and common words.
   385 and without a phone header (`911234567`) isn't taken: it could be an
   amount.
 
+**One person, one token number across files (2026-11-14, branch `fix/rooms-person-variants`):**
+
+- **Found by Claude on staging** (a personnel FDD task): "payroll and register
+  name tokens don't fully line up".
+- **Cause:** the resolver matched a full name to a known person only when its
+  words came in the same order. A register's "ŠIMUNIĆ DARKO" and a payroll's
+  "Darko Šimunić" (made-up) became two people.
+  - The known-name finder already took a name the other way round, but a
+    name the trusted model or the detectors found goes through the resolver
+    first, and its new entity won.
+- **Fix (`engine._Resolver`):** a full name matches a known person by the same
+  name words in any order (`_name_bag`: the stems sorted; case, diacritics
+  and case endings were already folded). It gets that person's number, with
+  its own spelling place (⟦PERSON_1:2⟧), so it restores as written.
+  - Initials work either way round too ("D. Šimunić", "Šimunić D.") when only
+    one person fits.
+  - A vault that already split a person: the first token wins, in the
+    resolver and in the known-name finder. A file run again from its
+    original comes back with one number.
+  - "Check again" can't heal it: it sweeps the anonymized copies, where the
+    second token is already in place. Re-run the files, or make the room
+    again.
+- **Claude's instructions** now say that one number is one party in every
+  file, and to match people across files on the number, ignoring the ":2".
+- **Still apart, on purpose:**
+  - a name with an extra word ("Darko Ivan Šimunić"), which may be another
+    person;
+  - an initial that fits two people.
+- **Not yet:** a name split into two columns (IME | PREZIME) gives a one-word
+  token per cell (the trusted model's call). A payroll with split columns
+  doesn't join a register with full names on one token.
+
 ## Later
 
 - **Fleet side door.** If the person turns on both connectors in one Claude chat,

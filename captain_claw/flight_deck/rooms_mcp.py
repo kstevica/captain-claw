@@ -47,7 +47,10 @@ TO_MODEL = "Claude (data-room connector)"
 
 INSTRUCTIONS = (
     "This connector serves anonymized data rooms. Every real name, company, address and identifying number "
-    "in them is replaced by a token like ⟦ORG_7⟧ or ⟦PERSON_2⟧; ⟦ORG_7:2⟧ is another spelling of ⟦ORG_7⟧. "
+    "in them is replaced by a token like ⟦ORG_7⟧ or ⟦PERSON_2⟧; ⟦ORG_7:2⟧ is another spelling of ⟦ORG_7⟧ — "
+    "the same person or company, written differently (surname first, capitals, no diacritics, an initial). "
+    "One token number is one party in every file of the room, so when you match people or companies across "
+    "files (a payroll against a register or a ledger), match on the number and ignore the :2. "
     "Numbers, dates and the story are kept. Rules:\n"
     "1. Keep every token exactly as written, brackets included, in answers and in every file you make — "
     "titles, sheet names, notes and file names too. Never replace a token with a codename, a role or a "
