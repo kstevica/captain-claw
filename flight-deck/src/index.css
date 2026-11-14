@@ -20,6 +20,29 @@
 :root {
   --fd-sidebar: 260px;
   --fd-panel: 380px;
+
+  /* ── Shell tokens: the simple / kiosk layout's look ──
+     Calm surfaces, one accent, big soft corners. The night palette is the
+     default; html.light below swaps in the warm day one. Used through the
+     .fd-* classes further down, never as one-off colours. */
+  --fd-radius-control: 0.75rem;
+  --fd-radius-card: 1.25rem;
+  --fd-radius-panel: 1.5rem;
+  --fd-shell: #0b0b0c;
+  --fd-surface: #121214;
+  --fd-surface-raised: #18181b;
+  --fd-line: rgba(255, 255, 255, 0.07);
+  --fd-ink: #f5f5f4;
+  --fd-ink-soft: #a8a29e;
+  --fd-ink-faint: #78716c;
+  --fd-hover: rgba(255, 255, 255, 0.05);
+  --fd-selected: rgba(255, 255, 255, 0.08);
+  --fd-accent: #8b5cf6;
+  --fd-accent-hover: #7c3aed;
+  --fd-accent-ink: #ffffff;
+  --fd-accent-soft: rgba(139, 92, 246, 0.16);
+  --fd-accent-text: #c4b5fd;
+  --fd-shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.35), 0 12px 32px -16px rgba(0, 0, 0, 0.7);
 }
 
 /* Safe area for notched devices */
@@ -177,21 +200,38 @@ html.light .crew-md blockquote { border-left-color: #8b5cf6; background: rgba(13
 /* ── Light theme overrides ── */
 html.light {
   color-scheme: light;
-  /* Override Tailwind v4 CSS variables for zinc palette in light mode */
-  --color-zinc-950: #ffffff;
-  --color-zinc-900: #f4f4f5;
-  --color-zinc-800: #e4e4e7;
-  --color-zinc-700: #d4d4d8;
-  --color-zinc-600: #a1a1aa;
-  --color-zinc-500: #71717a;
-  --color-zinc-400: #52525b;
-  --color-zinc-300: #1a1a1e;
-  --color-zinc-200: #27272a;
-  --color-zinc-100: #18181b;
+  /* Override Tailwind v4 CSS variables for zinc palette in light mode: a warm
+     paper-and-ink neutral (stone-leaning), not a cold grey. */
+  --color-zinc-950: #fffefc;
+  --color-zinc-900: #f6f3ee;
+  --color-zinc-800: #ebe6df;
+  --color-zinc-700: #dbd4cb;
+  --color-zinc-600: #a59d93;
+  --color-zinc-500: #776f66;
+  --color-zinc-400: #57504a;
+  --color-zinc-300: #201c18;
+  --color-zinc-200: #2b2622;
+  --color-zinc-100: #1a1714;
+
+  /* Shell tokens, day palette (see :root). */
+  --fd-shell: #f4f0ea;
+  --fd-surface: #fffefc;
+  --fd-surface-raised: #ffffff;
+  --fd-line: rgba(68, 54, 40, 0.09);
+  --fd-ink: #1c1917;
+  --fd-ink-soft: #57504a;
+  --fd-ink-faint: #8a8178;
+  --fd-hover: rgba(68, 54, 40, 0.05);
+  --fd-selected: rgba(68, 54, 40, 0.08);
+  --fd-accent: #7c3aed;
+  --fd-accent-hover: #6d28d9;
+  --fd-accent-soft: rgba(124, 58, 237, 0.1);
+  --fd-accent-text: #6d28d9;
+  --fd-shadow-soft: 0 1px 2px rgba(68, 54, 40, 0.05), 0 14px 36px -18px rgba(68, 54, 40, 0.22);
 }
 html.light body {
-  background: #fafafa;
-  color: #18181b;
+  background: #faf8f4;
+  color: #1c1917;
 }
 /* Scrollbar in light mode */
 html.light ::-webkit-scrollbar-thumb { background: #d4d4d8; }
@@ -209,29 +249,29 @@ html.light .fd-markdown blockquote { border-left-color: #d4d4d8; color: #52525b;
 html.light .fd-markdown hr { border-top-color: #e4e4e7; }
 html.light .fd-markdown a { color: #7c3aed; }
 /* Chat panel top bar in light mode */
-html.light .bg-zinc-900\/60 { background-color: rgba(244,244,245,0.85) !important; }
-html.light .bg-zinc-900\/80 { background-color: rgba(244,244,245,0.9) !important; }
+html.light .bg-zinc-900\/60 { background-color: rgba(246,243,238,0.85) !important; }
+html.light .bg-zinc-900\/80 { background-color: rgba(246,243,238,0.9) !important; }
 /* Border opacity variants */
-html.light .border-zinc-800\/20 { border-color: rgba(212,212,216,0.25) !important; }
-html.light .border-zinc-800\/50 { border-color: rgba(212,212,216,0.5) !important; }
-html.light .border-zinc-700\/50 { border-color: rgba(212,212,216,0.5) !important; }
+html.light .border-zinc-800\/20 { border-color: rgba(219,212,203,0.25) !important; }
+html.light .border-zinc-800\/50 { border-color: rgba(219,212,203,0.5) !important; }
+html.light .border-zinc-700\/50 { border-color: rgba(219,212,203,0.5) !important; }
 /* Hover states */
-html.light .hover\:bg-zinc-900:hover { background-color: #f4f4f5 !important; }
-html.light .hover\:bg-zinc-900\/50:hover { background-color: rgba(244,244,245,0.7) !important; }
-html.light .hover\:bg-zinc-900\/20:hover { background-color: rgba(244,244,245,0.3) !important; }
-html.light .hover\:bg-zinc-800:hover { background-color: #e4e4e7 !important; }
-/* Modal backdrop — lighter in light mode */
-html.light .bg-black\/60 { background-color: rgba(0,0,0,0.3) !important; }
+html.light .hover\:bg-zinc-900:hover { background-color: #f6f3ee !important; }
+html.light .hover\:bg-zinc-900\/50:hover { background-color: rgba(246,243,238,0.7) !important; }
+html.light .hover\:bg-zinc-900\/20:hover { background-color: rgba(246,243,238,0.3) !important; }
+html.light .hover\:bg-zinc-800:hover { background-color: #ebe6df !important; }
+/* Modal backdrop — lighter in light mode, a warm dusk rather than grey */
+html.light .bg-black\/60 { background-color: rgba(41,32,24,0.28) !important; }
 /* Checkbox borders */
-html.light .border-zinc-600 { border-color: #a1a1aa !important; }
+html.light .border-zinc-600 { border-color: #a59d93 !important; }
 /* Focus borders */
 html.light .focus\:border-violet-500\/50:focus { border-color: rgba(139,92,246,0.5) !important; }
 /* Dividers */
-html.light .divide-zinc-800\/60 > * + * { border-color: rgba(212,212,216,0.6) !important; }
-html.light .divide-zinc-800 > * + * { border-color: #d4d4d8 !important; }
+html.light .divide-zinc-800\/60 > * + * { border-color: rgba(219,212,203,0.6) !important; }
+html.light .divide-zinc-800 > * + * { border-color: #dbd4cb !important; }
 /* Active button backgrounds */
-html.light .bg-zinc-700 { background-color: #d4d4d8 !important; }
-html.light .bg-zinc-700\/30 { background-color: rgba(212,212,216,0.4) !important; }
+html.light .bg-zinc-700 { background-color: #dbd4cb !important; }
+html.light .bg-zinc-700\/30 { background-color: rgba(219,212,203,0.4) !important; }
 /* Help hint banners & chips */
 html.light .fd-help-banner { border-color: rgba(139,92,246,0.35) !important; background: rgba(139,92,246,0.08) !important; }
 html.light .fd-help-banner .text-zinc-300 { color: #3f3f46 !important; }
@@ -247,6 +287,117 @@ html.light .text-amber-400 { color: #d97706 !important; }
 html.light .border-violet-500\/50 { border-color: rgba(139,92,246,0.45) !important; }
 html.light .bg-violet-500\/10 { background-color: rgba(139,92,246,0.1) !important; }
 html.light .bg-violet-500\/5 { background-color: rgba(139,92,246,0.06) !important; }
+
+/* ── Shell: the simple / kiosk layout's shared pieces ──
+   Built on the shell tokens (:root / html.light), so both themes follow from
+   the palette. In the components layer: a utility on the element still wins. */
+@layer components {
+  /* The window behind everything: the nav sits on it, the main panel floats on it. */
+  .fd-shell { background: var(--fd-shell); color: var(--fd-ink); }
+  /* The centre: one calm, rounded sheet. */
+  .fd-main-panel {
+    background: var(--fd-surface);
+    border: 1px solid var(--fd-line);
+    border-radius: var(--fd-radius-panel);
+    box-shadow: var(--fd-shadow-soft);
+  }
+  .fd-side-panel { background: var(--fd-surface); border-color: var(--fd-line); }
+  .fd-divider { border-color: var(--fd-line); }
+
+  /* A destination in the nav: icon + plain word, quiet until it's where you are. */
+  .fd-nav-item {
+    position: relative;
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 0.75rem;
+    min-height: 2rem;
+    padding: 0 0.75rem;
+    border-radius: var(--fd-radius-control);
+    color: var(--fd-ink-soft);
+    font-size: 0.875rem;
+    font-weight: 500;
+    text-align: left;
+    transition: background-color 0.15s, color 0.15s;
+  }
+  .fd-nav-item:hover { background: var(--fd-hover); color: var(--fd-ink); }
+  .fd-nav-item:focus-visible { outline: 2px solid var(--fd-accent); outline-offset: -2px; }
+  .fd-nav-item[aria-current="page"] { background: var(--fd-selected); color: var(--fd-ink); font-weight: 600; }
+  .fd-nav-item[aria-current="page"] .fd-nav-icon { color: var(--fd-accent-text); }
+  .fd-nav-icon { width: 1.125rem; height: 1.125rem; flex-shrink: 0; color: var(--fd-ink-faint); transition: color 0.15s; }
+  .fd-nav-item:hover .fd-nav-icon { color: var(--fd-ink); }
+  /* The same destination on the folded rail: an icon-only square. */
+  .fd-nav-item.fd-nav-rail { width: 2.5rem; height: 2.5rem; padding: 0; justify-content: center; }
+
+  /* A small heading over a group of nav items or a list. */
+  .fd-section-label { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.01em; color: var(--fd-ink-faint); }
+  /* A count beside a nav item: the accent when it wants you, quiet otherwise. */
+  .fd-count {
+    min-width: 1.25rem;
+    padding: 0 0.375rem;
+    border-radius: 9999px;
+    background: var(--fd-selected);
+    color: var(--fd-ink-soft);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    line-height: 1.25rem;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .fd-count-hot { background: var(--fd-accent); color: var(--fd-accent-ink); }
+
+  /* A card on the shell: raised a touch, big soft corners. */
+  .fd-card {
+    background: var(--fd-surface-raised);
+    border: 1px solid var(--fd-line);
+    border-radius: var(--fd-radius-card);
+    box-shadow: var(--fd-shadow-soft);
+  }
+  /* The one confident button, and its quiet sibling: pills. */
+  .fd-btn-primary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 9999px;
+    background: var(--fd-accent);
+    color: var(--fd-accent-ink);
+    font-weight: 600;
+    transition: background-color 0.15s, transform 0.05s;
+  }
+  .fd-btn-primary:hover { background: var(--fd-accent-hover); }
+  .fd-btn-primary:active { transform: translateY(1px); }
+  .fd-btn-primary:focus-visible, .fd-btn-quiet:focus-visible { outline: 2px solid var(--fd-accent); outline-offset: 2px; }
+  .fd-btn-quiet {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 9999px;
+    border: 1px solid var(--fd-line);
+    color: var(--fd-ink);
+    font-weight: 500;
+    transition: background-color 0.15s;
+  }
+  .fd-btn-quiet:hover { background: var(--fd-hover); }
+
+  /* A friendly empty state: a mark, a line of what this is, what to do next. */
+  .fd-empty-mark {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 3.5rem;
+    height: 3.5rem;
+    border-radius: 1.125rem;
+    background: var(--fd-accent-soft);
+    color: var(--fd-accent-text);
+  }
+  .fd-empty-title { color: var(--fd-ink); font-weight: 700; letter-spacing: -0.015em; }
+  .fd-empty-text { color: var(--fd-ink-soft); }
+
+  /* Dialogs opened from the shell: the same corners and shadow. */
+  .fd-dialog { border-color: var(--fd-line); box-shadow: 0 30px 80px -24px rgba(0, 0, 0, 0.45); }
+}
 
 /* ── Sign-in / sign-up / first password (AuthShell) ──
    Always the deck's night palette, whatever the app theme: these screens come

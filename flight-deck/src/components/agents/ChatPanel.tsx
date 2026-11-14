@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
+import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
 import {
   AlarmClock,
   Info,
@@ -112,6 +112,7 @@ import { FileIcon } from './AgentFilesPanel'
 import { FileViewer } from './FileViewer'
 import { useQuotaStore } from '../../stores/quotaStore'
 import { PlanUsageBar } from '../common/PlanUsage'
+import { statusActivity, toolActivity } from '../console/activityText'
 import type { ChatMessage, TokenUsage } from '../../services/agentChat'
 import type { ReasoningProfile } from '../../utils/reasoningEffort'
 import type { ModelSwitchInfo } from '../../utils/modelSwitch'
@@ -876,6 +877,19 @@ function ChatContent({
     inputRef.current?.focus()
   }, [])
 
+  // An approval's Edit: its message goes in the box, to change and send.
+  const draftInBox = useCallback((text: string) => {
+    setInput(text)
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (!el) return
+      el.style.height = 'auto'
+      el.style.height = Math.min(el.scrollHeight, 192) + 'px'
+      el.focus()
+      el.setSelectionRange(text.length, text.length)
+    })
+  }, [])
+
   // Keep the full transcript — every tool call is shown. The intermediary
   // activity (tools + narration) is grouped into a collapsible panel that
   // streams while the turn runs and collapses to a tools-history summary once
@@ -934,11 +948,12 @@ function ChatContent({
   // While the agent is busy, what you send waits and goes once it is free.
   const sendTitle = pendingUploads > 0 ? 'Waiting for uploads...'
     : session.busy ? `Send when ${session.containerName} is free` : null
-  const placeholder = closed ? 'Disconnected'
+  // A ready box starts "Ask anything" (the e2e screenshot scripts find it by that).
+  const placeholder = closed ? 'This chat has ended'
     : sleeping ? (session.waking ? 'Waking up…' : 'Asleep — write to wake it…')
-    : !session.connected ? 'Connecting...' : quotaSpent ? 'Daily limit reached'
+    : !session.connected ? 'Connecting…' : quotaSpent ? "You've reached today's limit"
     : simple ? (skills.available ? 'Ask anything, or try a skill…' : 'Ask anything…')
-    : shared || isMobile ? 'Message…' : 'Message, paste image, or drop files...'
+    : shared || isMobile ? 'Ask anything…' : 'Ask anything — or drop in a file…'
 
   return (
     <div
@@ -977,9 +992,10 @@ function ChatContent({
         {visibleMessages.length === 0 && session.connected && !simple && (
           <div className="mt-12 text-center">
             <MessageSquare className="mx-auto h-8 w-8 text-zinc-700" />
-            <p className="mt-2 text-sm text-zinc-500">Send a message to start chatting with this agent.</p>
+            <p className="mt-2 text-base font-semibold text-zinc-200">What can {session.containerName} do for you?</p>
+            <p className="mt-1 text-sm text-zinc-500">Ask in your own words — a question, a task, a quick favour.</p>
             {!shared && <p className="mt-1 text-xs text-zinc-600">
-              {isMobile ? 'Attach files and pictures with the paperclip.' : 'You can drag & drop files or paste images from clipboard.'}
+              {isMobile ? 'Got a file or a picture? Attach it with the paperclip.' : 'Got a file or a picture? Drop it here or paste it in.'}
             </p>}
           </div>
         )}
@@ -1010,14 +1026,17 @@ function ChatContent({
           <div className="mt-12 text-center" title={session.unreachable || undefined}>
             <AlertCircle className="mx-auto h-8 w-8 text-zinc-700" />
             <p className="mt-2 text-sm text-zinc-500">
-              {session.unreachable ? 'Agent unreachable — reconnecting…' : 'Connecting to agent...'}
+              {session.unreachable ? `Can't reach ${session.containerName} right now — trying again…` : `Getting ${session.containerName} on the line…`}
             </p>
           </div>
         ))}
 
+        <DraftInBox.Provider value={closed || quotaSpent ? null : draftInBox}>
         {groups.map((grp, gi) => {
-          // The live group is the last one (a payment card after it doesn't count).
-          const live = session.busy && groups.slice(gi + 1).every((g) => g.kind === 'payment' || g.kind === 'purchase')
+          // The live group is the last one (a payment card, or a question
+          // the agent waits on, after it doesn't count).
+          const live = session.busy && groups.slice(gi + 1).every((g) => g.kind === 'payment' || g.kind === 'purchase'
+            || (g.kind === 'single' && !!g.items[0].approval_request_id && !g.items[0].approval_resolved))
           return grp.kind === 'payment' ? (
             <PaymentCard key={`pay-${grp.paymentId}`} id={grp.paymentId!} compact />
           ) : grp.kind === 'purchase' ? (
@@ -1028,11 +1047,13 @@ function ChatContent({
               items={grp.items}
               live={live}
               liveTurnUsage={live ? session.liveTurnUsage ?? null : null}
+              agentName={session.containerName}
             />
           ) : (
             <MessageBubble key={grp.items[0].id} message={grp.items[0]} sourceName={session.containerName} agentId={session.containerId} large={simple} panels={!simple} />
           )
         })}
+        </DraftInBox.Provider>
 
         {fresh && (
           <ChatGreeting
@@ -1055,11 +1076,12 @@ function ChatContent({
           </div>
         )}
 
-        {/* Busy indicator */}
+        {/* Busy indicator: the agent's status in words ("Captain is
+            checking your calendar"); the raw status on hover. */}
         {session.busy && (
-          <div className="mb-3 flex items-center gap-2 text-xs text-zinc-500">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            <span>{session.statusText || 'Working...'}</span>
+          <div className={`mb-3 flex items-center gap-2 text-zinc-500 ${simple ? 'text-sm' : 'text-xs'}`} title={session.statusText || undefined}>
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+            <span>{busyText(session.containerName, session.statusText)}</span>
           </div>
         )}
 
@@ -2307,10 +2329,8 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
           className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-400"
         >
           <Wrench className="h-3 w-3" />
-          {message.peer_name && (
-            <span className="font-medium text-sky-600 dark:text-sky-400">{message.peer_name}</span>
-          )}
-          <span className="font-medium">{message.tool_name}</span>
+          <span className="font-medium">{stepText(message)}</span>
+          <span className="font-mono text-[10px] text-zinc-600">{message.tool_name}</span>
           {toolExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         </button>
         {toolExpanded && message.content && (
@@ -2363,43 +2383,9 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
         </div>
       )
     }
-    // Approval request with approve/deny buttons
-    if (message.approval_request_id && !message.approval_resolved) {
-      const respondToApproval = useChatStore.getState().respondToApproval
-      return (
-        <div className="mb-3 flex justify-center">
-          <div className="max-w-[85%] rounded-lg border border-amber-600/30 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 px-4 py-3 shadow-sm">
-            <p className="whitespace-pre-wrap text-xs text-amber-900 dark:text-amber-200 mb-2.5">{message.content}</p>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => agentId && respondToApproval(agentId, message.approval_request_id!, true)}
-                className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700 dark:bg-emerald-600/80 dark:hover:bg-emerald-600"
-              >
-                Approve
-              </button>
-              <button
-                onClick={() => agentId && respondToApproval(agentId, message.approval_request_id!, false)}
-                className="rounded-md bg-zinc-200 px-3 py-1 text-xs font-medium text-zinc-700 hover:bg-zinc-300 dark:bg-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-600"
-              >
-                Deny
-              </button>
-            </div>
-          </div>
-        </div>
-      )
-    }
-    // Resolved approval
-    if (message.approval_request_id && message.approval_resolved) {
-      return (
-        <div className="mb-3 flex justify-center">
-          <div className="max-w-[85%] rounded-lg border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700/50 dark:bg-zinc-800/40">
-            <div className="fd-markdown text-xs">
-              <MarkdownMessage content={message.content} />
-            </div>
-            <span className="text-[10px] text-zinc-400 dark:text-zinc-600 italic">Responded</span>
-          </div>
-        </div>
-      )
+    // An approval request: the agent's question, Approve / Dismiss.
+    if (message.approval_request_id) {
+      return <ApprovalCard message={message} agentId={agentId} agentName={sourceName || 'Your agent'} large={large} />
     }
     return (
       <div className="mb-3 flex justify-center">
@@ -2458,6 +2444,118 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     </div>
   )
 })
+
+/** Set by the chat around its messages: puts a text in the message box, to
+ *  change and send. Null where there is no box to write in. */
+const DraftInBox = createContext<((text: string) => void) | null>(null)
+
+/** An approval request in words: what the agent wants to do, as a question,
+ *  and what it would do (the request's own text, tidied). The agent's
+ *  requests are one of a few shapes (web_server / consult_peer / playbooks);
+ *  anything else gets a plain question, its own text kept for "See what
+ *  happened". `draft` is a message the user may rewrite (Edit). */
+function readApproval(content: string, category: string | undefined, agentName: string) {
+  const peer = content.match(/^Agent wants to consult peer "(.+?)"\s*(?:\n+Message:\s*([\s\S]*))?$/)
+  if (peer) {
+    const body = (peer[2] || '').trim()
+    return {
+      ask: `${agentName} wants to check with ${peer[1]} first. Good to go?`,
+      what: `check with ${peer[1]}`,
+      label: body ? `Here's what it would send ${peer[1]}:` : '',
+      body,
+      draft: body ? `Check with ${peer[1]}, but send this instead:\n\n${body}` : '',
+    }
+  }
+  if (category === 'playbook' || /^Playbook match found:/.test(content)) {
+    const list = content.replace(/^Playbook match found:\s*\n?/, '').split('\n')
+      .map((l) => l.trim()).filter(Boolean).map((l) => `- ${l}`).join('\n')
+    return { ask: `${agentName} found a playbook that fits this. Use it?`, what: 'use a playbook', label: '', body: list, draft: '' }
+  }
+  if (category === 'peer_consult') {
+    return { ask: `${agentName} wants to check with another agent first. Good to go?`, what: 'check with another agent',
+      label: 'The exact request is under See what happened.', body: '', draft: '' }
+  }
+  return { ask: `${agentName} wants your OK before it goes on. Good to go?`, what: 'go ahead',
+    label: 'The exact request is under See what happened.', body: '', draft: '' }
+}
+
+/** Approve, edit or dismiss, as the agent's question to you. Edit turns the
+ *  request down and puts its message in the box, to change and send yourself
+ *  (the agent's answer is yes or no). The agent goes ahead by itself when
+ *  nobody answers in time (its own timeout): the card says so. */
+function ApprovalCard({ message, agentId, agentName, large }: { message: ChatMessage; agentId?: string; agentName: string; large: boolean }) {
+  const [details, setDetails] = useState(false)
+  const draftInBox = useContext(DraftInBox)
+  const read = readApproval(message.content || '', message.approval_category, agentName)
+  const respond = (approved: boolean) => {
+    if (agentId) useChatStore.getState().respondToApproval(agentId, message.approval_request_id!, approved)
+  }
+  const detailsToggle = (
+    <button onClick={() => setDetails((d) => !d)} aria-expanded={details}
+      className="flex shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-300">
+      {details ? 'Hide details' : 'See what happened'}
+      {details ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+    </button>
+  )
+  const request = details && (
+    <div className="fd-markdown mt-1.5 border-l-2 border-zinc-700 py-1 pl-3 text-xs text-zinc-400">
+      <MarkdownMessage content={message.content} />
+    </div>
+  )
+  if (message.approval_resolved) {
+    return (
+      <div id={`fd-msg-${message.id}`} className="mb-3">
+        <div className="flex items-center gap-1.5 text-xs text-zinc-500">
+          <Check className="h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 truncate">You answered — {agentName} asked to {read.what}</span>
+          {detailsToggle}
+        </div>
+        {request}
+      </div>
+    )
+  }
+  return (
+    <div id={`fd-msg-${message.id}`} data-fd-approval className="mb-3 flex justify-start">
+      <div className="w-full max-w-[85%] rounded-2xl border border-violet-200 bg-white px-4 py-3.5 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+        <p className={`font-semibold leading-snug text-zinc-100 ${large ? 'text-base' : 'text-sm'}`}>{read.ask}</p>
+        {read.label && <p className="mt-2 text-xs text-zinc-500">{read.label}</p>}
+        {read.body && (
+          <div className={`fd-markdown mt-1.5 rounded-r-lg border-l-2 border-violet-500/60 bg-violet-50 px-3 py-2 text-zinc-300 dark:bg-zinc-800/50 ${large ? 'text-[15px] leading-relaxed' : 'text-sm'}`}>
+            <MarkdownMessage content={read.body} />
+          </div>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => respond(true)}
+            className="flex items-center gap-1.5 rounded-xl bg-violet-600 px-4 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-violet-500"
+          >
+            <Check className="h-4 w-4" />
+            Approve
+          </button>
+          {read.draft && draftInBox && (
+            <button
+              onClick={() => { respond(false); draftInBox(read.draft) }}
+              title="Turn this down and put the message in your box, to change and send yourself"
+              className="flex items-center gap-1.5 rounded-xl border border-zinc-700 px-3 py-1.5 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              Edit
+            </button>
+          )}
+          <button
+            onClick={() => respond(false)}
+            className="rounded-xl px-3 py-1.5 text-sm font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+          >
+            Dismiss
+          </button>
+          <span className="ml-auto">{detailsToggle}</span>
+        </div>
+        {request}
+        <p className="mt-2 text-[11px] text-zinc-500">No answer soon, and it goes ahead.</p>
+      </div>
+    </div>
+  )
+}
 
 /** A note for a runtime message the agent's session holds as "user" — a
  *  result relayed to it, an automated turn's opener. Not the user's words:
@@ -2740,9 +2838,8 @@ function CompactMessageDialog({ message, content, onClose }: {
 // ── Intermediary "activity" stream (tool calls + between-step narration) ──
 //
 // During a turn the agent emits tool calls and short narration blurbs. These
-// are grouped into one tinted section that stacks until the turn finishes, so
-// they read as a connected activity log rather than loose grey lines. Each
-// type gets its own colour: tools (sky), narration (violet).
+// are grouped into one section per run of steps, folded to a line of plain
+// words: the steps themselves (tool names, output, tokens) are a click away.
 
 function isActivityMessage(m: ChatMessage): boolean {
   return m.role === 'tool' || (m.role === 'system' && !!m.narration)
@@ -2780,40 +2877,51 @@ function groupActivity(msgs: ChatMessage[]): ChatGroup[] {
 // memo: `items` is a stable array as long as the message list is unchanged
 // (see the useMemo'd groups in ChatContent), so non-message ticks skip every
 // group except the live/last one, whose `live`/`liveTurnUsage` props change.
-const ActivityGroup = memo(function ActivityGroup({ items, live, liveTurnUsage }: { items: ChatMessage[]; live: boolean; liveTurnUsage?: TokenUsage | null }) {
-  // Expanded & streaming while the turn runs; auto-collapses to a tools-history
-  // summary once it finishes. The user can still toggle it open afterwards.
-  const [collapsed, setCollapsed] = useState(!live)
-  useEffect(() => { setCollapsed(!live) }, [live])
+//
+// Folded by default, live or done: one plain line ("Captain is on it · 2 steps
+// so far", "Captain worked through 4 steps") with "See what happened" beside
+// it. Unfolded, each step says what it did in words, with the raw tool name,
+// its output and the turn's token usage — the audit trail, one click away.
+const ActivityGroup = memo(function ActivityGroup({ items, live, liveTurnUsage, agentName }: { items: ChatMessage[]; live: boolean; liveTurnUsage?: TokenUsage | null; agentName: string }) {
+  const [open, setOpen] = useState(false)
   const toolCount = items.filter((m) => m.role === 'tool').length
+  const steps = toolCount || items.length
   // Token usage: live cumulative counter while running, else the frozen value
   // stamped onto one of this group's tool messages when the turn ended.
   const usage: TokenUsage | null = live
     ? (liveTurnUsage ?? null)
     : (items.find((m) => m.usage)?.usage ?? null)
   const hasUsage = !!usage && ((usage.prompt_tokens || 0) > 0 || (usage.completion_tokens || 0) > 0)
+  const stepWord = `${steps} step${steps !== 1 ? 's' : ''}`
+  const summary = live ? `${agentName} is on it · ${stepWord} so far` : `${agentName} worked through ${stepWord}`
   return (
-    <div className="mb-3 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2.5 py-2">
-      <button
-        onClick={() => setCollapsed((c) => !c)}
-        className="flex w-full items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-zinc-500 hover:text-zinc-400"
-      >
-        <Wrench className="h-3 w-3" />
-        Activity{toolCount > 0 && <span className="text-zinc-600">· {toolCount} tool{toolCount !== 1 ? 's' : ''}</span>}
-        {hasUsage && usage && (
-          <span className="text-zinc-600 normal-case" title="Tokens this turn — input / output / cached">
-            · {fmtTokens(usage.prompt_tokens)}↑ {fmtTokens(usage.completion_tokens)}↓
-            {(usage.cache_read_input_tokens || 0) > 0 ? ` · ${fmtTokens(usage.cache_read_input_tokens)} cached` : ''}
-          </span>
-        )}
-        <span className="ml-auto">{collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}</span>
-      </button>
-      {!collapsed && (
-        <div className="mt-1.5 space-y-0.5">
+    <div className="mb-3">
+      <div className="flex items-center gap-2 text-sm text-zinc-500">
+        {live
+          ? <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-violet-500" />
+          : <Check className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
+        <span className="min-w-0 truncate">{summary}</span>
+        <button
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          className="ml-1 flex shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium text-zinc-500 transition-colors hover:bg-zinc-800/60 hover:text-zinc-300"
+        >
+          {open ? 'Hide details' : 'See what happened'}
+          {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+        </button>
+      </div>
+      {open && (
+        <div className="mt-1.5 space-y-0.5 border-l-2 border-zinc-800 py-1 pl-3">
           {items.map((m) =>
             m.role === 'tool'
               ? <ActivityToolRow key={m.id} message={m} />
               : <ActivityNarration key={m.id} message={m} />
+          )}
+          {hasUsage && usage && (
+            <p className="px-1.5 pt-1 text-[11px] text-zinc-600" title="Tokens this turn — input / output / cached">
+              Tokens this turn: {fmtTokens(usage.prompt_tokens)} in · {fmtTokens(usage.completion_tokens)} out
+              {(usage.cache_read_input_tokens || 0) > 0 ? ` · ${fmtTokens(usage.cache_read_input_tokens)} cached` : ''}
+            </p>
           )}
         </div>
       )}
@@ -2821,21 +2929,36 @@ const ActivityGroup = memo(function ActivityGroup({ items, live, liveTurnUsage }
   )
 })
 
+/** The busy line: "Captain is checking your calendar…". A status that is
+ *  plain words already ("Busy with another request…") reads as it is. */
+function busyText(agentName: string, status: string): string {
+  const doing = statusActivity(status)
+  if (doing) return `${agentName} is ${doing}…`
+  return status || `${agentName} is working on it…`
+}
+
+/** A step in words: "Checking your calendar"; a peer agent's step keeps its
+ *  name: "Inbox Helper: checking your email". */
+function stepText(m: ChatMessage): string {
+  const doing = toolActivity(m.tool_name, m.tool_arguments)
+  return m.peer_name ? `${m.peer_name}: ${doing}` : doing[0].toUpperCase() + doing.slice(1)
+}
+
 const ActivityToolRow = memo(function ActivityToolRow({ message }: { message: ChatMessage }) {
   const [expanded, setExpanded] = useState(false)
   return (
     <div>
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-400"
+        className="flex max-w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-xs text-zinc-400 hover:bg-zinc-800/50 hover:text-zinc-300"
+        title={message.content ? 'Show what it got back' : undefined}
       >
-        <Wrench className="h-3 w-3" />
-        {message.peer_name && <span className="font-medium text-sky-600 dark:text-sky-400">{message.peer_name}</span>}
-        <span className="font-medium">{message.tool_name}</span>
-        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <span className="truncate">{stepText(message)}</span>
+        <span className="shrink-0 font-mono text-[10px] text-zinc-600">{message.tool_name}</span>
+        {message.content && (expanded ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />)}
       </button>
       {expanded && message.content && (
-        <pre className="ml-6 mt-1 max-h-40 overflow-auto rounded-md bg-zinc-900/80 p-2 text-xs text-zinc-400 font-mono">
+        <pre className="ml-1.5 mt-1 max-h-40 overflow-auto rounded-md bg-zinc-900/80 p-2 text-xs text-zinc-400 font-mono">
           {message.content.slice(0, 2000)}
           {message.content.length > 2000 && '\n...truncated'}
         </pre>

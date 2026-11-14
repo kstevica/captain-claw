@@ -602,7 +602,7 @@ export function DesktopPage() {
               <p className="text-sm text-zinc-600">
                 {dockerAvailable
                   ? 'No agents running. Spawn one from the Spawn Agent page, or click "Add Local Agent" to connect to an existing instance.'
-                  : 'No agents registered. Click "Add Local Agent" to connect to a Captain Claw instance.'}
+                  : 'No agents registered. Click "Add Local Agent" to connect to a Captain agent.'}
               </p>
             )
           )}

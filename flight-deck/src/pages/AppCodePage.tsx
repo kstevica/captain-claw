@@ -129,7 +129,7 @@ export function AppCodePage() {
       <CenterPanel>
         <h2 className="mb-2 text-lg font-semibold text-zinc-200">No code-apps yet</h2>
         <p className="text-sm text-zinc-500">
-          Ask Captain Claw to scaffold one — for example, “build me a notes app”.
+          Ask Captain to scaffold one — for example, “build me a notes app”.
           The agent will write <code>backend.py</code> and <code>frontend.html</code>;
           they'll appear here automatically.
         </p>

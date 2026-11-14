@@ -36,7 +36,7 @@ async function settings(theme, guideOptedOut) {
   await api('PUT', '/fd/settings', { settings: {
     'fd:theme': theme,
     // The panels as a newcomer finds them, except the queue: shown where it's the subject.
-    'fd:simple-left-open': 'true', 'fd:simple-right-open': 'true', 'fd:simple-queue-open': 'false',
+    'fd:simple-left-open': 'true', 'fd:simple-queue-open': 'false',
     'fd:onboarding': JSON.stringify({ completed: { desktop: false, forge: false, council: false, kiosk: guideOptedOut }, dismissedHints: [] }),
   } })
 }

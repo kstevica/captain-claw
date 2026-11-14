@@ -108,18 +108,18 @@ function AskDialog({ ask, onDone }: { ask: OpenAsk; onDone: () => void }) {
     }
   }
   const mins = Math.floor(left / 60)
-  const timeLeft = left <= 0 ? 'time is up' : mins >= 1 ? `${mins} min left` : `${left} s left`
+  const timeLeft = left <= 0 ? 'time is up' : mins >= 1 ? `${mins} min to answer` : `${left} s to answer`
   return (
-    <Dialog title={`${ask.title} asks`} icon={MessageCircleQuestion} onClose={onDone} keepOpen closable={false} wide footer={<>
-      <Button variant="ghost" icon={X} busy={busy === 'decline'} disabled={!!busy} onClick={() => reply(true)}>Don't answer</Button>
-      <Button variant="primary" icon={Send} busy={busy === 'send'} disabled={!!busy || problems.length > 0} onClick={() => reply(false)}>Send</Button>
+    <Dialog title={`${ask.title} has a question`} icon={MessageCircleQuestion} onClose={onDone} keepOpen closable={false} wide footer={<>
+      <Button variant="ghost" icon={X} busy={busy === 'decline'} disabled={!!busy} onClick={() => reply(true)}>Skip it</Button>
+      <Button variant="primary" icon={Send} busy={busy === 'send'} disabled={!!busy || problems.length > 0} onClick={() => reply(false)}>Send answer</Button>
     </>}>
       <div className="space-y-4">
         <p className="text-sm leading-relaxed text-zinc-500">
           {ask.source === 'agent'
-            ? <>{ask.agent_name || 'Your agent'} needs your answer to go on · {timeLeft}.</>
+            ? <>{ask.agent_name || 'Your agent'} needs a quick answer from you to keep going · {timeLeft}.</>
             : <>{ask.label || 'A custom tool'}{ask.owner_name ? ` (a tool by ${ask.owner_name})` : ''} is running
-              {ask.agent_name ? ` for ${ask.agent_name}` : ''} and waits for your answer · {timeLeft}.</>}
+              {ask.agent_name ? ` for ${ask.agent_name}` : ''} and needs a quick answer from you · {timeLeft}.</>}
         </p>
         {error && <Notice tone="red">{error}</Notice>}
         {ask.questions.map((q) => (

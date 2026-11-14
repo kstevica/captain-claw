@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Activity, Mail, MailCheck, MessageCircle, Check, Trash2, RefreshCw, Send, ChevronDown, Reply,
-  UserX, Moon, Loader2, NotebookPen, Plug,
+  UserX, Moon, Loader2, NotebookPen, Plug, ChevronRight,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { useConsoleStore } from '../../stores/consoleStore'
@@ -13,13 +13,17 @@ import {
   inputCls, type Tone,
 } from './parts'
 import { timeAgo, fmtNumber } from './format'
+import { activityText } from './activityText'
+import { fetchUsageLogs, type UsageLog } from './consoleApi'
 import {
   fetchActivity, fetchMailbox, fetchDraft, sendEmail, noteContact, deleteContact,
   type ActivityReport, type ActivityUser, type ActivityDay, type Contact, type Mailbox,
   type MessageDraft, type Template, type ActivityStatus,
 } from './activityApi'
 
-// Activity: who on the deck is using it and whether you've written to them.
+// Activity: what's been happening on the deck, in plain sentences (the deck's
+// event log through activityText, the raw event a click away), then who is
+// using it and whether you've written to them.
 // "Typed" is the messages people sent their agents, from any channel; their
 // agents' own work (scheduled tasks too) shows apart, so it never passes for
 // them. "You wrote" is the deck's record — its emails, and what you marked —
@@ -132,6 +136,8 @@ export function ActivityConsole() {
   const [writing, setWriting] = useState<ActivityUser | null>(null)
   const [noting, setNoting] = useState<ActivityUser | null>(null)
   const [flash, setFlash] = useState('')
+  const [updates, setUpdates] = useState<UsageLog[] | null>(null)
+  const [updatesError, setUpdatesError] = useState('')
 
   // Each tick reads again; the first mailbox read may take the server's copy.
   const [tick, setTick] = useState(0)
@@ -145,6 +151,14 @@ export function ActivityConsole() {
       .finally(() => { if (live) setLoading(false) })
     return () => { live = false }
   }, [windowDays, tick])
+
+  useEffect(() => {
+    let live = true
+    fetchUsageLogs(UPDATES_SHOWN)
+      .then((l) => { if (live) { setUpdates(l); setUpdatesError('') } })
+      .catch((e) => { if (live) { setUpdates((u) => u ?? []); setUpdatesError(errText(e)) } })
+    return () => { live = false }
+  }, [tick])
 
   useEffect(() => {
     let live = true
@@ -166,6 +180,7 @@ export function ActivityConsole() {
   }, [flash])
 
   const users = useMemo(() => report?.users ?? [], [report])
+  const me = useAuthStore((s) => s.user)
   const wrote = useMemo(() => new Map(users.map((u) => [u.id, lastWrote(u, mailbox)])), [users, mailbox])
 
   const counts = useMemo(() => ({
@@ -207,10 +222,7 @@ export function ActivityConsole() {
       <PageHeader
         icon={Activity}
         title="Activity"
-        description={<>
-          Who is using the deck, and whether you've written to them. <em>Typed</em> counts the messages someone sent their
-          agents on any channel; their agents' own work, scheduled tasks included, shows apart. Days are UTC.
-        </>}
+        description="What's been happening on the deck, who is using it, and whether you've been in touch."
         actions={<>
           <Segmented
             value={windowDays}
@@ -224,6 +236,14 @@ export function ActivityConsole() {
 
       {flash && <Notice tone="emerald">{flash}</Notice>}
       {error && <Notice tone="red">{error}</Notice>}
+
+      <LatestUpdates
+        logs={updates}
+        error={updatesError}
+        users={users}
+        me={me ? { id: me.id, name: me.display_name || me.email } : null}
+        onAll={() => go('usage')}
+      />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <StatTile icon={Activity} tone="emerald" label="Active this week" value={counts.active} loading={loading && !report}
@@ -245,7 +265,14 @@ export function ActivityConsole() {
         onConnect={() => go('connections', { connection: 'google' })}
       />
 
-      <Card bodyClassName="">
+      <Card
+        title="People"
+        hint={<>
+          <em>Typed</em> counts the messages someone sent their agents on any channel; their agents' own work, scheduled
+          tasks included, shows apart. Days are UTC.
+        </>}
+        bodyClassName=""
+      >
         <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800/80 px-4 py-3">
           <div className="flex min-w-0 basis-full wide:basis-0 wide:flex-1">
             <SearchBox value={query} onChange={setQuery} placeholder="Search people" />
@@ -317,6 +344,113 @@ export function ActivityConsole() {
         />
       )}
     </Page>
+  )
+}
+
+// ── Latest updates ──
+
+const UPDATES_SHOWN = 6
+
+/** The event's detail as an object, for its raw view and its outcome; null when it isn't JSON. */
+function rawDetail(detail: string): Record<string, unknown> | null {
+  try {
+    const d = JSON.parse(detail || '{}')
+    return d && typeof d === 'object' && !Array.isArray(d) ? d : null
+  } catch {
+    return null
+  }
+}
+
+/** The sentence for one event — activityText's, or the bare event if it can't say. */
+function updateText(l: UsageLog, actor: string, nameOf: (id: string) => string): { label: string; text: string } {
+  try {
+    const row = activityText(l.event_type, l.detail, actor, nameOf)
+    return { label: row?.label || l.event_type, text: row?.text || actor }
+  } catch {
+    return { label: l.event_type, text: `${actor} · ${l.event_type.replace(/_/g, ' ')}` }
+  }
+}
+
+function LatestUpdates({ logs, error, users, me, onAll }: {
+  logs: UsageLog[] | null
+  error: string
+  users: ActivityUser[]
+  me: { id: string; name: string } | null
+  onAll: () => void
+}) {
+  const [open, setOpen] = useState<number | null>(null)
+  const names = useMemo(() => new Map(users.map((u) => [u.id, nameOf(u)])), [users])
+  const nameFor = (id: string) => (me && id === me.id ? me.name : names.get(id) || 'someone')
+  // "You" when it was you, as a sentence's subject.
+  const actor = (id: string) => (me && id === me.id ? 'You' : nameFor(id))
+
+  return (
+    <Card
+      title="Latest updates"
+      hint="What people and their agents did on the deck, newest first."
+      action={<Button variant="ghost" onClick={onAll}>All activity <ChevronRight className="h-4 w-4" /></Button>}
+      bodyClassName=""
+    >
+      {logs === null ? (
+        <div className="flex justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-zinc-600" /></div>
+      ) : error && logs.length === 0 ? (
+        <div className="px-5 py-5 text-sm text-zinc-500">
+          The latest updates couldn't be loaded right now.
+          <details className="mt-2 text-xs">
+            <summary className="cursor-pointer text-violet-600 dark:text-violet-400">See what happened</summary>
+            <p className="mt-1 break-words text-red-600 dark:text-red-400">{error}</p>
+          </details>
+        </div>
+      ) : logs.length === 0 ? (
+        <p className="px-5 py-8 text-center text-sm text-zinc-500">
+          All quiet so far. Agents started, files shared and settings changed will show up here.
+        </p>
+      ) : (
+        <ul className="divide-y divide-zinc-800/70">
+          {error && <li className="px-5 py-2.5 text-xs text-amber-700 dark:text-amber-300">These couldn't be refreshed: {error}</li>}
+          {logs.map((l) => {
+            const row = updateText(l, actor(l.user_id), nameFor)
+            const detail = rawDetail(l.detail)
+            const failed = detail?.ok === false
+            const shown = open === l.id
+            return (
+              <li key={l.id} className="px-5 py-3">
+                <div className="flex items-start gap-3">
+                  <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${failed ? 'bg-amber-500' : 'bg-zinc-600'}`} />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm text-zinc-200">{row.text}</p>
+                    <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-zinc-500">
+                      <span>{row.label}</span>
+                      <span title={new Date(l.created_at).toLocaleString()}>{whenAgo(l.created_at)}</span>
+                      {failed && <span className="font-medium text-amber-700 dark:text-amber-300">didn't go through</span>}
+                      <button
+                        onClick={() => setOpen(shown ? null : l.id)}
+                        aria-expanded={shown}
+                        className="inline-flex items-center gap-0.5 text-violet-600 hover:underline dark:text-violet-400"
+                      >
+                        See what happened <ChevronDown className={`h-3 w-3 transition-transform ${shown ? 'rotate-180' : ''}`} />
+                      </button>
+                    </div>
+                    {shown && (
+                      <div className="mt-2 space-y-1.5 rounded-xl border border-zinc-800 bg-zinc-950/50 p-3 text-xs">
+                        <Line label="Event"><code className="font-mono">{l.event_type}</code></Line>
+                        <Line label="When">{new Date(l.created_at).toLocaleString()}</Line>
+                        <Line label="By">{nameFor(l.user_id)}</Line>
+                        <Line label="Detail">
+                          <pre className="whitespace-pre-wrap break-all font-mono text-[11px] text-zinc-400">
+                            {detail ? JSON.stringify(detail, null, 2) : l.detail || '—'}
+                          </pre>
+                        </Line>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </Card>
   )
 }
 
@@ -413,10 +547,10 @@ function PersonRow({ user: u, report, wrote, mailbox, open, onToggle, onWrite, o
             <button
               onClick={onToggle}
               aria-expanded={open}
-              aria-label={`Details for ${name}`}
+              aria-label={`See what happened with ${name}`}
               className="inline-flex items-center gap-0.5 text-violet-600 hover:underline dark:text-violet-400"
             >
-              Details <ChevronDown className={`h-3 w-3 transition-transform ${open ? 'rotate-180' : ''}`} />
+              See what happened <ChevronDown className={`h-3 w-3 transition-transform ${open ? 'rotate-180' : ''}`} />
             </button>
           </div>
         </div>

@@ -306,7 +306,7 @@ export default function GoogleConnection() {
             <div className="font-medium text-amber-600 mb-0.5">Bring your own OAuth client</div>
             <div className="text-zinc-400 space-y-1.5">
               <p>
-                Captain Claw does not ship with Google credentials. In{' '}
+                Captain does not ship with Google credentials. In{' '}
                 <a
                   href="https://console.cloud.google.com/apis/credentials"
                   target="_blank"
@@ -334,7 +334,7 @@ export default function GoogleConnection() {
           <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-xs text-zinc-300">
             <div className="font-medium text-amber-600 mb-0.5">Bring your own OAuth client</div>
             <div className="text-zinc-400">
-              Captain Claw does not ship with Google credentials. Create an OAuth 2.0
+              Captain does not ship with Google credentials. Create an OAuth 2.0
               Client ID in{' '}
               <a
                 href="https://console.cloud.google.com/apis/credentials"
