@@ -241,6 +241,9 @@ export interface FileText {
   state: FileState
   clean: string
   original?: string
+  /** The text was longer than the page shows (the start of it is here). */
+  clean_cut?: boolean
+  original_cut?: boolean
   /** Real values the check found here: hidden after the check, and still there. */
   leftovers?: { hidden: Leftover[]; left: Leftover[] }
 }

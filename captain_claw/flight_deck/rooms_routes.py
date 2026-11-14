@@ -411,8 +411,9 @@ async def file_text(room_id: str, file_id: str, request: Request, original: bool
     lo = f.get("leftovers") or {}
     out["leftovers"] = {"hidden": lo.get("hidden") or [], "left": lo.get("left") or []}
     text_path = store.text_file(room_id, file_id)
-    out["clean"] = (await asyncio.to_thread(text_path.read_text, "utf-8"))[:_TEXT_PREVIEW] \
-        if text_path.exists() else ""
+    clean = await asyncio.to_thread(text_path.read_text, "utf-8") if text_path.exists() else ""
+    out["clean"] = clean[:_TEXT_PREVIEW]
+    out["clean_cut"] = len(clean) > _TEXT_PREVIEW  # the page shows the start of a long file
     if original:
         vault = await av.store().get(owner, room["vault_id"])
         if vault is None:
@@ -421,7 +422,9 @@ async def file_text(room_id: str, file_id: str, request: Request, original: bool
             blob = await rj.read_original(room, f, av.store().cipher(vault))
         except (ri.IntakeError, OSError) as exc:
             raise HTTPException(409, f"The original can't be read: {exc}") from None
-        out["original"] = (await asyncio.to_thread(_original_text, f["path"], blob))[:_TEXT_PREVIEW]
+        original_text = await asyncio.to_thread(_original_text, f["path"], blob)
+        out["original"] = original_text[:_TEXT_PREVIEW]
+        out["original_cut"] = len(original_text) > _TEXT_PREVIEW
     return out
 
 

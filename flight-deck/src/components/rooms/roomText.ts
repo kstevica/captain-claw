@@ -150,6 +150,88 @@ export function findRe(text: string, re: RegExp): Range[] {
   return [...text.matchAll(g)].filter((m) => m[0]).map((m) => [m.index ?? 0, (m.index ?? 0) + m[0].length] as Range)
 }
 
+// ── a workbook's text, as sheets ───────────────────────────────────
+
+/** A cell of a sheet: its text as written in the room's text, and where it starts there. */
+export interface SheetCell { text: string; at: number }
+
+export interface Sheet {
+  name: string
+  /** Where the name starts in the text (for highlights in the tab). */
+  nameAt: number
+  /** The sheet's stretch of the text: its heading up to the next one. */
+  start: number
+  end: number
+  /** "pictures": the text read from the pictures the room removed, not a sheet. */
+  kind: 'sheet' | 'pictures'
+  rows: SheetCell[][]
+  width: number
+  /** Lines that aren't rows: "(empty sheet)", a picture's text. */
+  notes: SheetCell[]
+}
+
+/** Column letters, as Excel names them: 0 → "A", 26 → "AA". */
+export function colName(i: number): string {
+  let n = i + 1, s = ''
+  while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26) }
+  return s
+}
+
+function splitRow(line: string, start: number): SheetCell[] {
+  const cells: SheetCell[] = []
+  let from = 1
+  for (let i = 1; i <= line.length; i++) {
+    if (i < line.length && !(line[i] === '|' && line[i - 1] !== '\\')) continue
+    let a = from, b = i
+    while (a < b && line[a] === ' ') a++
+    while (b > a && line[b - 1] === ' ') b--
+    if (i < line.length || a < b) cells.push({ text: line.slice(a, b), at: start + a })
+    from = i + 1
+  }
+  return cells
+}
+
+/** A workbook's text as the room makes it ("## Sheet: name", then a markdown
+ *  table) split into its sheets, each cell knowing where it is in the text;
+ *  null when the text isn't a workbook's. */
+export function parseSheets(text: string): Sheet[] | null {
+  if (!/^## Sheet:/m.test(text)) return null
+  const sheets: Sheet[] = []
+  let cur: Sheet | null = null
+  let at = 0
+  for (const line of text.split('\n')) {
+    const start = at
+    at += line.length + 1
+    const h = /^## (?:Sheet: ?(.*)|(Pictures\b.*))$/.exec(line)
+    if (h) {
+      if (cur) cur.end = start
+      const name = h[1] !== undefined ? h[1] : 'Pictures'
+      cur = {
+        name: name.trim() || 'Sheet', nameAt: start + Math.max(0, line.indexOf(name)), start, end: text.length,
+        kind: h[1] !== undefined ? 'sheet' : 'pictures', rows: [], width: 0, notes: [],
+      }
+      sheets.push(cur)
+      continue
+    }
+    if (!cur || !line.trim()) continue
+    if (cur.kind === 'sheet' && line.startsWith('|')) {
+      const cells = splitRow(line, start)
+      if (cells.length && cells.every((c) => /^:?-{3,}:?$/.test(c.text))) continue // the header's rule
+      cur.rows.push(cells)
+      cur.width = Math.max(cur.width, cells.length)
+    } else {
+      const bullet = line.startsWith('- ') ? 2 : 0
+      cur.notes.push({ text: line.slice(bullet).replace(/^_\((.*)\)_$/, '$1'), at: start + bullet })
+    }
+  }
+  return sheets
+}
+
+/** The sheet holding text position *pos*, or -1. */
+export function sheetAt(sheets: Sheet[], pos: number): number {
+  return sheets.findIndex((s) => s.start <= pos && pos < s.end)
+}
+
 export const STATE_LABEL: Record<Room['state'], string> = {
   setup: 'Setting up', running: 'Running', review: 'Ready to check', released: 'Released',
 }
