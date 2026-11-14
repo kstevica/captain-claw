@@ -114,7 +114,7 @@ export default function CodexConnection() {
             <div className="text-zinc-400">
               {status?.detail || (
                 <>
-                  Captain Claw reuses the OAuth tokens cached by the Codex CLI in{' '}
+                  Captain reuses the OAuth tokens cached by the Codex CLI in{' '}
                   <code className="text-zinc-200">~/.codex/auth.json</code>. Install the
                   Codex CLI and run <code className="text-zinc-200">codex login</code> on
                   the same machine that runs Flight Deck, then click{' '}

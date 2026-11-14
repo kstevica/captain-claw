@@ -64,7 +64,7 @@ export function AppHost() {
         <CenterPanel>
           <h2 className="mb-2 text-lg font-semibold text-zinc-200">No apps registered</h2>
           <p className="text-sm text-zinc-500">
-            Describe what you want and Captain Claw will write the manifest for you.
+            Describe what you want and Captain will write the manifest for you.
           </p>
           <button
             onClick={() => setAuthoring({ mode: 'new' })}

@@ -24,7 +24,6 @@ function asLayoutMode(v: string | null | undefined): LayoutMode {
 
 const LAYOUT_MODE_KEY = 'fd:layout-mode'
 const SIMPLE_LEFT_OPEN_KEY = 'fd:simple-left-open'
-const SIMPLE_RIGHT_OPEN_KEY = 'fd:simple-right-open'
 const SIMPLE_QUEUE_OPEN_KEY = 'fd:simple-queue-open'
 
 function loadLayoutMode(): LayoutMode {
@@ -57,8 +56,6 @@ interface UIStore {
   layoutMode: LayoutMode
   /** Simple layout: is the agents column expanded (vs. a thin rail)? */
   simpleLeftOpen: boolean
-  /** Simple layout: is the files + datastore column expanded? */
-  simpleRightOpen: boolean
   /** Simple layout: is the chat's queue column shown? Hidden until asked for. */
   simpleQueueOpen: boolean
   setView: (v: ViewMode) => void
@@ -75,7 +72,6 @@ interface UIStore {
   visitLayout: (mode: LayoutMode) => void
   toggleLayoutMode: () => void
   setSimpleLeftOpen: (v: boolean) => void
-  setSimpleRightOpen: (v: boolean) => void
   setSimpleQueueOpen: (v: boolean) => void
 }
 
@@ -110,7 +106,6 @@ export const useUIStore = create<UIStore>((set, get) => ({
   forgeProjectId: '',
   layoutMode: loadLayoutMode(),
   simpleLeftOpen: loadBool(SIMPLE_LEFT_OPEN_KEY, true),
-  simpleRightOpen: loadBool(SIMPLE_RIGHT_OPEN_KEY, true),
   simpleQueueOpen: loadBool(SIMPLE_QUEUE_OPEN_KEY, false),
 
   setView: (view) => set({ view }),
@@ -146,11 +141,6 @@ export const useUIStore = create<UIStore>((set, get) => ({
     persist(SIMPLE_LEFT_OPEN_KEY, String(simpleLeftOpen))
     set({ simpleLeftOpen })
   },
-  setSimpleRightOpen: (simpleRightOpen) => {
-    if (get().simpleRightOpen === simpleRightOpen) return
-    persist(SIMPLE_RIGHT_OPEN_KEY, String(simpleRightOpen))
-    set({ simpleRightOpen })
-  },
   setSimpleQueueOpen: (simpleQueueOpen) => {
     if (get().simpleQueueOpen === simpleQueueOpen) return
     persist(SIMPLE_QUEUE_OPEN_KEY, String(simpleQueueOpen))
@@ -177,10 +167,9 @@ registerHydrator((settings) => {
     layoutMode: layoutChosenSinceHydrate || layoutVisited ? useUIStore.getState().layoutMode
       : mode === undefined && admin ? 'console' as const : asLayoutMode(mode),
     simpleLeftOpen: bool(SIMPLE_LEFT_OPEN_KEY, true),
-    simpleRightOpen: bool(SIMPLE_RIGHT_OPEN_KEY, true),
     simpleQueueOpen: bool(SIMPLE_QUEUE_OPEN_KEY, false),
   }
-  for (const key of [LAYOUT_MODE_KEY, SIMPLE_LEFT_OPEN_KEY, SIMPLE_RIGHT_OPEN_KEY, SIMPLE_QUEUE_OPEN_KEY]) {
+  for (const key of [LAYOUT_MODE_KEY, SIMPLE_LEFT_OPEN_KEY, SIMPLE_QUEUE_OPEN_KEY]) {
     const v = settings[key]
     try { if (v !== undefined) localStorage.setItem(key, v) } catch { /* ignore */ }
   }

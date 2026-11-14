@@ -229,7 +229,7 @@ export function BrandingAdmin({ name, description, poweredBy, onSave }: Props) {
         <div>
           <div className="text-sm text-zinc-300">“Powered by Captain” on the sign-in page</div>
           <div className="text-xs text-zinc-500 mt-0.5">
-            Links in the footer to captain-claw.com and the Captain Claw repository on GitHub. Off: only the
+            Links in the footer to captain-claw.com and Captain's repository on GitHub. Off: only the
             version shows there.
           </div>
         </div>

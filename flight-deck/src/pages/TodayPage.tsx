@@ -382,7 +382,7 @@ export function TodayPage() {
       <div className="flex h-full flex-col items-center justify-center bg-zinc-950 text-zinc-500">
         <CalendarDays className="mb-3 h-10 w-10 text-zinc-700" />
         <div className="text-sm">No agents reachable yet.</div>
-        <div className="mt-1 text-xs text-zinc-600">Spawn a Captain Claw agent to populate Today.</div>
+        <div className="mt-1 text-xs text-zinc-600">Spawn an agent to populate Today.</div>
       </div>
     )
   }

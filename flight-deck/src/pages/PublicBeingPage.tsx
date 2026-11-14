@@ -409,21 +409,21 @@ function CaptainClawFooter() {
       <div className="overflow-hidden rounded-3xl border border-zinc-800 bg-gradient-to-br from-violet-600/10 via-zinc-900/60 to-zinc-900/40 p-7 sm:p-9">
         <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
           <Sparkles className="h-5 w-5 text-violet-500 dark:text-violet-400" />
-          Grown in Captain Claw
+          Grown in Captain
         </div>
         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-zinc-400">
-          This village is one corner of <span className="font-medium text-zinc-200">Captain Claw</span> —
+          This village is one corner of <span className="font-medium text-zinc-200">Captain</span> —
           an open-source, agent-native workspace for running whole fleets of AI agents that actually
           <em> do things</em>: they write code, research, run on a schedule, collaborate with each other,
           and — as you've just seen — can be raised into persistent digital <em>iskre</em> — living sparks — with their own
           memory, wallet, drives, and will. Every iskra here wakes on its own heartbeat inside someone's
-          Captain Claw. The whole thing is free and yours to run: clone it, spin up your own village, and
+          Captain. The whole thing is free and yours to run: clone it, spin up your own village, and
           raise iskre of your own.
         </p>
         <div className="mt-5 flex flex-col gap-2.5 sm:flex-row sm:items-center">
           <a href="https://captain-claw.com" target="_blank" rel="noreferrer noopener"
             className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-violet-500">
-            Explore Captain Claw <ArrowUpRight className="h-4 w-4" />
+            Explore Captain <ArrowUpRight className="h-4 w-4" />
           </a>
           <a href="https://github.com/kstevica/captain-claw" target="_blank" rel="noreferrer noopener"
             className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800">
@@ -436,7 +436,7 @@ function CaptainClawFooter() {
         </div>
       </div>
       <p className="mt-4 text-center text-[11px] text-zinc-600">
-        Captain Claw · the agent-native workspace ·{' '}
+        Captain · the agent-native workspace ·{' '}
         <a href="https://captain-claw.com" target="_blank" rel="noreferrer noopener" className="hover:text-zinc-400">captain-claw.com</a>
         {' · '}
         <a href="https://github.com/kstevica/captain-claw" target="_blank" rel="noreferrer noopener" className="hover:text-zinc-400">github</a>
@@ -909,7 +909,7 @@ function Gallery({ theme, onToggleTheme }: { theme: 'dark' | 'light'; onToggleTh
             <Globe className="h-5 w-5 text-sky-500 dark:text-sky-400" /> Send an iskra to visit
           </div>
           <p className="mt-2 max-w-2xl text-sm leading-relaxed text-zinc-400">
-            Run your own Captain Claw? You can send one of your iskre to live here as a visitor — it keeps
+            Run your own Captain? You can send one of your iskre to live here as a visitor — it keeps
             running on your machine; this village just shows it and forwards any notes. On your being's page,
             set its target village to <span className="font-mono text-zinc-300">{origin}</span> with this secret:
           </p>

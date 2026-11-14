@@ -78,7 +78,7 @@ function GlassesApp() {
     else if (wasSignedIn.current) { wasSignedIn.current = false; collapseHistory() }
   }, [booted, authEnabled, isAuthenticated, signingOut])
 
-  if (!booted) return <BootScreen text={unreachable ? "Can't reach Flight Deck — retrying…" : 'Captain Claw…'} settings={unreachable} />
+  if (!booted) return <BootScreen text={unreachable ? "Can't reach Flight Deck — retrying…" : 'Captain…'} settings={unreachable} />
   // Signing out reloads the page in a moment; the sign-in screen mounted
   // meanwhile would request a pairing code only to drop it.
   if (authEnabled && !isAuthenticated) return signingOut ? <BootScreen text="Signing out…" /> : <SignIn />
@@ -203,8 +203,8 @@ function renderRoute(route: Route, agents: ReturnType<typeof useAgents.getState>
   if (route.v === 'agents') return <AgentsScreen />
   if (!agents) {
     return error
-      ? <RouteState title="Captain Claw" kind="error" message={error} onRetry={() => { void useAgents.getState().refresh() }} />
-      : <RouteState title="Captain Claw" kind="loading" />
+      ? <RouteState title="Captain" kind="error" message={error} onRetry={() => { void useAgents.getState().refresh() }} />
+      : <RouteState title="Captain" kind="loading" />
   }
   const agent = agents.find((a) => a.id === route.a)
   if (!agent) {

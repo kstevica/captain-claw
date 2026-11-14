@@ -760,7 +760,7 @@ function NewSetDialog({ copyName, catalog, tierLabel, existingNames, onClose, on
             <p className="text-xs leading-relaxed text-zinc-500">
               {kind === 'copy'
                 ? `A copy of “${copyName}”, keys included, to change without touching the original.`
-                : 'Each tier starts on the model Captain Claw suggests for it; add keys and change models after.'}
+                : 'Each tier starts on the model Captain suggests for it; add keys and change models after.'}
             </p>
             <Field label="Set name">
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder={fallbackName} className={inputCls} autoFocus />

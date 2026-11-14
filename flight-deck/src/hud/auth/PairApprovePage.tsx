@@ -93,7 +93,7 @@ export function PairApprovePage() {
 
   useEffect(() => {
     const prev = document.title
-    document.title = 'Pair glasses · Captain Claw'
+    document.title = 'Pair glasses · Captain'
     return () => { document.title = prev }
   }, [])
 
@@ -141,7 +141,7 @@ export function PairApprovePage() {
     <div className="hud-page hud-pair-page">
       <div className="hud-pp-wrap">
         <header className="hud-pp-head">
-          <div className="hud-pp-brand">Captain Claw</div>
+          <div className="hud-pp-brand">Captain</div>
           <h1 className="hud-pp-title">Pair glasses</h1>
         </header>
         {content}

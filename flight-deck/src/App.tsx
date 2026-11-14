@@ -62,6 +62,7 @@ import { BrowserLLMPage } from './pages/BrowserLLMPage'
 import { BeingsPage } from './pages/BeingsPage'
 import { PaymentsPage, paymentIdFromPath, purchaseIdFromPath } from './pages/PaymentsPage'
 import { PublicBeingPage } from './pages/PublicBeingPage'
+import { AgentStorePanel } from './components/store/AgentStorePanel'
 import { useUIStore, startInConsoleUnlessChosen, beginLayoutHydrate } from './stores/uiStore'
 import { useConsoleStore, syncConsoleFromUrl, dropConsoleRequest, selectConsoleAdmin, openConsole, startDesktop, consoleHome, pageFromPath } from './stores/consoleStore'
 import { isAppShell, reportAndroidSession, reportAndroidSignedOut } from './services/desktopShell'
@@ -489,6 +490,10 @@ function AppContent() {
       </>
     )
   }
+
+  // The Agent store (/store): a page of its own, on every form factor — after
+  // the kiosk lock, so a locked account stays in its chat-first layout.
+  if (window.location.pathname === '/store') return <AgentStorePanel />
 
   // The desktop app decides between the kiosk and the console after a sign-in
   // (startDesktop): nothing to show until it has.

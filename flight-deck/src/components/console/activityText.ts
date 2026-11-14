@@ -145,3 +145,85 @@ export function activityText(eventType: string, rawDetail: string, actor: string
   const label = eventType.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase())
   return { label, text: [actor, ...(fields.length ? fields : rawDetail && rawDetail !== '{}' && !Object.keys(d).length ? [rawDetail] : [])].join(' · ') }
 }
+
+// ── An agent's tool calls, as a colleague would narrate them ──
+//
+// The chat shows what an agent is doing as "Captain is checking your
+// calendar", not "google_calendar". toolActivity gives the words after "is":
+// present-continuous, lower-case, no subject, so the caller puts the agent's
+// (or a peer's) name in front. A tool not listed here is "working on it"; the
+// raw tool name stays in the chat's "See what happened".
+
+type Args = Record<string, unknown> | undefined
+
+const WRITES = /^(send|reply|forward|create|insert|add|update|edit|set|delete|remove|move|write|upsert|draft|schedule|cancel)/
+const action = (args: Args) => str(args?.action ?? args?.operation ?? args?.op ?? args?.command).toLowerCase()
+const writes = (args: Args) => WRITES.test(action(args))
+
+function mail(args: Args): string {
+  const a = action(args)
+  if (/^draft/.test(a)) return 'drafting an email'
+  if (/^(send|reply|forward)/.test(a)) return 'sending an email'
+  return 'checking your email'
+}
+
+const TOOL_ACTIVITY: Record<string, string | ((args: Args) => string)> = {
+  google_mail: mail, microsoft_mail: mail, imap_mail: mail,
+  send_mail: 'sending an email',
+  google_calendar: (a) => (writes(a) ? 'updating your calendar' : 'checking your calendar'),
+  microsoft_calendar: (a) => (writes(a) ? 'updating your calendar' : 'checking your calendar'),
+  google_drive: 'looking through your files', microsoft_onedrive: 'looking through your files',
+  datastore: (a) => (writes(a) ? 'updating your records' : 'looking through your records'),
+  contacts: (a) => (writes(a) ? 'updating your contacts' : 'looking up a contact'),
+  read: 'reading a file', workspace_read: 'reading a file', vfs: 'looking through your files',
+  glob: 'looking through your files', grep: 'searching your files', summarize_files: 'reading your files',
+  pdf_extract: 'reading a PDF', ocr_pdf: 'reading a PDF', docx_extract: 'reading a document',
+  xlsx_extract: 'reading a spreadsheet', pptx_extract: 'reading a slide deck', ocr_image: 'reading text in a picture',
+  write: 'saving a file', edit: 'editing a file', workspace_write: 'saving a file',
+  docx: 'putting a document together', xlsx: 'building a spreadsheet', pptx: 'putting slides together',
+  web_search: 'searching the web', web_fetch: 'reading a web page', web_fetch_batch: 'reading a few web pages',
+  web_get: 'reading a web page', browser: 'browsing the web', pinchtab: 'browsing the web',
+  consult_peer: 'checking with a teammate', colleagues: 'checking with a teammate', crew: 'working with the crew',
+  captain_swarm: 'working with the crew', botport: 'checking with another agent',
+  shell: 'running a quick task', terminal: 'running a quick task', code: 'running a quick task',
+  scripts: 'running a script', app_runner: 'running an app', termux: 'running a quick task',
+  image_gen: 'making a picture', image_manipulation: 'touching up a picture',
+  image_vision: 'looking at a picture', cv: 'looking at a picture', video_vision: 'watching a video',
+  audio: 'listening to the audio', pocket_tts: 'recording a voice note',
+  knowledge: 'checking its notes', facts: 'checking its notes', project_memory: 'checking its notes',
+  external_memory: 'checking its notes', history: 'looking back through past chats',
+  insights: 'checking its notes', intentions: 'checking its plans',
+  todo: 'updating its to-do list', cron: 'setting up a schedule',
+  whatsapp_send_file: 'sending a file on WhatsApp', whatsapp_web: 'checking WhatsApp',
+  telegram_inbox: 'checking Telegram', line: 'checking LINE', twitter: 'checking X',
+  payments: 'preparing a payment', spend: 'preparing a payment',
+  ask_user: 'asking you something', ask_human: 'asking you something',
+  playbooks: 'pulling up a playbook', visualize: 'drawing a chart', synthesize_flow: 'sketching a workflow',
+  personality: 'adjusting its settings', model_switch: 'adjusting its settings', reasoning_effort: 'adjusting its settings',
+  sessions: 'switching topics', topics: 'switching topics', clipboard: 'using the clipboard',
+  hosting: 'publishing a page', public_link: 'making a share link',
+  custom_tools: 'using one of your tools', apis: 'using a connected service', direct_api: 'using a connected service',
+  linked_system: 'using a connected service', anonymize: 'hiding personal details',
+  watch_background: 'keeping an eye on a background job', self_check: 'double-checking its work',
+  flight_deck: 'checking Flight Deck', course: 'checking the course', desktop_action: 'working on your desktop',
+  ocr: 'reading text in a picture',
+}
+
+/** What a tool call is doing, after "<agent> is": "checking your calendar". */
+export function toolActivity(tool: string | undefined, args?: Args): string {
+  const t = TOOL_ACTIVITY[(tool || '').trim()]
+  if (!t) return 'working on it'
+  return typeof t === 'function' ? t(args) : t
+}
+
+/** The agent's status line ("Using web_search...", "Calling LLM (…)") the
+ *  same way, or null for a status that is plain words already. */
+export function statusActivity(status: string | undefined): string | null {
+  const s = (status || '').trim()
+  const using = s.match(/^Using\s+([\w-]+)\s*(?:\.\.\.|…)?$/)
+  if (using) return toolActivity(using[1])
+  if (/^(Calling LLM\b|Thinking|Working)/i.test(s)) return 'thinking'
+  if (/^Stopping/i.test(s)) return 'stopping'
+  if (/^Waking up/i.test(s)) return 'waking up'
+  return null
+}
