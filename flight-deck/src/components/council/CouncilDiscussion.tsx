@@ -1,5 +1,7 @@
 import { useRef, useEffect, useMemo } from 'react'
+import { MessagesSquare } from 'lucide-react'
 import { CouncilMessageBubble } from './CouncilMessage'
+import { AgentAvatar } from './councilLook'
 import type { CouncilMessage, CouncilSession } from '../../stores/councilStore'
 
 interface CouncilDiscussionProps {
@@ -48,15 +50,15 @@ export function CouncilDiscussion({ session, onPin, speaking }: CouncilDiscussio
   const speakingAgent = session.agents.find(a => a.id === speaking)
 
   return (
-    <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-auto px-4 py-3 space-y-4">
+    <div ref={scrollRef} onScroll={handleScroll} className="min-h-0 flex-1 space-y-6 overflow-auto px-4 py-4 wide:px-6">
       {rounds.map(([round, messages]) => (
-        <div key={round} className="space-y-2">
-          <div className="sticky top-0 z-10 flex items-center gap-2 py-1">
-            <div className="h-px flex-1 bg-zinc-700/50" />
-            <span className="rounded-full bg-zinc-800 px-3 py-0.5 text-[10px] font-medium text-zinc-400 border border-zinc-700/50">
+        <div key={round} className="space-y-3">
+          <div className="sticky -top-4 z-10 -mx-4 flex items-center gap-3 bg-zinc-950/95 px-4 py-1.5 backdrop-blur-sm wide:-mx-6 wide:px-6">
+            <div className="h-px flex-1 bg-zinc-800" />
+            <span className="rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500 shadow-sm">
               Round {round}
             </span>
-            <div className="h-px flex-1 bg-zinc-700/50" />
+            <div className="h-px flex-1 bg-zinc-800" />
           </div>
 
           {messages.map(msg => (
@@ -71,18 +73,24 @@ export function CouncilDiscussion({ session, onPin, speaking }: CouncilDiscussio
       ))}
 
       {speaking && speakingAgent && (
-        <div className="flex items-center gap-2 px-3 py-2 text-xs text-zinc-400">
-          <div className="flex gap-1">
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-violet-500 animate-pulse" />
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-violet-500 animate-pulse" style={{ animationDelay: '0.2s' }} />
-            <span className="inline-block h-1.5 w-1.5 rounded-full bg-violet-500 animate-pulse" style={{ animationDelay: '0.4s' }} />
+        <div className="flex items-center gap-3">
+          <AgentAvatar name={speakingAgent.name} id={speakingAgent.id} />
+          <div className="flex items-center gap-2.5 rounded-2xl border border-zinc-800 bg-zinc-900/40 px-3.5 py-2.5 text-sm text-zinc-400">
+            <div className="flex gap-1">
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-500" />
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-500" style={{ animationDelay: '0.2s' }} />
+              <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-500" style={{ animationDelay: '0.4s' }} />
+            </div>
+            <span>{speakingAgent.name} is speaking...</span>
           </div>
-          <span>{speakingAgent.name} is speaking...</span>
         </div>
       )}
 
       {session.messages.length === 0 && (
-        <div className="flex h-full items-center justify-center text-sm text-zinc-500">
+        <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-sm text-zinc-500">
+          <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-zinc-900 text-zinc-500">
+            <MessagesSquare className="h-5 w-5" />
+          </span>
           Council discussion will appear here once started.
         </div>
       )}

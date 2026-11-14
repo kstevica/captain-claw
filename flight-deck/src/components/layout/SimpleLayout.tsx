@@ -51,6 +51,7 @@ import {
   Target,
   LayoutGrid,
   Network,
+  Flame,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -1457,6 +1458,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
   const canSwarm = useCanSwarm()
   const openAnonymize = useAnonymizeStore((s) => s.openAnonymize)
   const openRooms = useRoomsStore((s) => s.openRooms)
+  const openTeamWork = useTeamWorkStore((s) => s.openTeamWork)
 
   // Closed without choosing: the focus goes back to the Settings button.
   const [opener] = useState(() => document.activeElement as HTMLElement | null)
@@ -1478,6 +1480,15 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
         { icon: AlarmClock, label: 'Scheduled tasks', hint: 'On a timer, results by chat or email', onSelect: onScheduled, tone: 'amber' },
         { icon: Archive, label: 'Agent backups', hint: 'Your agents backed up on a schedule, and restored', onSelect: onBackups, tone: 'teal' },
         { icon: Activity, label: 'Activity', hint: 'Every tool they used, and how it went', onSelect: onActivity, tone: 'emerald' },
+      ],
+    },
+    // Also in the agent column's More; a phone has no column, so this is its way in.
+    {
+      title: 'Agents as a team',
+      items: [
+        { icon: Flame, label: 'Vatra', hint: 'A lead splits one job; the team builds one result', onSelect: () => { onClose(); openTeamWork('vatra') }, tone: 'violet' },
+        { icon: Network, label: 'Basna', hint: 'Several agents answer; the best of each merged into one', onSelect: () => { onClose(); openTeamWork('basna') }, tone: 'sky' },
+        { icon: MessagesSquare, label: 'Council', hint: 'Your agents discuss a topic in rounds, then sum it up', onSelect: () => { onClose(); openTeamWork('council') }, tone: 'amber' },
       ],
     },
     {
@@ -1817,7 +1828,7 @@ function MoreToolsDialog({ taskboardCount, onTaskboard, onFolders, onPicked, onC
     {
       title: 'Agents as a team',
       items: [
-        { icon: Users, label: 'Vatra', hint: 'A lead splits one job; the team builds one result', onSelect: pick(() => openTeamWork('vatra')), tone: 'violet' },
+        { icon: Flame, label: 'Vatra', hint: 'A lead splits one job; the team builds one result', onSelect: pick(() => openTeamWork('vatra')), tone: 'violet' },
         { icon: Network, label: 'Basna', hint: 'Several agents answer; the best of each merged into one', onSelect: pick(() => openTeamWork('basna')), tone: 'sky' },
         { icon: MessagesSquare, label: 'Council', hint: 'Your agents discuss a topic in rounds, then sum it up', onSelect: pick(() => openTeamWork('council')), tone: 'amber' },
       ],

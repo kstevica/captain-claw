@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { CornerDownRight, ArrowRight, Check, X, Loader2, Users, Share2, ClipboardList, Download, Pencil } from 'lucide-react'
+import { CornerDownRight, ArrowRight, Check, X, Loader2, Flame, Share2, ClipboardList, Download, Pencil } from 'lucide-react'
+import { vatraPanelCls, iconBtnCls, dangerIconBtnCls } from './basna/lookCls'
 import { apiListVatraAsks, apiListVatraBoard, type VatraAsk, type VatraBoardEntry, type VatraSubtask } from '../stores/basnaStore'
 
 // Render the shared board as a markdown document — the substantive entries
@@ -43,15 +44,14 @@ function downloadMarkdown(filename: string, content: string): void {
 
 function Chip({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return (
-    <span className={`rounded-full border border-zinc-700/60 bg-zinc-800/60 px-2 py-0.5 text-[11px] font-medium ${className}`}>
+    <span className={`inline-flex items-center rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] font-medium ${className}`}>
       {children}
     </span>
   )
 }
 
-// Theme-aware: violet is a non-zinc accent, so it needs explicit light defaults
-// plus dark: overrides (zinc would auto-invert, violet does not).
-const PANEL = 'rounded-lg border border-violet-300/70 bg-violet-50/60 p-4 dark:border-violet-800/40 dark:bg-violet-950/10'
+// A Vatra panel: the card with a faint violet wash (theme-safe: translucent violet).
+const PANEL = vatraPanelCls
 
 // ── Team plan: the decomposition (owner · piece), shown for review + while running ──
 
@@ -80,27 +80,27 @@ export function VatraTeamPlan({
 
   return (
     <div className={PANEL}>
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <Users className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
-        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Team plan</span>
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <Flame className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+        <span className="text-[13px] font-semibold text-zinc-200">Team plan</span>
         <Chip className="text-violet-600 dark:text-violet-300">vatra · collaborative</Chip>
         {!!subtasks?.length && <Chip className="text-zinc-400">{subtasks.length} piece(s)</Chip>}
         {editable && <Chip className="text-emerald-600 dark:text-emerald-300">editable</Chip>}
       </div>
       {sharedContext?.trim() && (
-        <div className="mb-3 rounded-md border border-violet-300/50 bg-violet-100/40 p-2.5 dark:border-violet-800/40 dark:bg-violet-900/20">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-300">Shared contract — every piece follows this</div>
-          <p className="whitespace-pre-wrap text-[11px] leading-snug text-zinc-600 dark:text-zinc-400">{sharedContext.trim()}</p>
+        <div className="mb-4 rounded-xl border border-violet-500/20 bg-violet-500/[0.06] px-3.5 py-3">
+          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-violet-700 dark:text-violet-300">Shared contract — every piece follows this</div>
+          <p className="whitespace-pre-wrap text-xs leading-relaxed text-zinc-400">{sharedContext.trim()}</p>
         </div>
       )}
 
       {!subtasks?.length ? (
-        <p className="text-xs text-zinc-500">The Lead is decomposing the task into complementary pieces…</p>
+        <p className="flex items-center gap-2 text-sm text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> The Lead is decomposing the task into complementary pieces…</p>
       ) : !editable ? (
         <div className="flex flex-wrap gap-1.5">
           {subtasks.map((s) => (
-            <span key={s.id} title={s.brief || ''} className="rounded-md border border-zinc-800 bg-zinc-900/50 px-2 py-1 text-[11px] text-zinc-300">
-              {s.group && <span className="mr-1 rounded bg-violet-500/20 px-1 text-[9px] font-semibold text-violet-700 dark:text-violet-300">{s.group}</span>}
+            <span key={s.id} title={s.brief || ''} className="rounded-lg border border-zinc-800 bg-zinc-950/50 px-2.5 py-1 text-xs text-zinc-300">
+              {s.group && <span className="mr-1.5 rounded bg-violet-500/20 px-1 text-[10px] font-semibold text-violet-700 dark:text-violet-300">{s.group}</span>}
               <span className="text-violet-700 dark:text-violet-300/80">{s.owner_archetype_id}</span>
               <span className="mx-1 text-zinc-700">·</span>
               {s.title}
@@ -109,23 +109,23 @@ export function VatraTeamPlan({
         </div>
       ) : (
         <>
-          <div className="space-y-2">
+          <div className="grid gap-2.5 @4xl:grid-cols-2">
             {subtasks.map((s) => (
-              <div key={s.id} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5">
-                <div className="flex items-center gap-2">
-                  <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-200">
+              <div key={s.id} className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-200">
                     <span className="text-violet-700 dark:text-violet-300/90">{s.owner_archetype_id}</span>
                     <span className="mx-1 text-zinc-700">·</span>{s.title}
                   </span>
                   {/* Group selector — Auto (Lead's default) or A/B/C/D */}
-                  <div className="inline-flex shrink-0 rounded-md border border-zinc-700 bg-zinc-950/50 p-0.5">
+                  <div className="inline-flex shrink-0 gap-0.5 rounded-lg border border-zinc-800 bg-zinc-950/60 p-0.5">
                     {(['', ...(_GROUPS as readonly string[])]).map((g) => (
                       <button
                         key={g || 'auto'}
                         onClick={() => onUpdateSubtask?.(s.id, { group: g })}
                         title={g ? `Run in group ${g}` : 'Auto (Lead default phase)'}
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors ${
-                          (s.group || '') === g ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                        className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                          (s.group || '') === g ? 'bg-violet-600 text-white' : 'text-zinc-500 hover:text-zinc-200'
                         }`}
                       >
                         {g || 'Auto'}
@@ -135,44 +135,45 @@ export function VatraTeamPlan({
                   <button
                     onClick={() => onRemoveSubtask?.(s.id)}
                     title="Remove this agent from the run"
-                    className="shrink-0 rounded p-1 text-zinc-500 hover:bg-red-500/20 hover:text-red-300"
+                    aria-label="Remove this agent from the run"
+                    className={`shrink-0 ${dangerIconBtnCls}`}
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
                 </div>
                 <button
                   onClick={() => setEditId(s.id)}
-                  className="mt-1.5 flex w-full items-center gap-2 rounded border border-zinc-700 bg-zinc-950/40 px-2 py-1.5 text-left hover:border-violet-500/50"
+                  className="mt-2 flex w-full items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2.5 py-2 text-left transition-colors hover:border-violet-500/50"
                 >
-                  <Pencil className="h-3 w-3 shrink-0 text-zinc-500" />
-                  <span className={`min-w-0 flex-1 truncate text-[11px] ${s.brief?.trim() ? 'text-zinc-300' : 'italic text-zinc-600'}`}>
+                  <Pencil className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                  <span className={`min-w-0 flex-1 truncate text-xs ${s.brief?.trim() ? 'text-zinc-300' : 'italic text-zinc-500'}`}>
                     {s.brief?.trim() || 'Add instructions…'}
                   </span>
-                  <span className="shrink-0 text-[10px] text-violet-500">Edit</span>
+                  <span className="shrink-0 text-[11px] font-medium text-violet-600 dark:text-violet-400">Edit</span>
                 </button>
               </div>
             ))}
           </div>
 
           {assignedGroups.length > 0 && (
-            <div className="mt-3 space-y-1.5">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Per-group instructions</div>
+            <div className="mt-4 space-y-2">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Per-group instructions</div>
               {assignedGroups.map((g) => (
-                <div key={g} className="flex items-start gap-2">
-                  <span className="mt-1 rounded bg-violet-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-violet-700 dark:text-violet-300">{g}</span>
+                <div key={g} className="flex items-start gap-2.5">
+                  <span className="mt-1.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-violet-500/15 text-xs font-bold text-violet-700 dark:text-violet-300">{g}</span>
                   <textarea
                     value={groupInstructions?.[g] || ''}
                     onChange={(e) => onSetGroupInstruction?.(g, e.target.value)}
                     rows={2}
                     placeholder={`Extra instructions for every Group ${g} agent…`}
-                    className="w-full resize-y rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+                    className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none focus:ring-2 focus:ring-violet-500/15"
                   />
                 </div>
               ))}
             </div>
           )}
 
-          <p className="mt-2 text-[10px] text-zinc-600">
+          <p className="mt-3 text-[11px] leading-relaxed text-zinc-500">
             Groups run in order A→B→C→D (barrier between); agents in the same group run in parallel. Auto = the Lead's default phase. Edits apply on Run.
           </p>
           {editing && (
@@ -195,32 +196,34 @@ function InstructionModal({ subtask, onSave, onClose }: {
 }) {
   const [draft, setDraft] = useState(subtask.brief || '')
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
-      <div className="flex max-h-[85vh] w-[560px] flex-col rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-3">
-          <div className="flex min-w-0 items-center gap-2">
-            <ClipboardList className="h-4 w-4 shrink-0 text-violet-400" />
-            <h2 className="truncate text-sm font-semibold text-zinc-100">
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 wide:items-center wide:p-4" onClick={onClose}>
+      <div role="dialog" aria-modal="true" className="flex max-h-[92dvh] w-full flex-col rounded-t-2xl border border-zinc-800 bg-zinc-950 shadow-2xl wide:max-h-[85vh] wide:max-w-[560px] wide:rounded-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-5 py-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-violet-500/10 text-violet-600 dark:text-violet-400">
+              <ClipboardList className="h-[18px] w-[18px]" />
+            </span>
+            <h2 className="truncate text-base font-semibold text-zinc-100">
               Instructions — <span className="text-violet-700 dark:text-violet-300">{subtask.owner_archetype_id}</span>
               <span className="mx-1 text-zinc-700">·</span>{subtask.title}
             </h2>
           </div>
-          <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"><X className="h-4 w-4" /></button>
+          <button onClick={onClose} aria-label="Close" title="Close" className={iconBtnCls}><X className="h-4 w-4" /></button>
         </div>
-        <div className="flex-1 overflow-y-auto px-5 py-4">
+        <div className="flex-1 overflow-y-auto px-5 py-5">
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             autoFocus
             rows={12}
             placeholder="What this agent should produce, how it should approach it, anything it must source from teammates…"
-            className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950/60 p-2.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+            className="w-full resize-y rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm leading-relaxed text-zinc-100 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none focus:ring-2 focus:ring-violet-500/15"
           />
         </div>
-        <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-5 py-3">
-          <button onClick={onClose} className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800">Cancel</button>
-          <button onClick={() => onSave(draft)} className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-violet-500">
-            <Check className="h-3.5 w-3.5" /> Save
+        <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-5 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+          <button onClick={onClose} className="inline-flex items-center rounded-xl border border-zinc-700 bg-zinc-900/60 px-3.5 py-2 text-sm font-medium text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800">Cancel</button>
+          <button onClick={() => onSave(draft)} className="inline-flex items-center gap-1.5 rounded-xl bg-violet-600 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-violet-500">
+            <Check className="h-4 w-4" /> Save
           </button>
         </div>
       </div>
@@ -283,22 +286,23 @@ export function VatraBlackboard({
   return (
     <div className={PANEL}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <ClipboardList className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
-        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Shared board</span>
+        <ClipboardList className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+        <span className="text-[13px] font-semibold text-zinc-200">Shared board</span>
         {boardShown.length > 0 && <Chip className="text-zinc-400">{boardShown.length} entries</Chip>}
         <span className="ml-auto flex items-center gap-2 text-[11px] text-zinc-500">
           {asks.length > 0 && (
             <>
-              {counts.answered ? <span className="text-emerald-500">{counts.answered} answered</span> : null}
-              {(counts.open || counts.claimed) ? <span className="text-amber-500">{(counts.open || 0) + (counts.claimed || 0)} pending</span> : null}
-              {counts.dropped ? <span className="text-rose-500">{counts.dropped} dropped</span> : null}
+              {counts.answered ? <span className="text-emerald-600 dark:text-emerald-400">{counts.answered} answered</span> : null}
+              {(counts.open || counts.claimed) ? <span className="text-amber-600 dark:text-amber-400">{(counts.open || 0) + (counts.claimed || 0)} pending</span> : null}
+              {counts.dropped ? <span className="text-red-600 dark:text-red-400">{counts.dropped} dropped</span> : null}
             </>
           )}
           {board.some((e) => e.kind !== 'narration') && (
             <button
               onClick={() => downloadMarkdown('vatra-shared-board.md', boardToMarkdown(board, (id) => subtasks?.find((s) => s.owner_archetype_id === id)?.title))}
               title="Export the shared board (notes & outputs) as Markdown"
-              className="flex items-center gap-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+              aria-label="Export the shared board"
+              className={iconBtnCls}
             >
               <Download className="h-3.5 w-3.5" />
             </button>
@@ -308,12 +312,12 @@ export function VatraBlackboard({
 
       {/* Shared memory — notes & outputs the team streamed, newest first. */}
       {boardShown.length === 0 ? (
-        <p className="text-xs text-zinc-600">
+        <p className="text-xs leading-relaxed text-zinc-500">
           Nothing shared yet — teammates' notes and finished pieces stream here as they work, and
           each can search/read it to build on the others.
         </p>
       ) : (
-        <div className="max-h-80 space-y-1.5 overflow-auto pr-1">
+        <div className="max-h-80 space-y-2 overflow-auto pr-1">
           {[...boardShown].reverse().slice(0, 40).map((e) => {
             const isOpen = !!openBoard[e.id]
             const kindCls = e.kind === 'output'
@@ -321,21 +325,21 @@ export function VatraBlackboard({
               : e.kind === 'note' ? 'text-sky-600 dark:text-sky-300'
               : 'text-zinc-500'  // narration / file — live activity, subtler
             return (
-              <div key={e.id} className="rounded-md border border-zinc-800 bg-zinc-900/40 p-2">
+              <div key={e.id} className="rounded-xl border border-zinc-800 bg-zinc-950/50 px-3 py-2.5">
                 <button
                   onClick={() => setOpenBoard((o) => ({ ...o, [e.id]: !o[e.id] }))}
                   className="flex w-full items-center gap-1.5 text-left"
                 >
                   <Chip className={kindCls}>{e.kind}</Chip>
-                  <span className="truncate text-[11px] text-zinc-300">{ownerTitle(e.from_owner) || e.from_owner}</span>
-                  {e.title && <span className="truncate text-[11px] text-zinc-500">· {e.title}</span>}
+                  <span className="truncate text-xs font-medium text-zinc-200">{ownerTitle(e.from_owner) || e.from_owner}</span>
+                  {e.title && <span className="truncate text-xs text-zinc-500">· {e.title}</span>}
                   {fmtBoardTime(e.created_at) && (
-                    <span className="ml-auto shrink-0 pl-1.5 font-mono text-[10px] tabular-nums text-zinc-600" title={e.created_at}>
+                    <span className="ml-auto shrink-0 pl-1.5 font-mono text-[10px] tabular-nums text-zinc-500" title={e.created_at}>
                       {fmtBoardTime(e.created_at)}
                     </span>
                   )}
                 </button>
-                <p className={`mt-1 pl-1 text-xs text-zinc-400 ${isOpen ? '' : 'line-clamp-2'}`}>{e.content}</p>
+                <p className={`mt-1.5 text-xs leading-relaxed text-zinc-400 ${isOpen ? '' : 'line-clamp-2'}`}>{e.content}</p>
               </div>
             )
           })}
@@ -345,15 +349,15 @@ export function VatraBlackboard({
       {asks.length > 0 && (
         <div className="mt-4 space-y-1.5">
           <div className="flex items-center gap-1.5">
-            <Share2 className="h-3 w-3 text-violet-600 dark:text-violet-400" />
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Delegation (asks)</span>
+            <Share2 className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Delegation (asks)</span>
           </div>
           {asks.map((a) => {
             const st = STATUS_STYLE[a.status]
             const isOpen = !!open[a.id]
             const fromLabel = ownerTitle(a.from_owner) || a.from_owner || 'a specialist'
             return (
-              <div key={a.id} className="rounded-md border border-zinc-800 bg-zinc-900/40 p-2">
+              <div key={a.id} className="rounded-xl border border-zinc-800 bg-zinc-950/50 px-3 py-2.5">
                 <button
                   onClick={() => setOpen((o) => ({ ...o, [a.id]: !o[a.id] }))}
                   className="flex w-full items-center gap-1.5 text-left"

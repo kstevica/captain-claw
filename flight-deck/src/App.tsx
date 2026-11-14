@@ -406,7 +406,9 @@ function AppContent() {
       {view === 'admin' && <AdminPage />}
       {view === 'users' && <UsersPage />}
       {view === 'council' && <CouncilPage />}
-      {view === 'basna' && <BasnaPage />}
+      {/* Basna and Vatra: one page, never both at once — each view is locked to its mode. */}
+      {view === 'basna' && <BasnaPage key="basna" mode="basna" />}
+      {view === 'vatra' && <BasnaPage key="vatra" mode="vatra" />}
       {view === 'bat' && <BatPage />}
       {view === 'captain-swarm' && <CaptainSwarmPage />}
       {view === 'payments' && <PaymentsPage />}

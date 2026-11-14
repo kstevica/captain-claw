@@ -1,23 +1,8 @@
 import { Users, Trash2, MessageSquare, Clock, Square, Share2 } from 'lucide-react'
 import type { CouncilSessionSummary } from '../../stores/councilStore'
-
-const TYPE_COLORS: Record<string, string> = {
-  debate: 'bg-red-500/20 text-red-400',
-  brainstorm: 'bg-green-500/20 text-green-400',
-  review: 'bg-blue-500/20 text-blue-400',
-  planning: 'bg-yellow-500/20 text-yellow-400',
-  interview: 'bg-cyan-500/20 text-cyan-400',
-  troubleshoot: 'bg-orange-500/20 text-orange-400',
-  critique: 'bg-rose-500/20 text-rose-400',
-  freeform: 'bg-purple-500/20 text-purple-400',
-}
-
-const STATUS_COLORS: Record<string, string> = {
-  setup: 'bg-zinc-500/20 text-zinc-400',
-  active: 'bg-emerald-500/20 text-emerald-400',
-  synthesizing: 'bg-violet-500/20 text-violet-400',
-  concluded: 'bg-zinc-500/20 text-zinc-400',
-}
+import { Pill } from '../console/parts'
+import { IconSquare, RoundBar, StatusPill, TypePill } from './councilLook'
+import { typeLook } from './councilStyles'
 
 interface SessionCardProps {
   session: CouncilSessionSummary
@@ -26,6 +11,9 @@ interface SessionCardProps {
   onCancel?: (id: string) => void
   onShare?: (session: CouncilSessionSummary) => void
 }
+
+// Shown on hover where there is one; always on a touch screen.
+const CARD_ACTION = 'rounded-lg p-1.5 text-zinc-500 transition-all hover:bg-zinc-800 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover:opacity-100 [@media(hover:hover)]:group-focus-visible:opacity-100'
 
 export function SessionCard({ session, onOpen, onDelete, onCancel, onShare }: SessionCardProps) {
   const running = session.status === 'active' || session.status === 'synthesizing'
@@ -36,29 +24,27 @@ export function SessionCard({ session, onOpen, onDelete, onCancel, onShare }: Se
   const date = new Date(session.created_at).toLocaleDateString('en-US', {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   })
+  const look = typeLook(session.session_type)
 
   return (
     <button
       onClick={() => onOpen(session.id)}
-      className="group flex flex-col gap-2 rounded-xl border border-zinc-700/50 bg-zinc-800/50 p-4 text-left transition-all hover:border-violet-500/40 hover:bg-zinc-800"
+      className="group relative flex min-w-0 flex-col rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 text-left transition-all hover:-translate-y-px hover:border-zinc-700 hover:bg-zinc-900/70 hover:shadow-lg hover:shadow-black/10 focus-visible:border-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
     >
-      <div className="flex items-start justify-between gap-2">
-        <h3 className="font-medium text-zinc-200 line-clamp-1">{session.title || 'Untitled'}</h3>
-        <div className="flex shrink-0 items-center gap-1">
-          {running && onCancel && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onCancel(session.id) }}
-              title="Stop this deliberation"
-              className="rounded p-1 text-amber-500 transition-colors hover:bg-zinc-700 hover:text-rose-400"
-            >
-              <Square className="h-3.5 w-3.5 fill-current" />
-            </button>
-          )}
+      <div className="flex items-start gap-3">
+        <IconSquare icon={look.icon} tone={look.tone} />
+        <div className="min-w-0 flex-1 pt-0.5">
+          <h3 className="line-clamp-2 text-[15px] font-semibold leading-snug text-zinc-100">{session.title || 'Untitled'}</h3>
+          <div className="mt-0.5 flex items-center gap-1 text-xs text-zinc-500">
+            <Clock className="h-3 w-3 shrink-0" /> <span className="truncate">{date}</span>
+          </div>
+        </div>
+        <div className="-mr-1 -mt-1 flex shrink-0 items-center">
           {!session.shared && onShare && (
             <button
               onClick={(e) => { e.stopPropagation(); onShare(session) }}
               title="Share with other users"
-              className="rounded p-1 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-700 hover:text-sky-300 group-hover:opacity-100"
+              className={`${CARD_ACTION} hover:text-sky-600 dark:hover:text-sky-300`}
             >
               <Share2 className="h-3.5 w-3.5" />
             </button>
@@ -66,37 +52,48 @@ export function SessionCard({ session, onOpen, onDelete, onCancel, onShare }: Se
           {!session.shared && (
             <button
               onClick={(e) => { e.stopPropagation(); onDelete(session.id) }}
-              className="rounded p-1 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-700 hover:text-red-400 group-hover:opacity-100"
+              title="Delete"
+              className={`${CARD_ACTION} hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400`}
             >
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           )}
+          {running && onCancel && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onCancel(session.id) }}
+              title="Stop this deliberation"
+              className="ml-1 rounded-lg border border-zinc-700 p-1.5 text-zinc-400 transition-colors hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400"
+            >
+              <Square className="h-3 w-3 fill-current" />
+            </button>
+          )}
         </div>
       </div>
+
       {session.shared && (
-        <span className="flex w-fit items-center gap-1 rounded border border-sky-500/25 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-300">
-          <Users className="h-2.5 w-2.5" /> shared by {session.owner_name || session.owner_email || 'another user'} · {session.access}
-        </span>
+        <div className="mt-3">
+          <Pill tone="sky" icon={Users}>
+            shared by {session.owner_name || session.owner_email || 'another user'} · {session.access}
+          </Pill>
+        </div>
       )}
 
-      <p className="text-xs text-zinc-400 line-clamp-2">{session.topic}</p>
+      <p className="mt-3 line-clamp-2 text-sm leading-relaxed text-zinc-400">{session.topic}</p>
 
-      <div className="flex flex-wrap items-center gap-2 mt-auto pt-1">
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium uppercase ${TYPE_COLORS[session.session_type] || TYPE_COLORS.brainstorm}`}>
-          {session.session_type}
-        </span>
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_COLORS[session.status] || STATUS_COLORS.setup}`}>
-          {session.status}
-        </span>
-        <span className="flex items-center gap-1 text-[10px] text-zinc-500">
-          <Users className="h-3 w-3" /> {agentCount}
-        </span>
-        <span className="flex items-center gap-1 text-[10px] text-zinc-500">
-          <MessageSquare className="h-3 w-3" /> R{session.current_round}/{session.max_rounds}
-        </span>
-        <span className="flex items-center gap-1 text-[10px] text-zinc-500 ml-auto">
-          <Clock className="h-3 w-3" /> {date}
-        </span>
+      <div className="mt-auto pt-4">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <StatusPill status={session.status} />
+          <TypePill type={session.session_type} />
+          <span className="ml-auto flex items-center gap-3 text-xs tabular-nums text-zinc-500">
+            <span className="flex items-center gap-1" title={`${agentCount} agent${agentCount === 1 ? '' : 's'}`}>
+              <Users className="h-3.5 w-3.5" /> {agentCount}
+            </span>
+            <span className="flex items-center gap-1" title={`Round ${session.current_round} of ${session.max_rounds}`}>
+              <MessageSquare className="h-3.5 w-3.5" /> R{session.current_round}/{session.max_rounds}
+            </span>
+          </span>
+        </div>
+        <RoundBar current={session.current_round} max={session.max_rounds} className="mt-3" />
       </div>
     </button>
   )

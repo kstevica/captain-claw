@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Users, Plus, ArrowLeft, MessageSquare, Lightbulb, ClipboardCheck, Target, X } from 'lucide-react'
+import { Plus, MessagesSquare, Loader2 } from 'lucide-react'
 import { useCouncilStore, type CreateSessionConfig } from '../stores/councilStore'
 import { useOnboardingStore } from '../stores/onboardingStore'
 import { CouncilSetup } from '../components/council/CouncilSetup'
@@ -10,14 +10,25 @@ import { SynthesisView } from '../components/council/SynthesisView'
 import { TldrPanel } from '../components/council/TldrPanel'
 import { ActionPointsPanel } from '../components/council/ActionPointsPanel'
 import { SessionCard } from '../components/council/SessionCard'
+import { CouncilHeader, IconSquare, StatusPill, TypePill } from '../components/council/councilLook'
+import { TYPE_LOOK, TONE_SQUARE } from '../components/council/councilStyles'
 import { ShareModal } from '../components/common/ShareModal'
-import type { CouncilSessionSummary } from '../stores/councilStore'
+import { Button, Page } from '../components/console/parts'
+import type { CouncilSessionSummary, SessionType } from '../stores/councilStore'
 
 type PageState = 'list' | 'setup' | 'active'
 
 const SIDEBAR_MIN = 280
 const SIDEBAR_MAX_RATIO = 0.65
 const SIDEBAR_DEFAULT_RATIO = 0.5
+
+// The four kinds of session the empty page shows, each in its colour.
+const STARTERS: { type: SessionType; label: string; desc: string }[] = [
+  { type: 'debate', label: 'Debate', desc: 'Argue perspectives' },
+  { type: 'brainstorm', label: 'Brainstorm', desc: 'Generate ideas' },
+  { type: 'review', label: 'Review', desc: 'Evaluate work' },
+  { type: 'planning', label: 'Plan', desc: 'Strategy & goals' },
+]
 
 /** `onClose`: in a kiosk dialog, its Close. */
 export function CouncilPage({ onClose }: { onClose?: () => void } = {}) {
@@ -103,9 +114,15 @@ export function CouncilPage({ onClose }: { onClose?: () => void } = {}) {
   const synthesisMsg = activeSession?.messages.find(m => m.role === 'synthesis')
   const tldrs = activeSession?.artifacts?.filter(a => a.kind === 'tldr') || []
   const actionPoints = activeSession?.artifacts?.filter(a => a.kind === 'action_points') || []
+  const showTldrs = tldrs.length > 0 || generatingArtifact === 'tldr'
+  const showActionPoints = !!synthesisMsg || actionPoints.length > 0 || generatingArtifact === 'action_points'
+
+  const newSession = (
+    <Button variant="primary" icon={Plus} onClick={() => setPageState('setup')}>New session</Button>
+  )
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="@container flex h-full flex-col">
       {shareTarget && (
         <ShareModal
           resourceType="council"
@@ -114,144 +131,146 @@ export function CouncilPage({ onClose }: { onClose?: () => void } = {}) {
           onClose={() => setShareTarget(null)}
         />
       )}
-      {/* Header */}
-      <div className="shrink-0 border-b border-zinc-700/50 bg-zinc-900/50 px-4 py-3 md:px-6">
-        <div className="flex items-center gap-3">
-          {pageState !== 'list' && (
-            <button
-              onClick={handleBack}
-              className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-700/50 hover:text-zinc-200"
-            >
-              <ArrowLeft className="h-4 w-4" />
-            </button>
-          )}
-          <Users className="h-5 w-5 text-violet-400" />
-          <div>
-            <h1 className="text-sm font-semibold text-zinc-200">
-              {pageState === 'list' && 'Council of Agents'}
-              {pageState === 'setup' && 'New Council Session'}
-              {pageState === 'active' && (activeSession?.title || 'Council Session')}
-            </h1>
-            {pageState === 'active' && activeSession && (
-              <p className="text-xs text-zinc-500 line-clamp-1">{activeSession.topic}</p>
-            )}
-          </div>
 
-          {pageState === 'list' && (
-            <button
-              onClick={() => setPageState('setup')}
-              className="ml-auto flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
-            >
-              <Plus className="h-3.5 w-3.5" /> New Session
-            </button>
-          )}
-          {onClose && (
-            <button onClick={onClose} aria-label="Close" title="Close"
-              className={`${pageState === 'list' ? '' : 'ml-auto '}rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100`}>
-              <X className="h-4 w-4" />
-            </button>
-          )}
-        </div>
-      </div>
+      {/* Session List */}
+      {pageState === 'list' && (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <Page full={!!onClose}>
+            <CouncilHeader
+              icon={MessagesSquare}
+              title="Council"
+              description="Your agents discuss a topic in rounds — answering and challenging each other — then sum up the best of it."
+              action={sessions.length > 0 ? newSession : undefined}
+              onClose={onClose}
+            />
 
-      {/* Content */}
-      <div className="flex-1 overflow-hidden">
-        {/* Session List */}
-        {pageState === 'list' && (
-          <div className="h-full overflow-auto p-4 md:p-6">
             {loading && sessions.length === 0 && (
-              <div className="flex items-center justify-center py-12 text-sm text-zinc-500">
-                Loading sessions...
+              <div className="flex items-center justify-center gap-2 py-16 text-sm text-zinc-500">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading sessions...
               </div>
             )}
 
             {!loading && sessions.length === 0 && (
-              <div className="flex flex-col items-center justify-center py-12 text-center">
-                <Users className="h-12 w-12 text-zinc-600 mb-4" />
-                <h2 className="text-lg font-medium text-zinc-300 mb-2">Council Sessions</h2>
-                <p className="text-sm text-zinc-500 mb-6 max-w-lg">
-                  Have your agents discuss topics in moderated multi-round sessions. Each agent self-scores its suitability
-                  and can answer, challenge, refine, or broaden other agents' points. A synthesizer combines the best ideas at the end.
-                </p>
+              <div className="relative overflow-hidden rounded-3xl border border-zinc-800 bg-zinc-900/40 px-5 py-10 text-center @xl:px-10 @xl:py-14">
+                <div className="pointer-events-none absolute inset-x-0 top-0 h-40 bg-gradient-to-b from-amber-500/[0.07] to-transparent" aria-hidden />
+                <div className="relative">
+                  <IconSquare icon={MessagesSquare} tone="amber" size="xl" className="mx-auto shadow-lg shadow-amber-500/10" />
+                  <h2 className="mt-5 text-xl font-semibold tracking-tight text-zinc-100">Put a topic to your agents</h2>
+                  <p className="mx-auto mt-2 max-w-lg text-sm leading-relaxed text-zinc-500">
+                    Each agent rates how well the topic fits it, then answers, challenges or builds on the others,
+                    round by round. At the end, the best ideas come together in one summary.
+                  </p>
 
-                {/* Session type examples */}
-                <div className="mb-6 grid grid-cols-2 gap-2 max-w-md w-full text-left sm:grid-cols-4">
-                  {[
-                    { icon: MessageSquare, label: 'Debate', desc: 'Argue perspectives' },
-                    { icon: Lightbulb, label: 'Brainstorm', desc: 'Generate ideas' },
-                    { icon: ClipboardCheck, label: 'Review', desc: 'Evaluate work' },
-                    { icon: Target, label: 'Plan', desc: 'Strategy & goals' },
-                  ].map(({ icon: Icon, label, desc }) => (
-                    <div key={label} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
-                      <Icon className="h-4 w-4 text-violet-400 mb-1.5" />
-                      <p className="text-xs font-medium text-zinc-300">{label}</p>
-                      <p className="text-[10px] text-zinc-600">{desc}</p>
-                    </div>
-                  ))}
+                  <div className="mx-auto mt-8 grid max-w-3xl grid-cols-2 gap-2.5 text-left @2xl:grid-cols-4">
+                    {STARTERS.map(({ type, label, desc }) => {
+                      const look = TYPE_LOOK[type]
+                      const Icon = look.icon
+                      return (
+                        <div key={type} className="flex min-w-0 flex-col rounded-2xl border border-zinc-800 bg-zinc-950/40 p-3.5">
+                          <span className={`flex h-10 w-10 items-center justify-center rounded-xl ring-1 ${TONE_SQUARE[look.tone]}`}>
+                            <Icon className="h-5 w-5" />
+                          </span>
+                          <span className="mt-3 block text-sm font-semibold leading-snug text-zinc-100">{label}</span>
+                          <span className="mt-0.5 block text-xs leading-snug text-zinc-500">{desc}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  <Button variant="primary" icon={Plus} onClick={() => setPageState('setup')} className="mt-8 px-5! py-2.5!">
+                    Start your first session
+                  </Button>
                 </div>
-
-                <button
-                  onClick={() => setPageState('setup')}
-                  className="flex items-center gap-2 rounded-lg bg-violet-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-violet-500"
-                >
-                  <Plus className="h-4 w-4" /> Create First Session
-                </button>
               </div>
             )}
 
             {sessions.length > 0 && (
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {sessions.map(s => (
-                  <SessionCard
-                    key={s.id}
-                    session={s}
-                    onOpen={handleOpen}
-                    onDelete={handleDelete}
-                    onCancel={cancelSession}
-                    onShare={setShareTarget}
-                  />
-                ))}
-              </div>
+              <section className="@container space-y-3">
+                <div className="flex items-baseline gap-2 px-1">
+                  <h2 className="text-sm font-semibold text-zinc-200">Sessions</h2>
+                  <span className="text-xs tabular-nums text-zinc-500">{sessions.length}</span>
+                </div>
+                <div className="grid gap-3 @2xl:grid-cols-2 @6xl:grid-cols-3">
+                  {sessions.map(s => (
+                    <SessionCard
+                      key={s.id}
+                      session={s}
+                      onOpen={handleOpen}
+                      onDelete={handleDelete}
+                      onCancel={cancelSession}
+                      onShare={setShareTarget}
+                    />
+                  ))}
+                </div>
+              </section>
             )}
-          </div>
-        )}
+          </Page>
+        </div>
+      )}
 
-        {/* Setup */}
-        {pageState === 'setup' && (
-          <div className="h-full overflow-auto p-4 md:p-6">
+      {/* Setup */}
+      {pageState === 'setup' && (
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <Page full={!!onClose}>
+            <CouncilHeader
+              icon={MessagesSquare}
+              title="New session"
+              description="Set the topic, choose who takes part, and start."
+              onBack={handleBack}
+              onClose={onClose}
+            />
             <CouncilSetup
               onStart={handleCreate}
               onCancel={() => setPageState('list')}
             />
-          </div>
-        )}
+          </Page>
+        </div>
+      )}
 
-        {/* Active Session */}
-        {pageState === 'active' && activeSession && (
-          <div ref={containerRef} className="flex h-full">
-            {/* Main discussion area */}
-            <div className="flex flex-col min-w-0" style={{ flex: `1 1 ${(1 - sidebarRatio) * 100}%` }}>
-              {/* Synthesis view if present */}
-              {synthesisMsg && (
-                <div className="shrink-0 px-4 pt-3">
+      {/* Active Session */}
+      {pageState === 'active' && (
+        <div className="shrink-0 border-b border-zinc-800 px-4 py-3.5 wide:px-6">
+          <CouncilHeader
+            compact
+            icon={(activeSession && TYPE_LOOK[activeSession.sessionType]?.icon) || MessagesSquare}
+            tone={(activeSession && TYPE_LOOK[activeSession.sessionType]?.tone) || 'amber'}
+            title={activeSession?.title || 'Council Session'}
+            meta={activeSession && (
+              <>
+                <TypePill type={activeSession.sessionType} />
+                <StatusPill status={activeSession.status} />
+                <span className="text-[11px] font-medium tabular-nums text-zinc-500">
+                  R{activeSession.currentRound}/{activeSession.maxRounds}
+                </span>
+              </>
+            )}
+            description={activeSession?.topic}
+            onBack={handleBack}
+            onClose={onClose}
+          />
+        </div>
+      )}
+      {pageState === 'active' && activeSession && (
+        <div ref={containerRef} className="flex min-h-0 flex-1">
+          {/* Main discussion area */}
+          <div className="flex min-w-0 flex-col" style={{ flex: `1 1 ${(1 - sidebarRatio) * 100}%` }}>
+            {/* Synthesis, TL;DRs, action points: on top, never taking the whole column */}
+            {(synthesisMsg || showTldrs || showActionPoints) && (
+              <div className="@container max-h-[45%] shrink-0 space-y-3 overflow-y-auto border-b border-zinc-800/70 px-4 py-3 wide:px-6">
+                {synthesisMsg && (
                   <SynthesisView message={synthesisMsg} votes={activeSession.votes} />
-                </div>
-              )}
+                )}
 
-              {/* TL;DR panel */}
-              {(tldrs.length > 0 || generatingArtifact === 'tldr') && (
-                <div className="shrink-0 px-4 pt-3">
+                {showTldrs && (
                   <TldrPanel
                     tldrs={tldrs}
                     generating={generatingArtifact === 'tldr'}
                     onGenerate={generateTldrs}
                   />
-                </div>
-              )}
+                )}
 
-              {/* Action points panel — available once the council has been synthesized */}
-              {(synthesisMsg || actionPoints.length > 0 || generatingArtifact === 'action_points') && (
-                <div className="shrink-0 px-4 pt-3">
+                {/* Action points panel — available once the council has been synthesized */}
+                {showActionPoints && (
                   <ActionPointsPanel
                     artifacts={actionPoints}
                     generating={generatingArtifact === 'action_points'}
@@ -259,61 +278,61 @@ export function CouncilPage({ onClose }: { onClose?: () => void } = {}) {
                     onGenerate={generateActionPoints}
                     onSend={sendActionPointToAgent}
                   />
-                </div>
-              )}
+                )}
+              </div>
+            )}
 
-              {/* Discussion thread */}
-              <CouncilDiscussion
-                session={activeSession}
-                onPin={pinMessage}
-                speaking={speaking}
-              />
+            {/* Discussion thread */}
+            <CouncilDiscussion
+              session={activeSession}
+              onPin={pinMessage}
+              speaking={speaking}
+            />
 
-              {/* Controls */}
-              <CouncilControls
-                session={activeSession}
-                speaking={speaking}
-                roundRunning={roundRunning}
-                generatingArtifact={generatingArtifact}
-                autoAdvanceCountdown={autoAdvanceCountdown}
-                onInject={injectMessage}
-                onDirectAddress={directAddress}
-                onAdvanceRound={advanceRound}
-                onRestartRound={restartRound}
-                onRequestSynthesis={requestSynthesis}
-                onConclude={concludeSession}
-                onCancelAutoAdvance={cancelAutoAdvance}
-                onGenerateTldrs={generateTldrs}
-                onExportMd={exportMinutesMd}
-                onDisposeAgents={disposeAgents}
-              />
-            </div>
-
-            {/* Resize handle */}
-            <div
-              onMouseDown={onMouseDown}
-              className="hidden lg:flex w-1 shrink-0 cursor-col-resize items-center justify-center hover:bg-violet-500/20 active:bg-violet-500/30 transition-colors"
-            >
-              <div className="h-8 w-0.5 rounded-full bg-zinc-600" />
-            </div>
-
-            {/* Sidebar panel */}
-            <div
-              className="hidden lg:block shrink-0 overflow-hidden"
-              style={{ width: `${sidebarRatio * 100}%`, minWidth: SIDEBAR_MIN }}
-            >
-              <CouncilSidebar
-                session={activeSession}
-                speaking={speaking}
-                activityLog={activityLog}
-                autoAdvanceCountdown={autoAdvanceCountdown}
-                onMute={muteAgent}
-                onPinClick={pinMessage}
-              />
-            </div>
+            {/* Controls */}
+            <CouncilControls
+              session={activeSession}
+              speaking={speaking}
+              roundRunning={roundRunning}
+              generatingArtifact={generatingArtifact}
+              autoAdvanceCountdown={autoAdvanceCountdown}
+              onInject={injectMessage}
+              onDirectAddress={directAddress}
+              onAdvanceRound={advanceRound}
+              onRestartRound={restartRound}
+              onRequestSynthesis={requestSynthesis}
+              onConclude={concludeSession}
+              onCancelAutoAdvance={cancelAutoAdvance}
+              onGenerateTldrs={generateTldrs}
+              onExportMd={exportMinutesMd}
+              onDisposeAgents={disposeAgents}
+            />
           </div>
-        )}
-      </div>
+
+          {/* Resize handle */}
+          <div
+            onMouseDown={onMouseDown}
+            className="group hidden w-1.5 shrink-0 cursor-col-resize items-center justify-center border-l border-zinc-800 transition-colors hover:bg-violet-500/15 active:bg-violet-500/25 lg:flex"
+          >
+            <div className="h-10 w-1 rounded-full bg-zinc-700 transition-colors group-hover:bg-violet-500/60" />
+          </div>
+
+          {/* Sidebar panel */}
+          <div
+            className="hidden shrink-0 overflow-hidden lg:block"
+            style={{ width: `${sidebarRatio * 100}%`, minWidth: SIDEBAR_MIN }}
+          >
+            <CouncilSidebar
+              session={activeSession}
+              speaking={speaking}
+              activityLog={activityLog}
+              autoAdvanceCountdown={autoAdvanceCountdown}
+              onMute={muteAgent}
+              onPinClick={pinMessage}
+            />
+          </div>
+        </div>
+      )}
     </div>
   )
 }

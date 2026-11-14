@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import { Database, Table2, Eye, Loader2, Folder, ChevronDown, ChevronRight, Users } from 'lucide-react'
+import { Database, Table2, Eye, Loader2, Folder, FolderClock, ChevronDown } from 'lucide-react'
+import { Card, EmptyState, Pill } from '../console/parts'
+import { iconBtnCls } from './lookCls'
 import { DatastoreBrowser } from '../agents/DatastoreBrowser'
 import { fdGet } from './RunArtifacts'
 import type { ProjectSource } from './ProjectFiles'
@@ -35,59 +37,59 @@ export function ProjectDatastore({ sources }: { sources: ProjectSource[] }) {
   const withTables = sources.filter((s) => (byFolder[s.folder] || []).length > 0)
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <Database className="h-3.5 w-3.5 text-emerald-500/80" />
-        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Datastore</span>
-        {!loading && <span className="text-[10px] tabular-nums text-zinc-600">{total} table(s) across {withTables.length} source(s)</span>}
-      </div>
-
+    <Card
+      title="Datastore"
+      icon={Database}
+      hint={loading ? 'Tables in the project folder and every run’s folder.' : `${total} table(s) across ${withTables.length} source(s).`}
+    >
       {loading ? (
-        <div className="flex items-center gap-2 text-[11px] text-zinc-600"><Loader2 className="h-3 w-3 animate-spin" /> loading…</div>
+        <div className="flex items-center gap-2 text-sm text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
       ) : withTables.length === 0 ? (
-        <p className="text-[11px] text-zinc-600">No datastore tables in this project's runs yet.</p>
+        <EmptyState icon={Database} title="No tables yet">No datastore tables in this project's runs yet.</EmptyState>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-2.5">
           {withTables.map((s) => {
             const tables = byFolder[s.folder] || []
             const isOpen = !!open[s.folder]
             return (
-              <div key={s.folder} className="rounded-lg border border-zinc-800 bg-zinc-900/40">
-                <button
-                  onClick={() => setOpen((o) => ({ ...o, [s.folder]: !o[s.folder] }))}
-                  className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left"
-                >
-                  {isOpen ? <ChevronDown className="h-3 w-3 shrink-0 text-zinc-600" /> : <ChevronRight className="h-3 w-3 shrink-0 text-zinc-600" />}
-                  {s.owner === 'project'
-                    ? <Folder className="h-3.5 w-3.5 shrink-0 text-sky-500/80" />
-                    : <Users className="h-3.5 w-3.5 shrink-0 text-violet-500/80" />}
-                  <span className="truncate text-xs font-medium text-zinc-200" title={s.label}>{s.label}</span>
-                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
-                    s.owner === 'project' ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300' : 'bg-violet-500/15 text-violet-700 dark:text-violet-300'}`}>
-                    {s.owner === 'project' ? 'project' : 'run'}
-                  </span>
-                  <span className="ml-auto flex shrink-0 items-center gap-2 text-[10px] text-zinc-600">
-                    <span className="tabular-nums">{tables.length} tables</span>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setDs({ folder: s.folder, label: s.label }) }}
-                      title="Open datastore"
-                      className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-                    >
-                      <Database className="h-3.5 w-3.5" />
-                    </button>
-                  </span>
-                </button>
+              <div key={s.folder} className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/40">
+                <div className="flex items-center gap-1 pr-2 transition-colors hover:bg-zinc-800/40">
+                  <button
+                    onClick={() => setOpen((o) => ({ ...o, [s.folder]: !o[s.folder] }))}
+                    aria-expanded={isOpen}
+                    className="flex min-w-0 flex-1 items-center gap-2.5 py-2.5 pl-3.5 text-left"
+                  >
+                    {s.owner === 'project'
+                      ? <Folder className="h-4 w-4 shrink-0 text-zinc-400" />
+                      : <FolderClock className="h-4 w-4 shrink-0 text-zinc-500" />}
+                    <span className="min-w-0 truncate text-sm font-medium text-zinc-200" title={s.label}>{s.label}</span>
+                    <Pill tone={s.owner === 'project' ? 'violet' : 'zinc'}>{s.owner === 'project' ? 'Project' : 'Run'}</Pill>
+                    <span className="ml-auto flex shrink-0 items-center gap-3 text-[11px] text-zinc-500">
+                      <span className="tabular-nums">{tables.length} {tables.length === 1 ? 'table' : 'tables'}</span>
+                      <ChevronDown className={`h-4 w-4 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setDs({ folder: s.folder, label: s.label })}
+                    title="Open datastore"
+                    aria-label="Open datastore"
+                    className={iconBtnCls}
+                  >
+                    <Database className="h-3.5 w-3.5" />
+                  </button>
+                </div>
                 {isOpen && (
-                  <div className="space-y-0.5 px-2 pb-2">
+                  <div className="divide-y divide-zinc-800/60 border-t border-zinc-800/80">
                     {tables.map((t) => (
-                      <div key={t.name} className="flex items-center gap-1.5 rounded px-1 py-0.5 text-xs hover:bg-zinc-800/50">
-                        <Table2 className="h-3 w-3 shrink-0 text-emerald-500/80" />
-                        <span className="truncate font-mono text-zinc-300" title={t.name}>{t.name}</span>
-                        <span className="shrink-0 text-[10px] tabular-nums text-zinc-600">{t.row_count} rows</span>
+                      <div key={t.name} className="flex items-center gap-2.5 px-3.5 py-1.5 text-sm hover:bg-zinc-800/30">
+                        <Table2 className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                        <span className="min-w-0 truncate font-mono text-[13px] text-zinc-300" title={t.name}>{t.name}</span>
+                        <span className="shrink-0 text-[11px] tabular-nums text-zinc-500">{t.row_count} rows</span>
                         <button
                           onClick={() => setDs({ folder: s.folder, label: s.label, table: t.name })}
                           title="View table"
-                          className="ml-auto shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+                          aria-label={`View table ${t.name}`}
+                          className={`ml-auto shrink-0 ${iconBtnCls}`}
                         >
                           <Eye className="h-3.5 w-3.5" />
                         </button>
@@ -108,6 +110,6 @@ export function ProjectDatastore({ sources }: { sources: ProjectSource[] }) {
           onClose={() => setDs(null)}
         />
       )}
-    </div>
+    </Card>
   )
 }

@@ -1,11 +1,16 @@
 import { useState, useRef } from 'react'
-import { Swords, Lightbulb, ClipboardCheck, Map, Play, Paperclip, X, MessageCircleQuestion, Bug, ShieldAlert, MessagesSquare, Sparkles, MousePointerClick, Loader2, Check } from 'lucide-react'
+import {
+  Swords, Lightbulb, ClipboardCheck, Map, Play, Paperclip, X, MessageCircleQuestion, Bug, ShieldAlert, MessagesSquare,
+  Sparkles, MousePointerClick, Check, Upload, FileText, Users, SlidersHorizontal, Crown, Search,
+} from 'lucide-react'
 import { AgentPicker, isOldManName } from './AgentPicker'
 import { formatSize } from '../../services/fileTransfer'
 import { archetypeMatches, useTierConfig } from '../../services/tierConfig'
 import type {
   CouncilAgentDef, CreateSessionConfig, SessionType, Verbosity,
 } from '../../stores/councilStore'
+import { Button, Card, Field, inputCls, labelCls } from '../console/parts'
+import { TONE_SQUARE, TYPE_LOOK } from './councilStyles'
 
 const SESSION_TYPES: { id: SessionType; label: string; icon: typeof Swords; desc: string }[] = [
   { id: 'debate', label: 'Debate', icon: Swords, desc: 'Structured argumentation' },
@@ -25,6 +30,25 @@ const VERBOSITY_OPTIONS: { id: Verbosity; label: string; desc: string }[] = [
   { id: 'medium', label: 'Medium', desc: 'Up to 5 paragraphs' },
   { id: 'long', label: 'Long', desc: 'Up to 10 paragraphs' },
 ]
+
+// A choice among several, as a tile: violet when picked.
+const CHOICE = 'rounded-2xl border text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40'
+const CHOICE_ON = 'border-violet-500/60 bg-violet-500/[0.08] ring-1 ring-violet-500/30'
+const CHOICE_OFF = 'border-zinc-800 bg-zinc-950/40 hover:-translate-y-px hover:border-zinc-700 hover:bg-zinc-800/60'
+
+const RANGE = 'h-1.5 w-full cursor-pointer accent-violet-500 dark:[color-scheme:dark]'
+
+function Value({ children }: { children: React.ReactNode }) {
+  return <span className="rounded-md bg-violet-500/10 px-1.5 py-0.5 text-xs font-semibold tabular-nums text-violet-700 dark:text-violet-300">{children}</span>
+}
+
+function Ticks({ marks }: { marks: (number | string)[] }) {
+  return (
+    <div className="mt-1.5 flex justify-between text-[11px] tabular-nums text-zinc-500">
+      {marks.map((m) => <span key={m}>{m}</span>)}
+    </div>
+  )
+}
 
 interface CouncilSetupProps {
   onStart: (cfg: CreateSessionConfig) => void | Promise<void>
@@ -105,308 +129,327 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
     // On success the page navigates away; no need to clear submitting.
   }
 
+  const panelModes = [
+    { on: true, icon: Sparkles, label: 'Auto-assemble', desc: 'Spawn a panel of specialists modeled to the topic' },
+    { on: false, icon: MousePointerClick, label: 'Pick agents', desc: 'Choose from your already-running agents' },
+  ]
+
   return (
-    <div className="mx-auto max-w-2xl space-y-6">
-      {/* Title */}
-      <div>
-        <label className="mb-1 block text-xs font-medium text-zinc-400">Title (optional)</label>
-        <input
-          value={title}
-          onChange={e => setTitle(e.target.value)}
-          placeholder="Council session title..."
-          className="w-full rounded-lg border border-zinc-700/50 bg-zinc-800/50 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 focus:border-violet-500/50 focus:outline-none"
-        />
-      </div>
-
-      {/* Topic */}
-      <div>
-        <label className="mb-1 block text-xs font-medium text-zinc-400">Topic / Task *</label>
-        <textarea
-          value={topic}
-          onChange={e => setTopic(e.target.value)}
-          placeholder="What should the council discuss or work on?"
-          rows={3}
-          className="w-full rounded-lg border border-zinc-700/50 bg-zinc-800/50 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-500 focus:border-violet-500/50 focus:outline-none resize-none"
-        />
-      </div>
-
-      {/* Session Type */}
-      <div>
-        <label className="mb-2 block text-xs font-medium text-zinc-400">Session Type</label>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {SESSION_TYPES.map(t => (
-            <button
-              key={t.id}
-              onClick={() => setSessionType(t.id)}
-              className={`flex flex-col items-center gap-1 rounded-lg border p-3 text-center transition-colors ${
-                sessionType === t.id
-                  ? 'border-violet-500/50 bg-violet-500/10 text-violet-300'
-                  : 'border-zinc-700/50 bg-zinc-800/30 text-zinc-400 hover:bg-zinc-700/30'
-              }`}
-            >
-              <t.icon className="h-5 w-5" />
-              <span className="text-xs font-medium">{t.label}</span>
-              <span className="text-[10px] opacity-60">{t.desc}</span>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Verbosity */}
-      <div>
-        <label className="mb-2 block text-xs font-medium text-zinc-400">Response Verbosity</label>
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {VERBOSITY_OPTIONS.map(v => (
-            <button
-              key={v.id}
-              onClick={() => setVerbosity(v.id)}
-              className={`rounded-lg border px-3 py-2 text-center transition-colors ${
-                verbosity === v.id
-                  ? 'border-violet-500/50 bg-violet-500/10 text-violet-300'
-                  : 'border-zinc-700/50 bg-zinc-800/30 text-zinc-400 hover:bg-zinc-700/30'
-              }`}
-            >
-              <div className="text-xs font-medium">{v.label}</div>
-              <div className="text-[10px] opacity-60">{v.desc}</div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Max Rounds */}
-      <div>
-        <label className="mb-1 block text-xs font-medium text-zinc-400">
-          Max Rounds: <span className="text-violet-400">{maxRounds}</span>
-        </label>
-        <input
-          type="range"
-          min={1}
-          max={20}
-          value={maxRounds}
-          onChange={e => setMaxRounds(parseInt(e.target.value))}
-          className="w-full accent-violet-500"
-        />
-        <div className="flex justify-between text-[10px] text-zinc-500">
-          <span>1</span><span>10</span><span>20</span>
-        </div>
-      </div>
-
-      {/* Panel composition: auto-assemble vs. pick running agents */}
-      <div>
-        <label className="mb-2 block text-xs font-medium text-zinc-400">Panel</label>
-        <div className="mb-3 grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={() => setAutoAssemble(true)}
-            className={`flex items-start gap-2 rounded-lg border p-3 text-left transition-colors ${
-              autoAssemble
-                ? 'border-violet-500/50 bg-violet-500/10 text-violet-200'
-                : 'border-zinc-700/50 bg-zinc-800/30 text-zinc-400 hover:bg-zinc-700/30'
-            }`}
-          >
-            <Sparkles className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>
-              <span className="block text-xs font-medium">Auto-assemble</span>
-              <span className="block text-[10px] opacity-70">Spawn a panel of specialists modeled to the topic</span>
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setAutoAssemble(false)}
-            className={`flex items-start gap-2 rounded-lg border p-3 text-left transition-colors ${
-              !autoAssemble
-                ? 'border-violet-500/50 bg-violet-500/10 text-violet-200'
-                : 'border-zinc-700/50 bg-zinc-800/30 text-zinc-400 hover:bg-zinc-700/30'
-            }`}
-          >
-            <MousePointerClick className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>
-              <span className="block text-xs font-medium">Pick agents</span>
-              <span className="block text-[10px] opacity-70">Choose from your already-running agents</span>
-            </span>
-          </button>
-        </div>
-
-        {autoAssemble ? (
-          <div className="space-y-3 rounded-lg border border-zinc-700/30 bg-zinc-800/30 p-3">
-            {selectedArchetypes.length === 0 ? (
-              <div>
-                <label className="mb-1 block text-xs font-medium text-zinc-400">
-                  Panel size: <span className="text-violet-400">{maxAgents}</span> specialists
-                </label>
+    <div className="@container space-y-6">
+      <div className="grid items-start gap-6 @5xl:grid-cols-2">
+        {/* ── Left: what, and how they talk ── */}
+        <div className="space-y-6">
+          <Card title="Topic" icon={FileText}>
+            <div className="space-y-4">
+              <Field label="Topic / Task *">
+                <textarea
+                  value={topic}
+                  onChange={e => setTopic(e.target.value)}
+                  placeholder="What should the council discuss or work on?"
+                  rows={4}
+                  className={`${inputCls} resize-none leading-relaxed`}
+                />
+              </Field>
+              <Field label="Title (optional)">
                 <input
-                  type="range"
-                  min={2}
-                  max={6}
-                  value={maxAgents}
-                  onChange={e => setMaxAgents(parseInt(e.target.value))}
-                  className="w-full accent-violet-500"
+                  value={title}
+                  onChange={e => setTitle(e.target.value)}
+                  placeholder="Council session title..."
+                  className={inputCls}
                 />
-                <div className="flex justify-between text-[10px] text-zinc-500">
-                  <span>2</span><span>4</span><span>6</span>
-                </div>
-                <p className="mt-2 text-[11px] text-zinc-500">
-                  A router picks complementary archetypes for this topic and spawns each as a
-                  fresh agent. They're torn down when you delete the session.
-                </p>
-              </div>
-            ) : (
-              <p className="text-[11px] text-zinc-500">
-                Using <span className="text-violet-400">{selectedArchetypes.length}</span> hand-picked
-                specialist{selectedArchetypes.length !== 1 ? 's' : ''}. Each is spawned fresh and
-                briefed for this topic; torn down when you delete the session.
-              </p>
-            )}
+              </Field>
+            </div>
+          </Card>
 
-            {/* Optional: hand-pick the specialists instead of auto-routing. */}
-            {archetypes.length > 0 && (
+          <Card title="Session Type" icon={MessagesSquare} className="@container">
+            <div className="grid grid-cols-2 gap-2.5 @md:grid-cols-4">
+              {SESSION_TYPES.map(t => {
+                const on = sessionType === t.id
+                return (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setSessionType(t.id)}
+                    aria-pressed={on}
+                    className={`${CHOICE} flex min-w-0 flex-col p-3 ${on ? CHOICE_ON : CHOICE_OFF}`}
+                  >
+                    <span className="flex items-center justify-between">
+                      <span className={`flex h-8 w-8 items-center justify-center rounded-lg ring-1 ${TONE_SQUARE[TYPE_LOOK[t.id].tone]}`}>
+                        <t.icon className="h-4 w-4" />
+                      </span>
+                      {on && (
+                        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-violet-600 text-white">
+                          <Check className="h-3 w-3" />
+                        </span>
+                      )}
+                    </span>
+                    <span className="mt-2.5 block text-sm font-semibold leading-snug text-zinc-100">{t.label}</span>
+                    <span className="mt-0.5 block text-[11px] leading-snug text-zinc-500">{t.desc}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </Card>
+
+          <Card title="Discussion" icon={SlidersHorizontal} className="@container">
+            <div className="space-y-6">
               <div>
-                <div className="mb-1.5 flex items-center justify-between">
-                  <label className="text-xs font-medium text-zinc-400">
-                    Specialists {selectedArchetypes.length > 0
-                      ? <span className="text-zinc-500">({selectedArchetypes.length} selected)</span>
-                      : <span className="text-zinc-500">(optional — leave empty to auto-pick)</span>}
-                  </label>
-                  {selectedArchetypes.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setSelectedArchetypes([])}
-                      className="text-[10px] text-zinc-500 hover:text-zinc-300"
-                    >
-                      Clear
-                    </button>
-                  )}
-                </div>
-<input
-                  value={teamQuery}
-                  onChange={(e) => setTeamQuery(e.target.value)}
-                  placeholder="Filter by role, family or skill…"
-                  aria-label="Filter archetypes"
-                  className="mb-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
-                />
-                <div className="max-h-48 space-y-1 overflow-auto pr-1">
-                  {archetypes.filter((a) => selectedArchetypes.includes(a.id) || archetypeMatches(a, teamQuery)).map(a => {
-                    const on = selectedArchetypes.includes(a.id)
+                <label className={labelCls}>Response Verbosity</label>
+                <div role="radiogroup" aria-label="Response Verbosity" className="grid grid-cols-2 gap-2 @md:grid-cols-5">
+                  {VERBOSITY_OPTIONS.map(v => {
+                    const on = verbosity === v.id
                     return (
                       <button
-                        key={a.id}
+                        key={v.id}
                         type="button"
-                        onClick={() => toggleArchetype(a.id)}
-                        className={`flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
-                          on
-                            ? 'border border-violet-500/40 bg-violet-500/15'
-                            : 'border border-zinc-700/30 bg-zinc-800/40 hover:bg-zinc-700/40'
-                        }`}
+                        role="radio"
+                        aria-checked={on}
+                        onClick={() => setVerbosity(v.id)}
+                        className={`${CHOICE} rounded-xl px-3 py-2.5 ${on ? CHOICE_ON : CHOICE_OFF}`}
                       >
-                        <div className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded ${
-                          on ? 'bg-violet-500 text-white' : 'border border-zinc-600'
-                        }`}>
-                          {on && <Check className="h-3 w-3" />}
-                        </div>
-                        <span className="min-w-0">
-                          <span className="block truncate text-xs font-medium text-zinc-200">{a.role}</span>
-                          <span className="block truncate text-[10px] text-zinc-500">{a.family}</span>
-                        </span>
+                        <div className={`text-sm font-medium ${on ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-200'}`}>{v.label}</div>
+                        <div className="mt-0.5 text-[11px] leading-snug text-zinc-500">{v.desc}</div>
                       </button>
                     )
                   })}
                 </div>
               </div>
-            )}
-          </div>
-        ) : (
-          <>
-            <label className="mb-2 block text-xs font-medium text-zinc-400">
-              Select Agents ({agents.length} selected)
-              {oldMan && <span className="ml-2 text-amber-400">Moderator mode (Old Man detected)</span>}
-              {!oldMan && agents.length >= 2 && <span className="ml-2 text-zinc-500">Round-robin mode</span>}
-            </label>
-            <AgentPicker selected={agents} onChange={setAgents} />
-          </>
-        )}
-      </div>
 
-      {/* File Attachments */}
-      <div>
-        <label className="mb-2 block text-xs font-medium text-zinc-400">
-          Attachments {files.length > 0 && <span className="text-zinc-500">({files.length} file{files.length !== 1 ? 's' : ''})</span>}
-        </label>
-        <div
-          onDragOver={e => { e.preventDefault(); setDragOver(true) }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={handleDrop}
-          onClick={() => fileInputRef.current?.click()}
-          className={`flex cursor-pointer flex-col items-center gap-1 rounded-lg border border-dashed p-4 text-center transition-colors ${
-            dragOver
-              ? 'border-violet-500 bg-violet-500/10'
-              : 'border-zinc-700/50 bg-zinc-800/30 hover:border-zinc-600 hover:bg-zinc-700/20'
-          }`}
-        >
-          <Paperclip className="h-5 w-5 text-zinc-500" />
-          <span className="text-xs text-zinc-400">Drop files here or click to browse</span>
-          <span className="text-[10px] text-zinc-500">Files will be uploaded to all agents at council start</span>
-        </div>
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          className="hidden"
-          onChange={e => { if (e.target.files?.length) { addFiles(e.target.files); e.target.value = '' } }}
-        />
-        {files.length > 0 && (
-          <div className="mt-2 space-y-1">
-            {files.map(f => (
-              <div key={f.name} className="flex items-center gap-2 rounded-md bg-zinc-800/50 px-2 py-1.5 text-xs">
-                <Paperclip className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
-                <span className="min-w-0 flex-1 truncate text-zinc-300">{f.name}</span>
-                <span className="flex-shrink-0 text-zinc-500">{formatSize(f.size)}</span>
-                <button
-                  onClick={e => { e.stopPropagation(); removeFile(f.name) }}
-                  className="flex-shrink-0 rounded p-0.5 text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+              <div>
+                <label className={`${labelCls} flex items-center gap-2`}>
+                  Max Rounds <Value>{maxRounds}</Value>
+                </label>
+                <input
+                  type="range"
+                  min={1}
+                  max={20}
+                  value={maxRounds}
+                  onChange={e => setMaxRounds(parseInt(e.target.value))}
+                  className={RANGE}
+                />
+                <Ticks marks={[1, 10, 20]} />
               </div>
-            ))}
-          </div>
-        )}
-      </div>
 
-      {/* First Speaker */}
-      {agents.length >= 2 && (
-        <div>
-          <label className="mb-1 block text-xs font-medium text-zinc-400">First Speaker</label>
-          <select
-            value={firstSpeaker}
-            onChange={e => setFirstSpeaker(e.target.value)}
-            className="w-full rounded-lg border border-zinc-700/50 bg-zinc-800/50 px-3 py-2 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
-          >
-            <option value="random">Random</option>
-            {agents.filter(a => a.id !== oldMan?.id).map(a => (
-              <option key={a.id} value={a.id}>{a.name}</option>
-            ))}
-          </select>
+              {/* First Speaker */}
+              {agents.length >= 2 && (
+                <Field label="First Speaker">
+                  <select
+                    value={firstSpeaker}
+                    onChange={e => setFirstSpeaker(e.target.value)}
+                    className={inputCls}
+                  >
+                    <option value="random">Random</option>
+                    {agents.filter(a => a.id !== oldMan?.id).map(a => (
+                      <option key={a.id} value={a.id}>{a.name}</option>
+                    ))}
+                  </select>
+                </Field>
+              )}
+            </div>
+          </Card>
         </div>
-      )}
+
+        {/* ── Right: who takes part, and what they read ── */}
+        <div className="space-y-6">
+          <Card title="Panel" icon={Users} className="@container">
+            <div className="space-y-4">
+              <div className="grid gap-2.5 @sm:grid-cols-2">
+                {panelModes.map(m => {
+                  const on = autoAssemble === m.on
+                  return (
+                    <button
+                      key={m.label}
+                      type="button"
+                      onClick={() => setAutoAssemble(m.on)}
+                      aria-pressed={on}
+                      className={`${CHOICE} flex items-start gap-3 p-3.5 ${on ? CHOICE_ON : CHOICE_OFF}`}
+                    >
+                      <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ring-1 ${TONE_SQUARE[on ? 'violet' : 'zinc']}`}>
+                        <m.icon className="h-[18px] w-[18px]" />
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-zinc-100">{m.label}</span>
+                        <span className="mt-0.5 block text-xs leading-snug text-zinc-500">{m.desc}</span>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+
+              {autoAssemble ? (
+                <div className="space-y-5 rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+                  {selectedArchetypes.length === 0 ? (
+                    <div>
+                      <label className={`${labelCls} flex items-center gap-2`}>
+                        Panel size <Value>{maxAgents}</Value> specialists
+                      </label>
+                      <input
+                        type="range"
+                        min={2}
+                        max={6}
+                        value={maxAgents}
+                        onChange={e => setMaxAgents(parseInt(e.target.value))}
+                        className={RANGE}
+                      />
+                      <Ticks marks={[2, 4, 6]} />
+                      <p className="mt-3 text-xs leading-relaxed text-zinc-500">
+                        A router picks complementary archetypes for this topic and spawns each as a
+                        fresh agent. They're torn down when you delete the session.
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-xs leading-relaxed text-zinc-500">
+                      Using <span className="font-semibold text-violet-700 dark:text-violet-300">{selectedArchetypes.length}</span> hand-picked
+                      specialist{selectedArchetypes.length !== 1 ? 's' : ''}. Each is spawned fresh and
+                      briefed for this topic; torn down when you delete the session.
+                    </p>
+                  )}
+
+                  {/* Optional: hand-pick the specialists instead of auto-routing. */}
+                  {archetypes.length > 0 && (
+                    <div>
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <label className="text-xs font-medium text-zinc-400">
+                          Specialists {selectedArchetypes.length > 0
+                            ? <span className="font-normal text-zinc-500">({selectedArchetypes.length} selected)</span>
+                            : <span className="font-normal text-zinc-500">(optional — leave empty to auto-pick)</span>}
+                        </label>
+                        {selectedArchetypes.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setSelectedArchetypes([])}
+                            className="rounded-lg px-2 py-0.5 text-xs text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+                          >
+                            Clear
+                          </button>
+                        )}
+                      </div>
+                      <div className="relative mb-2">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+                        <input
+                          value={teamQuery}
+                          onChange={(e) => setTeamQuery(e.target.value)}
+                          placeholder="Filter by role, family or skill…"
+                          aria-label="Filter archetypes"
+                          className={`${inputCls} pl-8`}
+                        />
+                      </div>
+                      <div className="grid max-h-56 gap-1.5 overflow-auto pr-1 @md:grid-cols-2">
+                        {archetypes.filter((a) => selectedArchetypes.includes(a.id) || archetypeMatches(a, teamQuery)).map(a => {
+                          const on = selectedArchetypes.includes(a.id)
+                          return (
+                            <button
+                              key={a.id}
+                              type="button"
+                              onClick={() => toggleArchetype(a.id)}
+                              className={`flex w-full min-w-0 items-start gap-2.5 rounded-xl border px-2.5 py-2 text-left transition-colors ${
+                                on
+                                  ? 'border-violet-500/50 bg-violet-500/[0.08]'
+                                  : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700 hover:bg-zinc-800/60'
+                              }`}
+                            >
+                              <span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-[5px] ${
+                                on ? 'bg-violet-600 text-white' : 'border border-zinc-600'
+                              }`}>
+                                {on && <Check className="h-3 w-3" />}
+                              </span>
+                              <span className="min-w-0">
+                                <span className="block truncate text-xs font-medium text-zinc-200">{a.role}</span>
+                                <span className="block truncate text-[11px] text-zinc-500">{a.family}</span>
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  <label className="flex flex-wrap items-center gap-2 text-xs font-medium text-zinc-400">
+                    Select Agents ({agents.length} selected)
+                    {oldMan && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
+                        <Crown className="h-3 w-3" /> Moderator mode (Old Man detected)
+                      </span>
+                    )}
+                    {!oldMan && agents.length >= 2 && (
+                      <span className="rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] font-medium text-zinc-400">Round-robin mode</span>
+                    )}
+                  </label>
+                  <AgentPicker selected={agents} onChange={setAgents} />
+                </div>
+              )}
+            </div>
+          </Card>
+
+          <Card
+            title="Attachments"
+            icon={Paperclip}
+            hint={files.length > 0 ? `${files.length} file${files.length !== 1 ? 's' : ''}` : undefined}
+          >
+            <div
+              onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+              onClick={() => fileInputRef.current?.click()}
+              className={`flex cursor-pointer flex-col items-center gap-1.5 rounded-xl border border-dashed px-4 py-6 text-center transition-colors ${
+                dragOver
+                  ? 'border-violet-500 bg-violet-500/10'
+                  : 'border-zinc-700 bg-zinc-950/40 hover:border-zinc-600 hover:bg-zinc-800/40'
+              }`}
+            >
+              <span className="mb-1 flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-800 text-zinc-400">
+                <Upload className="h-4 w-4" />
+              </span>
+              <span className="text-sm font-medium text-zinc-300">Drop files here or click to browse</span>
+              <span className="text-xs text-zinc-500">Files will be uploaded to all agents at council start</span>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={e => { if (e.target.files?.length) { addFiles(e.target.files); e.target.value = '' } }}
+            />
+            {files.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                {files.map(f => (
+                  <div key={f.name} className="flex items-center gap-2.5 rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-sm">
+                    <Paperclip className="h-3.5 w-3.5 flex-shrink-0 text-zinc-500" />
+                    <span className="min-w-0 flex-1 truncate text-zinc-200">{f.name}</span>
+                    <span className="flex-shrink-0 text-xs tabular-nums text-zinc-500">{formatSize(f.size)}</span>
+                    <button
+                      onClick={e => { e.stopPropagation(); removeFile(f.name) }}
+                      className="flex-shrink-0 rounded-lg p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      </div>
 
       {/* Actions */}
-      <div className="flex items-center gap-3 pt-2">
-        <button
-          onClick={handleStart}
-          disabled={!canStart || submitting}
-          className="flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-40 disabled:cursor-not-allowed"
-        >
-          {submitting
-            ? <><Loader2 className="h-4 w-4 animate-spin" /> {autoAssemble ? 'Assembling panel…' : 'Starting…'}</>
-            : <><Play className="h-4 w-4" /> Start Council</>}
-        </button>
-        <button
-          onClick={onCancel}
-          disabled={submitting}
-          className="rounded-lg border border-zinc-700/50 px-4 py-2 text-sm text-zinc-400 hover:bg-zinc-700/30 disabled:opacity-40"
-        >
-          Cancel
-        </button>
+      <div className="sticky bottom-0 z-10 -mx-4 -mb-6 border-t border-zinc-800 bg-zinc-950/90 px-4 py-3 backdrop-blur wide:-mx-8 wide:-mb-8 wide:px-8 wide:py-4">
+        <div className="flex flex-wrap items-center gap-3">
+          {!canStart && !submitting && (
+            <span className="mr-auto text-xs text-zinc-500">
+              {!topic.trim() ? 'Write a topic to start.' : 'Pick at least two agents.'}
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-2">
+            <Button variant="ghost" onClick={onCancel} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={handleStart} disabled={!canStart} busy={submitting} icon={Play}>
+              {submitting ? (autoAssemble ? 'Assembling panel…' : 'Starting…') : 'Start Council'}
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
   )

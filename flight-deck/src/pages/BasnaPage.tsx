@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Network, Play, Sparkles, Check, X, Paperclip, FileText, Image as ImageIcon,
+  Play, Sparkles, Check, X, Paperclip, FileText, Image as ImageIcon,
   SlidersHorizontal, ScanSearch, RefreshCw, CornerDownRight, Users, HelpCircle,
   Gauge, ListChecks, Brain, FolderSearch, Loader2, ChevronDown, ChevronRight,
-  Folder, ChevronLeft, ClipboardList, Database, Trash2, Scale,
+  Folder, ChevronLeft, ClipboardList, Database, Trash2, Scale, Inbox,
 } from 'lucide-react'
 import { useBasnaStore, parseAnalysis, apiVatraSkipAgent, type FolderMode, type BasnaSession, type Group0Plan } from '../stores/basnaStore'
 import { ShareModal } from '../components/common/ShareModal'
@@ -28,6 +28,15 @@ import { ProjectDetails } from '../components/basna/ProjectDetails'
 import { ProjectFiles, type ProjectSource } from '../components/basna/ProjectFiles'
 import { ProjectDatastore } from '../components/basna/ProjectDatastore'
 import { JudgeCalibrationModal } from '../components/basna/JudgeCalibrationModal'
+import { IconSquare, SectionLabel, TeamHeader } from '../components/basna/look'
+import {
+  MODE_LOOK, MODE_TILE_ON, checkCls, chipToggleCls, ctaCls, headerIconBtnCls, iconBtnCls, segBtnCls, segFrameCls, smallInputCls, toggleBtnCls,
+} from '../components/basna/lookCls'
+import { Button, Notice, Page, Segmented, inputCls, labelCls } from '../components/console/parts'
+import { FullscreenButton } from '../components/library/libraryParts'
+
+// The console input without its full width, for a control that shares its row.
+const fitInputCls = inputCls.replace('w-full ', '')
 
 // A run's project bundle id (config.project_id), '' when unfiled.
 function projectIdOf(config?: string): string {
@@ -160,12 +169,14 @@ function BriefEditor({ brief, busy, onReroute }: {
   useEffect(() => { setDraft(brief) }, [brief])
   const changed = draft.trim() !== brief.trim()
   return (
-    <div className="rounded-lg border border-amber-300/70 bg-amber-50/70 p-4 dark:border-amber-700/40 dark:bg-amber-900/10">
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <Sparkles className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
-        <span className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">Task brief</span>
-        <span className="text-[11px] text-zinc-500">the team was selected from this — edit &amp; re-route to re-pick it</span>
-        <button onClick={() => setOpen((o) => !o)} className="ml-auto text-[11px] text-zinc-500 hover:text-zinc-300">
+    <section className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.05] p-4 wide:p-5">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="flex items-center gap-2">
+          <Sparkles className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+          <span className="text-[13px] font-semibold text-amber-700 dark:text-amber-300">Task brief</span>
+        </span>
+        <span className="text-xs text-zinc-500">the team was selected from this — edit &amp; re-route to re-pick it</span>
+        <button onClick={() => setOpen((o) => !o)} className="ml-auto rounded-lg px-2 py-1 text-xs font-medium text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
           {open ? 'Hide' : 'Show'}
         </button>
       </div>
@@ -176,23 +187,23 @@ function BriefEditor({ brief, busy, onReroute }: {
             onChange={(e) => setDraft(e.target.value)}
             rows={Math.min(18, Math.max(6, draft.split('\n').length + 1))}
             spellCheck={false}
-            className="w-full resize-y rounded-md border border-zinc-300 bg-white/70 p-2.5 font-mono text-[11px] leading-relaxed text-zinc-800 focus:border-amber-500 focus:outline-none dark:border-zinc-700 dark:bg-zinc-950/60 dark:text-zinc-200"
+            className={`${inputCls} mt-3 resize-y font-mono text-xs leading-relaxed`}
           />
-          <div className="mt-2 flex flex-wrap items-center gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             <button
               onClick={() => onReroute(draft)}
               disabled={busy || !draft.trim()}
-              className="flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-amber-400 disabled:opacity-40"
+              className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 px-3.5 py-2 text-sm font-medium text-black shadow-sm transition-colors hover:bg-amber-400 disabled:opacity-40"
             >
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
               Re-route on this brief
             </button>
-            {changed && <span className="text-[11px] text-amber-600 dark:text-amber-400">edited — re-route to apply</span>}
-            <span className="ml-auto text-[10px] text-zinc-500">the original request always governs on conflict</span>
+            {changed && <span className="text-xs text-amber-700 dark:text-amber-300">edited — re-route to apply</span>}
+            <span className="ml-auto text-[11px] text-zinc-500">the original request always governs on conflict</span>
           </div>
         </>
       )}
-    </div>
+    </section>
   )
 }
 
@@ -211,45 +222,60 @@ function StageChip({ n, label, summary, state, busy, open, onClick }: {
   onClick?: () => void
 }) {
   const tone = state === 'done'
-    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
     : state === 'active'
       ? 'border-violet-500/50 bg-violet-500/15 text-violet-700 dark:text-violet-300'
       : state === 'failed'
-        ? 'border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300'
-        : 'border-zinc-700 bg-zinc-900/50 text-zinc-500'
+        ? 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300'
+        : 'border-zinc-800 bg-zinc-900/60 text-zinc-500'
   return (
     <button
       onClick={onClick}
       disabled={!onClick}
-      className={`flex min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${tone} ${onClick ? 'hover:brightness-110' : 'cursor-default'}`}
+      aria-expanded={onClick ? !!open : undefined}
+      className={`flex min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs font-medium transition-colors wide:px-3 ${tone} ${onClick ? 'hover:brightness-110' : 'cursor-default'}`}
     >
       {busy
-        ? <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+        ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
         : state === 'done'
-          ? <Check className="h-3 w-3 shrink-0" />
+          ? <Check className="h-3.5 w-3.5 shrink-0" />
           : state === 'failed'
-            ? <X className="h-3 w-3 shrink-0" />
-            : <span className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-[9px] ${
-                state === 'active' ? 'bg-violet-500/30' : 'bg-zinc-800 text-zinc-400'}`}>{n}</span>}
+            ? <X className="h-3.5 w-3.5 shrink-0" />
+            : <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${
+                state === 'active' ? 'bg-violet-500/25' : 'bg-zinc-800 text-zinc-400'}`}>{n}</span>}
       {label}
-      {summary && <span className="max-w-52 truncate font-normal opacity-70">· {summary}</span>}
-      {onClick && (open ? <ChevronDown className="h-3 w-3 shrink-0 opacity-60" /> : <ChevronRight className="h-3 w-3 shrink-0 opacity-60" />)}
+      {summary && <span className="hidden max-w-52 truncate font-normal opacity-75 wide:inline">· {summary}</span>}
+      {onClick && (open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 opacity-60" />)}
     </button>
   )
 }
 
 const QUALITY_LABEL: Record<string, string> = { off: 'Basic', balanced: 'Balanced', thorough: 'Thorough', custom: 'Custom' }
 
-/** `mode` opens a new run on Vatra or Basna (the kiosk's More has both);
- *  without it, the last one picked. `onClose`: in a kiosk dialog, its Close. */
+/** `mode` locks the page to Vatra or Basna: only that mode's runs, no switch
+ *  to the other (each has its own entry in the kiosk's More and in the full
+ *  layout). Without it, both, and a new run opens on the last one picked.
+ *  `onClose`: in a kiosk dialog, its Close. */
 export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose?: () => void } = {}) {
   const {
-    sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
+    sessions, activeSession: storeSession, routePlan: storeRoutePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, resuming, error,
     routerTier, maxAgents, setRouterTier, setMaxAgents, maxParallel, setMaxParallel, executionGroups, setExecutionGroups, groupedReview, setGroupedReview, sharedDatastore, setSharedDatastore, folderMode, setFolderMode, newFolderName, setNewFolderName, existingFolder, setExistingFolder, projects, projectsLoading, loadProjects, knowledgeSessionIds, toggleKnowledgeSession, knowledgeIncludeBoard, setKnowledgeIncludeBoard, referenceFolders, toggleReferenceFolder, deep, deepSamples, setDeep, setDeepSamples, planMode, planSteps, setPlanMode, setPlanSteps, planComplex, setPlanComplex, planDag, setPlanDag, runPlan, quality, setQuality, addFiles, removeFile,
     updateSelected, updateSubtask, removeSubtask, setGroupInstruction, loadSessions, pollRunning, selectSession, newSession, resetDraft, route, planVatra, runVatra, approveVatraPlan, replanVatraGroups, cancelVatraPlan, approvingPlan, fillGaps, saveTitle, execute, recompile, resumeSession, sendFeedback, deleteSession, cancelSession, deepenSession, continueSession, setActiveProjectId,
   } = useBasnaStore()
   const { tiers, registry, envVars } = useTierConfig()
+  // Locked to one mode: a run of the other one — left open in the shared store by
+  // the other page, or opened from a link — is never shown here; it's put down.
+  const ofPageMode = (config?: string) => !mode || isVatra(config) === (mode === 'vatra')
+  const foreign = !!storeSession && !ofPageMode(storeSession.config)
+  const activeSession = foreign ? null : storeSession
+  const routePlan = foreign ? null : storeRoutePlan
+  useEffect(() => { if (foreign) newSession() }, [foreign, storeSession?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The runs this page shows: this mode's only, when locked.
+  const modeSessions = useMemo(
+    () => (mode ? sessions.filter((s) => isVatra(s.config) === (mode === 'vatra')) : sessions),
+    [sessions, mode],
+  )
   const {
     projects: bundleProjects, current: currentProject, loading: bundlesLoading,
     loadProjects: loadBundles, createProject, updateProject, deleteProject, select: selectProject,
@@ -269,18 +295,18 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
   // Run count per project (+ Unfiled) for the picker cards.
   const runCounts = useMemo(() => {
     const c: Record<string, number> = {}
-    for (const s of sessions) {
+    for (const s of modeSessions) {
       const pid = projectIdOf(s.config) || UNFILED_ID
       c[pid] = (c[pid] || 0) + 1
     }
     return c
-  }, [sessions])
+  }, [modeSessions])
   // The runs shown in the sidebar — scoped to the open project (Unfiled = no id).
   const scopedSessions = useMemo(() => {
-    if (!currentProject) return sessions
-    if (currentProject.id === UNFILED_ID) return sessions.filter((s) => !projectIdOf(s.config))
-    return sessions.filter((s) => projectIdOf(s.config) === currentProject.id)
-  }, [sessions, currentProject?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (!currentProject) return modeSessions
+    if (currentProject.id === UNFILED_ID) return modeSessions.filter((s) => !projectIdOf(s.config))
+    return modeSessions.filter((s) => projectIdOf(s.config) === currentProject.id)
+  }, [modeSessions, currentProject?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // File/datastore sources for the project Files + Datastore tabs: the project's
   // shared folder plus every run's own write folder, deduped (continuation chains
@@ -300,6 +326,7 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
   const [intent, setIntent] = useState('')
   const [title, setTitle] = useState('')
   // Compose mode for a NEW run; a selected run locks to its own mode (effectiveMode).
+  // A page locked to one mode composes in that mode only.
   const [composeMode, setComposeMode] = useState<'basna' | 'vatra'>(
     () => mode || ((typeof localStorage !== 'undefined' && localStorage.getItem('basna.composeMode')) as 'basna' | 'vatra') || 'basna',
   )
@@ -314,21 +341,6 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
   const [modal, setModal] = useState<{ title: string; content: string; mode: ViewMode } | null>(null)
   const viewFull = (t: string, content: string) => setModal({ title: t, content, mode: 'markdown' })
   const [calibrationOpen, setCalibrationOpen] = useState(false)
-  const calibrationButton = (
-    <button
-      onClick={() => setCalibrationOpen(true)}
-      title="How often the automatic judge agrees with your thumbs votes — and export the pairs"
-      className="ml-auto flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
-    >
-      <Scale className="h-3.5 w-3.5" /> Judge calibration
-    </button>
-  )
-  const closeButton = onClose && (
-    <button onClick={onClose} aria-label="Close" title="Close"
-      className="rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100">
-      <X className="h-4 w-4" />
-    </button>
-  )
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
 
@@ -383,7 +395,7 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
   const vatraMode = !!activeSession && isVatra(activeSession.config)
   // The mode the controls act in: a selected run is locked to its own mode; with
   // no run selected, the toggle (composeMode) decides.
-  const effectiveMode: 'basna' | 'vatra' = activeSession ? (vatraMode ? 'vatra' : 'basna') : composeMode
+  const effectiveMode: 'basna' | 'vatra' = mode ?? (activeSession ? (vatraMode ? 'vatra' : 'basna') : composeMode)
   // Plan step engine: simple = one model per step; complex = a full run of the
   // selected mode (Basna ensemble / Vatra team) per step.
   const planStepMode: 'llm' | 'ensemble' | 'vatra' =
@@ -395,10 +407,10 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
     else if (sId === 'deep') setDeep(true)   // setter clears Plan
     else setPlanMode(true)                   // setter clears Deep
   }
-  // Keep the toggle in sync with whatever run is open.
+  // Keep the toggle in sync with whatever run is open (never while locked).
   useEffect(() => {
-    if (activeSession) setComposeMode(isVatra(activeSession.config) ? 'vatra' : 'basna')
-  }, [activeSession?.id, activeSession?.config])
+    if (activeSession && !mode) setComposeMode(isVatra(activeSession.config) ? 'vatra' : 'basna')
+  }, [activeSession?.id, activeSession?.config, mode])
   const pickMode = (m: 'basna' | 'vatra') => {
     if (m === effectiveMode) return
     setComposeMode(m)
@@ -412,14 +424,15 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
   const [showRefFolders, setShowRefFolders] = useState(false)
   // Wizard handoff: set the task + mode, then prepare (route/plan) — the user
   // reviews the plan and runs it via the normal panel.
-  const onWizardPrepare = ({ intent: wi, title: wt, mode }: { intent: string; title: string; mode: 'basna' | 'vatra' }) => {
+  const onWizardPrepare = ({ intent: wi, title: wt, mode: picked }: { intent: string; title: string; mode: 'basna' | 'vatra' }) => {
     if (!wi.trim()) return
+    const m = mode ?? picked  // a locked page prepares in its own mode only
     newSession()
     setIntent(wi); setTitle(wt); setTeam([])
-    setComposeMode(mode)
-    try { localStorage.setItem('basna.composeMode', mode) } catch { /* ignore */ }
+    setComposeMode(m)
+    try { localStorage.setItem('basna.composeMode', m) } catch { /* ignore */ }
     setWizardOpen(false)
-    if (mode === 'vatra') planVatra(wi, tiers, wt, [])
+    if (m === 'vatra') planVatra(wi, tiers, wt, [])
     else route(wi, tiers, wt, [])
   }
   // Creds for the wizard's recommend call — same tier the router uses.
@@ -527,7 +540,7 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
 
   const planAgentCount = vatraMode ? (routePlan?.subtasks?.length || 0) : (routePlan?.selected.length || 0)
   const setupSummary = [
-    effectiveMode === 'vatra' ? 'Vatra' : 'Basna',
+    ...(mode ? [] : [effectiveMode === 'vatra' ? 'Vatra' : 'Basna']),
     strategy[0].toUpperCase() + strategy.slice(1),
     QUALITY_LABEL[quality.profile] || quality.profile,
     ...(knowledgeSessionIds.length ? [`${knowledgeSessionIds.length} prior`] : []),
@@ -538,7 +551,7 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
   const onDelete = (s: typeof sessions[number]) => {
     const raw = (s.title || s.intent || '').trim()
     const label = raw.slice(0, 80)
-    if (window.confirm(`Delete this Basna run?${label ? `\n\n"${label}${raw.length > 80 ? '…' : ''}"` : ''}`)) {
+    if (window.confirm(`Delete this ${mode === 'vatra' ? 'Vatra' : 'Basna'} run?${label ? `\n\n"${label}${raw.length > 80 ? '…' : ''}"` : ''}`)) {
       deleteSession(s.id)
     }
   }
@@ -551,31 +564,47 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
     if (window.confirm(msg)) deleteProject(p.id, n > 0)
   }
 
+  // ── The header: the mode's icon, name and a line on it (the kiosk opens a
+  // mode), or Basna's own in the full layout — and the page's actions. ──
+  const look = MODE_LOOK[mode ? effectiveMode : 'basna']
+  const pageTitle = mode ? look.name : 'Basna'
+  const pageBlurb = mode ? look.blurb : 'Bundle runs into projects — one theme, one shared folder.'
+  const headerActions = (
+    <>
+      <Button
+        icon={HelpCircle}
+        onClick={() => viewFull('Basna, Vatra & Deep mode', HELP_MD)}
+        title="What are Basna, Vatra and Deep mode?"
+        aria-label="Help"
+        className="px-2.5 wide:px-3"
+      >
+        <span className="hidden wide:inline">Help</span>
+      </Button>
+      <Button
+        icon={Scale}
+        onClick={() => setCalibrationOpen(true)}
+        title="How often the automatic judge agrees with your thumbs votes — and export the pairs"
+        aria-label="Judge calibration"
+        className="px-2.5 wide:px-3"
+      >
+        <span className="hidden wide:inline">Judge calibration</span>
+      </Button>
+      <FullscreenButton className={headerIconBtnCls} />
+      {onClose && <Button variant="ghost" icon={X} onClick={onClose} aria-label="Close" title="Close" className="px-2.5" />}
+    </>
+  )
+
   // ── Project picker: the projects-first landing (no project open yet) ──
   if (!currentProject) {
     return (
-      <div className="flex h-full flex-col">
-        <div className="flex shrink-0 items-center gap-2 border-b border-zinc-700/50 bg-zinc-900/50 px-4 py-3 md:px-6">
-          <Network className="h-5 w-5 text-sky-600 dark:text-sky-400" />
-          <div>
-            <h1 className="text-sm font-semibold text-zinc-100">Basna</h1>
-            <p className="text-[11px] text-zinc-500">Bundle runs into projects — one theme, one shared folder</p>
-          </div>
-          {calibrationButton}
-          <button
-            onClick={() => viewFull('Basna, Vatra & Deep mode', HELP_MD)}
-            title="What are Basna, Vatra and Deep mode?"
-            className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
-          >
-            <HelpCircle className="h-3.5 w-3.5" /> Help
-          </button>
-          {closeButton}
-        </div>
-        <div className="flex-1 overflow-auto">
+      <div className="@container h-full overflow-y-auto">
+        <Page full={!!onClose}>
+          <TeamHeader icon={look.icon} tone={look.tone} title={pageTitle} description={pageBlurb} actions={headerActions} />
           <ProjectPicker
             projects={bundleProjects}
             counts={runCounts}
             busy={bundlesLoading}
+            accent={look.tone === 'sky' ? 'sky' : 'violet'}
             onSelect={selectProject}
             onCreate={async (name, description, instructions) => {
               const p = await createProject(name, description, instructions)
@@ -583,81 +612,80 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
             }}
             onDelete={onDeleteProject}
           />
-        </div>
+        </Page>
         {modal && <FileModal title={modal.title} content={modal.content} mode={modal.mode} onClose={() => setModal(null)} />}
-        {calibrationOpen && <JudgeCalibrationModal onClose={() => setCalibrationOpen(false)} />}
+        {calibrationOpen && <JudgeCalibrationModal mode={mode} onClose={() => setCalibrationOpen(false)} />}
       </div>
     )
   }
 
   const isUnfiled = currentProject.id === UNFILED_ID
+  // A tab's own pane: it scrolls beside the runs list on a larger screen; on a
+  // phone the whole page scrolls as one column.
+  const paneCls = '@container min-w-0 @3xl:flex-1 @3xl:overflow-y-auto'
+  const runCta = ctaCls(effectiveMode === 'vatra' ? 'violet' : 'sky')
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="@container flex h-full flex-col">
       {shareTarget && (
         <ShareModal
           resourceType="basna"
           resourceId={shareTarget.id}
-          resourceName={shareTarget.title || shareTarget.intent || 'Basna run'}
+          resourceName={shareTarget.title || shareTarget.intent || `${mode === 'vatra' ? 'Vatra' : 'Basna'} run`}
           onClose={() => setShareTarget(null)}
         />
       )}
-      {/* Header — project breadcrumb + Details/Run tabs */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-zinc-700/50 bg-zinc-900/50 px-4 py-3 md:px-6">
-        <button
-          onClick={() => selectProject(null)}
-          title="All projects"
-          className="flex items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
-        >
-          <ChevronLeft className="h-3.5 w-3.5" /> Projects
-        </button>
-        <Folder className="h-4 w-4 shrink-0 text-sky-500/80" />
-        <span className="min-w-0 truncate text-sm font-semibold text-zinc-100" title={currentProject.name}>{currentProject.name}</span>
-        {!isUnfiled && (
-          <div className="ml-3 inline-flex rounded-lg border border-zinc-700 bg-zinc-900/50 p-0.5">
-            {([
-              { id: 'details', label: 'Details', icon: ClipboardList },
-              { id: 'run', label: 'Run', icon: Play },
-              { id: 'files', label: 'Files', icon: FileText },
-              { id: 'datastore', label: 'Datastore', icon: Database },
-            ] as const).map((t) => {
-              const Icon = t.icon
-              const sel = projectTab === t.id
-              return (
-                <button
-                  key={t.id}
-                  onClick={() => setProjectTab(t.id)}
-                  className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                    sel ? 'bg-sky-600 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
-                >
-                  <Icon className="h-3.5 w-3.5" /> {t.label}
-                </button>
-              )
-            })}
-          </div>
-        )}
-        {calibrationButton}
-        <button
-          onClick={() => viewFull('Basna, Vatra & Deep mode', HELP_MD)}
-          title="What are Basna, Vatra and Deep mode?"
-          className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
-        >
-          <HelpCircle className="h-3.5 w-3.5" /> Help
-        </button>
-        {closeButton}
+      {/* Header — the mode, the project breadcrumb and its Details/Run/Files/Datastore tabs */}
+      <div className="shrink-0 border-b border-zinc-800/80 px-4 pb-4 pt-4 wide:px-8 wide:pt-6">
+        <TeamHeader icon={look.icon} tone={look.tone} title={pageTitle} description={pageBlurb} actions={headerActions} compact />
+        <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-3">
+          <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1 text-sm">
+            <button
+              onClick={() => selectProject(null)}
+              title="All projects"
+              className="flex shrink-0 items-center gap-1 rounded-lg py-1 pl-1 pr-2 font-medium text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              <ChevronLeft className="h-4 w-4" /> Projects
+            </button>
+            <span className="text-zinc-700" aria-hidden>/</span>
+            <span className="flex min-w-0 items-center gap-1.5 px-1 font-medium text-zinc-100" title={currentProject.name}>
+              {isUnfiled
+                ? <Inbox className="h-4 w-4 shrink-0 text-zinc-500" />
+                : <Folder className={`h-4 w-4 shrink-0 ${look.tone === 'sky' ? 'text-sky-600 dark:text-sky-400' : 'text-violet-600 dark:text-violet-400'}`} />}
+              <span className="truncate">{currentProject.name}</span>
+            </span>
+          </nav>
+          {!isUnfiled && (
+            <div className="wide:ml-auto">
+              <Segmented
+                label="Project view"
+                value={projectTab}
+                onChange={setProjectTab}
+                options={[
+                  { value: 'details', label: <><ClipboardList className="hidden h-3.5 w-3.5 wide:block" />Details</> },
+                  { value: 'run', label: <><Play className="hidden h-3.5 w-3.5 wide:block" />Run</> },
+                  { value: 'files', label: <><FileText className="hidden h-3.5 w-3.5 wide:block" />Files</> },
+                  { value: 'datastore', label: <><Database className="hidden h-3.5 w-3.5 wide:block" />Datastore</> },
+                ]}
+              />
+            </div>
+          )}
+        </div>
       </div>
       {wizardOpen && (
         <BasnaWizardModal
-          sessions={sessions}
+          sessions={modeSessions}
           creds={wizardCreds}
+          mode={mode}
           onClose={() => setWizardOpen(false)}
           onPrepare={onWizardPrepare}
         />
       )}
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto @3xl:flex-row @3xl:overflow-hidden">
         {projectTab === 'run' && (
           <RunsSidebar
+            mode={mode}
             sessions={scopedSessions}
             activeId={activeSession?.id}
             onSelect={selectSession}
@@ -671,8 +699,8 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
 
         {/* Details tab — the project's theme. */}
         {projectTab === 'details' && !isUnfiled && (
-          <div className="flex-1 overflow-auto p-4 md:p-6">
-            <div className="mx-auto w-[92%] max-w-[1100px]">
+          <div className={paneCls}>
+            <div className="mx-auto w-full max-w-4xl px-4 py-6 wide:px-8 wide:py-8">
               <ProjectDetails
                 project={currentProject}
                 saving={savingProject}
@@ -688,8 +716,8 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
 
         {/* Files tab — the project folder + every run's folder, grouped by owner. */}
         {projectTab === 'files' && !isUnfiled && (
-          <div className="flex-1 overflow-auto p-4 md:p-6">
-            <div className="mx-auto w-[92%] max-w-[1100px]">
+          <div className={paneCls}>
+            <div className="mx-auto w-full max-w-5xl px-4 py-6 wide:px-8 wide:py-8">
               <ProjectFiles sources={projectSources} uploadFolder={currentProject.vfs_folder} />
             </div>
           </div>
@@ -697,8 +725,8 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
 
         {/* Datastore tab — tables across the project folder + every run, by owner. */}
         {projectTab === 'datastore' && !isUnfiled && (
-          <div className="flex-1 overflow-auto p-4 md:p-6">
-            <div className="mx-auto w-[92%] max-w-[1100px]">
+          <div className={paneCls}>
+            <div className="mx-auto w-full max-w-5xl px-4 py-6 wide:px-8 wide:py-8">
               <ProjectDatastore sources={projectSources} />
             </div>
           </div>
@@ -706,26 +734,26 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
 
         {/* Detail (Run tab) */}
         {projectTab === 'run' && (
-        <div className="flex-1 overflow-auto p-4 md:p-6">
-          <div className="mx-auto w-[92%] max-w-[2000px] space-y-3">
+        <div className={paneCls}>
+          <div className="mx-auto w-full max-w-[1600px] space-y-4 px-4 py-5 wide:px-6 wide:py-6">
             {/* Deepen lineage — jump to the parent / child runs of this one. */}
             {activeSession && (() => {
               const pid = parentIdOf(activeSession.config)
-              const parent = pid ? sessions.find((s) => s.id === pid) : null
-              const children = sessions.filter((s) => parentIdOf(s.config) === activeSession.id)
+              const parent = pid ? modeSessions.find((s) => s.id === pid) : null
+              const children = modeSessions.filter((s) => parentIdOf(s.config) === activeSession.id)
               if (!parent && children.length === 0) return null
-              const linkCls = 'flex items-center gap-1 text-left text-violet-700 hover:underline dark:text-violet-300'
+              const linkCls = 'flex min-w-0 items-center gap-1.5 text-left text-violet-700 hover:underline dark:text-violet-300'
               return (
-                <div className="flex flex-col gap-1 rounded-lg border border-violet-300 bg-violet-50 px-3 py-2 text-[11px] dark:border-violet-900/40 dark:bg-violet-950/20">
+                <div className="flex flex-col gap-1.5 rounded-xl border border-violet-500/25 bg-violet-500/[0.05] px-3.5 py-2.5 text-xs">
                   {parent && (
                     <button onClick={() => selectSession(parent.id)} className={linkCls}>
-                      <CornerDownRight className="h-3 w-3 shrink-0" />
+                      <CornerDownRight className="h-3.5 w-3.5 shrink-0" />
                       <span className="truncate">deepened from “{parent.title || parent.intent || 'run'}”</span>
                     </button>
                   )}
                   {children.map((ch) => (
                     <button key={ch.id} onClick={() => selectSession(ch.id)} className={linkCls}>
-                      <ScanSearch className="h-3 w-3 shrink-0" />
+                      <ScanSearch className="h-3.5 w-3.5 shrink-0" />
                       <span className="truncate">
                         deepened into “{ch.title || ch.intent || 'run'}”{ch.status !== 'done' ? ` · ${ch.status}` : ''}
                       </span>
@@ -744,7 +772,7 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
                 open={open.define}
                 onClick={() => toggle('define')}
               />
-              <ChevronRight className="h-3 w-3 text-zinc-700" />
+              <ChevronRight className="hidden h-3.5 w-3.5 shrink-0 text-zinc-600 wide:block" />
               <StageChip
                 n={2} label="Setup"
                 state={intent.trim() ? 'done' : 'idle'}
@@ -752,7 +780,7 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
                 open={open.setup}
                 onClick={() => toggle('setup')}
               />
-              <ChevronRight className="h-3 w-3 text-zinc-700" />
+              <ChevronRight className="hidden h-3.5 w-3.5 shrink-0 text-zinc-600 wide:block" />
               <StageChip
                 n={3} label="Plan"
                 state={routePlan ? (stage === 'plan' ? 'active' : 'done') : 'idle'}
@@ -760,7 +788,7 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
                 open={open.plan}
                 onClick={routePlan ? () => toggle('plan') : undefined}
               />
-              <ChevronRight className="h-3 w-3 text-zinc-700" />
+              <ChevronRight className="hidden h-3.5 w-3.5 shrink-0 text-zinc-600 wide:block" />
               <StageChip
                 n={4} label="Run"
                 state={stage === 'run' ? 'active' : stage === 'done' ? (activeSession?.status === 'error' ? 'failed' : 'done') : 'idle'}
@@ -772,23 +800,26 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
             {/* A stopped/failed run can be resumed from its checkpoints — restore the
                 finished agents (no re-spend) and re-run only the missing ones. */}
             {resumable && (
-              <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-300/70 bg-amber-50/70 p-3 dark:border-amber-700/40 dark:bg-amber-900/10">
-                <div className="min-w-0">
-                  <div className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
-                    {activeSession?.status === 'error' ? 'Run failed' : 'Run stopped'}
-                  </div>
-                  <div className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-400">
-                    Resume from where it left off — finished {vatraMode ? 'specialists' : 'agents'} are
-                    restored from checkpoints (no re-run, no re-spend); only the missing ones re-run,
-                    then it synthesizes.
+              <div className="flex flex-col gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] p-4 wide:flex-row wide:items-center wide:justify-between">
+                <div className="flex min-w-0 items-start gap-3">
+                  <IconSquare icon={RefreshCw} tone="amber" size="sm" />
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-amber-700 dark:text-amber-300">
+                      {activeSession?.status === 'error' ? 'Run failed' : 'Run stopped'}
+                    </div>
+                    <div className="mt-0.5 text-xs leading-relaxed text-zinc-500">
+                      Resume from where it left off — finished {vatraMode ? 'specialists' : 'agents'} are
+                      restored from checkpoints (no re-run, no re-spend); only the missing ones re-run,
+                      then it synthesizes.
+                    </div>
                   </div>
                 </div>
                 <button
                   onClick={() => resumeSession(tiers, envVars, vatraMode)}
                   disabled={resuming}
-                  className="inline-flex shrink-0 items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-zinc-950 hover:bg-amber-400 disabled:opacity-40"
+                  className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl bg-amber-500 px-3.5 py-2 text-sm font-medium text-black shadow-sm transition-colors hover:bg-amber-400 disabled:opacity-40"
                 >
-                  {resuming ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                  {resuming ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                   Resume
                 </button>
               </div>
@@ -796,243 +827,253 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
 
             {/* Stage 1 — Task: title, the task itself, attachments. */}
             {open.define && (
-              <div
-                className={`rounded-lg border bg-zinc-900/50 p-4 ${dragOver ? 'border-sky-500' : 'border-zinc-800'}`}
+              <section
+                className={`rounded-2xl border bg-zinc-900/40 p-4 transition-colors wide:p-5 ${
+                  dragOver ? 'border-violet-500/60 ring-2 ring-violet-500/15' : 'border-zinc-800'}`}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
                 onDragLeave={() => setDragOver(false)}
                 onDrop={(e) => { e.preventDefault(); setDragOver(false); if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files) }}
               >
-                <label className="mb-1.5 block text-xs font-medium text-zinc-400">
+                <label className={labelCls}>
                   Title <span className="font-normal text-zinc-600">— optional, auto-generated from the task if blank</span>
                 </label>
-                <div className="mb-3 flex items-center gap-2">
+                <div className="mb-4 flex items-center gap-2">
                   <input
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     placeholder="e.g. Q3 competitor scan"
-                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950/60 px-2.5 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-sky-600 focus:outline-none"
+                    className={inputCls}
                   />
                   {activeSession && title.trim() !== (activeSession.title || '') && (
-                    <button
-                      onClick={() => saveTitle(title)}
-                      title="Save title"
-                      className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800"
-                    >
-                      <Check className="h-3.5 w-3.5" /> Save
-                    </button>
+                    <Button icon={Check} onClick={() => saveTitle(title)} title="Save title" className="shrink-0">
+                      Save
+                    </Button>
                   )}
                 </div>
-                <label className="mb-1.5 block text-xs font-medium text-zinc-400">Task / intent</label>
+                <label className={labelCls}>Task / intent</label>
                 <textarea
                   value={intent}
                   onChange={(e) => setIntent(e.target.value)}
                   onPaste={handlePaste}
                   rows={7}
-                  placeholder="Describe the task, or attach/drop/paste files. The router picks the smallest team that can answer it well."
-                  className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950/60 p-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-sky-600 focus:outline-none"
+                  placeholder={mode === 'vatra'
+                    ? 'Describe the task, or attach/drop/paste files. A Lead splits it into pieces and the team builds one result.'
+                    : 'Describe the task, or attach/drop/paste files. The router picks the smallest team that can answer it well.'}
+                  className={`${inputCls} resize-y leading-relaxed`}
                 />
 
                 {/* Attachments */}
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-                  >
-                    <Paperclip className="h-3.5 w-3.5" /> Attach
-                  </button>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <Button icon={Paperclip} onClick={() => fileInputRef.current?.click()} className="px-3 py-1.5 text-xs">
+                    Attach
+                  </Button>
                   <input
                     ref={fileInputRef} type="file" multiple className="hidden"
                     onChange={(e) => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }}
                   />
                   {attachments.filter((a) => a.kind !== 'generated').map((a) => (
-                    <span key={a.name} className="flex items-center gap-1.5 rounded-full border border-zinc-700 bg-zinc-800/60 px-2 py-0.5 text-[11px] text-zinc-300">
-                      {a.mime.startsWith('image/') ? <ImageIcon className="h-3 w-3 text-zinc-500" /> : <FileText className="h-3 w-3 text-zinc-500" />}
-                      {a.name}
-                      <span className="text-zinc-600">{Math.max(1, Math.round(a.size / 1024))}kb</span>
-                      <button onClick={() => removeFile(a.name)} className="text-zinc-500 hover:text-rose-400"><X className="h-3 w-3" /></button>
+                    <span key={a.name} className="flex max-w-full items-center gap-1.5 rounded-full border border-zinc-800 bg-zinc-950/60 py-1 pl-2.5 pr-1.5 text-xs text-zinc-300">
+                      {a.mime.startsWith('image/') ? <ImageIcon className="h-3.5 w-3.5 shrink-0 text-zinc-500" /> : <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
+                      <span className="truncate">{a.name}</span>
+                      <span className="shrink-0 text-zinc-600">{Math.max(1, Math.round(a.size / 1024))}kb</span>
+                      <button onClick={() => removeFile(a.name)} aria-label={`Remove ${a.name}`} className="shrink-0 rounded-full p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-red-600 dark:hover:text-red-400"><X className="h-3 w-3" /></button>
                     </span>
                   ))}
                 </div>
                 {!intent.trim() && (
-                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                    <span className="text-[11px] text-zinc-600">Try:</span>
+                  <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-zinc-800/80 pt-4">
+                    <span className="mr-1 text-xs text-zinc-500">Try:</span>
                     {BASNA_EXAMPLES.map((ex) => (
                       <button
                         key={ex.label}
                         onClick={() => setIntent(ex.text)}
                         title={ex.text}
-                        className="rounded-full border border-sky-300 bg-sky-50 px-2.5 py-1 text-[11px] text-sky-700 transition-colors hover:bg-sky-100 dark:border-sky-500/30 dark:bg-sky-500/10 dark:text-sky-300 dark:hover:bg-sky-500/20"
+                        className="rounded-full border border-zinc-800 bg-zinc-950/60 px-2.5 py-1 text-xs text-zinc-400 transition-colors hover:border-violet-500/50 hover:text-violet-700 dark:hover:text-violet-300"
                       >
                         {ex.label}
                       </button>
                     ))}
                   </div>
                 )}
-              </div>
+              </section>
             )}
 
             {/* Stage 2 — Setup: mode, effort, quality, knowledge, folders, tuning. */}
             {open.setup && (
-              <div className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
-                {/* Mode selector — the two ways to run a team, clearly distinguished. */}
-                <div className="grid grid-cols-2 gap-2">
-                  {([
-                    { id: 'basna', icon: Network, name: 'Basna', sub: 'Independent ensemble — agents answer blind, merged by reliability', on: 'border-sky-400 bg-sky-50 dark:border-sky-500/70 dark:bg-sky-950/30', dot: 'text-sky-600 dark:text-sky-400' },
-                    { id: 'vatra', icon: Users, name: 'Vatra', sub: 'Collaborative team — a Lead splits the work, a reporter assembles it', on: 'border-violet-400 bg-violet-50 dark:border-violet-500/70 dark:bg-violet-950/30', dot: 'text-violet-600 dark:text-violet-400' },
-                  ] as const).map((m) => {
-                    const Icon = m.icon
-                    const sel = effectiveMode === m.id
-                    return (
-                      <button
-                        key={m.id}
-                        onClick={() => pickMode(m.id)}
-                        className={`flex items-start gap-2 rounded-lg border p-2.5 text-left transition-colors ${
-                          sel ? m.on : 'border-zinc-800 bg-zinc-900/40 hover:bg-zinc-800/40'}`}
-                      >
-                        <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${sel ? m.dot : 'text-zinc-500'}`} />
-                        <span className="min-w-0">
-                          <span className={`block text-xs font-semibold ${sel ? 'text-zinc-100' : 'text-zinc-300'}`}>
-                            {m.name}{sel && <span className="ml-1.5 text-[10px] font-normal text-zinc-500">selected</span>}
-                          </span>
-                          <span className="block text-[11px] leading-snug text-zinc-500">{m.sub}</span>
-                        </span>
-                      </button>
-                    )
-                  })}
-                </div>
-
-                {/* Effort / strategy */}
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Effort</span>
-                  <div className="inline-flex rounded-lg border border-zinc-700 bg-zinc-900/50 p-0.5">
+              <section className="space-y-5 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 wide:p-5">
+                {/* Mode selector — the two ways to run a team, clearly distinguished.
+                    A page locked to one mode has no switch to the other. */}
+                {!mode && (
+                <div>
+                  <SectionLabel className="mb-2.5">Mode</SectionLabel>
+                  <div className="grid gap-2.5 @xl:grid-cols-2">
                     {([
-                      { id: 'standard', label: 'Standard', icon: Gauge, on: 'bg-sky-600 text-white' },
-                      { id: 'deep', label: 'Deep', icon: ScanSearch, on: 'bg-amber-500 text-zinc-950' },
-                      { id: 'plan', label: 'Plan', icon: ListChecks, on: 'bg-emerald-600 text-white' },
-                    ] as const).map((st) => {
-                      const Icon = st.icon
-                      const sel = strategy === st.id
+                      { id: 'basna', sub: 'Independent ensemble — agents answer blind, merged by reliability' },
+                      { id: 'vatra', sub: 'Collaborative team — a Lead splits the work, a reporter assembles it' },
+                    ] as const).map((m) => {
+                      const ml = MODE_LOOK[m.id]
+                      const sel = effectiveMode === m.id
                       return (
                         <button
-                          key={st.id}
-                          onClick={() => setStrategy(st.id)}
-                          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                            sel ? st.on : 'text-zinc-400 hover:text-zinc-200'}`}
+                          key={m.id}
+                          onClick={() => pickMode(m.id)}
+                          aria-pressed={sel}
+                          className={`group relative flex min-w-0 items-center gap-3.5 rounded-2xl border p-3.5 text-left transition-all hover:-translate-y-px ${
+                            sel ? MODE_TILE_ON[ml.tone] : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700 hover:bg-zinc-800/60 hover:shadow-lg hover:shadow-black/10'}`}
                         >
-                          <Icon className="h-3.5 w-3.5" /> {st.label}
+                          <IconSquare icon={ml.icon} tone={sel ? ml.tone : 'zinc'} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-sm font-semibold text-zinc-100">{ml.name}</span>
+                            <span className="mt-0.5 block text-xs leading-snug text-zinc-500">{m.sub}</span>
+                          </span>
+                          {sel && (
+                            <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-white ${ml.tone === 'sky' ? 'bg-sky-600' : 'bg-violet-600'}`}>
+                              <Check className="h-3 w-3" /><span className="sr-only">selected</span>
+                            </span>
+                          )}
                         </button>
                       )
                     })}
                   </div>
-                  <button
-                    onClick={() => setTuning((t) => !t)}
-                    title="Router tier and team size"
-                    className={`ml-auto flex items-center gap-1.5 rounded-md px-2 py-1 text-xs ${
-                      tuning ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'}`}
-                  >
-                    <SlidersHorizontal className="h-3.5 w-3.5" /> Tuning
-                  </button>
                 </div>
+                )}
 
-                {/* What the chosen effort does + its options */}
-                <div className="rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2.5 text-xs text-zinc-400">
-                  {strategy === 'standard' && (
-                    <p className="leading-relaxed">
-                      A minimal team answers once — {effectiveMode === 'vatra'
-                        ? 'a Lead splits the work and a reporter assembles it.'
-                        : 'independent agents, merged by reliability.'}
-                    </p>
-                  )}
-                  {strategy === 'deep' && (
-                    <div className="space-y-2">
+                {/* Effort / strategy */}
+                <div>
+                  <div className="mb-2.5 flex items-center justify-between gap-3">
+                    <SectionLabel>Effort</SectionLabel>
+                    <button
+                      onClick={() => setTuning((t) => !t)}
+                      title="Router tier and team size"
+                      aria-pressed={tuning}
+                      className={toggleBtnCls(tuning)}
+                    >
+                      <SlidersHorizontal className="h-3.5 w-3.5" /> Tuning
+                    </button>
+                  </div>
+                  <Segmented
+                    label="Effort"
+                    value={strategy}
+                    onChange={setStrategy}
+                    options={[
+                      { value: 'standard', label: <><Gauge className="h-3.5 w-3.5" />Standard</> },
+                      { value: 'deep', label: <><ScanSearch className="h-3.5 w-3.5" />Deep</> },
+                      { value: 'plan', label: <><ListChecks className="h-3.5 w-3.5" />Plan</> },
+                    ]}
+                  />
+
+                  {/* What the chosen effort does + its options */}
+                  <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/40 px-4 py-3 text-xs text-zinc-400">
+                    {strategy === 'standard' && (
                       <p className="leading-relaxed">
-                        A diverse critic panel reviews each answer and revises it if refuted{effectiveMode === 'basna'
-                          ? ', and every agent self-consistency-votes' : ''}. Much stronger, much slower &amp; costlier.
+                        A minimal team answers once — {effectiveMode === 'vatra'
+                          ? 'a Lead splits the work and a reporter assembles it.'
+                          : 'independent agents, merged by reliability.'}
                       </p>
-                      {effectiveMode === 'basna' && (
-                        <label className="flex items-center gap-2 text-zinc-400">
-                          Samples / agent
-                          <input
-                            type="number" min={2} max={8} value={deepSamples}
-                            onChange={(e) => setDeepSamples(Number(e.target.value))}
-                            title="Self-consistency vote width per agent"
-                            className="w-14 rounded border border-amber-700/50 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-amber-500 focus:outline-none"
-                          />
-                        </label>
-                      )}
-                    </div>
-                  )}
-                  {strategy === 'plan' && (
-                    <div className="space-y-2.5">
-                      <p className="leading-relaxed">
-                        Break the task into steps, drive each to a <span className="text-zinc-300">verified</span> result before the next, re-plan on failure, then synthesize.
-                      </p>
-                      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
-                        <label className="flex items-center gap-2 text-zinc-400">
-                          Steps
-                          <input
-                            type="number" min={1} max={12} value={planSteps}
-                            onChange={(e) => setPlanSteps(Number(e.target.value))}
-                            title="Max steps in the plan"
-                            className="w-14 rounded border border-emerald-700/50 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-emerald-500 focus:outline-none"
-                          />
-                        </label>
-                        <div className="flex items-center gap-2 text-zinc-400">
-                          Each step
-                          <div className="inline-flex rounded-md border border-zinc-700 bg-zinc-950/50 p-0.5">
-                            {([
-                              { complex: false, label: 'simple' },
-                              { complex: true, label: effectiveMode === 'vatra' ? 'Vatra team' : 'Basna ensemble' },
-                            ]).map((opt) => (
-                              <button
-                                key={opt.label}
-                                onClick={() => setPlanComplex(opt.complex)}
-                                title={opt.complex
-                                  ? `Each step runs a full ${effectiveMode === 'vatra' ? 'Vatra team' : 'Basna ensemble'} — strongest, slowest.`
-                                  : 'One fast model per step.'}
-                                className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${
-                                  planComplex === opt.complex ? 'bg-emerald-600 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
-                              >
-                                {opt.label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                        <label
-                          className="flex items-center gap-1.5 text-zinc-400"
-                          title="Planner emits a dependency graph — independent steps run in parallel, each seeing only what it depends on."
-                        >
-                          <input
-                            type="checkbox" checked={planDag}
-                            onChange={(e) => setPlanDag(e.target.checked)}
-                            className="accent-emerald-500"
-                          />
-                          parallel
-                        </label>
+                    )}
+                    {strategy === 'deep' && (
+                      <div className="space-y-3">
+                        <p className="leading-relaxed">
+                          A diverse critic panel reviews each answer and revises it if refuted{effectiveMode === 'basna'
+                            ? ', and every agent self-consistency-votes' : ''}. Much stronger, much slower &amp; costlier.
+                        </p>
+                        {effectiveMode === 'basna' && (
+                          <label className="flex items-center gap-2 text-zinc-400">
+                            Samples / agent
+                            <input
+                              type="number" min={2} max={8} value={deepSamples}
+                              onChange={(e) => setDeepSamples(Number(e.target.value))}
+                              title="Self-consistency vote width per agent"
+                              className={`${smallInputCls} w-16`}
+                            />
+                          </label>
+                        )}
                       </div>
-                    </div>
-                  )}
+                    )}
+                    {strategy === 'plan' && (
+                      <div className="space-y-3">
+                        <p className="leading-relaxed">
+                          Break the task into steps, drive each to a <span className="text-zinc-200">verified</span> result before the next, re-plan on failure, then synthesize.
+                        </p>
+                        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                          <label className="flex items-center gap-2 text-zinc-400">
+                            Steps
+                            <input
+                              type="number" min={1} max={12} value={planSteps}
+                              onChange={(e) => setPlanSteps(Number(e.target.value))}
+                              title="Max steps in the plan"
+                              className={`${smallInputCls} w-16`}
+                            />
+                          </label>
+                          <div className="flex items-center gap-2 text-zinc-400">
+                            Each step
+                            <div className={segFrameCls}>
+                              {([
+                                { complex: false, label: 'simple' },
+                                { complex: true, label: effectiveMode === 'vatra' ? 'Vatra team' : 'Basna ensemble' },
+                              ]).map((opt) => (
+                                <button
+                                  key={opt.label}
+                                  onClick={() => setPlanComplex(opt.complex)}
+                                  title={opt.complex
+                                    ? `Each step runs a full ${effectiveMode === 'vatra' ? 'Vatra team' : 'Basna ensemble'} — strongest, slowest.`
+                                    : 'One fast model per step.'}
+                                  className={segBtnCls(planComplex === opt.complex)}
+                                >
+                                  {opt.label}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          <label
+                            className="flex cursor-pointer items-center gap-2 text-zinc-400"
+                            title="Planner emits a dependency graph — independent steps run in parallel, each seeing only what it depends on."
+                          >
+                            <input
+                              type="checkbox" checked={planDag}
+                              onChange={(e) => setPlanDag(e.target.checked)}
+                              className={checkCls}
+                            />
+                            parallel
+                          </label>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* Quality levers (opt-in cross-pollination) */}
                 <QualityControls scope="research" value={quality} onChange={setQuality} />
 
-                {/* Prior-run knowledge (opt-in) — seed this run with earlier reports + gaps */}
+                {/* What the team can read: prior runs' knowledge and reference folders. */}
                 <div>
-                  <button
-                    onClick={() => setShowKnowledge((v) => !v)}
-                    className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                      knowledgeSessionIds.length > 0
-                        ? 'border-violet-500/50 bg-violet-500/10 text-violet-700 dark:text-violet-300'
-                        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
-                    }`}
-                    title="Use the knowledge (report + gaps/blind spots) of prior finished runs"
-                  >
-                    <Brain className="h-3.5 w-3.5" />
-                    {knowledgeSessionIds.length > 0 ? `Prior knowledge: ${knowledgeSessionIds.length}` : 'Use prior-run knowledge'}
-                  </button>
+                  <SectionLabel className="mb-2.5">Knowledge</SectionLabel>
+                  <div className="flex flex-wrap gap-2">
+                    {/* Prior-run knowledge (opt-in) — seed this run with earlier reports + gaps */}
+                    <button
+                      onClick={() => setShowKnowledge((v) => !v)}
+                      aria-expanded={showKnowledge}
+                      className={chipToggleCls(knowledgeSessionIds.length > 0, 'violet')}
+                      title="Use the knowledge (report + gaps/blind spots) of prior finished runs"
+                    >
+                      <Brain className="h-4 w-4" />
+                      {knowledgeSessionIds.length > 0 ? `Prior knowledge: ${knowledgeSessionIds.length}` : 'Use prior-run knowledge'}
+                      <ChevronDown className={`h-3.5 w-3.5 opacity-60 transition-transform ${showKnowledge ? 'rotate-180' : ''}`} />
+                    </button>
+                    {/* Reference folders (read-only) — agents check these before web search */}
+                    <button
+                      onClick={() => { setShowRefFolders((v) => !v); if (projects.length === 0) loadProjects() }}
+                      aria-expanded={showRefFolders}
+                      className={chipToggleCls(referenceFolders.length > 0, 'emerald')}
+                      title="Read-only VFS folders agents search before web search (prior-knowledge runs' folders are auto-included)"
+                    >
+                      <FolderSearch className="h-4 w-4" />
+                      {referenceFolders.length > 0 ? `Reference folders: ${referenceFolders.length}` : 'Reference folders (read-only)'}
+                      <ChevronDown className={`h-3.5 w-3.5 opacity-60 transition-transform ${showRefFolders ? 'rotate-180' : ''}`} />
+                    </button>
+                  </div>
                   {showKnowledge && (
-                    <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                    <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
                       <KnowledgePicker
                         sessions={scopedSessions}
                         selectedIds={knowledgeSessionIds}
@@ -1042,24 +1083,8 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
                       />
                     </div>
                   )}
-                </div>
-
-                {/* Reference folders (read-only) — agents check these before web search */}
-                <div>
-                  <button
-                    onClick={() => { setShowRefFolders((v) => !v); if (projects.length === 0) loadProjects() }}
-                    className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                      referenceFolders.length > 0
-                        ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
-                        : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
-                    }`}
-                    title="Read-only VFS folders agents search before web search (prior-knowledge runs' folders are auto-included)"
-                  >
-                    <FolderSearch className="h-3.5 w-3.5" />
-                    {referenceFolders.length > 0 ? `Reference folders: ${referenceFolders.length}` : 'Reference folders (read-only)'}
-                  </button>
                   {showRefFolders && (
-                    <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+                    <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
                       <ReferenceFolderPicker projects={projects} selected={referenceFolders} onToggle={toggleReferenceFolder} />
                     </div>
                   )}
@@ -1067,161 +1092,164 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
 
                 {/* Tuning (router tier + team size) */}
                 {tuning && (
-                  <div className="flex flex-wrap items-center gap-5 rounded-lg border border-zinc-800 bg-zinc-900/30 px-3 py-2 text-xs">
-                    <label className="flex items-center gap-2 text-zinc-400">
-                      Router tier
-                      <select
-                        value={routerTier}
-                        onChange={(e) => setRouterTier(e.target.value)}
-                        title="Which Library tier picks the team / leads it"
-                        className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
-                      >
-                        {TIER_ORDER.filter((t) => tiers[t]).map((t) => (
-                          <option key={t} value={t}>{registry?.tiers[t]?.label || t}</option>
-                        ))}
-                        {Object.keys(tiers).length === 0 && <option value="reason">reason</option>}
-                      </select>
-                    </label>
-                    <label className="flex items-center gap-2 text-zinc-400">
-                      Max agents
-                      <input
-                        type="number" min={1} max={10} value={maxAgents}
-                        onChange={(e) => setMaxAgents(Number(e.target.value))}
-                        disabled={team.length > 0}
-                        title={team.length > 0 ? 'Ignored — the team is fixed by your selection' : 'Team size cap'}
-                        className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none disabled:opacity-40"
-                      />
-                    </label>
-                    <label className="flex items-center gap-2 text-zinc-400">
-                      Max parallel
-                      <input
-                        type="number" min={0} max={16} value={maxParallel}
-                        onChange={(e) => setMaxParallel(Number(e.target.value))}
-                        title="How many agents run their turn at once. 0 = all at once. Lower it (e.g. 2) for local models to avoid running the serving box out of memory."
-                        className="w-16 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
-                      />
-                    </label>
-                    {effectiveMode === 'vatra' && (
-                      <label
-                        className="flex cursor-pointer items-center gap-1.5 text-zinc-400"
-                        title="Run owners in ordered phases A→B→C→D (research/design first, review/assembly last) with a barrier between groups, instead of all at once. Opt-in."
-                      >
-                        <input
-                          type="checkbox" checked={executionGroups}
-                          onChange={(e) => setExecutionGroups(e.target.checked)}
-                          className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-950/60 accent-violet-600"
-                        />
-                        Grouped
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
+                    <SectionLabel className="mb-3">Tuning</SectionLabel>
+                    <div className="grid gap-x-5 gap-y-4 @lg:grid-cols-2 @4xl:grid-cols-3">
+                      <label className="block min-w-0">
+                        <span className={labelCls}>Router tier</span>
+                        <select
+                          value={routerTier}
+                          onChange={(e) => setRouterTier(e.target.value)}
+                          title="Which Library tier picks the team / leads it"
+                          className={inputCls}
+                        >
+                          {TIER_ORDER.filter((t) => tiers[t]).map((t) => (
+                            <option key={t} value={t}>{registry?.tiers[t]?.label || t}</option>
+                          ))}
+                          {Object.keys(tiers).length === 0 && <option value="reason">reason</option>}
+                        </select>
                       </label>
-                    )}
-                    {effectiveMode === 'vatra' && executionGroups && (
-                      <label
-                        className="flex cursor-pointer items-center gap-1.5 text-zinc-400"
-                        title="After the final group, every owner revises its piece against the whole team's work — early-group owners never see later groups' output otherwise. Adds one dispatch per owner. Opt-in."
-                      >
+                      <label className="block min-w-0">
+                        <span className={labelCls}>Max agents</span>
                         <input
-                          type="checkbox" checked={groupedReview}
-                          onChange={(e) => setGroupedReview(e.target.checked)}
-                          className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-950/60 accent-violet-600"
+                          type="number" min={1} max={10} value={maxAgents}
+                          onChange={(e) => setMaxAgents(Number(e.target.value))}
+                          disabled={team.length > 0}
+                          title={team.length > 0 ? 'Ignored — the team is fixed by your selection' : 'Team size cap'}
+                          className={inputCls}
                         />
-                        Review round
                       </label>
-                    )}
-                    {/* Run folder — new (auto/custom name) or an existing VFS folder */}
-                    <label
-                      className="flex items-center gap-2 text-zinc-400"
-                      title="Where this run's agents read/write shared files (and the shared datastore, if on). New = a fresh folder; Existing = build on a folder from a previous run."
-                    >
-                      Folder
-                      <select
-                        value={folderMode}
-                        onChange={(e) => {
-                          const m = e.target.value as FolderMode
-                          setFolderMode(m)
-                          if (m === 'existing') loadProjects()
-                        }}
-                        className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
-                      >
-                        <option value="new">New</option>
-                        <option value="existing">Existing</option>
-                      </select>
-                      {folderMode === 'new' ? (
+                      <label className="block min-w-0">
+                        <span className={labelCls}>Max parallel</span>
                         <input
-                          value={newFolderName}
-                          onChange={(e) => setNewFolderName(e.target.value)}
-                          placeholder="auto-name"
-                          title="Leave blank to auto-name (basna-…/vatra-…), or type a folder name to reuse across runs."
-                          className="w-32 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 placeholder-zinc-600 focus:border-sky-600 focus:outline-none"
+                          type="number" min={0} max={16} value={maxParallel}
+                          onChange={(e) => setMaxParallel(Number(e.target.value))}
+                          title="How many agents run their turn at once. 0 = all at once. Lower it (e.g. 2) for local models to avoid running the serving box out of memory."
+                          className={inputCls}
                         />
-                      ) : (
-                        <span className="flex items-center gap-1">
+                      </label>
+                      {/* Run folder — new (auto/custom name) or an existing VFS folder */}
+                      <label
+                        className="block min-w-0 @lg:col-span-2"
+                        title="Where this run's agents read/write shared files (and the shared datastore, if on). New = a fresh folder; Existing = build on a folder from a previous run."
+                      >
+                        <span className={labelCls}>Folder</span>
+                        <span className="flex items-center gap-2">
                           <select
-                            value={existingFolder}
-                            onChange={(e) => setExistingFolder(e.target.value)}
-                            className="w-44 rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-zinc-200 focus:border-sky-600 focus:outline-none"
+                            value={folderMode}
+                            onChange={(e) => {
+                              const m = e.target.value as FolderMode
+                              setFolderMode(m)
+                              if (m === 'existing') loadProjects()
+                            }}
+                            className={`${fitInputCls} w-32 shrink-0`}
                           >
-                            <option value="">
-                              {projectsLoading ? 'Loading…' : projects.length === 0 ? 'No folders found' : '— pick folder —'}
-                            </option>
-                            {projects.map((p) => (
-                              <option key={p.name} value={p.name}>
-                                {p.name}{p.files ? ` (${p.files})` : ''}
-                              </option>
-                            ))}
+                            <option value="new">New</option>
+                            <option value="existing">Existing</option>
                           </select>
-                          <button
-                            type="button"
-                            onClick={() => loadProjects()}
-                            title="Refresh folder list"
-                            className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-                          >
-                            <RefreshCw className={`h-3 w-3 ${projectsLoading ? 'animate-spin' : ''}`} />
-                          </button>
+                          {folderMode === 'new' ? (
+                            <input
+                              value={newFolderName}
+                              onChange={(e) => setNewFolderName(e.target.value)}
+                              placeholder="auto-name"
+                              title="Leave blank to auto-name (basna-…/vatra-…), or type a folder name to reuse across runs."
+                              className={`${fitInputCls} min-w-0 flex-1`}
+                            />
+                          ) : (
+                            <>
+                              <select
+                                value={existingFolder}
+                                onChange={(e) => setExistingFolder(e.target.value)}
+                                className={`${fitInputCls} min-w-0 flex-1`}
+                              >
+                                <option value="">
+                                  {projectsLoading ? 'Loading…' : projects.length === 0 ? 'No folders found' : '— pick folder —'}
+                                </option>
+                                {projects.map((p) => (
+                                  <option key={p.name} value={p.name}>
+                                    {p.name}{p.files ? ` (${p.files})` : ''}
+                                  </option>
+                                ))}
+                              </select>
+                              <button
+                                type="button"
+                                onClick={() => loadProjects()}
+                                title="Refresh folder list"
+                                className={iconBtnCls}
+                              >
+                                <RefreshCw className={`h-3.5 w-3.5 ${projectsLoading ? 'animate-spin' : ''}`} />
+                              </button>
+                            </>
+                          )}
                         </span>
+                      </label>
+                    </div>
+                    <div className="mt-4 flex flex-wrap gap-x-6 gap-y-3 border-t border-zinc-800/80 pt-4 text-sm text-zinc-300">
+                      {effectiveMode === 'vatra' && (
+                        <label
+                          className="flex cursor-pointer items-center gap-2"
+                          title="Run owners in ordered phases A→B→C→D (research/design first, review/assembly last) with a barrier between groups, instead of all at once. Opt-in."
+                        >
+                          <input
+                            type="checkbox" checked={executionGroups}
+                            onChange={(e) => setExecutionGroups(e.target.checked)}
+                            className={checkCls}
+                          />
+                          Grouped
+                        </label>
                       )}
-                    </label>
-                    {/* Shared datastore — one relational store in the folder for all agents */}
-                    <label
-                      className="flex cursor-pointer items-center gap-1.5 text-zinc-400"
-                      title="Bind every agent in this run to ONE relational datastore stored in the run's VFS folder, so they collaborate through shared tables. Off = each agent keeps a private datastore."
-                    >
-                      <input
-                        type="checkbox" checked={sharedDatastore}
-                        onChange={(e) => setSharedDatastore(e.target.checked)}
-                        className="h-3.5 w-3.5 rounded border-zinc-700 bg-zinc-950/60 accent-violet-600"
-                      />
-                      Shared datastore
-                    </label>
+                      {effectiveMode === 'vatra' && executionGroups && (
+                        <label
+                          className="flex cursor-pointer items-center gap-2"
+                          title="After the final group, every owner revises its piece against the whole team's work — early-group owners never see later groups' output otherwise. Adds one dispatch per owner. Opt-in."
+                        >
+                          <input
+                            type="checkbox" checked={groupedReview}
+                            onChange={(e) => setGroupedReview(e.target.checked)}
+                            className={checkCls}
+                          />
+                          Review round
+                        </label>
+                      )}
+                      {/* Shared datastore — one relational store in the folder for all agents */}
+                      <label
+                        className="flex cursor-pointer items-center gap-2"
+                        title="Bind every agent in this run to ONE relational datastore stored in the run's VFS folder, so they collaborate through shared tables. Off = each agent keeps a private datastore."
+                      >
+                        <input
+                          type="checkbox" checked={sharedDatastore}
+                          onChange={(e) => setSharedDatastore(e.target.checked)}
+                          className={checkCls}
+                        />
+                        Shared datastore
+                      </label>
+                    </div>
                   </div>
                 )}
-              </div>
+              </section>
             )}
 
             {/* Gate action bar — the coordination plan is drafted and awaiting the user;
                 Execute approves (runs Group A) and Cancel discards. Replaces Plan/Run team
                 since the run is already in motion. */}
             {awaitingPlan && (
-              <div className="flex items-center justify-end gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2">
                 {planDirty && (
-                  <span className="mr-auto text-[11px] text-amber-600 dark:text-amber-400">
+                  <span className="mr-auto text-xs text-amber-700 dark:text-amber-300">
                     Plan edited — re-plan to fold your groups/answers into the coordination.
                   </span>
                 )}
-                <button
-                  onClick={() => cancelVatraPlan()}
-                  disabled={approvingPlan}
-                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-rose-500/50 hover:text-rose-300 disabled:opacity-40"
-                >
-                  <Trash2 className="h-3.5 w-3.5" /> Cancel
-                </button>
+                <Button variant="danger" icon={Trash2} onClick={() => cancelVatraPlan()} disabled={approvingPlan}>
+                  Cancel
+                </Button>
                 {planDirty && group0Draft && (
                   <button
                     onClick={() => replanVatraGroups(group0Draft, tiers, envVars)}
                     disabled={approvingPlan}
                     title="Regenerate the coordination plan for the new grouping / answers"
-                    className="flex items-center gap-1.5 rounded-lg border border-amber-400 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-500/20 disabled:opacity-40 dark:border-amber-500/60 dark:text-amber-300"
+                    className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-amber-500/50 bg-amber-500/10 px-3.5 py-2 text-sm font-medium text-amber-700 transition-colors hover:bg-amber-500/20 disabled:opacity-40 dark:text-amber-300"
                   >
-                    {approvingPlan ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                    {approvingPlan ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                     Re-plan
                   </button>
                 )}
@@ -1229,9 +1257,9 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
                   onClick={() => approveVatraPlan(group0Draft ?? undefined, tiers, envVars)}
                   disabled={approvingPlan}
                   title={planDirty ? 'Run with the new groups but the current (pre-re-plan) mandates' : 'Run Group A'}
-                  className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                  className={ctaCls('violet')}
                 >
-                  {approvingPlan ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                  {approvingPlan ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                   Execute
                 </button>
               </div>
@@ -1239,20 +1267,18 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
 
             {/* Action bar — pin a team, then route/plan/run. Hidden while live or at the gate. */}
             {!running && !awaitingPlan && (
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   onClick={() => setTeamOpen((o) => !o)}
                   disabled={teamLocked}
-                  className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs disabled:opacity-40 ${
-                    team.length > 0
-                      ? 'border-violet-500/50 bg-violet-500/10 text-violet-700 dark:text-violet-300'
-                      : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
+                  aria-expanded={teamOpen}
+                  className={chipToggleCls(team.length > 0, 'violet')}
                   title={teamLocked ? 'Locked while running' : 'Pin exactly which archetypes the team must use (optional)'}
                 >
-                  <Users className="h-3.5 w-3.5" />
+                  <Users className="h-4 w-4" />
                   {team.length > 0 ? `Team: ${team.length}` : 'Select team'}
                 </button>
-                <div className="ml-auto flex items-center gap-2">
+                <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
                   {planMode ? (
                     <button
                       onClick={() => runPlan(intent, tiers, title, envVars, team, planStepMode)}
@@ -1260,48 +1286,46 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
                       title={team.length > 0 && !planComplex
                         ? 'A team is selected but "simple" steps do not route — switch to a full ensemble/team step.'
                         : `Decompose → verify each step (${planComplex ? (effectiveMode === 'vatra' ? 'Vatra team' : 'Basna ensemble') : 'single model'}/step) → re-plan → synthesize.`}
-                      className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-40"
+                      className={runCta}
                     >
-                      {executing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                      {executing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                       Run plan
                     </button>
                   ) : effectiveMode === 'vatra' ? (
                     <>
-                      <button
+                      <Button
                         onClick={() => planVatra(intent, tiers, title, team)}
                         disabled={!canRoute || vatraMode}
                         title="Decompose the task into owned pieces — review the team, then Run team."
-                        className="flex items-center gap-1.5 rounded-lg border border-violet-300 px-3 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100 disabled:opacity-40 dark:border-violet-700/70 dark:text-violet-300 dark:hover:bg-violet-800/30"
                       >
-                        {planning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                        {planning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                         Plan team
-                      </button>
+                      </Button>
                       <button
                         onClick={() => runVatra(tiers, envVars)}
                         disabled={!canRun}
-                        className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                        className={runCta}
                       >
-                        {(executing || activeBusy) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                        {(executing || activeBusy) ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                         Run team
                       </button>
                     </>
                   ) : (
                     <>
-                      <button
+                      <Button
                         onClick={() => route(intent, tiers, title, team)}
                         disabled={!canRoute}
                         title="Select the minimal archetype team — review/edit it, then Run ensemble."
-                        className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
                       >
-                        {routing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                        {routing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                         Route
-                      </button>
+                      </Button>
                       <button
                         onClick={() => execute(tiers, envVars)}
                         disabled={!canRun}
-                        className="flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                        className={runCta}
                       >
-                        {executing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                        {executing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
                         Run ensemble
                       </button>
                     </>
@@ -1312,24 +1336,24 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
 
             {/* Optional fixed team — pick archetypes the route/plan MUST use. */}
             {teamOpen && (
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="text-[11px] text-zinc-400">
+              <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 wide:p-5">
+                <div className="mb-3 flex items-start gap-3">
+                  <p className="min-w-0 flex-1 text-xs leading-relaxed text-zinc-500">
                     Pick the archetypes the {effectiveMode === 'vatra' ? 'Lead' : 'router'} must use — every one selected is
                     used and instructed for this task. Leave empty for automatic selection.
-                  </span>
+                  </p>
                   {team.length > 0 && (
-                    <button onClick={() => setTeam([])} disabled={teamLocked} className="ml-auto shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300 disabled:opacity-40">Clear</button>
+                    <button onClick={() => setTeam([])} disabled={teamLocked} className="shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">Clear</button>
                   )}
                 </div>
-<input
+                <input
                   value={teamQuery}
                   onChange={(e) => setTeamQuery(e.target.value)}
                   placeholder="Filter by role, family or skill…"
                   aria-label="Filter archetypes"
-                  className="mb-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+                  className={`${inputCls} mb-3`}
                 />
-                <div className={`grid max-h-64 grid-cols-1 gap-1 overflow-auto sm:grid-cols-2 ${teamLocked ? 'pointer-events-none opacity-50' : ''}`}>
+                <div className={`grid max-h-72 grid-cols-1 gap-1.5 overflow-auto @xl:grid-cols-2 @5xl:grid-cols-3 ${teamLocked ? 'pointer-events-none opacity-50' : ''}`}>
                   {(registry?.archetypes || []).filter((a) => team.includes(a.id) || archetypeMatches(a, teamQuery)).map((a) => {
                     const on = team.includes(a.id)
                     return (
@@ -1337,29 +1361,25 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
                         key={a.id}
                         onClick={() => toggleTeam(a.id)}
                         disabled={teamLocked}
-                        className={`flex items-start gap-2 rounded border p-1.5 text-left text-xs transition-colors ${
-                          on ? 'border-violet-500/50 bg-violet-500/10' : 'border-zinc-800 hover:bg-zinc-800/50'}`}
+                        className={`flex items-start gap-2.5 rounded-xl border px-3 py-2 text-left transition-colors ${
+                          on ? 'border-violet-500/50 bg-violet-500/10' : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700 hover:bg-zinc-800/50'}`}
                       >
-                        <span className={`mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
-                          on ? 'border-violet-500 bg-violet-500 text-white' : 'border-zinc-600'}`}>
-                          {on && <Check className="h-2.5 w-2.5" />}
+                        <span className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                          on ? 'border-violet-500 bg-violet-600 text-white' : 'border-zinc-600'}`}>
+                          {on && <Check className="h-3 w-3" />}
                         </span>
                         <span className="min-w-0">
-                          <span className="block text-zinc-200">{a.role || a.id}</span>
-                          <span className="block text-[10px] text-zinc-500">{a.family || a.id}</span>
+                          <span className="block truncate text-sm text-zinc-200">{a.role || a.id}</span>
+                          <span className="block truncate text-[11px] text-zinc-500">{a.family || a.id}</span>
                         </span>
                       </button>
                     )
                   })}
                 </div>
-              </div>
+              </section>
             )}
 
-            {error && (
-              <div className="flex items-start gap-2 rounded-lg border border-rose-900/50 bg-rose-950/30 p-2.5 text-xs text-rose-300">
-                <X className="mt-0.5 h-3.5 w-3.5 shrink-0" /> {error}
-              </div>
-            )}
+            {error && <Notice tone="red">{error}</Notice>}
 
             {/* Group 0 gate — the Long Horizon Planner's coordination plan, awaiting
                 the user's review/edit before any Group-A worker runs. The Execute/Cancel
@@ -1424,7 +1444,9 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
             )}
             {/* A fresh execute before the session flips to running (progress already streaming). */}
             {stage !== 'run' && executing && !activeSession && progress.length > 0 && (
-              <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 text-xs text-zinc-500">Starting…</div>
+              <div className="flex items-center gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 text-sm text-zinc-500">
+                <Loader2 className="h-4 w-4 animate-spin" /> Starting…
+              </div>
             )}
 
             {/* Stage 4 done — the report takes over: Report | Analysis | Gaps | Board | Files | Agents | Log. */}
@@ -1472,7 +1494,7 @@ export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose
       </div>
 
       {modal && <FileModal title={modal.title} content={modal.content} mode={modal.mode} onClose={() => setModal(null)} />}
-      {calibrationOpen && <JudgeCalibrationModal onClose={() => setCalibrationOpen(false)} />}
+      {calibrationOpen && <JudgeCalibrationModal mode={mode} onClose={() => setCalibrationOpen(false)} />}
     </div>
   )
 }

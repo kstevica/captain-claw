@@ -16,7 +16,7 @@ export const DIFFICULTY_COLOR: Record<string, string> = {
 
 export function Badge({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return (
-    <span className={`rounded-full border border-zinc-700/60 bg-zinc-800/60 px-2 py-0.5 text-[11px] font-medium ${className}`}>
+    <span className={`inline-flex items-center rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] font-medium ${className}`}>
       {children}
     </span>
   )
@@ -24,7 +24,7 @@ export function Badge({ children, className = '' }: { children: React.ReactNode;
 
 export function WeightBar({ value }: { value: number }) {
   return (
-    <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-800/80">
       <div className="h-full rounded-full bg-sky-500" style={{ width: `${Math.round(value * 100)}%` }} />
     </div>
   )
@@ -188,47 +188,49 @@ export function FileModal({ title, content, mode, onClose }: {
   const ext = fileExt(title)
   const exportName = ext ? title : `${slugify(title)}.md`
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 wide:items-center wide:p-4" onClick={onClose}>
       <div
-        className={`flex flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl ${
-          maximized ? 'h-[96vh] w-[97vw] max-w-none' : 'max-h-[90vh] w-full max-w-4xl'
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className={`flex w-full flex-col border border-zinc-800 bg-zinc-950 shadow-2xl ${
+          maximized ? 'h-[100dvh] wide:h-[96vh] wide:w-[97vw] wide:max-w-none wide:rounded-2xl' : 'max-h-[92dvh] rounded-t-2xl wide:max-h-[90vh] wide:max-w-4xl wide:rounded-2xl'
         }`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-800 px-4 py-3">
-          <span className="truncate text-sm font-medium text-zinc-200">{title}</span>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setMaximized((m) => !m)}
-              title={maximized ? 'Restore' : 'Maximise'}
-              className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-            >
-              {maximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-            </button>
-            <button
-              onClick={() => downloadMarkdown(exportName, content)}
-              className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
-            >
-              <Download className="h-3.5 w-3.5" /> Export {ext ? `.${ext}` : '.md'}
-            </button>
-            <button onClick={onClose} className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
-              <X className="h-4 w-4" />
-            </button>
-          </div>
+        <div className="flex shrink-0 items-center gap-2 border-b border-zinc-800 px-5 py-3.5">
+          <span className="min-w-0 flex-1 truncate text-base font-semibold text-zinc-100">{title}</span>
+          <button
+            onClick={() => setMaximized((m) => !m)}
+            title={maximized ? 'Restore' : 'Maximise'}
+            aria-label={maximized ? 'Restore' : 'Maximise'}
+            className="hidden rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 wide:block"
+          >
+            {maximized ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+          </button>
+          <button
+            onClick={() => downloadMarkdown(exportName, content)}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-zinc-700 bg-zinc-900/60 px-3 py-1.5 text-xs font-medium text-zinc-200 transition-colors hover:border-zinc-600 hover:bg-zinc-800"
+          >
+            <Download className="h-3.5 w-3.5" /> Export {ext ? `.${ext}` : '.md'}
+          </button>
+          <button onClick={onClose} aria-label="Close" title="Close" className="rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
+            <X className="h-4 w-4" />
+          </button>
         </div>
         {mode === 'html' ? (
           <iframe
             title={title}
             sandbox=""
             srcDoc={content}
-            className="min-h-[60vh] w-full flex-1 rounded-b-xl bg-white"
+            className="min-h-[60vh] w-full flex-1 rounded-b-2xl bg-white"
           />
         ) : mode === 'markdown' ? (
-          <div className="fd-markdown flex-1 overflow-auto p-5 text-sm text-zinc-200 leading-relaxed">
+          <div className="fd-markdown flex-1 overflow-auto px-6 py-5 text-sm leading-relaxed text-zinc-200">
             <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
           </div>
         ) : (
-          <pre className="flex-1 overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-xs leading-relaxed text-zinc-300">
+          <pre className="flex-1 overflow-auto whitespace-pre-wrap break-words px-6 py-5 font-mono text-xs leading-relaxed text-zinc-300">
             {content}
           </pre>
         )}
@@ -241,10 +243,10 @@ export function FileModal({ title, content, mode, onClose }: {
 export function OutputActions({ title, content, onView }: { title: string; content: string; onView: (t: string, c: string) => void }) {
   return (
     <div className="flex items-center gap-1">
-      <button onClick={() => onView(title, content)} title="Fullscreen" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+      <button onClick={() => onView(title, content)} title="Fullscreen" aria-label="Fullscreen" className="rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
         <Maximize2 className="h-3.5 w-3.5" />
       </button>
-      <button onClick={() => downloadMarkdown(`${slugify(title)}.md`, content)} title="Export .md" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+      <button onClick={() => downloadMarkdown(`${slugify(title)}.md`, content)} title="Export .md" aria-label="Export .md" className="rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
         <Download className="h-3.5 w-3.5" />
       </button>
     </div>
