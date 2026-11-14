@@ -23,11 +23,11 @@ export function ReferenceFolderPicker({
     : folders
   return (
     <div>
-      <p className="mb-2 text-[10px] text-zinc-500">
+      <p className="mb-2.5 text-xs leading-relaxed text-zinc-500">
         Agents check these first (glob + read), then web-search only what's missing. Folders from selected prior-knowledge runs are included automatically.
       </p>
       {folders.length === 0 ? (
-        <p className="text-[11px] text-zinc-500">No VFS folders yet.</p>
+        <p className="text-xs text-zinc-500">No VFS folders yet.</p>
       ) : (
         <>
           {folders.length > 6 && (
@@ -37,7 +37,7 @@ export function ReferenceFolderPicker({
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Filter folders…"
-                className="w-full rounded-md border border-zinc-700 bg-zinc-950 py-1 pl-7 pr-2 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+                className="w-full rounded-lg border border-zinc-700 bg-zinc-950 py-1.5 pl-7 pr-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none focus:ring-2 focus:ring-violet-500/15"
               />
             </div>
           )}
@@ -49,15 +49,15 @@ export function ReferenceFolderPicker({
                 <li key={p.name}>
                   <button
                     onClick={() => onToggle(p.name)}
-                    className={`flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left transition-colors ${
-                      sel ? 'border-emerald-500/50 bg-emerald-500/10' : 'border-zinc-800 bg-zinc-900/50 hover:border-zinc-700'
+                    className={`flex w-full items-center gap-2.5 rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                      sel ? 'border-emerald-500/50 bg-emerald-500/10' : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700 hover:bg-zinc-800/50'
                     }`}
                   >
                     <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${sel ? 'border-emerald-500 bg-emerald-600 text-white' : 'border-zinc-600'}`}>
                       {sel && <Check className="h-3 w-3" />}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className={`block truncate text-[11px] ${sel ? 'text-emerald-700 dark:text-emerald-200' : 'text-zinc-300'}`}>{label}</span>
+                      <span className={`block truncate text-xs ${sel ? 'text-emerald-700 dark:text-emerald-200' : 'text-zinc-200'}`}>{label}</span>
                       {p.title && p.title !== p.name && (
                         <span className="block truncate font-mono text-[9px] text-zinc-600">{p.name}</span>
                       )}

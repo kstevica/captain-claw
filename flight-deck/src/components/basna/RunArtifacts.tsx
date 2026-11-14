@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
-  FileText, Database, Eye, Download, Loader2, ChevronDown, ChevronRight, Table2,
+  FileText, Database, Eye, Download, Loader2, ChevronDown, Table2, type LucideIcon,
 } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 import type { VFSEntry } from '../../stores/vfsStore'
 import { DatastoreBrowser } from '../agents/DatastoreBrowser'
 import { FileModal, isViewable, viewModeForFile, type ViewMode } from './shared'
+import { PanelTitle } from './look'
+import { iconBtnCls, panelCls } from './lookCls'
 
 // ── Run artifacts: the files the team wrote to the run's VFS folder and the
 // datastore tables it built. Reused live (in the run rail) and after the run
@@ -51,8 +53,8 @@ function fmtKb(bytes: number): string {
 }
 
 // Shared collapsible shell so the rail panels match ProgressFeed / AgentRoster.
-function Panel({ icon, label, count, right, variant, children }: {
-  icon: React.ReactNode; label: string; count?: number; right?: React.ReactNode
+function Panel({ icon, iconCls, label, count, right, variant, children }: {
+  icon: LucideIcon; iconCls?: string; label: string; count?: number; right?: React.ReactNode
   variant: 'rail' | 'tab'; children: React.ReactNode
 }) {
   const [open, setOpen] = useState(true)
@@ -60,17 +62,15 @@ function Panel({ icon, label, count, right, variant, children }: {
     return <div>{children}</div>
   }
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
-      <div className="flex items-center gap-2">
-        <button onClick={() => setOpen((o) => !o)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-          {icon}
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">{label}</span>
-          {typeof count === 'number' && count > 0 && <span className="text-[10px] tabular-nums text-zinc-600">{count}</span>}
-          {open ? <ChevronDown className="h-3 w-3 text-zinc-600" /> : <ChevronRight className="h-3 w-3 text-zinc-600" />}
+    <div className={`${panelCls} p-4`}>
+      <div className="flex items-center gap-1">
+        <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+          <PanelTitle icon={icon} iconCls={iconCls} count={count}>{label}</PanelTitle>
+          <ChevronDown className={`ml-auto h-4 w-4 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-180' : ''}`} />
         </button>
         {right}
       </div>
-      {open && <div className="mt-2">{children}</div>}
+      {open && <div className="mt-3">{children}</div>}
     </div>
   )
 }
@@ -109,23 +109,23 @@ export function RunFilesPanel({ project, live, variant = 'rail' }: {
 
   const body = (
     loading && files.length === 0
-      ? <div className="flex items-center gap-2 text-[11px] text-zinc-600"><Loader2 className="h-3 w-3 animate-spin" /> loading…</div>
+      ? <div className="flex items-center gap-2 text-xs text-zinc-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…</div>
       : files.length === 0
-        ? <p className="text-[11px] text-zinc-600">No files written yet.</p>
+        ? <p className="text-xs text-zinc-500">No files written yet.</p>
         : (
-          <div className={`space-y-0.5 overflow-auto ${variant === 'rail' ? 'max-h-56' : 'max-h-[60vh]'}`}>
+          <div className={`-mx-1.5 space-y-0.5 overflow-auto ${variant === 'rail' ? 'max-h-56' : 'max-h-[60vh]'}`}>
             {files.map((e) => (
-              <div key={e.path} className="flex items-center gap-1.5 rounded px-1 py-0.5 text-xs hover:bg-zinc-800/50">
-                <FileText className="h-3 w-3 shrink-0 text-zinc-500" />
-                <span className="truncate text-zinc-300" title={e.path}>{e.path}</span>
-                <span className="shrink-0 text-[10px] text-zinc-600">{fmtKb(e.size)}</span>
+              <div key={e.path} className="flex items-center gap-2 rounded-lg px-1.5 py-0.5 text-[13px] hover:bg-zinc-800/50">
+                <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                <span className="min-w-0 truncate text-zinc-300" title={e.path}>{e.path}</span>
+                <span className="shrink-0 text-[11px] tabular-nums text-zinc-500">{fmtKb(e.size)}</span>
                 <div className="ml-auto flex shrink-0 items-center gap-0.5">
                   {isViewable(e.name) ? (
-                    <button onClick={() => view(e)} title="View" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+                    <button onClick={() => view(e)} title="View" aria-label={`View ${e.name}`} className={iconBtnCls}>
                       <Eye className="h-3.5 w-3.5" />
                     </button>
                   ) : (
-                    <button onClick={() => download(e)} title="Download" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+                    <button onClick={() => download(e)} title="Download" aria-label={`Download ${e.name}`} className={iconBtnCls}>
                       <Download className="h-3.5 w-3.5" />
                     </button>
                   )}
@@ -140,7 +140,7 @@ export function RunFilesPanel({ project, live, variant = 'rail' }: {
     <>
       <Panel
         variant={variant}
-        icon={<FileText className="h-3.5 w-3.5 text-zinc-500" />}
+        icon={FileText}
         label="Files"
         count={files.length}
       >
@@ -178,17 +178,17 @@ export function RunDatastorePanel({ project, live, variant = 'rail', hideWhenEmp
 
   const body = (
     loading && tables.length === 0
-      ? <div className="flex items-center gap-2 text-[11px] text-zinc-600"><Loader2 className="h-3 w-3 animate-spin" /> loading…</div>
+      ? <div className="flex items-center gap-2 text-xs text-zinc-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…</div>
       : tables.length === 0
-        ? <p className="text-[11px] text-zinc-600">No datastore tables.</p>
+        ? <p className="text-xs text-zinc-500">No datastore tables.</p>
         : (
-          <div className={`space-y-0.5 overflow-auto ${variant === 'rail' ? 'max-h-56' : 'max-h-[60vh]'}`}>
+          <div className={`-mx-1.5 space-y-0.5 overflow-auto ${variant === 'rail' ? 'max-h-56' : 'max-h-[60vh]'}`}>
             {tables.map((t) => (
-              <div key={t.name} className="flex items-center gap-1.5 rounded px-1 py-0.5 text-xs hover:bg-zinc-800/50">
-                <Table2 className="h-3 w-3 shrink-0 text-emerald-500/80" />
-                <span className="truncate font-mono text-zinc-300" title={t.name}>{t.name}</span>
-                <span className="shrink-0 text-[10px] tabular-nums text-zinc-600">{t.row_count} rows</span>
-                <button onClick={() => openDs(t.name)} title="View table" className="ml-auto shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+              <div key={t.name} className="flex items-center gap-2 rounded-lg px-1.5 py-0.5 text-[13px] hover:bg-zinc-800/50">
+                <Table2 className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                <span className="min-w-0 truncate font-mono text-zinc-300" title={t.name}>{t.name}</span>
+                <span className="shrink-0 text-[11px] tabular-nums text-zinc-500">{t.row_count} rows</span>
+                <button onClick={() => openDs(t.name)} title="View table" aria-label={`View table ${t.name}`} className={`ml-auto shrink-0 ${iconBtnCls}`}>
                   <Eye className="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -201,11 +201,12 @@ export function RunDatastorePanel({ project, live, variant = 'rail', hideWhenEmp
     <>
       <Panel
         variant={variant}
-        icon={<Database className="h-3.5 w-3.5 text-emerald-500/80" />}
+        icon={Database}
+        iconCls="text-emerald-600 dark:text-emerald-400"
         label="Datastore"
         count={tables.length}
         right={variant === 'rail' && tables.length > 0 ? (
-          <button onClick={() => openDs(undefined)} title="Open datastore" className="shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+          <button onClick={() => openDs(undefined)} title="Open datastore" aria-label="Open datastore" className={`shrink-0 ${iconBtnCls}`}>
             <Database className="h-3.5 w-3.5" />
           </button>
         ) : undefined}

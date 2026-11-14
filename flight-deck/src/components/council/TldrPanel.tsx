@@ -1,10 +1,13 @@
 import { useState } from 'react'
-import { RefreshCw, Loader2, MessageSquareQuote, ChevronDown } from 'lucide-react'
+import { RefreshCw, Loader2, MessageSquareQuote } from 'lucide-react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import type { CouncilArtifact } from '../../stores/councilStore'
+import { Button } from '../console/parts'
+import { AgentAvatar, PanelHead } from './councilLook'
+import { SMALL_BTN } from './councilStyles'
 
 interface TldrPanelProps {
   tldrs: CouncilArtifact[]
@@ -16,30 +19,27 @@ export function TldrPanel({ tldrs, generating, onGenerate }: TldrPanelProps) {
   const [collapsed, setCollapsed] = useState(false)
 
   return (
-    <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <button
-          onClick={() => setCollapsed(!collapsed)}
-          className="flex items-center gap-2 min-w-0"
-        >
-          <MessageSquareQuote className="h-4 w-4 text-violet-400 shrink-0" />
-          <h3 className="text-sm font-medium text-violet-300">TL;DR</h3>
-          <ChevronDown className={`h-3.5 w-3.5 text-violet-400 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
-        </button>
-        <button
-          onClick={(e) => { e.stopPropagation(); onGenerate() }}
-          disabled={generating}
-          className="ml-auto flex items-center gap-1 rounded-lg border border-violet-500/30 px-2 py-1 text-[10px] font-medium text-violet-400 hover:bg-violet-500/10 disabled:opacity-40"
-        >
-          {generating
-            ? <><Loader2 className="h-3 w-3 animate-spin" /> Generating...</>
-            : <><RefreshCw className="h-3 w-3" /> {tldrs.length > 0 ? 'Regenerate' : 'Generate'}</>
-          }
-        </button>
-      </div>
+    <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40">
+      <PanelHead
+        icon={MessageSquareQuote}
+        tone="violet"
+        title="TL;DR"
+        collapsed={collapsed}
+        onToggle={() => setCollapsed(!collapsed)}
+        action={
+          <Button
+            onClick={(e) => { e.stopPropagation(); onGenerate() }}
+            disabled={generating}
+            icon={generating ? Loader2 : RefreshCw}
+            className={`${SMALL_BTN} ${generating ? '[&>svg]:animate-spin' : ''}`}
+          >
+            {generating ? 'Generating...' : tldrs.length > 0 ? 'Regenerate' : 'Generate'}
+          </Button>
+        }
+      />
 
       {!collapsed && (
-        <>
+        <div className="space-y-2 border-t border-zinc-800/80 px-4 pb-4 pt-3">
           {tldrs.length === 0 && !generating && (
             <p className="text-xs text-zinc-500">
               No TL;DRs yet. Click Generate to have each agent summarize the discussion.
@@ -47,27 +47,32 @@ export function TldrPanel({ tldrs, generating, onGenerate }: TldrPanelProps) {
           )}
 
           {generating && tldrs.length === 0 && (
-            <div className="flex items-center gap-2 py-2 text-xs text-zinc-400">
-              <Loader2 className="h-3 w-3 animate-spin" />
+            <div className="flex items-center gap-2 py-1 text-xs text-zinc-400">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
               Collecting TL;DRs from agents...
             </div>
           )}
 
-          <div className="space-y-2">
-            {tldrs.map(t => (
-              <div
-                key={`${t.agentId}-${t.id}`}
-                className="rounded-lg bg-zinc-800/40 p-2.5"
-              >
-                <span className="text-xs font-medium text-zinc-300">{t.agentName}</span>
-                <div className="fd-markdown mt-1 text-xs text-zinc-400 leading-relaxed">
-                  <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{t.content}</Markdown>
+          {tldrs.length > 0 && (
+            <div className="grid gap-2 @xl:grid-cols-2">
+              {tldrs.map(t => (
+                <div
+                  key={`${t.agentId}-${t.id}`}
+                  className="flex gap-2.5 rounded-xl border border-zinc-800 bg-zinc-950/40 p-3"
+                >
+                  <AgentAvatar name={t.agentName} id={t.agentId} size="xs" />
+                  <div className="min-w-0 flex-1">
+                    <span className="text-xs font-semibold text-zinc-200">{t.agentName}</span>
+                    <div className="fd-markdown mt-1 text-xs leading-relaxed text-zinc-400 [&_ol]:list-decimal [&_ul]:list-disc">
+                      <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{t.content}</Markdown>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        </>
+              ))}
+            </div>
+          )}
+        </div>
       )}
-    </div>
+    </section>
   )
 }

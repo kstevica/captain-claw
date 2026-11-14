@@ -7,12 +7,14 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { BasnaAnalysis, BasnaRun, BasnaSession, ProgressEvent, RunCost, VatraSubtask } from '../../stores/basnaStore'
 import { CostCard } from '../CostCard'
+import { Button, inputCls } from '../console/parts'
 import { VatraBlackboard } from '../VatraDelegation'
 import { ProgressFeed, ResizableSplit } from './RunWorkspace'
 import { RunFilesPanel, RunDatastorePanel } from './RunArtifacts'
 import {
   analysisToMarkdown, Badge, downloadMarkdown, OutputActions, slugify, WeightBar,
 } from './shared'
+import { ctaCls, iconBtnCls, panelCls, segBtnCls, segFrameCls, smallInputCls } from './lookCls'
 
 // ── Run report: the finished run as one tabbed destination ──────────────────
 // Report | Analysis | Gaps | Board | Files | Agents | Log — with the follow-up
@@ -26,10 +28,10 @@ function AgentRow({ run, onFeedback, onView }: { run: BasnaRun; onFeedback: (suc
   let actions: { tool: string; detail?: string }[] = []
   try { actions = JSON.parse(run.actions || '[]') } catch { actions = [] }
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-4">
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="text-sm font-medium text-zinc-200">{run.role || run.archetype_id}</span>
+          <span className="text-sm font-semibold text-zinc-100">{run.role || run.archetype_id}</span>
           <Badge className="text-sky-700 dark:text-sky-300">{run.tier}</Badge>
           {scored && (
             <span title={voted ? 'Your vote' : 'Auto-scored by the judge'}>
@@ -44,58 +46,61 @@ function AgentRow({ run, onFeedback, onView }: { run: BasnaRun; onFeedback: (suc
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-2">
           {run.output && <OutputActions title={run.role || run.archetype_id} content={run.output} onView={onView} />}
-          <span className="text-[11px] text-zinc-500">{(run.latency_ms / 1000).toFixed(1)}s</span>
+          <span className="text-xs tabular-nums text-zinc-500">{(run.latency_ms / 1000).toFixed(1)}s</span>
         </div>
       </div>
-      <div className="mt-2 flex items-center gap-2">
-        <span className="w-16 shrink-0 text-[11px] text-zinc-500">weight {run.weight_at_run.toFixed(2)}</span>
+      <div className="mt-2.5 flex items-center gap-2">
+        <span className="w-20 shrink-0 text-[11px] tabular-nums text-zinc-500">weight {run.weight_at_run.toFixed(2)}</span>
         <WeightBar value={run.weight_at_run} />
       </div>
       {run.output && (
-        <div className="fd-markdown mt-2 max-h-48 overflow-auto text-xs text-zinc-400 leading-relaxed">
+        <div className="fd-markdown mt-3 max-h-48 overflow-auto text-[13px] leading-relaxed text-zinc-300">
           <Markdown remarkPlugins={[remarkGfm]}>{run.output}</Markdown>
         </div>
       )}
       {actions.length > 0 && (
-        <div className="mt-2 rounded-md border border-zinc-800 bg-zinc-950/40 p-2">
-          <div className="mb-1 flex items-center gap-2">
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Activity ({actions.length})</span>
+        <div className="mt-3 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2.5">
+          <div className="mb-1.5 flex items-center gap-2">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Activity ({actions.length})</span>
             <button
               onClick={() => downloadMarkdown(
                 `${slugify(run.role || run.archetype_id)}-activity.md`,
                 actions.map((a) => `- ${a.tool}${a.detail ? ': ' + a.detail : ''}`).join('\n'),
               )}
               title="Export activity"
-              className="rounded p-0.5 text-zinc-600 hover:text-zinc-300"
+              aria-label="Export activity"
+              className="rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
             >
-              <Download className="h-3 w-3" />
+              <Download className="h-3.5 w-3.5" />
             </button>
           </div>
           <div className="space-y-0.5">
             {actions.map((a, i) => (
-              <div key={i} className="flex items-baseline gap-2 text-[11px]">
+              <div key={i} className="flex items-baseline gap-2 text-xs">
                 <Wrench className="h-3 w-3 shrink-0 text-zinc-600" />
                 <span className="font-mono text-zinc-400">{a.tool}</span>
-                {a.detail && <span className="truncate text-zinc-600">{a.detail}</span>}
+                {a.detail && <span className="truncate text-zinc-500">{a.detail}</span>}
               </div>
             ))}
           </div>
         </div>
       )}
-      <div className="mt-2 flex items-center gap-2">
-        <span className="text-[11px] text-zinc-500">Was this contribution good?</span>
+      <div className="mt-3 flex items-center gap-1.5 border-t border-zinc-800/80 pt-3">
+        <span className="mr-1 text-xs text-zinc-500">Was this contribution good?</span>
         <button
           onClick={() => onFeedback(true)}
-          className={`rounded p-1 transition-colors ${run.human_success === 1 ? 'text-emerald-400' : 'text-zinc-500 hover:text-emerald-400'}`}
+          aria-pressed={run.human_success === 1}
+          className={`rounded-lg p-1.5 transition-colors ${run.human_success === 1 ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'text-zinc-500 hover:bg-zinc-800 hover:text-emerald-600 dark:hover:text-emerald-400'}`}
           title="Mark as good"
         >
           <ThumbsUp className="h-3.5 w-3.5" />
         </button>
         <button
           onClick={() => onFeedback(false)}
-          className={`rounded p-1 transition-colors ${run.human_success === 0 ? 'text-rose-400' : 'text-zinc-500 hover:text-rose-400'}`}
+          aria-pressed={run.human_success === 0}
+          className={`rounded-lg p-1.5 transition-colors ${run.human_success === 0 ? 'bg-red-500/15 text-red-600 dark:text-red-400' : 'text-zinc-500 hover:bg-zinc-800 hover:text-red-600 dark:hover:text-red-400'}`}
           title="Mark as poor"
         >
           <ThumbsDown className="h-3.5 w-3.5" />
@@ -107,7 +112,9 @@ function AgentRow({ run, onFeedback, onView }: { run: BasnaRun; onFeedback: (suc
 
 // Inline optional-instructions box for the one-click follow-ups. Running it empty
 // keeps the quick path; typing adds guidance appended to the gaps / blind spots.
-function OptionalInstructionBox({ placeholder, runLabel, icon: Icon, busy, onRun, onCancel }: {
+function OptionalInstructionBox({ placeholder, runLabel, icon: Icon, busy, onRun, onCancel, tone = 'violet' }: {
+  /** The run's mode colour: sky for Basna, violet for Vatra. */
+  tone?: 'violet' | 'sky'
   placeholder: string
   runLabel: string
   icon: React.ComponentType<{ className?: string }>
@@ -117,24 +124,24 @@ function OptionalInstructionBox({ placeholder, runLabel, icon: Icon, busy, onRun
 }) {
   const [text, setText] = useState('')
   return (
-    <div className="rounded-lg border border-violet-300/60 bg-violet-50/40 p-3 dark:border-violet-500/30 dark:bg-violet-950/10">
+    <div className={`rounded-xl border p-4 ${tone === 'sky' ? 'border-sky-500/25 bg-sky-500/[0.05]' : 'border-violet-500/25 bg-violet-500/[0.05]'}`}>
       <textarea
         autoFocus value={text} onChange={(e) => setText(e.target.value)} rows={2}
         onKeyDown={(e) => { if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') onRun(text.trim()) }}
         placeholder={placeholder}
-        className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950/60 p-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500 focus:outline-none"
+        className={`${inputCls} resize-y`}
       />
-      <div className="mt-2 flex flex-wrap items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <button
           onClick={() => onRun(text.trim())}
           disabled={busy}
-          className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+          className={ctaCls(tone)}
         >
-          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Icon className="h-4 w-4" />}
           {runLabel}
         </button>
-        <button onClick={onCancel} disabled={busy} className="rounded-lg px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 disabled:opacity-40">Cancel</button>
-        <span className="ml-auto text-[10px] text-zinc-600">optional — leave empty to run as-is · ⌘/Ctrl+Enter</span>
+        <Button variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
+        <span className="ml-auto text-[11px] text-zinc-500">optional — leave empty to run as-is · ⌘/Ctrl+Enter</span>
       </div>
     </div>
   )
@@ -210,51 +217,53 @@ export function RunReport({
   const [deepOpen, setDeepOpen] = useState(false)
   const [gapsOpen, setGapsOpen] = useState(false)
 
+  // The run's mode colour for its own actions: sky for Basna, violet for Vatra.
+  const tone: 'violet' | 'sky' = vatraMode ? 'violet' : 'sky'
   const deepenButton = done && truth && !!analysis?.blind_spots?.length && (
     <button
       onClick={() => setDeepOpen((o) => !o)}
       disabled={deepening}
       title="Spawn a follow-up run focused on these blind spots, seeded with this run's result"
-      className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+      className={ctaCls(tone)}
     >
-      {deepening ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanSearch className="h-3.5 w-3.5" />}
+      {deepening ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScanSearch className="h-4 w-4" />}
       Investigate blind spots
     </button>
   )
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50">
+    <div className={panelCls}>
       {/* Header: tabs left, outcome + actions right. */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-3 py-2">
-        <div className="flex flex-wrap items-center gap-1">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2.5 border-b border-zinc-800/80 px-3 py-3 wide:px-4">
+        <div role="tablist" aria-label="Run report" className={segFrameCls}>
           {tabs.map((t) => (
             <button
               key={t.id}
+              role="tab"
+              aria-selected={activeTab === t.id}
               onClick={() => setTab(t.id)}
-              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
-                activeTab === t.id ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
-              }`}
+              className={segBtnCls(activeTab === t.id)}
             >
-              {t.id === 'report' && <Check className={`h-3 w-3 ${failed ? 'text-rose-400' : 'text-emerald-500'}`} />}
-              {t.id === 'analysis' && <ScanSearch className="h-3 w-3 text-violet-500" />}
-              {t.id === 'gaps' && <AlertTriangle className="h-3 w-3 text-amber-500" />}
-              {t.id === 'quality' && <ShieldCheck className={`h-3 w-3 ${
-                analysis?.quality_verdict === 'critical_findings_remain' ? 'text-rose-500' : 'text-emerald-500'}`} />}
-              {t.id === 'board' && <ClipboardList className="h-3 w-3 text-violet-500" />}
-              {t.id === 'files' && <FileText className="h-3 w-3 text-zinc-500" />}
-              {t.id === 'datastore' && <Database className="h-3 w-3 text-emerald-500/80" />}
-              {t.id === 'agents' && <ListTree className="h-3 w-3 text-zinc-500" />}
-              {t.id === 'log' && <Activity className="h-3 w-3 text-zinc-500" />}
+              {t.id === 'report' && <Check className={`h-3.5 w-3.5 ${failed ? 'text-red-500' : 'text-emerald-500'}`} />}
+              {t.id === 'analysis' && <ScanSearch className="h-3.5 w-3.5 text-violet-500" />}
+              {t.id === 'gaps' && <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />}
+              {t.id === 'quality' && <ShieldCheck className={`h-3.5 w-3.5 ${
+                analysis?.quality_verdict === 'critical_findings_remain' ? 'text-red-500' : 'text-emerald-500'}`} />}
+              {t.id === 'board' && <ClipboardList className="h-3.5 w-3.5 text-violet-500" />}
+              {t.id === 'files' && <FileText className="h-3.5 w-3.5 text-zinc-500" />}
+              {t.id === 'datastore' && <Database className="h-3.5 w-3.5 text-emerald-500" />}
+              {t.id === 'agents' && <ListTree className="h-3.5 w-3.5 text-zinc-500" />}
+              {t.id === 'log' && <Activity className="h-3.5 w-3.5 text-zinc-500" />}
               {t.label}
               {typeof t.count === 'number' && t.count > 0 && (
-                <span className="rounded bg-zinc-800/80 px-1 text-[10px] tabular-nums text-zinc-400">{t.count}</span>
+                <span className="rounded-full bg-zinc-700/60 px-1.5 text-[10px] tabular-nums text-zinc-300">{t.count}</span>
               )}
             </button>
           ))}
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           {truth && (
-            <span className="flex items-center gap-2 text-[11px] text-zinc-500" title={vatraMode ? 'How completely the report covers the task' : 'Merge confidence'}>
+            <span className="flex items-center gap-2 text-xs text-zinc-500" title={vatraMode ? 'How completely the report covers the task' : 'Merge confidence'}>
               {vatraMode ? 'assembled' : 'confidence'} {(confidence * 100).toFixed(0)}%
               <span className="h-1.5 w-16 overflow-hidden rounded-full bg-zinc-800">
                 <span className="block h-full rounded-full bg-emerald-500" style={{ width: `${Math.round(confidence * 100)}%` }} />
@@ -267,7 +276,8 @@ export function RunReport({
               onClick={onRecompile}
               disabled={recompiling}
               title="Recompile the truth + analysis from the agent outputs"
-              className="flex items-center gap-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40"
+              aria-label="Recompile"
+              className={iconBtnCls}
             >
               <RefreshCw className={`h-3.5 w-3.5 ${recompiling ? 'animate-spin' : ''}`} />
             </button>
@@ -277,9 +287,9 @@ export function RunReport({
             <button
               onClick={() => { setContinuePanel((v) => !v); setContinueKind('continue'); setContinueSameCast(true) }}
               title="Carry this run forward into another round — same shared folder, building on this conclusion"
-              className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1 text-xs font-medium text-white hover:bg-violet-500"
+              className={ctaCls(tone)}
             >
-              <CornerDownRight className="h-3.5 w-3.5" /> Continue…
+              <CornerDownRight className="h-4 w-4" /> Continue…
             </button>
           )}
         </div>
@@ -287,9 +297,9 @@ export function RunReport({
 
       {/* Continue launcher — next round, same shared folder & conclusion. */}
       {continuePanel && (
-        <div className="border-b border-violet-300/60 bg-violet-50/40 px-4 py-3 dark:border-violet-500/30 dark:bg-violet-950/10">
-          <div className="mb-2 flex items-center gap-2 text-[11px] text-zinc-500">
-            <CornerDownRight className="h-3 w-3 text-violet-600 dark:text-violet-400" />
+        <div className={`border-b px-4 py-4 wide:px-5 ${vatraMode ? 'border-violet-500/20 bg-violet-500/[0.04]' : 'border-sky-500/20 bg-sky-500/[0.04]'}`}>
+          <div className="mb-2.5 flex items-center gap-2 text-xs text-zinc-500">
+            <CornerDownRight className={`h-3.5 w-3.5 ${vatraMode ? 'text-violet-600 dark:text-violet-400' : 'text-sky-600 dark:text-sky-400'}`} />
             next round · same shared folder &amp; conclusion
           </div>
           <textarea
@@ -297,15 +307,15 @@ export function RunReport({
             onChange={(e) => setContinueText(e.target.value)}
             rows={3}
             placeholder="What should the next round do? e.g. extend the research, write the next chapter, act on the conclusion…"
-            className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950/60 p-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500 focus:outline-none"
+            className={`${inputCls} resize-y`}
           />
-          <div className="mt-2 flex flex-wrap items-center gap-4">
+          <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-3">
             <label className="flex items-center gap-2 text-xs text-zinc-400">
               Mode
               <select
                 value={continueKind}
                 onChange={(e) => setContinueKind(e.target.value)}
-                className="rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-xs text-zinc-200 focus:border-violet-500 focus:outline-none"
+                className={smallInputCls}
               >
                 <option value="continue">Continue (extend)</option>
                 <option value="revise">Revise (improve)</option>
@@ -319,18 +329,14 @@ export function RunReport({
                 type="checkbox"
                 checked={continueSameCast}
                 onChange={(e) => setContinueSameCast(e.target.checked)}
-                className="h-3.5 w-3.5"
+                className="h-4 w-4 rounded border-zinc-600 accent-violet-600"
               />
               Same team
             </label>
             <div className="ml-auto flex items-center gap-2">
-              <button
-                onClick={() => { setContinuePanel(false); setContinueText('') }}
-                disabled={continuing}
-                className="rounded-lg px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 disabled:opacity-40"
-              >
+              <Button variant="ghost" onClick={() => { setContinuePanel(false); setContinueText('') }} disabled={continuing}>
                 Cancel
-              </button>
+              </Button>
               <button
                 onClick={async () => {
                   setContinuing(true)
@@ -342,9 +348,9 @@ export function RunReport({
                 }}
                 disabled={continuing || ((continueKind === 'continue' || continueKind === 'revise') && !continueText.trim())}
                 title="Spawn the next round, seeded with this run's conclusion and shared files"
-                className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                className={ctaCls(tone)}
               >
-                {continuing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CornerDownRight className="h-3.5 w-3.5" />}
+                {continuing ? <Loader2 className="h-4 w-4 animate-spin" /> : <CornerDownRight className="h-4 w-4" />}
                 Start round
               </button>
             </div>
@@ -352,13 +358,13 @@ export function RunReport({
         </div>
       )}
 
-      <div className="p-4">
+      <div className="p-4 wide:p-6">
         {/* Report tab */}
         {activeTab === 'report' && (
-          <div className="space-y-3">
+          <div className="space-y-4">
             {failed && (
-              <div className="flex items-start gap-2 rounded-lg border border-rose-900/50 bg-rose-950/30 p-3 text-xs text-rose-300">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <div className="flex items-start gap-2.5 rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-700 dark:text-red-300">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <span>
                   The run ended with an error.{runs.length > 0 ? ' The agent outputs below are saved — you can recompile from them.' : ' Adjust the task or setup and run it again.'}
                 </span>
@@ -366,23 +372,23 @@ export function RunReport({
             )}
             {/* Recovery: agents produced outputs but the merge didn't finish */}
             {!truth && runs.length > 0 && (
-              <div className="flex items-center gap-3 rounded-lg border border-yellow-400 bg-yellow-100 p-4 dark:border-amber-500/40 dark:bg-amber-400/10">
-                <AlertTriangle className="h-4 w-4 shrink-0 text-orange-600 dark:text-orange-400" />
-                <span className="text-xs font-medium text-orange-700 dark:text-orange-300">
+              <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-3">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                <span className="min-w-0 flex-1 text-sm text-amber-700 dark:text-amber-300">
                   No compiled truth — the merge may have stalled or failed. The {runs.length} agent output(s) are saved; recompile from them.
                 </span>
                 <button
                   onClick={onRecompile}
                   disabled={recompiling}
-                  className="ml-auto flex shrink-0 items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-500 disabled:opacity-40"
+                  className={`shrink-0 ${ctaCls(vatraMode ? 'violet' : 'sky')}`}
                 >
-                  {recompiling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                  {recompiling ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                   Compile truth
                 </button>
               </div>
             )}
             {truth && (
-              <div className="fd-markdown text-sm text-zinc-200 leading-relaxed">
+              <div className="fd-markdown max-w-4xl text-sm leading-relaxed text-zinc-200">
                 <Markdown remarkPlugins={[remarkGfm]}>{truth}</Markdown>
               </div>
             )}
@@ -394,7 +400,7 @@ export function RunReport({
         {activeTab === 'analysis' && analysis && (
           <div className="space-y-3">
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Cross-agent analysis</span>
+              <span className="text-[13px] font-semibold text-zinc-200">Cross-agent analysis</span>
               <div className="ml-auto flex items-center gap-2">
                 {deepenButton}
                 <OutputActions title={`${subject} — Analysis`} content={analysisToMarkdown(analysis)} onView={onView} />
@@ -405,6 +411,7 @@ export function RunReport({
                 placeholder="Optional: extra focus for the follow-up (e.g. prioritise X, cite sources). Leave empty to just investigate the blind spots."
                 runLabel="Investigate blind spots"
                 icon={ScanSearch}
+                tone={tone}
                 busy={deepening}
                 onCancel={() => setDeepOpen(false)}
                 onRun={(instruction) => { setDeepOpen(false); void onDeepen(instruction) }}
@@ -450,7 +457,7 @@ export function RunReport({
               </div>
             )}
             {!!analysis.blind_spots?.length && (
-              <div className="rounded-md border border-rose-300 bg-rose-50 p-3 dark:border-rose-900/40 dark:bg-rose-950/20">
+              <div className="rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3">
                 <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-rose-700 dark:text-rose-300">
                   <AlertTriangle className="h-3.5 w-3.5" /> Blind spots — covered by none
                 </div>
@@ -466,16 +473,16 @@ export function RunReport({
         {activeTab === 'gaps' && analysis && (
           <div className="space-y-3">
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Coverage gaps</span>
+              <span className="text-[13px] font-semibold text-zinc-200">Coverage gaps</span>
               {!analysis.gaps?.length && <Badge className="text-emerald-700 dark:text-emerald-300">complete</Badge>}
               {done && !!analysis.gaps?.length && (
                 <button
                   onClick={() => setGapsOpen((o) => !o)}
                   disabled={deepening}
                   title="Spawn a follow-up Vatra that fills these gaps, seeded with this report"
-                  className="ml-auto flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
+                  className={`ml-auto ${ctaCls('violet')}`}
                 >
-                  {deepening ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ScanSearch className="h-3.5 w-3.5" />}
+                  {deepening ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScanSearch className="h-4 w-4" />}
                   Fill the gaps
                 </button>
               )}
@@ -491,13 +498,13 @@ export function RunReport({
               />
             )}
             {analysis.coverage_summary && (
-              <p className="text-xs text-zinc-400">{analysis.coverage_summary}</p>
+              <p className="text-sm leading-relaxed text-zinc-400">{analysis.coverage_summary}</p>
             )}
             {!!analysis.gaps?.length && (
-              <ul className="space-y-1.5">
+              <ul className="divide-y divide-zinc-800/70 rounded-xl border border-zinc-800 bg-zinc-950/40">
                 {analysis.gaps.map((g, i) => (
-                  <li key={i} className="flex items-start gap-2 text-xs text-zinc-300">
-                    <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                  <li key={i} className="flex items-start gap-2.5 px-3.5 py-2.5 text-sm text-zinc-300">
+                    <span className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${
                       g.severity === 'major'
                         ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
                         : 'bg-amber-500/15 text-amber-700 dark:text-amber-300'}`}>
@@ -515,9 +522,9 @@ export function RunReport({
         {activeTab === 'quality' && analysis && (
           <div className="space-y-3">
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Quality checks</span>
+              <span className="text-[13px] font-semibold text-zinc-200">Quality checks</span>
               {analysis.quality_verdict && (
-                <span className={`rounded px-2 py-0.5 text-[11px] font-semibold ${
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${
                   analysis.quality_verdict === 'clean'
                     ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
                     : 'bg-rose-500/15 text-rose-700 dark:text-rose-300'}`}>
@@ -526,7 +533,7 @@ export function RunReport({
                 </span>
               )}
               {analysis.blocking && analysis.blocking.rounds > 0 && (
-                <span className="text-[11px] text-zinc-500">
+                <span className="text-xs text-zinc-500">
                   {analysis.blocking.rounds} fix round(s)
                 </span>
               )}
@@ -534,11 +541,11 @@ export function RunReport({
 
             {/* Metrics grid — one stat per lever that actually ran. */}
             {!!analysis.quality_metrics && (
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+              <div className="grid grid-cols-1 gap-2.5 @lg:grid-cols-2 @4xl:grid-cols-4">
                 {typeof analysis.quality_metrics.claims_checked === 'number' && (
-                  <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-2">
-                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Fact check</div>
-                    <div className="mt-0.5 text-sm text-zinc-200">
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3.5 py-3">
+                    <div className="text-[11px] font-medium text-zinc-500">Fact check</div>
+                    <div className="mt-1 text-sm text-zinc-100">
                       {String(analysis.quality_metrics.claims_checked)} checked ·{' '}
                       <span className={Number(analysis.quality_metrics.claims_refuted) > 0 ? 'text-rose-600 dark:text-rose-400' : ''}>
                         {String(analysis.quality_metrics.claims_refuted)} refuted
@@ -548,9 +555,9 @@ export function RunReport({
                   </div>
                 )}
                 {analysis.consistency && (
-                  <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-2">
-                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Consistency</div>
-                    <div className="mt-0.5 text-sm text-zinc-200">
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3.5 py-3">
+                    <div className="text-[11px] font-medium text-zinc-500">Consistency</div>
+                    <div className="mt-1 text-sm text-zinc-100">
                       {analysis.consistency.values_checked} values · {analysis.consistency.relations_checked} relations ·{' '}
                       <span className={analysis.consistency.critical > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}>
                         {analysis.consistency.critical} critical
@@ -565,9 +572,9 @@ export function RunReport({
                   </div>
                 )}
                 {analysis.contract && (
-                  <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-2">
-                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Constraints</div>
-                    <div className="mt-0.5 text-sm text-zinc-200">
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3.5 py-3">
+                    <div className="text-[11px] font-medium text-zinc-500">Constraints</div>
+                    <div className="mt-1 text-sm text-zinc-100">
                       {analysis.contract.passed}/{analysis.contract.checked} passed ·{' '}
                       <span className={analysis.contract.failed_critical > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}>
                         {analysis.contract.failed_critical} critical
@@ -579,9 +586,9 @@ export function RunReport({
                   </div>
                 )}
                 {typeof analysis.quality_metrics.budget_spent_tokens === 'number' && (
-                  <div className="rounded-md border border-zinc-800 bg-zinc-950/40 px-2.5 py-2">
-                    <div className="text-[10px] uppercase tracking-wide text-zinc-500">Lever spend</div>
-                    <div className="mt-0.5 text-sm text-zinc-200">
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3.5 py-3">
+                    <div className="text-[11px] font-medium text-zinc-500">Lever spend</div>
+                    <div className="mt-1 text-sm text-zinc-100">
                       ~{Math.round(Number(analysis.quality_metrics.budget_spent_tokens) / 1000)}K tok
                     </div>
                     {!!analysis.quality_metrics.budget_stopped_reason && (
@@ -598,8 +605,8 @@ export function RunReport({
                 <div className="mb-1 text-xs font-semibold text-rose-700 dark:text-rose-300">Constraint violations</div>
                 <ul className="space-y-1.5">
                   {analysis.contract.failed.map((f, i) => (
-                    <li key={i} className="flex items-start gap-2 text-xs text-zinc-300">
-                      <span className={`mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                    <li key={i} className="flex items-start gap-2.5 text-sm text-zinc-300">
+                      <span className={`mt-0.5 shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${
                         f.severity === 'critical'
                           ? 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
                           : 'bg-amber-500/15 text-amber-700 dark:text-amber-300'}`}>
@@ -617,7 +624,7 @@ export function RunReport({
 
             {/* Blocking gate leftovers — what survived the fix rounds. */}
             {!!analysis.blocking?.remaining?.length && (
-              <div className="rounded-md border border-rose-300 bg-rose-50 p-3 dark:border-rose-900/40 dark:bg-rose-950/20">
+              <div className="rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3">
                 <div className="mb-1 flex items-center gap-1.5 text-xs font-semibold text-rose-700 dark:text-rose-300">
                   <AlertTriangle className="h-3.5 w-3.5" /> Critical findings remaining after the gate
                 </div>
@@ -633,7 +640,7 @@ export function RunReport({
               </div>
             )}
 
-            <p className="text-[11px] text-zinc-600">
+            <p className="text-xs text-zinc-500">
               Full audit reports (consistency / fact-check) are saved next to the deliverable — see the Files tab.
             </p>
           </div>
@@ -657,7 +664,7 @@ export function RunReport({
 
         {/* Agent runs tab */}
         {activeTab === 'agents' && (
-          <div className="space-y-2">
+          <div className="grid gap-2.5 @5xl:grid-cols-2">
             {runs.map((run) => (
               <AgentRow key={run.id} run={run} onFeedback={(s) => onFeedback(run.id, s)} onView={onView} />
             ))}

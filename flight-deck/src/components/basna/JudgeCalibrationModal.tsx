@@ -4,6 +4,8 @@ import {
   apiExportLabelPairs, apiLabelAgreement,
   type LabelAgreement, type LabelAgreementGroup, type LabelAgreementSummary,
 } from '../../stores/basnaStore'
+import { Button } from '../console/parts'
+import { checkCls, iconBtnCls, segBtnCls, segFrameCls, smallInputCls } from './lookCls'
 
 // ── Judge calibration ───────────────────────────────────────────────────────
 // How far the automatic judge's success/fail verdict on each agent run agrees
@@ -32,10 +34,10 @@ const GROUPS: { id: GroupKey; label: string; field: 'mode' | 'domain' | 'archety
 
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-3 py-2">
-      <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">{label}</div>
-      <div className="text-lg font-semibold text-zinc-100">{value}</div>
-      {hint && <div className="text-[11px] text-zinc-500">{hint}</div>}
+    <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
+      <div className="text-xs font-medium text-zinc-500">{label}</div>
+      <div className="mt-1.5 text-2xl font-semibold tabular-nums tracking-tight text-zinc-100">{value}</div>
+      {hint && <div className="mt-0.5 text-xs text-zinc-500">{hint}</div>}
     </div>
   )
 }
@@ -70,7 +72,8 @@ function Confusion({ a }: { a: LabelAgreement }) {
   )
 }
 
-export function JudgeCalibrationModal({ onClose }: { onClose: () => void }) {
+/** `mode`: the page is locked to Basna or Vatra — no breakdown by mode here. */
+export function JudgeCalibrationModal({ onClose, mode }: { onClose: () => void; mode?: 'basna' | 'vatra' }) {
   const [since, setSince] = useState('')
   const [summary, setSummary] = useState<LabelAgreementSummary | null>(null)
   const [loading, setLoading] = useState(true)
@@ -104,43 +107,48 @@ export function JudgeCalibrationModal({ onClose }: { onClose: () => void }) {
   }
 
   const o = summary?.overall
+  const groups = mode ? GROUPS.filter((x) => x.id !== 'by_mode') : GROUPS
   const g = GROUPS.find((x) => x.id === group)!
   const rows: LabelAgreementGroup[] = summary ? summary[group] : []
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 wide:items-center wide:p-4" onClick={onClose}>
       <div
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Judge calibration"
+        className="flex max-h-[92dvh] w-full flex-col rounded-t-2xl border border-zinc-800 bg-zinc-950 shadow-2xl wide:max-h-[90vh] wide:max-w-2xl wide:rounded-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-zinc-800 px-4 py-3">
-          <span className="flex items-center gap-2 text-sm font-medium text-zinc-200">
-            <Scale className="h-4 w-4 text-sky-600 dark:text-sky-400" /> Judge calibration
+        <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 px-5 py-4">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-violet-500/10 text-violet-600 dark:text-violet-400">
+            <Scale className="h-[18px] w-[18px]" />
           </span>
-          <button onClick={onClose} className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+          <h2 className="min-w-0 flex-1 truncate text-base font-semibold text-zinc-100">Judge calibration</h2>
+          <button onClick={onClose} aria-label="Close" title="Close" className={iconBtnCls}>
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="space-y-4 overflow-auto p-4">
-          <p className="text-xs leading-relaxed text-zinc-400">
+        <div className="space-y-5 overflow-auto px-5 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
+          <p className="text-sm leading-relaxed text-zinc-400">
             How often the automatic judge's success/fail verdict on an agent's contribution matches your
             thumbs vote. Vote on runs in a run's <span className="text-zinc-300">Agents</span> tab — agreeing
             votes count too.
           </p>
 
-          <label className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
+          <label className="flex flex-wrap items-center gap-2 text-sm text-zinc-400">
             Runs since
             <input
               type="date"
               value={since}
               onChange={(e) => setSince(e.target.value)}
-              className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200"
+              className={smallInputCls}
             />
             {since && (
-              <button onClick={() => setSince('')} className="text-zinc-500 hover:text-zinc-300">clear</button>
+              <button onClick={() => setSince('')} className="rounded-lg px-2 py-1 text-xs font-medium text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">clear</button>
             )}
-            <span className="basis-full text-[11px] text-zinc-500">
+            <span className="basis-full text-xs leading-relaxed text-zinc-500">
               Set this to the day your deck started keeping judge labels separately: a run voted on before that
               and voted on again since may carry your old vote in place of the judge's.
             </span>
@@ -152,7 +160,7 @@ export function JudgeCalibrationModal({ onClose }: { onClose: () => void }) {
 
           {o && (
             <>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <div className="grid grid-cols-1 gap-2.5 wide:grid-cols-3">
                 <Stat label="Pairs" value={String(o.n)}
                   hint={summary!.unpaired ? `+${summary!.unpaired} vote(s) the judge left unscored` : undefined} />
                 <Stat label="Agreement" value={pct(o.agreement)}
@@ -169,16 +177,16 @@ export function JudgeCalibrationModal({ onClose }: { onClose: () => void }) {
                 </p>
               )}
               {o.n > 0 && (
-                <div className="flex flex-wrap items-start gap-6">
+                <div className="flex flex-wrap items-start gap-6 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
                   <Confusion a={o} />
                   <div className="min-w-0 flex-1">
-                    <div className="mb-1.5 inline-flex rounded-lg border border-zinc-700 bg-zinc-900/50 p-0.5">
-                      {GROUPS.map((x) => (
+                    <div className={`mb-2.5 ${segFrameCls}`}>
+                      {groups.map((x) => (
                         <button
                           key={x.id}
                           onClick={() => setGroup(x.id)}
-                          className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
-                            group === x.id ? 'bg-sky-600 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+                          aria-pressed={group === x.id}
+                          className={segBtnCls(group === x.id)}
                         >
                           {x.label}
                         </button>
@@ -210,32 +218,31 @@ export function JudgeCalibrationModal({ onClose }: { onClose: () => void }) {
             </>
           )}
 
-          <div className="space-y-2 rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
-            <div className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Export eval set</div>
-            <label className="flex items-center gap-2 text-xs text-zinc-400">
-              <input type="checkbox" checked={includeUnpaired} onChange={(e) => setIncludeUnpaired(e.target.checked)} />
+          <div className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
+            <div className="text-[13px] font-semibold text-zinc-200">Export eval set</div>
+            <label className="flex items-start gap-2.5 text-sm text-zinc-400">
+              <input type="checkbox" checked={includeUnpaired} onChange={(e) => setIncludeUnpaired(e.target.checked)} className={`${checkCls} mt-0.5`} />
               Include votes the judge left unscored
             </label>
-            <label className="flex items-center gap-2 text-xs text-zinc-400">
-              <input type="checkbox" checked={includeText} onChange={(e) => setIncludeText(e.target.checked)} />
+            <label className="flex items-start gap-2.5 text-sm text-zinc-400">
+              <input type="checkbox" checked={includeText} onChange={(e) => setIncludeText(e.target.checked)} className={`${checkCls} mt-0.5`} />
               Include text — task, compiled answer and each agent's output (larger; may hold sensitive content)
             </label>
             <div className="flex gap-2 pt-1">
               {(['jsonl', 'csv'] as const).map((f) => (
-                <button
+                <Button
                   key={f}
                   onClick={() => onExport(f)}
                   disabled={exporting !== null}
-                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
                 >
-                  {exporting === f ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                  {exporting === f ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                   Export {f.toUpperCase()}
-                </button>
+                </Button>
               ))}
             </div>
           </div>
 
-          {error && <p className="text-xs text-rose-700 dark:text-rose-300">{error}</p>}
+          {error && <p className="rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm text-red-700 dark:text-red-300">{error}</p>}
         </div>
       </div>
     </div>

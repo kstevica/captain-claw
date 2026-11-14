@@ -23,6 +23,7 @@ import {
   Workflow,
   Brain,
   Network,
+  Flame,
   Hammer,
   Target,
   Library,
@@ -78,6 +79,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
     title: 'Multi-Agent',
     items: [
       { id: 'council', icon: Users, label: 'Council' },
+      { id: 'vatra', icon: Flame, label: 'Vatra' },
       { id: 'basna', icon: Network, label: 'Basna' },
       { id: 'bat', icon: Hammer, label: 'Bat' },
       { id: 'captain-swarm', icon: Target, label: 'Captain Swarm', needsSwarm: true },

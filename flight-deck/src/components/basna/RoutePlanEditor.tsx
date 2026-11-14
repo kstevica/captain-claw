@@ -1,10 +1,12 @@
 import { useState } from 'react'
-import { SlidersHorizontal } from 'lucide-react'
+import { Network, SlidersHorizontal } from 'lucide-react'
 import type { RoutePlan, RouteSelected } from '../../stores/basnaStore'
 import type { TierMap, ArchetypeRegistry } from '../../services/tierConfig'
 import { TIER_ORDER, PROVIDERS, INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS } from '../../services/tierConfig'
 import { CtxSelect } from '../common/CtxSelect'
 import { Badge, DIFFICULTY_COLOR, WeightBar } from './shared'
+import { PanelTitle } from './look'
+import { panelCls } from './lookCls'
 
 const COGNITIVE_MODES = ['neutra', 'ionian', 'dorian', 'phrygian', 'lydian', 'mixolydian', 'aeolian', 'locrian']
 
@@ -18,51 +20,53 @@ export function RoutePlanEditor({ routePlan, tiers, registry, onUpdateSelected }
 }) {
   const [editing, setEditing] = useState<Record<number, boolean>>({})
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Route plan</span>
+    <section className={panelCls}>
+      <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800/80 px-4 py-3.5 wide:px-5">
+        <PanelTitle icon={Network} iconCls="text-sky-600 dark:text-sky-400">Route plan</PanelTitle>
         <Badge className="text-zinc-300">{routePlan.domain}</Badge>
         <Badge className={DIFFICULTY_COLOR[routePlan.difficulty] || 'text-zinc-300'}>{routePlan.difficulty}</Badge>
         <Badge className="text-sky-700 dark:text-sky-300">{routePlan.merge_kind}</Badge>
         {routePlan.source && <Badge className="text-zinc-500">{routePlan.source}</Badge>}
-        <span className="ml-auto text-[11px] text-zinc-600">{routePlan.selected.length} agent(s)</span>
+        <span className="ml-auto text-xs text-zinc-500">{routePlan.selected.length} agent(s)</span>
       </div>
-      {routePlan.rationale && <p className="mb-3 text-xs text-zinc-400">{routePlan.rationale}</p>}
-      <div className="space-y-2">
+      <div className="p-4 wide:p-5">
+      {routePlan.rationale && <p className="mb-4 text-sm leading-relaxed text-zinc-400">{routePlan.rationale}</p>}
+      <div className="grid gap-2.5 @4xl:grid-cols-2">
         {routePlan.selected.map((sel, idx) => {
           const tc = tiers[sel.tier]
           const arch = registry?.archetypes.find((a) => a.id === sel.archetype_id)
           const dispProvider = sel.provider ?? tc?.provider ?? ''
           const dispModel = sel.model ?? tc?.model ?? ''
           const isOpen = !!editing[idx]
-          const fld = 'w-full rounded border border-zinc-700 bg-zinc-950/60 px-2 py-1 text-xs text-zinc-200 focus:border-sky-600 focus:outline-none'
-          const lbl = 'mb-0.5 block text-[10px] font-medium text-zinc-500'
+          const fld = 'w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none focus:ring-2 focus:ring-violet-500/15'
+          const lbl = 'mb-1 block text-[11px] font-medium text-zinc-500'
           return (
-          <div key={sel.archetype_id} className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5">
+          <div key={sel.archetype_id} className={`rounded-xl border bg-zinc-950/40 p-3.5 ${isOpen ? 'border-zinc-700 @4xl:col-span-2' : 'border-zinc-800'}`}>
             <div className="flex items-center justify-between gap-2">
-              <span className="text-sm font-medium text-zinc-200">{sel.role || sel.archetype_id}</span>
-              <div className="flex items-center gap-1.5">
+              <span className="min-w-0 truncate text-sm font-semibold text-zinc-100">{sel.role || sel.archetype_id}</span>
+              <div className="flex shrink-0 items-center gap-1.5">
                 <Badge className="text-sky-700 dark:text-sky-300">{sel.tier}</Badge>
                 <button
                   onClick={() => setEditing((e) => ({ ...e, [idx]: !e[idx] }))}
                   title="Edit agent"
-                  className={`rounded p-1 ${isOpen ? 'text-sky-400' : 'text-zinc-500 hover:text-zinc-200'}`}
+                  aria-pressed={isOpen}
+                  className={`rounded-lg p-1.5 transition-colors ${isOpen ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'}`}
                 >
                   <SlidersHorizontal className="h-3.5 w-3.5" />
                 </button>
               </div>
             </div>
-            <p className="mt-0.5 font-mono text-[11px] text-zinc-600">
+            <p className="mt-0.5 truncate font-mono text-[11px] text-zinc-500">
               {dispModel ? `${dispProvider}/${dispModel}` : `${sel.tier} tier (model from server)`}
             </p>
-            {sel.why && <p className="mt-1 text-xs text-zinc-500">{sel.why}</p>}
-            <div className="mt-2 flex items-center gap-2">
-              <span className="w-20 shrink-0 text-[11px] text-zinc-500">prior {(sel.prior_weight ?? 0).toFixed(2)}</span>
+            {sel.why && <p className="mt-1.5 text-xs leading-relaxed text-zinc-400">{sel.why}</p>}
+            <div className="mt-2.5 flex items-center gap-2">
+              <span className="w-20 shrink-0 text-[11px] tabular-nums text-zinc-500">prior {(sel.prior_weight ?? 0).toFixed(2)}</span>
               <WeightBar value={sel.prior_weight ?? 0} />
             </div>
 
             {isOpen && (
-              <div className="mt-3 space-y-2 border-t border-zinc-800 pt-3">
+              <div className="mt-3.5 space-y-3 border-t border-zinc-800 pt-3.5">
                 <div>
                   <label className={lbl}>Role</label>
                   <input className={fld} value={sel.role}
@@ -78,9 +82,9 @@ export function RoutePlanEditor({ routePlan, tiers, registry, onUpdateSelected }
                           tier: t, provider: undefined, model: undefined, api_key: undefined,
                           base_url: undefined, max_context: undefined, max_tokens: undefined,
                         })}
-                        className={`rounded-full border px-2.5 py-0.5 text-[11px] ${
-                          sel.tier === t ? 'border-sky-500 bg-sky-500/15 text-sky-300'
-                            : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'
+                        className={`rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
+                          sel.tier === t ? 'border-violet-500/50 bg-violet-500/15 text-violet-700 dark:text-violet-200'
+                            : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
                         }`}
                       >
                         {registry?.tiers[t]?.label || t}
@@ -88,7 +92,7 @@ export function RoutePlanEditor({ routePlan, tiers, registry, onUpdateSelected }
                     ))}
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className={lbl}>Provider</label>
                     <select className={fld} value={dispProvider}
@@ -114,7 +118,7 @@ export function RoutePlanEditor({ routePlan, tiers, registry, onUpdateSelected }
                   <input className={fld} value={sel.base_url ?? tc?.base_url ?? ''} placeholder="(tier)"
                     onChange={(e) => onUpdateSelected(idx, { base_url: e.target.value })} />
                 </div>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className={lbl}>Input ctx</label>
                     <CtxSelect className={fld} options={INPUT_CTX_OPTIONS}
@@ -159,6 +163,7 @@ export function RoutePlanEditor({ routePlan, tiers, registry, onUpdateSelected }
           )
         })}
       </div>
-    </div>
+      </div>
+    </section>
   )
 }

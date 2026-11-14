@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ClipboardList, Pencil, Check } from 'lucide-react'
 import type { Group0Plan, Group0Agent, Group0Question, VatraSubtask } from '../stores/basnaStore'
+import { vatraPanelCls } from './basna/lookCls'
 
 // The Group 0 gate: the Long Horizon Planner's per-agent coordination plan, presented
 // for review and editing before any Group-A worker runs. Master–detail — the agent
@@ -9,12 +10,14 @@ import type { Group0Plan, Group0Agent, Group0Question, VatraSubtask } from '../s
 // calls onChange with the next plan; the parent owns the draft + the Execute/Cancel CTAs.
 
 // Theme-aware violet accent (matches VatraTeamPlan).
-const PANEL = 'rounded-lg border border-violet-300/70 bg-violet-50/60 p-4 dark:border-violet-800/40 dark:bg-violet-950/10'
+const PANEL = vatraPanelCls
 const GROUPS = ['A', 'B', 'C', 'D'] as const
+
+const TEXTAREA = 'w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-[13px] leading-relaxed text-zinc-100 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none focus:ring-2 focus:ring-violet-500/15'
 
 function Chip({ children, className = '' }: { children: React.ReactNode; className?: string }) {
   return (
-    <span className={`rounded-full border border-zinc-700/60 bg-zinc-800/60 px-2 py-0.5 text-[11px] font-medium ${className}`}>
+    <span className={`inline-flex items-center rounded-full bg-zinc-800 px-2 py-0.5 text-[11px] font-medium ${className}`}>
       {children}
     </span>
   )
@@ -24,9 +27,11 @@ function TabBtn({ on, onClick, children }: { on: boolean; onClick: () => void; c
   return (
     <button
       onClick={onClick}
-      className={`-mb-px flex items-center rounded-t-md border-b-2 px-3 py-1.5 text-xs font-medium transition-colors ${
-        on ? 'border-violet-500 text-violet-700 dark:text-violet-300'
-           : 'border-transparent text-zinc-500 hover:text-zinc-300'
+      role="tab"
+      aria-selected={on}
+      className={`flex items-center rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+        on ? 'bg-zinc-800 text-zinc-100 shadow-sm'
+           : 'text-zinc-500 hover:text-zinc-200'
       }`}
     >
       {children}
@@ -43,19 +48,19 @@ function Field({ label, value, onChange, rows = 3, placeholder, editing }: {
   editing: boolean
 }) {
   return (
-    <div className="mb-3">
-      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">{label}</div>
+    <div className="mb-4">
+      <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{label}</div>
       {editing ? (
         <textarea
           value={value}
           onChange={(e) => onChange(e.target.value)}
           rows={rows}
           placeholder={placeholder}
-          className="w-full resize-y rounded border border-zinc-700 bg-zinc-950/60 px-2.5 py-2 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+          className={TEXTAREA}
         />
       ) : (
-        <div className="whitespace-pre-wrap px-0.5 text-xs leading-relaxed text-zinc-300">
-          {value.trim() || <span className="italic text-zinc-600">{placeholder || '—'}</span>}
+        <div className="whitespace-pre-wrap px-0.5 text-[13px] leading-relaxed text-zinc-300">
+          {value.trim() || <span className="italic text-zinc-500">{placeholder || '—'}</span>}
         </div>
       )}
     </div>
@@ -130,31 +135,32 @@ export function VatraGroup0Plan({
   return (
     <div className={PANEL}>
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <ClipboardList className="h-3.5 w-3.5 text-violet-600 dark:text-violet-400" />
-        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Group 0 — coordination plan</span>
+        <ClipboardList className="h-4 w-4 text-violet-600 dark:text-violet-400" />
+        <span className="text-[13px] font-semibold text-zinc-200">Group 0 — coordination plan</span>
         <Chip className="text-violet-600 dark:text-violet-300">Long Horizon Planner</Chip>
         <Chip className="text-amber-600 dark:text-amber-300">review before run</Chip>
         {tab === 'plan' && (
           <button
             onClick={() => setEditing((v) => !v)}
             title={editing ? 'Done editing — show the plan as text' : 'Edit the plan text'}
-            className={`ml-auto flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-colors ${
-              editing ? 'border-violet-500 bg-violet-500/10 text-violet-700 dark:text-violet-300'
-                      : 'border-zinc-700 text-zinc-400 hover:text-zinc-200'
+            aria-pressed={editing}
+            className={`ml-auto flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors ${
+              editing ? 'border-violet-500/50 bg-violet-500/10 text-violet-700 dark:text-violet-300'
+                      : 'border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:border-zinc-600 hover:bg-zinc-800'
             }`}
           >
             {editing ? <><Check className="h-3.5 w-3.5" /> Done</> : <><Pencil className="h-3.5 w-3.5" /> Edit</>}
           </button>
         )}
       </div>
-      <p className="mb-3 text-[11px] leading-snug text-zinc-500">
+      <p className="mb-4 max-w-3xl text-xs leading-relaxed text-zinc-500">
         The Long Horizon Planner drafted how the team will operate. Review and edit the coordination
         plan{questions.length ? ', and answer its clarifying questions,' : ''} then Execute above to
         run Group A (or Cancel to discard; nothing runs).
       </p>
 
       {dirty && (
-        <div className="mb-3 rounded-md border border-amber-400/60 bg-amber-500/10 p-2.5 text-[11px] leading-snug text-amber-700 dark:border-amber-500/40 dark:text-amber-300">
+        <div className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3.5 py-3 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
           You changed the grouping or answered a question. The mandates, dependencies, and hand-offs
           were written for the <span className="font-semibold">previous</span> plan — click
           <span className="font-semibold"> Re-plan</span> above to regenerate the coordination, or
@@ -163,11 +169,11 @@ export function VatraGroup0Plan({
       )}
 
       {questions.length > 0 && (
-        <div className="mb-3 flex items-center gap-1 border-b border-zinc-800">
+        <div role="tablist" className="mb-4 inline-flex max-w-full flex-wrap gap-1 rounded-xl border border-zinc-800 bg-zinc-950/60 p-1">
           <TabBtn on={tab === 'plan'} onClick={() => setTab('plan')}>Coordination plan</TabBtn>
           <TabBtn on={tab === 'questions'} onClick={() => setTab('questions')}>
             Questions
-            <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold ${
+            <span className={`ml-1.5 rounded-full px-1.5 text-[10px] font-semibold leading-4 ${
               unanswered ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
                          : 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'}`}>
               {unanswered ? `${unanswered} to answer` : 'answered'}
@@ -178,19 +184,19 @@ export function VatraGroup0Plan({
 
       {tab === 'plan' ? (
       <>
-      <div className="mb-3">
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-300">Coordination overview</div>
+      <div className="mb-4">
+        <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-violet-700 dark:text-violet-300">Coordination overview</div>
         {editing ? (
           <textarea
             value={plan.overview}
             onChange={(e) => onChange({ ...plan, overview: e.target.value })}
             rows={3}
             placeholder="How the team works together end to end…"
-            className="w-full resize-y rounded border border-zinc-700 bg-zinc-950/60 px-2.5 py-2 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+            className={TEXTAREA}
           />
         ) : (
-          <div className="whitespace-pre-wrap px-0.5 text-xs leading-relaxed text-zinc-300">
-            {plan.overview.trim() || <span className="italic text-zinc-600">How the team works together end to end…</span>}
+          <div className="whitespace-pre-wrap px-0.5 text-[13px] leading-relaxed text-zinc-300">
+            {plan.overview.trim() || <span className="italic text-zinc-500">How the team works together end to end…</span>}
           </div>
         )}
       </div>
@@ -198,28 +204,28 @@ export function VatraGroup0Plan({
       {!agents.length ? (
         <p className="text-xs text-zinc-500">The planner produced no plan entries.</p>
       ) : (
-        <div className="flex flex-col gap-3 md:flex-row md:items-start">
+        <div className="flex flex-col gap-3 @3xl:flex-row @3xl:items-start">
           {/* Left column — agent list (≈30%). */}
-          <div className="shrink-0 space-y-1 md:w-[30%]">
+          <div className="shrink-0 space-y-1.5 @3xl:w-[30%]">
             {ordered.map((g) => {
               const on = g.subtask_id === a?.subtask_id
               return (
                 <button
                   key={g.subtask_id}
                   onClick={() => setSelId(g.subtask_id)}
-                  className={`flex w-full items-start gap-2 rounded-md border px-2.5 py-2 text-left transition-colors ${
-                    on ? 'border-violet-500 bg-violet-500/10'
-                       : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
+                  className={`flex w-full items-start gap-2 rounded-xl border px-3 py-2.5 text-left transition-colors ${
+                    on ? 'border-violet-500/50 bg-violet-500/10'
+                       : 'border-zinc-800 bg-zinc-950/50 hover:border-zinc-700'
                   }`}
                 >
                   {g.group && (
-                    <span className="mt-0.5 shrink-0 rounded bg-violet-500/20 px-1 text-[9px] font-semibold text-violet-700 dark:text-violet-300">{g.group}</span>
+                    <span className="mt-0.5 shrink-0 rounded bg-violet-500/20 px-1 text-[10px] font-semibold text-violet-700 dark:text-violet-300">{g.group}</span>
                   )}
                   <span className="min-w-0">
-                    <span className={`block truncate text-[11px] font-medium ${on ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-300'}`}>
+                    <span className={`block truncate text-xs font-medium ${on ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-200'}`}>
                       {g.agent_id}
                     </span>
-                    <span className="block truncate text-[10px] text-zinc-500">{titleFor(g.subtask_id)}</span>
+                    <span className="block truncate text-[11px] text-zinc-500">{titleFor(g.subtask_id)}</span>
                   </span>
                 </button>
               )
@@ -228,24 +234,24 @@ export function VatraGroup0Plan({
 
           {/* Right column — the selected agent's fields, stacked vertically. */}
           {a && (
-            <div className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900/30 p-3">
-              <div className="mb-3 flex items-center gap-2">
+            <div className="min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
+              <div className="mb-4 flex flex-wrap items-center gap-2">
                 <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-200">
                   <span className="text-violet-700 dark:text-violet-300/90">{a.agent_id}</span>
                   <span className="mx-1 text-zinc-700">·</span>{titleFor(a.subtask_id)}
                 </span>
                 {/* Group — the phase this agent runs in (A→B→C→D). Selector in edit mode. */}
                 <div className="inline-flex shrink-0 items-center gap-1.5">
-                  <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Group</span>
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Group</span>
                   {editing ? (
-                    <div className="inline-flex rounded-md border border-zinc-700 bg-zinc-950/50 p-0.5">
+                    <div className="inline-flex gap-0.5 rounded-lg border border-zinc-800 bg-zinc-950/60 p-0.5">
                       {GROUPS.map((g) => (
                         <button
                           key={g}
                           onClick={() => patch({ group: g })}
                           title={`Run this agent in group ${g}`}
-                          className={`rounded px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                            a.group === g ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+                          className={`rounded-md px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                            a.group === g ? 'bg-violet-600 text-white' : 'text-zinc-500 hover:text-zinc-200'
                           }`}
                         >
                           {g}
@@ -261,8 +267,8 @@ export function VatraGroup0Plan({
                 onChange={(v) => patch({ mandate: v })} placeholder="What this agent must accomplish…" />
               <Field label="Produces" value={a.produces} rows={2} editing={editing}
                 onChange={(v) => patch({ produces: v })} placeholder="The artifact it hands off…" />
-              <div className="mb-3">
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Consumes from</div>
+              <div className="mb-4">
+                <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Consumes from</div>
                 {editing ? (
                   teammates.length ? (
                     <div className="flex flex-wrap gap-1.5">
@@ -273,9 +279,9 @@ export function VatraGroup0Plan({
                             key={s.id}
                             onClick={() => toggleConsume(s.id)}
                             title={s.title}
-                            className={`rounded border px-2 py-1 text-[10px] transition-colors ${
+                            className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors ${
                               on ? 'border-violet-500 bg-violet-600 text-white'
-                                 : 'border-zinc-700 text-zinc-400 hover:text-zinc-200'
+                                 : 'border-zinc-700 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'
                             }`}
                           >
                             {s.owner_archetype_id}
@@ -284,21 +290,21 @@ export function VatraGroup0Plan({
                       })}
                     </div>
                   ) : (
-                    <span className="text-[10px] text-zinc-600">no teammates</span>
+                    <span className="text-xs text-zinc-500">no teammates</span>
                   )
                 ) : (a.consumes_from || []).length ? (
                   <div className="flex flex-wrap gap-1.5">
                     {(a.consumes_from || []).map((cid) => {
                       const s = (subtasks || []).find((x) => x.id === cid)
                       return (
-                        <span key={cid} className="rounded border border-zinc-700 bg-zinc-900/40 px-2 py-1 text-[10px] text-zinc-300">
+                        <span key={cid} className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1 text-[11px] text-zinc-300">
                           {s?.owner_archetype_id || cid}
                         </span>
                       )
                     })}
                   </div>
                 ) : (
-                  <span className="text-[10px] text-zinc-600">nothing — starts from scratch</span>
+                  <span className="text-xs text-zinc-500">nothing — starts from scratch</span>
                 )}
               </div>
               <Field label="Hand-off notes" value={a.hand_off_notes} rows={5} editing={editing}
@@ -308,16 +314,16 @@ export function VatraGroup0Plan({
         </div>
       )}
 
-      <p className="mt-3 text-[10px] text-zinc-600">
+      <p className="mt-4 text-[11px] leading-relaxed text-zinc-500">
         Groups run in order A→B→C→D (barrier between). Each agent runs with its mandate, output, and
         the teammates it consumes from injected into its prompt.
       </p>
       </>
       ) : (
         <>
-          <div className="flex flex-col gap-3 md:flex-row md:items-start">
+          <div className="flex flex-col gap-3 @3xl:flex-row @3xl:items-start">
             {/* Left — question list. */}
-            <div className="shrink-0 space-y-1 md:w-[30%]">
+            <div className="shrink-0 space-y-1.5 @3xl:w-[30%]">
               {questions.map((x) => {
                 const on = x.id === q?.id
                 const done = isAnswered(x)
@@ -325,13 +331,13 @@ export function VatraGroup0Plan({
                   <button
                     key={x.id}
                     onClick={() => setSelQId(x.id)}
-                    className={`flex w-full items-start gap-2 rounded-md border px-2.5 py-2 text-left transition-colors ${
-                      on ? 'border-violet-500 bg-violet-500/10'
-                         : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700'
+                    className={`flex w-full items-start gap-2 rounded-xl border px-3 py-2.5 text-left transition-colors ${
+                      on ? 'border-violet-500/50 bg-violet-500/10'
+                         : 'border-zinc-800 bg-zinc-950/50 hover:border-zinc-700'
                     }`}
                   >
                     <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${done ? 'bg-emerald-500' : 'bg-amber-500'}`} />
-                    <span className={`min-w-0 text-[11px] leading-snug ${on ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-300'}`}>
+                    <span className={`min-w-0 text-xs leading-snug ${on ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-300'}`}>
                       {x.question}
                     </span>
                   </button>
@@ -341,9 +347,9 @@ export function VatraGroup0Plan({
 
             {/* Right — the selected question's answer. */}
             {q && (
-              <div className="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900/30 p-3">
-                <div className="mb-2 text-sm font-medium leading-snug text-zinc-200">{q.question}</div>
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+              <div className="min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
+                <div className="mb-3 text-sm font-medium leading-snug text-zinc-100">{q.question}</div>
+                <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
                   {q.multi ? 'Pick any that apply' : 'Pick one'}
                 </div>
                 {q.options.length > 0 && (
@@ -354,9 +360,9 @@ export function VatraGroup0Plan({
                         <button
                           key={opt}
                           onClick={() => toggleOption(opt)}
-                          className={`rounded-md border px-2.5 py-1 text-[11px] transition-colors ${
+                          className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                             on ? 'border-violet-500 bg-violet-600 text-white'
-                               : 'border-zinc-700 text-zinc-300 hover:text-zinc-100'
+                               : 'border-zinc-700 text-zinc-300 hover:border-zinc-600 hover:text-zinc-100'
                           }`}
                         >
                           {opt}
@@ -365,18 +371,18 @@ export function VatraGroup0Plan({
                     })}
                   </div>
                 )}
-                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Other</div>
+                <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Other</div>
                 <textarea
                   value={q.other}
                   onChange={(e) => patchQ({ other: e.target.value })}
                   rows={2}
                   placeholder="Your own answer (optional)…"
-                  className="w-full resize-y rounded border border-zinc-700 bg-zinc-950/60 px-2.5 py-2 text-xs leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+                  className={TEXTAREA}
                 />
               </div>
             )}
           </div>
-          <p className="mt-3 text-[10px] text-zinc-600">
+          <p className="mt-4 text-[11px] leading-relaxed text-zinc-500">
             Answer what matters, then click Re-plan above — your answers are folded back into the
             planner and the coordination is regenerated. Unanswered questions use the planner's
             defaults.

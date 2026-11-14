@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react'
-import { RefreshCw, Loader2, ListChecks, ChevronDown, Send, CheckSquare, Sparkles, Check, AlertTriangle } from 'lucide-react'
+import { RefreshCw, Loader2, ListChecks, Send, CheckSquare, Sparkles, Check, AlertTriangle } from 'lucide-react'
 import type { CouncilArtifact, ActionPoint } from '../../stores/councilStore'
+import { Button } from '../console/parts'
+import { AgentAvatar, PanelHead } from './councilLook'
+import { SMALL_BTN } from './councilStyles'
 
 interface ActionPointsPanelProps {
   artifacts: CouncilArtifact[]   // kind === 'action_points', one per agent
@@ -38,44 +41,49 @@ export function ActionPointsPanel({ artifacts, generating, busy, onGenerate, onS
   }
 
   return (
-    <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 space-y-3">
-      <div className="flex items-center gap-2">
-        <button onClick={() => setCollapsed(!collapsed)} className="flex items-center gap-2 min-w-0">
-          <ListChecks className="h-4 w-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-          <h3 className="text-sm font-medium text-emerald-700 dark:text-emerald-300">Action Points</h3>
-          <ChevronDown className={`h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
-        </button>
-        <button
-          onClick={(e) => { e.stopPropagation(); onGenerate() }}
-          disabled={generating}
-          className="ml-auto flex items-center gap-1 rounded-lg border border-emerald-500/30 px-2 py-1 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/10 disabled:opacity-40"
-        >
-          {generating
-            ? <><Loader2 className="h-3 w-3 animate-spin" /> Extracting...</>
-            : <><RefreshCw className="h-3 w-3" /> {artifacts.length > 0 ? 'Regenerate' : 'Extract'}</>}
-        </button>
-      </div>
+    <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40">
+      <PanelHead
+        icon={ListChecks}
+        tone="emerald"
+        title="Action Points"
+        collapsed={collapsed}
+        onToggle={() => setCollapsed(!collapsed)}
+        action={
+          <Button
+            onClick={(e) => { e.stopPropagation(); onGenerate() }}
+            disabled={generating}
+            icon={generating ? Loader2 : RefreshCw}
+            className={`${SMALL_BTN} ${generating ? '[&>svg]:animate-spin' : ''}`}
+          >
+            {generating ? 'Extracting...' : artifacts.length > 0 ? 'Regenerate' : 'Extract'}
+          </Button>
+        }
+      />
 
       {!collapsed && (
-        <>
+        <div className="space-y-3 border-t border-zinc-800/80 px-4 pb-4 pt-3">
           {artifacts.length === 0 && !generating && (
-            <p className="text-xs text-zinc-500">
+            <p className="text-xs leading-relaxed text-zinc-500">
               No action points yet. Each agent extracts its own outstanding next steps from the discussion (scoped to its part — no full-transcript dump).
             </p>
           )}
           {generating && artifacts.length === 0 && (
-            <div className="flex items-center gap-2 py-2 text-xs text-zinc-400">
-              <Loader2 className="h-3 w-3 animate-spin" /> Collecting action points from agents...
+            <div className="flex items-center gap-2 py-1 text-xs text-zinc-400">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Collecting action points from agents...
             </div>
           )}
 
-          <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+          <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
             {artifacts.map(art => {
               const items = parse(art.content)
               if (items.length === 0) return null
               return (
-                <div key={`${art.agentId}-${art.id}`} className="rounded-lg dark:bg-zinc-800/40 p-2.5">
-                  <div className="mb-2 text-xs font-semibold text-zinc-100">{art.agentName}</div>
+                <div key={`${art.agentId}-${art.id}`}>
+                  <div className="mb-2 flex items-center gap-2">
+                    <AgentAvatar name={art.agentName} id={art.agentId} size="xs" />
+                    <span className="text-xs font-semibold text-zinc-200">{art.agentName}</span>
+                    <span className="text-[11px] tabular-nums text-zinc-500">{items.length}</span>
+                  </div>
                   <div className="space-y-2">
                     {items.map((item, i) => {
                       const key = `${art.id}-${i}`
@@ -83,26 +91,26 @@ export function ActionPointsPanel({ artifacts, generating, busy, onGenerate, onS
                       // item stays "Recorded" across reloads (and can't re-send).
                       const st = sendState[key] || (item.sent ? 'sent' : 'idle')
                       return (
-                      <div key={i} className="rounded-lg border border-zinc-700/50 bg-white dark:bg-zinc-900/40 p-2.5">
-                        <div className="flex items-start gap-2">
-                          <span className={`mt-0.5 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium shrink-0 ${
+                      <div key={i} className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
+                        <div className="flex items-start gap-2.5">
+                          <span className={`mt-px inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${
                             item.kind === 'intent'
-                              ? 'bg-violet-600/20 border border-violet-500/30 text-violet-700 dark:text-violet-300'
-                              : 'bg-emerald-600/20 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                              ? 'bg-violet-500/10 text-violet-700 dark:text-violet-300'
+                              : 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
                           }`}>
-                            {item.kind === 'intent' ? <Sparkles className="h-2.5 w-2.5" /> : <CheckSquare className="h-2.5 w-2.5" />}
+                            {item.kind === 'intent' ? <Sparkles className="h-3 w-3" /> : <CheckSquare className="h-3 w-3" />}
                             {item.kind}
                           </span>
-                          <span className="text-xs font-semibold text-zinc-100 flex-1 min-w-0">{item.title}</span>
+                          <span className="min-w-0 flex-1 text-sm font-semibold leading-snug text-zinc-100">{item.title}</span>
                           <button
                             onClick={() => handleSend(art.agentId, item, key)}
                             disabled={busy || st === 'sending' || st === 'sent'}
-                            className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] disabled:opacity-60 shrink-0 ${
+                            className={`flex shrink-0 items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed ${
                               st === 'sent'
-                                ? 'border-emerald-500/40 text-emerald-600 dark:text-emerald-400'
+                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
                                 : st === 'error'
-                                  ? 'border-red-500/40 text-red-400 hover:bg-red-500/10'
-                                  : 'border-zinc-600 text-zinc-300 hover:bg-zinc-700/40'
+                                  ? 'border-red-500/40 text-red-700 hover:bg-red-500/10 dark:text-red-400'
+                                  : 'border-zinc-700 bg-zinc-900/60 text-zinc-200 hover:border-zinc-600 hover:bg-zinc-800 disabled:opacity-50'
                             }`}
                             title={
                               st === 'sent' ? `Recorded in ${art.agentName}'s ${item.kind === 'intent' ? 'intentions' : 'todos'}`
@@ -110,18 +118,18 @@ export function ActionPointsPanel({ artifacts, generating, busy, onGenerate, onS
                                 : `Record this in ${art.agentName}'s ${item.kind === 'intent' ? 'intentions' : 'todos'}`
                             }
                           >
-                            {st === 'sending' ? <><Loader2 className="h-2.5 w-2.5 animate-spin" /> Sending</>
-                              : st === 'sent' ? <><Check className="h-2.5 w-2.5" /> Recorded</>
-                              : st === 'error' ? <><AlertTriangle className="h-2.5 w-2.5" /> Retry</>
-                              : <><Send className="h-2.5 w-2.5" /> Send</>}
+                            {st === 'sending' ? <><Loader2 className="h-3 w-3 animate-spin" /> Sending</>
+                              : st === 'sent' ? <><Check className="h-3 w-3" /> Recorded</>
+                              : st === 'error' ? <><AlertTriangle className="h-3 w-3" /> Retry</>
+                              : <><Send className="h-3 w-3" /> Send</>}
                           </button>
                         </div>
-                        <div className="mt-1.5 space-y-1 text-[11px] leading-relaxed text-zinc-400">
-                          {item.context && <p><span className="text-zinc-500">Context:</span> {item.context}</p>}
-                          {item.task && <p><span className="text-zinc-500">Task:</span> {item.task}</p>}
-                          {item.done_when && <p><span className="text-zinc-500">Done when:</span> {item.done_when}</p>}
+                        <div className="mt-2 space-y-1 text-xs leading-relaxed text-zinc-400">
+                          {item.context && <p><span className="font-medium text-zinc-500">Context:</span> {item.context}</p>}
+                          {item.task && <p><span className="font-medium text-zinc-500">Task:</span> {item.task}</p>}
+                          {item.done_when && <p><span className="font-medium text-zinc-500">Done when:</span> {item.done_when}</p>}
                           {item.refs?.length > 0 && (
-                            <p><span className="text-zinc-500">Refs:</span> {item.refs.join(', ')}</p>
+                            <p><span className="font-medium text-zinc-500">Refs:</span> {item.refs.join(', ')}</p>
                           )}
                         </div>
                       </div>
@@ -132,8 +140,8 @@ export function ActionPointsPanel({ artifacts, generating, busy, onGenerate, onS
               )
             })}
           </div>
-        </>
+        </div>
       )}
-    </div>
+    </section>
   )
 }

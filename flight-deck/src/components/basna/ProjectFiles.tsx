@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Download, Eye, FileText, Loader2, Paperclip, Trash2, Network,
-  Folder, ChevronDown, ChevronRight, Users,
+  Download, Eye, FileText, Loader2, Paperclip, Trash2, HardDrive,
+  Folder, FolderClock, ChevronDown,
 } from 'lucide-react'
+import { Button, Card, EmptyState, Pill } from '../console/parts'
+import { dangerIconBtnCls, iconBtnCls } from './lookCls'
 import { useAuthStore } from '../../stores/authStore'
 import type { VFSEntry } from '../../stores/vfsStore'
 import { fdGet, qp, walkFiles } from './RunArtifacts'
@@ -81,70 +83,66 @@ export function ProjectFiles({ sources, uploadFolder }: {
   const totalFiles = Object.values(byFolder).reduce((n, fs) => n + fs.length, 0)
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <FileText className="h-3.5 w-3.5 text-zinc-500" />
-        <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Files</span>
-        {!loading && <span className="text-[10px] tabular-nums text-zinc-600">{totalFiles} across {sources.length} source(s)</span>}
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={uploading || !uploadFolder}
-          className="ml-auto flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
-        >
-          {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Paperclip className="h-3.5 w-3.5" />} Upload to project
-        </button>
-        <input
-          ref={fileInputRef} type="file" multiple className="hidden"
-          onChange={(e) => { if (e.target.files) void upload(e.target.files); e.target.value = '' }}
-        />
-      </div>
-
+    <Card
+      title="Files"
+      icon={FileText}
+      hint={loading ? 'The project folder and every run’s own folder.' : `${totalFiles} across ${sources.length} source(s) — the project folder and every run’s own folder.`}
+      action={
+        <>
+          <Button icon={uploading ? undefined : Paperclip} busy={uploading} disabled={!uploadFolder} onClick={() => fileInputRef.current?.click()}>
+            Upload to project
+          </Button>
+          <input
+            ref={fileInputRef} type="file" multiple className="hidden"
+            onChange={(e) => { if (e.target.files) void upload(e.target.files); e.target.value = '' }}
+          />
+        </>
+      }
+    >
       {loading ? (
-        <div className="flex items-center gap-2 text-[11px] text-zinc-600"><Loader2 className="h-3 w-3 animate-spin" /> loading…</div>
+        <div className="flex items-center gap-2 text-sm text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
       ) : sources.length === 0 ? (
-        <p className="text-[11px] text-zinc-600">No files yet.</p>
+        <EmptyState icon={FileText} title="No files yet">Upload files to share them with every run in this project.</EmptyState>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-2.5">
           {sources.map((s) => {
             const files = byFolder[s.folder] || []
             const isOpen = !!open[s.folder]
             return (
-              <div key={s.folder} className="rounded-lg border border-zinc-800 bg-zinc-900/40">
+              <div key={s.folder} className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/40">
                 <button
                   onClick={() => setOpen((o) => ({ ...o, [s.folder]: !o[s.folder] }))}
-                  className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left"
+                  aria-expanded={isOpen}
+                  className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-zinc-800/40"
                 >
-                  {isOpen ? <ChevronDown className="h-3 w-3 shrink-0 text-zinc-600" /> : <ChevronRight className="h-3 w-3 shrink-0 text-zinc-600" />}
                   {s.owner === 'project'
-                    ? <Folder className="h-3.5 w-3.5 shrink-0 text-sky-500/80" />
-                    : <Users className="h-3.5 w-3.5 shrink-0 text-violet-500/80" />}
-                  <span className="truncate text-xs font-medium text-zinc-200" title={s.label}>{s.label}</span>
-                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
-                    s.owner === 'project' ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300' : 'bg-violet-500/15 text-violet-700 dark:text-violet-300'}`}>
-                    {s.owner === 'project' ? 'project' : 'run'}
-                  </span>
-                  <span className="ml-auto flex shrink-0 items-center gap-2 text-[10px] text-zinc-600">
-                    <span className="tabular-nums">{files.length} files</span>
-                    <span className="hidden items-center gap-1 sm:flex"><Network className="h-3 w-3" />{s.folder}</span>
+                    ? <Folder className="h-4 w-4 shrink-0 text-zinc-400" />
+                    : <FolderClock className="h-4 w-4 shrink-0 text-zinc-500" />}
+                  <span className="min-w-0 truncate text-sm font-medium text-zinc-200" title={s.label}>{s.label}</span>
+                  <Pill tone={s.owner === 'project' ? 'violet' : 'zinc'}>{s.owner === 'project' ? 'Project' : 'Run'}</Pill>
+                  <span className="ml-auto flex shrink-0 items-center gap-3 text-[11px] text-zinc-500">
+                    <span className="hidden items-center gap-1 font-mono @2xl:flex"><HardDrive className="h-3 w-3" />{s.folder}</span>
+                    <span className="tabular-nums">{files.length} {files.length === 1 ? 'file' : 'files'}</span>
+                    <ChevronDown className={`h-4 w-4 text-zinc-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
                   </span>
                 </button>
                 {isOpen && (
                   files.length === 0
-                    ? <p className="px-3 pb-2 text-[11px] text-zinc-600">No files.</p>
+                    ? <p className="border-t border-zinc-800/80 px-3.5 py-3 text-xs text-zinc-500">No files.</p>
                     : (
-                      <div className="space-y-0.5 px-2 pb-2">
+                      <div className="divide-y divide-zinc-800/60 border-t border-zinc-800/80">
                         {files.map((e) => (
-                          <div key={e.path} className="flex items-center gap-1.5 rounded px-1 py-0.5 text-xs hover:bg-zinc-800/50">
-                            <FileText className="h-3 w-3 shrink-0 text-zinc-500" />
-                            <span className="truncate text-zinc-300" title={e.path}>{e.path}</span>
-                            <span className="shrink-0 text-[10px] text-zinc-600">{Math.max(1, Math.round(e.size / 1024))}kb</span>
+                          <div key={e.path} className="flex items-center gap-2.5 px-3.5 py-1.5 text-sm hover:bg-zinc-800/30">
+                            <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                            <span className="min-w-0 truncate text-zinc-300" title={e.path}>{e.path}</span>
+                            <span className="shrink-0 text-[11px] tabular-nums text-zinc-500">{Math.max(1, Math.round(e.size / 1024))}kb</span>
                             <div className="ml-auto flex shrink-0 items-center gap-0.5">
                               {isViewable(e.name) && (
-                                <button onClick={() => view(s.folder, e)} title="View" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"><Eye className="h-3.5 w-3.5" /></button>
+                                <button onClick={() => view(s.folder, e)} title="View" aria-label={`View ${e.name}`} className={iconBtnCls}><Eye className="h-3.5 w-3.5" /></button>
                               )}
-                              <button onClick={() => download(s.folder, e)} title="Download" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"><Download className="h-3.5 w-3.5" /></button>
+                              <button onClick={() => download(s.folder, e)} title="Download" aria-label={`Download ${e.name}`} className={iconBtnCls}><Download className="h-3.5 w-3.5" /></button>
                               {s.owner === 'project' && (
-                                <button onClick={() => remove(s.folder, e)} title="Delete" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-rose-400"><Trash2 className="h-3.5 w-3.5" /></button>
+                                <button onClick={() => remove(s.folder, e)} title="Delete" aria-label={`Delete ${e.name}`} className={dangerIconBtnCls}><Trash2 className="h-3.5 w-3.5" /></button>
                               )}
                             </div>
                           </div>
@@ -158,6 +156,6 @@ export function ProjectFiles({ sources, uploadFolder }: {
         </div>
       )}
       {modal && <FileModal title={modal.title} content={modal.content} mode={modal.mode} onClose={() => setModal(null)} />}
-    </div>
+    </Card>
   )
 }

@@ -1,31 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle, Check, ChevronDown, ChevronRight, Clock, Download, Loader2,
+  AlertTriangle, Activity, Check, ChevronDown, ChevronRight, Clock, Download, Flame, Loader2,
   Network, Sparkles, Square, Users, Wrench, Coins,
 } from 'lucide-react'
 import type { BasnaSession, ProgressEvent, VatraSubtask, RunCost } from '../../stores/basnaStore'
 import { VatraBlackboard } from '../VatraDelegation'
 import { downloadMarkdown, formatProgress, fmtTok, type LiveAgent } from './shared'
 import { RunFilesPanel, RunDatastorePanel } from './RunArtifacts'
+import { PanelTitle } from './look'
+import { iconBtnCls, panelCls } from './lookCls'
 
 // ── Run workspace: live header + two-column board/agents/progress layout ────
 
 // One live agent card — its status, running token usage, and streaming activity.
 function LiveAgentCard({ a, onSkip }: { a: LiveAgent; onSkip?: (role: string) => void }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
+    <div className={`${panelCls} p-3.5`}>
       <div className="flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-2">
           {a.done
             ? (a.ok === false
-                ? <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-400" />
-                : <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" />)
-            : <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-400" />}
-          <span className="truncate text-sm font-medium text-zinc-200">{a.role}</span>
+                ? <AlertTriangle className="h-4 w-4 shrink-0 text-red-500" />
+                : <Check className="h-4 w-4 shrink-0 text-emerald-500" />)
+            : <Loader2 className="h-4 w-4 shrink-0 animate-spin text-violet-500" />}
+          <span className="truncate text-sm font-semibold text-zinc-100">{a.role}</span>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {a.usage && (
-            <span className="font-mono text-[10px] tabular-nums text-zinc-500" title="LLM tokens (prompt → completion)">
+            <span className="font-mono text-[11px] tabular-nums text-zinc-500" title="LLM tokens (prompt → completion)">
               {fmtTok(a.usage.prompt_tokens)}→{fmtTok(a.usage.completion_tokens)} tok
             </span>
           )}
@@ -33,34 +35,34 @@ function LiveAgentCard({ a, onSkip }: { a: LiveAgent; onSkip?: (role: string) =>
             <button
               onClick={() => onSkip(a.role)}
               title="Skip this agent — cancel its current turn and move on"
-              className="rounded p-0.5 text-zinc-500 transition-colors hover:text-rose-400"
+              className="rounded-lg p-1 text-zinc-500 transition-colors hover:bg-red-500/10 hover:text-red-500"
             >
               <Square className="h-3.5 w-3.5 fill-current" />
             </button>
           )}
         </div>
       </div>
-      <div className="mt-1.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-600">
+      <div className="mt-2.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
         Activity ({a.actions.length})
       </div>
-      <div className="mt-1 max-h-48 space-y-0.5 overflow-auto">
+      <div className="mt-1.5 max-h-48 space-y-1 overflow-auto">
         {a.actions.slice(-14).map((ev) => {
           const isNarr = ev.stage === 'narration' || ev.tool === 'narration'
           return (
-            <div key={ev.i} className="flex items-baseline gap-2 text-[11px]">
+            <div key={ev.i} className="flex items-baseline gap-2 text-xs">
               {isNarr
-                ? <Sparkles className="h-3 w-3 shrink-0 text-amber-400" />
+                ? <Sparkles className="h-3 w-3 shrink-0 text-amber-500" />
                 : <Wrench className="h-3 w-3 shrink-0 text-zinc-600" />}
               {isNarr
                 ? <span className="font-semibold text-zinc-100">{ev.detail || ev.tool}</span>
                 : <>
                     <span className="shrink-0 font-mono text-zinc-400">{ev.tool}</span>
-                    {ev.detail && <span className="truncate text-zinc-600">{ev.detail}</span>}
+                    {ev.detail && <span className="truncate text-zinc-500">{ev.detail}</span>}
                   </>}
             </div>
           )
         })}
-        {a.actions.length === 0 && <div className="text-[11px] text-zinc-600">working…</div>}
+        {a.actions.length === 0 && <div className="text-xs text-zinc-500">working…</div>}
       </div>
     </div>
   )
@@ -69,7 +71,7 @@ function LiveAgentCard({ a, onSkip }: { a: LiveAgent; onSkip?: (role: string) =>
 // A responsive grid of live agent cards (Basna's main column).
 function LiveAgentGrid({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: string) => void }) {
   return (
-    <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+    <div className="grid grid-cols-1 gap-2.5 xl:grid-cols-2">
       {agents.map((a) => <LiveAgentCard key={a.role} a={a} onSkip={onSkip} />)}
     </div>
   )
@@ -89,12 +91,12 @@ export function LiveAgentsPanel({ agents, onSkip }: { agents: LiveAgent[]; onSki
         const working = inGroup.some((a) => !a.done)
         return (
           <div key={letter}>
-            <div className="mb-1.5 flex items-center gap-2">
-              <span className="flex h-5 w-5 items-center justify-center rounded bg-sky-500/15 text-[11px] font-bold text-sky-300">{letter}</span>
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">Group {letter}</span>
-              <span className="text-[10px] text-zinc-600">{inGroup.length} agent(s)</span>
+            <div className="mb-2 flex items-center gap-2">
+              <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-violet-500/15 text-xs font-bold text-violet-700 dark:text-violet-300">{letter}</span>
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Group {letter}</span>
+              <span className="text-[11px] text-zinc-500">{inGroup.length} agent(s)</span>
               {working
-                ? <Loader2 className="h-3 w-3 animate-spin text-sky-400" />
+                ? <Loader2 className="h-3 w-3 animate-spin text-violet-500" />
                 : <Check className="h-3 w-3 text-emerald-500" />}
             </div>
             <LiveAgentGrid agents={inGroup} onSkip={onSkip} />
@@ -124,7 +126,7 @@ function AgentRoster({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: 
     const isOpen = !!open[a.role]
     return (
       <div key={a.role}>
-        <div className="flex w-full items-center gap-1.5 py-1 text-left">
+        <div className="flex w-full items-center gap-1.5 rounded-lg px-1.5 py-1 text-left hover:bg-zinc-800/40">
           <button
             onClick={() => setOpen((o) => ({ ...o, [a.role]: !o[a.role] }))}
             className="flex min-w-0 flex-1 items-center gap-1.5"
@@ -135,13 +137,13 @@ function AgentRoster({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: 
                   ? <span className="h-2 w-2 shrink-0 rounded-full bg-rose-500" />
                   : <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />)
               : a.actions.length > 0 || a.usage
-                ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin text-sky-400" />
+                ? <Loader2 className="h-2.5 w-2.5 shrink-0 animate-spin text-violet-500" />
                 : <span className="h-2 w-2 shrink-0 rounded-full bg-zinc-600" />}
-            <span className="truncate text-xs text-zinc-200">{a.role}</span>
+            <span className="truncate text-[13px] text-zinc-200">{a.role}</span>
             {isOpen ? <ChevronDown className="h-3 w-3 shrink-0 text-zinc-600" /> : <ChevronRight className="h-3 w-3 shrink-0 text-zinc-600" />}
           </button>
           {a.usage && (
-            <span className="shrink-0 font-mono text-[10px] tabular-nums text-zinc-600" title="LLM tokens (total)">
+            <span className="shrink-0 font-mono text-[11px] tabular-nums text-zinc-500" title="LLM tokens (total)">
               {fmtTok(a.usage.total_tokens ?? ((a.usage.prompt_tokens || 0) + (a.usage.completion_tokens || 0)))}
             </span>
           )}
@@ -149,14 +151,14 @@ function AgentRoster({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: 
             <button
               onClick={() => onSkip(a.role)}
               title="Skip this agent — cancel its current turn and move on"
-              className="shrink-0 rounded p-0.5 text-zinc-600 transition-colors hover:text-rose-400"
+              className="shrink-0 rounded-md p-0.5 text-zinc-500 transition-colors hover:bg-red-500/10 hover:text-red-500"
             >
               <Square className="h-3 w-3 fill-current" />
             </button>
           )}
         </div>
         {isOpen && (
-          <div className="mb-1 ml-3.5 max-h-40 space-y-0.5 overflow-auto border-l border-zinc-800 pl-2">
+          <div className="mb-1 ml-3 max-h-40 space-y-0.5 overflow-auto border-l border-zinc-800 pl-2.5">
             {a.actions.slice(-12).map((ev) => (
               <div key={ev.i} className="flex items-baseline gap-1.5 text-[10px]">
                 {ev.stage === 'narration'
@@ -174,21 +176,20 @@ function AgentRoster({ agents, onSkip }: { agents: LiveAgent[]; onSkip?: (role: 
   }
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
-      <div className="mb-1.5 flex items-center gap-2">
-        <Users className="h-3.5 w-3.5 text-zinc-500" />
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Agents</span>
-        <span className="ml-auto text-[10px] tabular-nums text-zinc-600">{agents.filter((a) => a.done).length}/{agents.length} done</span>
+    <div className={`${panelCls} p-4`}>
+      <div className="mb-2 flex items-center gap-2">
+        <PanelTitle icon={Users}>Agents</PanelTitle>
+        <span className="ml-auto text-[11px] tabular-nums text-zinc-500">{agents.filter((a) => a.done).length}/{agents.length} done</span>
       </div>
       {grouped.map((g) => (
         <div key={g.label ?? '_'}>
           {g.label && (
-            <div className="mt-1.5 mb-0.5 text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Group {g.label}</div>
+            <div className="mb-0.5 mt-2 px-1.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Group {g.label}</div>
           )}
           {g.items.map(row)}
         </div>
       ))}
-      {agents.length === 0 && <p className="text-[11px] text-zinc-600">Waiting for the team to spawn…</p>}
+      {agents.length === 0 && <p className="text-xs text-zinc-500">Waiting for the team to spawn…</p>}
     </div>
   )
 }
@@ -206,42 +207,41 @@ export function ProgressFeed({ progress, running, defaultOpen = true, fill = fal
     if (el) el.scrollTop = el.scrollHeight
   }, [progress.length, open])
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3">
-      <div className="flex items-center gap-2">
-        <button onClick={() => setOpen((o) => !o)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-          {running
-            ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-sky-400" />
-            : <Check className="h-3.5 w-3.5 shrink-0 text-emerald-500" />}
-          <span className="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Progress</span>
-          {progress.length > 0 && <span className="text-[10px] tabular-nums text-zinc-600">{progress.length}</span>}
-          {open ? <ChevronDown className="h-3 w-3 text-zinc-600" /> : <ChevronRight className="h-3 w-3 text-zinc-600" />}
+    <div className={`${panelCls} p-4`}>
+      <div className="flex items-center gap-1">
+        <button onClick={() => setOpen((o) => !o)} aria-expanded={open} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+          <PanelTitle icon={running ? Loader2 : Activity} iconCls={running ? 'animate-spin text-violet-500' : 'text-emerald-500'} count={progress.length}>
+            Progress
+          </PanelTitle>
+          <ChevronDown className={`ml-auto h-4 w-4 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-180' : ''}`} />
         </button>
         <button
           onClick={() => downloadMarkdown('basna-progress.md', formatProgress(progress))}
           title="Export progress log"
-          className="shrink-0 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+          aria-label="Export progress log"
+          className={`shrink-0 ${iconBtnCls}`}
         >
-          <Download className="h-3 w-3" />
+          <Download className="h-3.5 w-3.5" />
         </button>
       </div>
       {open && (
-        <div ref={ref} className={`mt-2 space-y-1 overflow-auto ${fill ? 'max-h-[62vh] min-h-[320px]' : 'max-h-64'}`}>
+        <div ref={ref} className={`mt-3 space-y-1.5 overflow-auto ${fill ? 'max-h-[62vh] min-h-[320px]' : 'max-h-64'}`}>
           {progress.slice(-40).map((ev) => (
-            <div key={ev.i} className="flex items-baseline gap-1.5 text-[11px]">
-              <span className="shrink-0 font-mono text-[9px] tabular-nums text-zinc-600">
+            <div key={ev.i} className="flex items-baseline gap-2 text-xs leading-relaxed">
+              <span className="shrink-0 font-mono text-[10px] tabular-nums text-zinc-600">
                 {ev.ts ? new Date(ev.ts * 1000).toLocaleTimeString([], { hour12: false }) : ''}
               </span>
               <span className={
-                ev.stage === 'phase' ? 'text-sky-700 dark:text-sky-300 font-semibold'
+                ev.stage === 'phase' ? 'font-semibold text-violet-700 dark:text-violet-300'
                   : ev.stage === 'narration' ? 'text-zinc-200'
-                  : ev.ok === false ? 'text-rose-400'
-                  : ev.stage === 'llm' ? 'italic text-sky-600/80 dark:text-sky-400/70'
+                  : ev.ok === false ? 'text-red-600 dark:text-red-400'
+                  : ev.stage === 'llm' ? 'italic text-sky-700/80 dark:text-sky-400/70'
                   : 'text-zinc-500'
               }>{ev.message}</span>
             </div>
           ))}
           {running && progress.length === 0 && (
-            <div className="text-[11px] text-zinc-500">Starting…</div>
+            <div className="text-xs text-zinc-500">Starting…</div>
           )}
         </div>
       )}
@@ -275,10 +275,10 @@ function GroupStepper({ agents }: { agents: LiveAgent[] }) {
         return (
           <span key={l} className="flex items-center gap-1">
             {i > 0 && <ChevronRight className="h-3 w-3 text-zinc-600" />}
-            <span className={`flex items-center gap-1 rounded px-2 py-0.5 font-medium ${
+            <span className={`flex items-center gap-1 rounded-full px-2.5 py-0.5 font-medium ${
               done ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
                 : active ? 'bg-violet-500/20 text-violet-700 dark:text-violet-300'
-                : 'bg-zinc-800/70 text-zinc-500'
+                : 'bg-zinc-800 text-zinc-500'
             }`}>
               {l}
               {done && <Check className="h-3 w-3" />}
@@ -339,7 +339,7 @@ export function ResizableSplit({ storageKey, left, right }: {
         className="group relative mx-1.5 w-1.5 shrink-0 cursor-col-resize"
       >
         <div className={`absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 rounded ${
-          dragging ? 'bg-sky-500' : 'bg-zinc-800 group-hover:bg-sky-600/60'}`} />
+          dragging ? 'bg-violet-500' : 'bg-zinc-800 group-hover:bg-violet-500/60'}`} />
       </div>
       <div style={{ width: `${100 - pct}%` }} className="h-full min-h-0 min-w-0">{right}</div>
     </div>
@@ -385,25 +385,25 @@ export function RunWorkspace({
   return (
     <div className="space-y-3">
       {/* Run header: what's running, where it is, what it costs so far. */}
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-3.5">
-        <div className="flex flex-wrap items-center gap-2">
+      <div className={`${panelCls} p-4 wide:px-5`}>
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2">
           {running
-            ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-sky-400" />
+            ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-violet-500" />
             : session.status === 'error'
-              ? <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" />
+              ? <AlertTriangle className="h-4 w-4 shrink-0 text-red-500" />
               : <Check className="h-4 w-4 shrink-0 text-emerald-500" />}
-          <span className="min-w-0 truncate text-sm font-semibold text-zinc-100">
+          <span className="min-w-0 truncate text-[15px] font-semibold text-zinc-100">
             {session.title || session.intent || 'Run'}
           </span>
-          <span className={`flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+          <span className={`flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${
             vatraMode
-              ? 'border-violet-500/25 bg-violet-500/15 text-violet-700 dark:text-violet-300'
-              : 'border-sky-500/25 bg-sky-500/15 text-sky-700 dark:text-sky-300'
+              ? 'bg-violet-500/10 text-violet-700 dark:text-violet-300'
+              : 'bg-sky-500/10 text-sky-700 dark:text-sky-300'
           }`}>
-            {vatraMode ? <Users className="h-2.5 w-2.5" /> : <Network className="h-2.5 w-2.5" />}
-            {vatraMode ? 'vatra' : 'basna'}
+            {vatraMode ? <Flame className="h-3 w-3" /> : <Network className="h-3 w-3" />}
+            {vatraMode ? 'Vatra' : 'Basna'}
           </span>
-          <div className="ml-auto flex shrink-0 items-center gap-3 text-[11px] text-zinc-500">
+          <div className="ml-auto flex shrink-0 flex-wrap items-center gap-3 text-xs text-zinc-500">
             {elapsedSec > 0 && (
               <span className="flex items-center gap-1 tabular-nums" title="Elapsed time">
                 <Clock className="h-3 w-3" /> {fmtElapsed(elapsedSec)}
@@ -418,7 +418,7 @@ export function RunWorkspace({
               <button
                 onClick={onStop}
                 title="Stop this run"
-                className="flex items-center gap-1.5 rounded-lg border border-rose-500/40 px-2.5 py-1 text-[11px] font-medium text-rose-600 hover:bg-rose-500/10 dark:text-rose-400"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-500/10 dark:text-red-400"
               >
                 <Square className="h-3 w-3 fill-current" /> Stop
               </button>
@@ -426,10 +426,10 @@ export function RunWorkspace({
           </div>
         </div>
         {(currentPhase || liveAgents.some((a) => a.group)) && (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
+          <div className="mt-3 flex flex-wrap items-center gap-2">
             <GroupStepper agents={liveAgents} />
             {currentPhase && (
-              <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-violet-500/10 px-2.5 py-0.5 text-[11px] font-medium text-violet-700 dark:text-violet-300">
                 {running && <Loader2 className="h-2.5 w-2.5 animate-spin" />}
                 {currentPhase}
               </span>
@@ -440,7 +440,7 @@ export function RunWorkspace({
 
       {/* Workspace: Progress ⇔ board/agents (resizable 50:50), + a rail for
           the roster and artifacts. */}
-      <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
+      <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-[minmax(0,1fr)_280px]">
         <div className="min-w-0">
           <ResizableSplit
             storageKey="basna.runSplit"
@@ -449,7 +449,7 @@ export function RunWorkspace({
               ? <VatraBlackboard sessionId={session.id} subtasks={subtasks} active={running} />
               : (liveAgents.length > 0
                   ? <LiveAgentsPanel agents={liveAgents} onSkip={onSkip} />
-                  : <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 text-xs text-zinc-500">Spawning the team…</div>)}
+                  : <div className={`${panelCls} flex items-center gap-2 p-4 text-sm text-zinc-500`}><Loader2 className="h-4 w-4 animate-spin" /> Spawning the team…</div>)}
           />
         </div>
         <div className="space-y-3">
