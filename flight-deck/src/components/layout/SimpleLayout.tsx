@@ -47,7 +47,6 @@ import {
   FolderPlus,
   Pin,
   PinOff,
-  Waypoints,
   Target,
   LayoutGrid,
   Network,
@@ -138,18 +137,23 @@ import {
   type AgentMenuItem,
 } from './KioskAgentDialogs'
 import { AGENT_DRAG_TYPE, AgentGroupDialog, AgentGroupPicker, AgentSections, RailGroupMark, type RowParts } from './KioskAgentGroups'
+import { SimpleNav } from './SimpleNav'
+import { navEntries, type NavEntry, type NavTarget } from './navDestinations'
+import { CustomersPanel } from './CustomersPanel'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import { NetworkBadge, networkShareAction } from '../agents/NetworkShare'
 import { dockerShareKey, processShareKey, useNetworkShareStore } from '../../stores/networkShareStore'
 
 // ── Simple layout ────────────────────────────────────────────────────
 //
-// A chat-first arrangement of the same Flight Deck: agents on the left, the
-// conversation in the middle, the active agent's files and datastore on the
+// A chat-first arrangement of the same Flight Deck: on the left the outcome
+// nav (Today, Inbox, Tasks, Customers, Automations, Activity — SimpleNav) over
+// the person's team of agents, the conversation (or Today's home) in the
+// middle on one rounded panel, the active agent's files and datastore on the
 // right (the kiosk has the File and Data libraries, and each agent's "⋯",
-// instead). No nav, no pages, no director — those all live in the full layout,
-// one click away. Both side columns collapse to a thin rail and remember
-// their state.
+// instead). No pages, no director — those live in the full layout, one click
+// away. Both side columns collapse to a thin rail and remember their state.
+// The look comes from the shell tokens and .fd-* classes in index.css.
 
 type AgentState = 'running' | 'starting' | 'stopped' | 'unknown'
 
@@ -252,7 +256,7 @@ function useAgentPanels(agentId: string): AgentPanels {
   return agentPanels(agentId, memberWorkspace, sharedAgents)
 }
 
-const iconBtn = 'rounded p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300'
+const iconBtn = 'rounded-full p-2 text-[var(--fd-ink-faint)] transition-colors hover:bg-[var(--fd-hover)] hover:text-[var(--fd-ink)]'
 /** A button on an agent's row in the column: one size for all of them, so they line up. */
 const rowBtn = 'flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors'
 
@@ -457,6 +461,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const teamWork = useTeamWorkStore((s) => s.open)
   const closeTeamWork = useTeamWorkStore((s) => s.close)
   const taskboardCount = useTaskboardStore((s) => s.needsMe)
+  // Customers: the people on the Taskboard's tasks (the nav's Customers).
+  const [customersOpen, setCustomersOpen] = useState(false)
+  // The Line's counts, for the nav's Inbox.
+  const lineUnread = useLineStore((s) => s.unread)
+  const lineWaiting = useLineStore((s) => s.waiting)
   // Shared folders: the files the agents keep together (vfs:<folder>/…).
   const [foldersOpen, setFoldersOpen] = useState(false)
   const openFolders = () => setFoldersOpen(true)
@@ -944,11 +953,46 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   }
   // What a phone's Back closes before it leaves a chat (or Flight Deck).
   const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen || toolsOpen
-    || anonOpen || roomsOpen || !!teamWork || !!filesData
+    || anonOpen || roomsOpen || !!teamWork || !!filesData || customersOpen
   const closePhoneOverlays = () => {
     closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null); closeAnon(); closeRooms()
-    closeTeamWork()
+    closeTeamWork(); setCustomersOpen(false)
   }
+
+  // The outcome nav. Each destination opens the view it always did (the
+  // Line, the Taskboard, Scheduled tasks, Activity) — one at a time, so the
+  // one picked is the one in front; Today closes them and the chat, leaving
+  // the home. A chat's session stays connected: its agent opens it again.
+  const closeDestinations = () => {
+    setLineOpen(false); closeTaskboard(); setCustomersOpen(false); closeScheduled(); closeActivity()
+  }
+  const goTo = (open: () => void) => () => { closeDestinations(); open() }
+  const goToday = () => {
+    closeDestinations()
+    if (useChatStore.getState().activeChatId) useChatStore.setState({ activeChatId: null, chatOpen: false })
+  }
+  const nav: NavEntry[] = navEntries({
+    onToday: goToday,
+    onInbox: goTo(() => setLineOpen(true)),
+    inboxUnread: lineUnread,
+    inboxWaiting: lineWaiting,
+    onTasks: goTo(() => openTaskboard()),
+    tasksNeedMe: taskboardCount,
+    onCustomers: goTo(() => setCustomersOpen(true)),
+    onAutomations: goTo(() => openScheduled()),
+    automationsCount: scheduledCount,
+    automationsRunning: scheduledRunning,
+    onActivity: goTo(() => openActivity()),
+  })
+  const navCurrent: NavTarget | null = lineOpen ? 'inbox'
+    : taskboardOpen ? 'tasks'
+      : customersOpen ? 'customers'
+        : scheduledOpen ? 'automations'
+          : activityOpen ? 'activity'
+            : hasActiveSession ? null : 'today'
+  // Customers' links into the Taskboard.
+  const customersToTasks = () => { setCustomersOpen(false); openTaskboard() }
+  const customersToTask = (taskId: string) => { setCustomersOpen(false); showTaskboardTask(taskId) }
   // Drive and OneDrive folders want the user's Google or Microsoft account:
   // Connections, on that tab.
   const foldersConnections = (service: 'google' | 'microsoft') => {
@@ -1327,6 +1371,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           <CoursePage kiosk />
         </KioskDialog>
       )}
+      {customersOpen && (
+        <KioskWideDialog label="Customers" phone={isMobile} onClose={() => setCustomersOpen(false)}>
+          <CustomersPanel onClose={() => setCustomersOpen(false)} onOpenTasks={customersToTasks} onOpenTask={customersToTask} />
+        </KioskWideDialog>
+      )}
       {lineOpen && (
         <KioskWideDialog label="Line" phone={isMobile} widest onClose={() => setLineOpen(false)}>
           <LinePanel onClose={() => setLineOpen(false)} />
@@ -1363,10 +1412,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onGroup={setGroupDialog}
           onSettings={locked ? () => setSettingsOpen(true) : undefined}
           onInfo={locked ? () => setInfoOpen(true) : undefined}
-          onTaskboard={() => openTaskboard()}
-          taskboardCount={taskboardCount}
-          onScheduled={() => openScheduled()}
-          scheduledRunning={scheduledRunning}
+          nav={nav}
           onLibrary={() => openLibrary()}
           onData={() => openData()}
           onFolders={openFolders}
@@ -1382,8 +1428,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     )
   }
 
+  // With every agent off, the centre offers to switch the first one on.
+  const firstOff = agents.find((a) => a.state === 'stopped' && !a.managed && (a.kind === 'docker' || a.kind === 'process'))
+
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="fd-shell flex h-screen overflow-hidden">
       <AgentsColumn
         agents={agents}
         activeAgentId={activeAgentId}
@@ -1399,11 +1448,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         onOptions={setOptionsAgent}
         onSettings={locked ? () => setSettingsOpen(true) : undefined}
         onInfo={locked ? () => setInfoOpen(true) : undefined}
-        onTaskboard={() => openTaskboard()}
-        taskboardCount={taskboardCount}
-        onScheduled={() => openScheduled()}
-        scheduledCount={scheduledCount}
-        scheduledRunning={scheduledRunning}
+        nav={nav}
+        navCurrent={navCurrent}
         onLibrary={() => openLibrary()}
         onData={() => openData()}
         onFolders={openFolders}
@@ -1412,7 +1458,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         adminSwitch={adminSwitch}
       />
 
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden" style={{ minWidth: 320 }}>
+      {/* The centre: one rounded panel floating on the shell. */}
+      <main className={`fd-main-panel my-2 flex min-w-0 flex-1 flex-col overflow-hidden ${locked ? 'mr-2' : ''}`} style={{ minWidth: 320 }}>
         {hasActiveSession
           ? <ChatPanel variant="simple" />
           : (
@@ -1424,7 +1471,16 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
               onOpen={handleOpen}
               locked={locked}
               onGuide={locked ? () => setGuideOpen(true) : undefined}
-              empty={<EmptyChat hasAgents={agents.length > 0} onSpawn={goSpawn} locked={locked} onGuide={locked ? () => setGuideOpen(true) : undefined} />}
+              empty={(
+                <EmptyChat
+                  hasAgents={agents.length > 0}
+                  onSpawn={goSpawn}
+                  locked={locked}
+                  onGuide={locked ? () => setGuideOpen(true) : undefined}
+                  startName={firstOff?.name}
+                  onStart={firstOff && !switching.has(firstOff.id) ? () => handlePower(firstOff, true) : undefined}
+                />
+              )}
             />
           )}
       </main>
@@ -1438,6 +1494,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           agentId={activeAgentId}
           agentName={activeSessionName}
           onOptions={activeAgent && activeAgent.kind !== 'shared' ? () => setOptionsAgent(activeAgent) : undefined}
+          onLibrary={() => openLibrary()}
         />
       )}
 
@@ -1504,11 +1561,11 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
     {
       title: 'Your agents at work',
       items: [
-        { icon: ListChecks, label: 'Taskboard', hint: 'Asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
+        { icon: ListChecks, label: 'Tasks', hint: 'The Taskboard: asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
         ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: () => { onClose(); openCrew() }, tone: 'teal' as const }] : []),
         ...(toolsOn ? [{ icon: Wrench, label: 'Custom tools', hint: 'Programs your agents run, yours and ones offered to you', onSelect: () => { onClose(); openTools() }, tone: 'violet' as const }] : []),
         ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: () => { onClose(); openSwarm() }, tone: 'amber' as const }] : []),
-        { icon: AlarmClock, label: 'Scheduled tasks', hint: 'On a timer, results by chat or email', onSelect: onScheduled, tone: 'amber' },
+        { icon: AlarmClock, label: 'Automations', hint: 'Scheduled tasks: on a timer, results by chat or email', onSelect: onScheduled, tone: 'amber' },
         { icon: Archive, label: 'Agent backups', hint: 'Your agents backed up on a schedule, and restored', onSelect: onBackups, tone: 'teal' },
         { icon: Activity, label: 'Activity', hint: 'Every tool they used, and how it went', onSelect: onActivity, tone: 'emerald' },
       ],
@@ -1627,14 +1684,14 @@ function KioskDialog({ label, widest = false, onClose, children }: {
       <div
         role="dialog"
         aria-label={label}
-        className={`relative flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 shadow-2xl wide:rounded-xl wide:border wide:border-zinc-800 ${widest ? 'wide:h-[88vh] wide:max-w-6xl' : 'wide:h-[85vh] wide:max-w-3xl'}`}
+        className={`fd-dialog relative flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 wide:rounded-[var(--fd-radius-panel)] wide:border ${widest ? 'wide:h-[88vh] wide:max-w-6xl' : 'wide:h-[85vh] wide:max-w-3xl'}`}
         onClick={(e) => e.stopPropagation()}
       >
         <button
           onClick={onClose}
           title="Close"
           aria-label="Close"
-          className="absolute right-2 top-2 z-10 rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 wide:right-3 wide:top-3 wide:p-1"
+          className="absolute right-2 top-2 z-10 rounded-full p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 wide:right-4 wide:top-4 wide:p-1.5"
         >
           <X className="h-5 w-5 wide:h-4 wide:w-4" />
         </button>
@@ -1655,66 +1712,6 @@ function KioskDialog({ label, widest = false, onClose, children }: {
 // first). Off a phone it can fill the window — the libraries and shared
 // folders put the switch in their header (FullscreenButton).
 
-/** The Line's row above the agents (or its button on the collapsed rail, or a
- *  phone's header): how many items are unread, and a mark while something waits. */
-function KioskLineRow({ rail = false, phone = false, buttonClass = '' }: {
-  rail?: boolean; phone?: boolean; buttonClass?: string
-}) {
-  const unread = useLineStore((s) => s.unread)
-  const waiting = useLineStore((s) => s.waiting)
-  const open = () => window.dispatchEvent(new Event(OPEN_LINE_EVENT))
-  const hint = `Line — everything the deck and your agents said on their own${unread ? ` (${unread} unread)` : ''}`
-  if (rail) {
-    return (
-      <button onClick={open} title={hint} aria-label="Open the Line"
-        className={buttonClass ? `${buttonClass} relative` : 'relative rounded p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300'}>
-        <Waypoints className={buttonClass ? 'h-5 w-5 text-violet-600 dark:text-violet-400' : 'h-4 w-4'} />
-        {unread > 0 && <span className={`absolute rounded-full bg-violet-500 ${buttonClass ? 'right-1.5 top-2 h-2 w-2 ring-2 ring-zinc-950' : '-right-0.5 -top-0.5 h-2 w-2'}`} />}
-      </button>
-    )
-  }
-  if (phone) {
-    return (
-      <button onClick={open} title={hint}
-        className="mb-3 flex w-full items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2.5 text-left text-zinc-200 transition-colors active:bg-zinc-800">
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-violet-600/15 text-violet-500">
-          <Waypoints className="h-5 w-5" />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-base font-medium">Line</span>
-          <span className="block truncate text-xs text-zinc-500">
-            {waiting ? `${waiting} waiting for you` : unread ? `${unread} new` : 'Everything said on its own'}
-          </span>
-        </span>
-        {unread > 0 && (
-          <span className="shrink-0 rounded-full bg-violet-600/20 px-2 py-0.5 text-xs font-semibold text-violet-600 dark:text-violet-300">
-            {unread > 99 ? '99+' : unread}
-          </span>
-        )}
-      </button>
-    )
-  }
-  return (
-    <button onClick={open} title={hint}
-      className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-zinc-300 transition-colors hover:bg-zinc-800/60">
-      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-violet-600/15 text-violet-500">
-        <Waypoints className="h-4 w-4" />
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium">Line</span>
-        <span className="block truncate text-[11px] text-zinc-500">
-          {waiting ? `${waiting} waiting for you` : unread ? `${unread} new` : 'Everything said on its own'}
-        </span>
-      </span>
-      {unread > 0 && (
-        <span className="shrink-0 rounded-full bg-violet-600/20 px-1.5 text-[10px] font-semibold text-violet-600 dark:text-violet-300">
-          {unread > 99 ? '99+' : unread}
-        </span>
-      )}
-    </button>
-  )
-}
-
 function KioskWideDialog({ label, phone, widest = false, roomy = false, onClose, children }: {
   label: string; phone: boolean; widest?: boolean; roomy?: boolean; onClose: () => void; children: ReactNode
 }) {
@@ -1726,8 +1723,8 @@ function KioskWideDialog({ label, phone, widest = false, roomy = false, onClose,
       <div
         role="dialog"
         aria-label={label}
-        className={`relative flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 pb-[env(safe-area-inset-bottom)] shadow-2xl wide:pb-0 ${big ? ''
-          : `wide:rounded-xl wide:border wide:border-zinc-800 ${roomy ? 'wide:h-[90vh] wide:w-[90vw]' : `wide:h-[88vh] ${widest ? 'wide:max-w-6xl' : 'wide:max-w-5xl'}`}`}`}
+        className={`relative flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 pb-[env(safe-area-inset-bottom)] wide:pb-0 ${big ? ''
+          : `fd-dialog wide:rounded-[var(--fd-radius-panel)] wide:border ${roomy ? 'wide:h-[90vh] wide:w-[90vw]' : `wide:h-[88vh] ${widest ? 'wide:max-w-6xl' : 'wide:max-w-5xl'}`}`}`}
         onClick={(e) => e.stopPropagation()}
       >
         <DialogFullscreen.Provider value={host}>{children}</DialogFullscreen.Provider>
@@ -1737,59 +1734,36 @@ function KioskWideDialog({ label, phone, widest = false, roomy = false, onClose,
   )
 }
 
-const toolTile = 'relative flex min-w-0 flex-col items-center gap-1 rounded-lg px-1 py-2 text-[11px] font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100'
-// Equal tiles, none narrower than its name: a narrow column gives the longer
-// names ("Scheduled") their width before the rest share what's left.
-const TILE_COLS: Record<number, string> = {
-  2: 'grid-cols-[repeat(2,minmax(max-content,1fr))]',
-  3: 'grid-cols-[repeat(3,minmax(max-content,1fr))]',
-  4: 'grid-cols-[repeat(4,minmax(max-content,1fr))]',
-  5: 'grid-cols-[repeat(5,minmax(max-content,1fr))]',
-  6: 'grid-cols-[repeat(3,minmax(max-content,1fr))]',
-  7: 'grid-cols-[repeat(4,minmax(max-content,1fr))]',
-  8: 'grid-cols-[repeat(4,minmax(max-content,1fr))]',
-  9: 'grid-cols-[repeat(5,minmax(max-content,1fr))]',
-}
+const toolTile = 'relative flex min-w-0 flex-col items-center gap-1 rounded-[var(--fd-radius-control)] px-1 py-2 text-[11px] font-medium text-[var(--fd-ink-soft)] transition-colors hover:bg-[var(--fd-hover)] hover:text-[var(--fd-ink)]'
+const toolIcon = 'h-[18px] w-[18px] text-[var(--fd-ink-faint)]'
 
-/** The agent column's row of tools, as tiles — an icon over its name:
- *  Scheduled tasks (how many are active, a pulse while one runs), the File
- *  library, the Data library, and More — a menu with the rest (the Taskboard,
- *  Crew, Swarm, Vatra, Basna, Council, shared folders, Anonymize, Data rooms).
- *  The Taskboard's count of what needs you rides on More. */
-function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, scheduledRunning, onLibrary, onData, onFolders }: {
-  onTaskboard?: () => void; taskboardCount: number
-  onScheduled?: () => void; scheduledCount: number; scheduledRunning: boolean
-  onLibrary?: () => void; onData?: () => void; onFolders?: () => void
-}) {
+/** The agent column's row of what the agents keep, as quiet tiles — an icon
+ *  over its name: the File library, the Data library, the shared folders,
+ *  and More — a menu with the rest (Crew, Swarm, Vatra, Basna, Council,
+ *  Anonymize, Data rooms). The destinations people come for are the nav's. */
+function ToolTiles({ onLibrary, onData, onFolders }: { onLibrary?: () => void; onData?: () => void; onFolders?: () => void }) {
   const [moreOpen, setMoreOpen] = useState(false)
   const moreRef = useRef<HTMLButtonElement>(null)
   // More is always there: Anonymize and Data rooms always are.
-  const n = [onScheduled, onLibrary, onData, true].filter(Boolean).length
-  const needsYou = onTaskboard ? taskboardCount : 0
+  const n = [onLibrary, onData, onFolders, true].filter(Boolean).length
   return (
-    <div className={`grid gap-0.5 border-t border-zinc-800 p-2 pb-0 ${TILE_COLS[n] ?? 'grid-cols-1'}`}>
-      {onScheduled && (
-        <button onClick={onScheduled} className={toolTile} title="Scheduled tasks — your agents on a timer">
-          <span className="relative">
-            <AlarmClock className="h-[18px] w-[18px] text-amber-600 dark:text-amber-400" />
-            {scheduledRunning && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-900 dark:bg-amber-400" />}
-            {scheduledCount > 0 && !scheduledRunning && (
-              <span className="absolute -right-2.5 -top-1.5 min-w-[16px] rounded-full bg-zinc-700 px-1 text-center text-[9px] font-semibold leading-4 text-zinc-100">{scheduledCount}</span>
-            )}
-          </span>
-          <span className="max-w-full truncate">Scheduled</span>
-        </button>
-      )}
+    <div className="grid gap-0.5 px-2 pt-1" style={{ gridTemplateColumns: `repeat(${n}, minmax(0, 1fr))` }}>
       {onLibrary && (
         <button onClick={onLibrary} className={toolTile} title="File library — every file your agents made, summarised and searchable">
-          <LibraryBig className="h-[18px] w-[18px] text-violet-600 dark:text-violet-400" />
+          <LibraryBig className={toolIcon} />
           <span className="max-w-full truncate">Library</span>
         </button>
       )}
       {onData && (
         <button onClick={onData} className={toolTile} title="Data library — every table your agents keep, summarised and easy to read">
-          <Database className="h-[18px] w-[18px] text-emerald-600 dark:text-emerald-400" />
+          <Database className={toolIcon} />
           <span className="max-w-full truncate">Data</span>
+        </button>
+      )}
+      {onFolders && (
+        <button onClick={onFolders} className={toolTile} title="Shared folders — the folders your agents work in together">
+          <Folders className={toolIcon} />
+          <span className="max-w-full truncate">Folders</span>
         </button>
       )}
       <button
@@ -1797,24 +1771,14 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
         onClick={() => setMoreOpen(true)}
         className={toolTile}
         aria-haspopup="dialog"
-        aria-label={needsYou > 0 ? `More tools — ${needsYou} task${needsYou === 1 ? '' : 's'} need${needsYou === 1 ? 's' : ''} you` : 'More tools'}
-        title={`More — Tasks${needsYou > 0 ? ` (${needsYou} need${needsYou === 1 ? 's' : ''} you)` : ''}, Crew, Vatra, Basna, Council, Folders, Anonymize, Data rooms`}
+        aria-label="More tools"
+        title="More — Crew, Vatra, Basna, Council, Anonymize, Data rooms"
       >
-        <span className="relative">
-          <LayoutGrid className="h-[18px] w-[18px]" />
-          {needsYou > 0 && (
-            <span className="absolute -right-2.5 -top-1.5 min-w-[16px] rounded-full bg-teal-600 px-1 text-center text-[9px] font-semibold leading-4 text-white">
-              {needsYou > 99 ? '99+' : needsYou}
-            </span>
-          )}
-        </span>
+        <LayoutGrid className={toolIcon} />
         <span className="max-w-full truncate">More</span>
       </button>
       {moreOpen && (
         <MoreToolsDialog
-          taskboardCount={needsYou}
-          onTaskboard={onTaskboard}
-          onFolders={onFolders}
           onPicked={() => setMoreOpen(false)}
           onClose={() => { setMoreOpen(false); moreRef.current?.focus() }}
         />
@@ -1823,12 +1787,13 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
   )
 }
 
-/** More, from the agent column: the tools that aren't tiles there. Choosing one
- *  closes the menu and opens it; closing it without a choice puts the focus
- *  back on More. */
-function MoreToolsDialog({ taskboardCount, onTaskboard, onFolders, onPicked, onClose }: {
-  taskboardCount: number
-  onTaskboard?: () => void
+/** More, from the agent column: the tools that are neither nav destinations
+ *  nor tiles there. A phone, which has no tiles, also gets the libraries and
+ *  the shared folders here. Choosing one closes the menu and opens it;
+ *  closing it without a choice puts the focus back on More. */
+function MoreToolsDialog({ onLibrary, onData, onFolders, onPicked, onClose }: {
+  onLibrary?: () => void
+  onData?: () => void
   onFolders?: () => void
   onPicked: () => void
   onClose: () => void
@@ -1843,19 +1808,12 @@ function MoreToolsDialog({ taskboardCount, onTaskboard, onFolders, onPicked, onC
   const openTeamWork = useTeamWorkStore((s) => s.openTeamWork)
   const pick = (open: () => void) => () => { onPicked(); open() }
 
+  const atWork: MenuSection['items'] = [
+    ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: pick(openCrew), tone: 'teal' as const }] : []),
+    ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: pick(openSwarm), tone: 'amber' as const }] : []),
+  ]
   const sections: MenuSection[] = [
-    {
-      title: 'Your agents at work',
-      items: [
-        ...(onTaskboard ? [{
-          icon: ListChecks, label: 'Taskboard', tone: 'teal' as const, badge: taskboardCount,
-          hint: taskboardCount > 0 ? `${taskboardCount} need${taskboardCount === 1 ? 's' : ''} you` : 'Asked, sent, and what needs you',
-          onSelect: pick(onTaskboard),
-        }] : []),
-        ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: pick(openCrew), tone: 'teal' as const }] : []),
-        ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: pick(openSwarm), tone: 'amber' as const }] : []),
-      ],
-    },
+    ...(atWork.length ? [{ title: 'Your agents at work', items: atWork }] : []),
     {
       title: 'Agents as a team',
       items: [
@@ -1867,6 +1825,8 @@ function MoreToolsDialog({ taskboardCount, onTaskboard, onFolders, onPicked, onC
     {
       title: 'What they keep',
       items: [
+        ...(onLibrary ? [{ icon: LibraryBig, label: 'File library', hint: 'Every file they made, easy to find', onSelect: pick(onLibrary), tone: 'violet' as const }] : []),
+        ...(onData ? [{ icon: Database, label: 'Data library', hint: 'Every table they keep, easy to read', onSelect: pick(onData), tone: 'cyan' as const }] : []),
         ...(onFolders ? [{ icon: Folders, label: 'Shared folders', hint: 'The folders they work in together', onSelect: pick(onFolders), tone: 'sky' as const }] : []),
         { icon: EyeOff, label: 'Anonymize', hint: 'Names and numbers out of a file; the real ones kept for you', onSelect: pick(() => openAnonymize()), tone: 'fuchsia' },
         { icon: FolderLock, label: 'Data rooms', hint: 'A data room anonymized for Claude; results restored here', onSelect: pick(() => openRooms()), tone: 'fuchsia' },
@@ -1887,12 +1847,11 @@ function MoreToolsDialog({ taskboardCount, onTaskboard, onFolders, onPicked, onC
   )
 }
 
-// ── Left: agents ─────────────────────────────────────────────────────
+// ── Left: the nav over the team of agents ────────────────────────────
 
 function AgentsColumn({
   agents, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onLeave, onRefresh, onSpawn, onGroup, onOptions, onSettings, onInfo,
-  onTaskboard, taskboardCount = 0,
-  onScheduled, scheduledCount = 0, scheduledRunning = false, onLibrary, onData, onFolders, menuFor, locked = false, adminSwitch = false,
+  nav, navCurrent, onLibrary, onData, onFolders, menuFor, locked = false, adminSwitch = false,
 }: {
   agents: SimpleAgent[]
   activeAgentId: string | null
@@ -1914,13 +1873,9 @@ function AgentsColumn({
   onSettings?: () => void
   /** Kiosk only: the Info button beside Settings. */
   onInfo?: () => void
-  /** Opens the Taskboard; its badge is the Needs me count. */
-  onTaskboard?: () => void
-  taskboardCount?: number
-  /** Opens Scheduled tasks. */
-  onScheduled?: () => void
-  scheduledCount?: number
-  scheduledRunning?: boolean
+  /** The outcome nav (Today, Inbox, Tasks…) and the one in front. */
+  nav: NavEntry[]
+  navCurrent: NavTarget | null
   /** Opens the File library. */
   onLibrary?: () => void
   /** Opens the Data library. */
@@ -1957,6 +1912,9 @@ function AgentsColumn({
     setAgentDragState(on)
     if (!on) setOverNew(false)
   }, [])
+  // The folded rail's More (the open column has its tiles).
+  const [railMore, setRailMore] = useState(false)
+  const railMoreRef = useRef<HTMLButtonElement>(null)
 
   // ── Collapsed rail ──
   if (!open) {
@@ -1980,28 +1938,28 @@ function AgentsColumn({
             : railStart
               ? `${a.name} — ${stateLabel(a)} · click to ${a.kind === 'local' ? 'check again' : 'start'}`
               : `${a.name} — ${isBooting ? 'Starting…' : stateLabel(a)}`}
-          className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold transition-colors ${
+          className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-semibold transition-colors ${
             active
-              ? 'bg-violet-600/20 text-violet-300 ring-1 ring-violet-500/40'
+              ? 'bg-[var(--fd-accent-soft)] text-[var(--fd-accent-text)] ring-2 ring-[var(--fd-accent)]/40'
               : openable
-                ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-                : 'bg-zinc-900 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-800'
+                ? 'bg-[var(--fd-selected)] text-[var(--fd-ink)] hover:bg-[var(--fd-hover)]'
+                : 'bg-[var(--fd-hover)] text-[var(--fd-ink-faint)] hover:bg-[var(--fd-selected)]'
           }`}
         >
           {switching.has(a.id) || isBooting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <AgentPicture agentId={a.id} name={a.name} size="md" dim={!openable && !active} />}
-          <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-zinc-900" />
+          <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-[var(--fd-shell)]" />
           {info?.busy && (
-            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-900 dark:bg-amber-400" />
+            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-[var(--fd-shell)] dark:bg-amber-400" />
           )}
           {info?.unread && !active && !info.busy && (
-            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-sky-400 ring-2 ring-zinc-900" />
+            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-sky-400 ring-2 ring-[var(--fd-shell)]" />
           )}
         </button>
       )
     }
     return (
-      <aside className="flex w-14 shrink-0 flex-col border-r border-zinc-800 bg-zinc-900/50">
-        <div className="flex flex-col items-center gap-0.5 border-b border-zinc-800 py-2">
+      <aside className="flex w-16 shrink-0 flex-col">
+        <div className="flex flex-col items-center gap-0.5 py-3">
           <button onClick={() => setOpen(true)} className={iconBtn} title="Show agents">
             <ChevronRight className="h-4 w-4" />
           </button>
@@ -2018,8 +1976,11 @@ function AgentsColumn({
           {/* Bell lives at the TOP so its downward dropdown isn't clipped by
               the h-screen overflow-hidden root when the rail is collapsed. */}
           <NotificationBell align="left" />
-          <KioskLineRow rail />
         </div>
+        <div className="py-1">
+          <SimpleNav entries={nav} current={navCurrent} rail />
+        </div>
+        <div className="mx-4 my-2 border-t fd-divider" />
         <div className="flex flex-1 flex-col items-center gap-1.5 overflow-y-auto py-2">
           {railSections.map((s) => {
             if (!s.group && s.agents.length === 0) return null
@@ -2035,89 +1996,42 @@ function AgentsColumn({
             <Plus className="h-4 w-4" />
           </button>
         </div>
-        {(onTaskboard || onScheduled || onLibrary || onData || onFolders) && (
-          <div className="flex flex-col items-center gap-0.5 border-t border-zinc-800 py-2">
-            {onTaskboard && (
-              <button
-                onClick={onTaskboard}
-                title={taskboardCount > 0 ? `Taskboard — ${taskboardCount} need${taskboardCount === 1 ? 's' : ''} you` : 'Taskboard'}
-                aria-label="Taskboard"
-                className="relative flex h-10 w-10 items-center justify-center rounded-lg text-teal-600 transition-colors hover:bg-zinc-800 dark:text-teal-400"
-              >
-                <ListChecks className="h-5 w-5" />
-                {taskboardCount > 0 && (
-                  <span className="absolute right-0.5 top-0.5 min-w-[16px] rounded-full bg-teal-600 px-1 text-center text-[9px] font-semibold leading-4 text-white">
-                    {taskboardCount > 99 ? '99+' : taskboardCount}
-                  </span>
-                )}
-              </button>
-            )}
-            {onScheduled && (
-              <button
-                onClick={onScheduled}
-                title="Scheduled tasks"
-                aria-label="Scheduled tasks"
-                className="relative flex h-10 w-10 items-center justify-center rounded-lg text-amber-600 transition-colors hover:bg-zinc-800 dark:text-amber-400"
-              >
-                <AlarmClock className="h-5 w-5" />
-                {scheduledRunning && <span className="absolute right-1.5 top-1.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-900 dark:bg-amber-400" />}
-              </button>
-            )}
-            {onLibrary && (
-              <button
-                onClick={onLibrary}
-                title="File library"
-                aria-label="File library"
-                className="flex h-10 w-10 items-center justify-center rounded-lg text-violet-600 transition-colors hover:bg-zinc-800 dark:text-violet-400"
-              >
-                <LibraryBig className="h-5 w-5" />
-              </button>
-            )}
-            {onData && (
-              <button
-                onClick={onData}
-                title="Data library"
-                aria-label="Data library"
-                className="flex h-10 w-10 items-center justify-center rounded-lg text-emerald-600 transition-colors hover:bg-zinc-800 dark:text-emerald-400"
-              >
-                <Database className="h-5 w-5" />
-              </button>
-            )}
-            {onFolders && (
-              <button
-                onClick={onFolders}
-                title="Shared folders"
-                aria-label="Shared folders"
-                className="flex h-10 w-10 items-center justify-center rounded-lg text-sky-600 transition-colors hover:bg-zinc-800 dark:text-sky-400"
-              >
-                <Folders className="h-5 w-5" />
-              </button>
-            )}
-          </div>
-        )}
+        <div className="flex flex-col items-center gap-0.5 py-2">
+          {onLibrary && (
+            <button onClick={onLibrary} title="File library" aria-label="File library" className="fd-nav-item fd-nav-rail">
+              <LibraryBig className="fd-nav-icon" />
+            </button>
+          )}
+          {onData && (
+            <button onClick={onData} title="Data library" aria-label="Data library" className="fd-nav-item fd-nav-rail">
+              <Database className="fd-nav-icon" />
+            </button>
+          )}
+          {onFolders && (
+            <button onClick={onFolders} title="Shared folders" aria-label="Shared folders" className="fd-nav-item fd-nav-rail">
+              <Folders className="fd-nav-icon" />
+            </button>
+          )}
+          <button ref={railMoreRef} onClick={() => setRailMore(true)} title="More tools" aria-label="More tools" aria-haspopup="dialog" className="fd-nav-item fd-nav-rail">
+            <LayoutGrid className="fd-nav-icon" />
+          </button>
+          {railMore && (
+            <MoreToolsDialog onPicked={() => setRailMore(false)} onClose={() => { setRailMore(false); railMoreRef.current?.focus() }} />
+          )}
+        </div>
         {onSettings ? (
-          <div className="flex flex-col items-center gap-0.5 border-t border-zinc-800 py-2">
+          <div className="flex flex-col items-center gap-0.5 pb-3 pt-1">
             {onInfo && (
-              <button
-                onClick={onInfo}
-                title="Info"
-                aria-label="Info"
-                className="flex h-10 w-10 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
-              >
-                <Info className="h-5 w-5" />
+              <button onClick={onInfo} title="Info" aria-label="Info" className="fd-nav-item fd-nav-rail">
+                <Info className="fd-nav-icon" />
               </button>
             )}
-            <button
-              onClick={onSettings}
-              title="Settings"
-              aria-label="Settings"
-              className="flex h-10 w-10 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
-            >
-              <Settings className="h-5 w-5" />
+            <button onClick={onSettings} title="Settings" aria-label="Settings" className="fd-nav-item fd-nav-rail">
+              <Settings className="fd-nav-icon" />
             </button>
           </div>
         ) : (
-          <div className="flex flex-col items-center gap-0.5 border-t border-zinc-800 py-2">
+          <div className="flex flex-col items-center gap-0.5 pb-3 pt-1">
             <button onClick={toggleTheme} className={iconBtn} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
               {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
             </button>
@@ -2138,11 +2052,11 @@ function AgentsColumn({
   // ── Expanded column ──
   return (
     <aside
-      className="relative flex shrink-0 flex-col border-r border-zinc-800 bg-zinc-900/50"
+      className="relative flex shrink-0 flex-col"
       style={{ width: width.size }}
     >
       {/* Header */}
-      <div className="flex h-14 items-center justify-between border-b border-zinc-800 px-3">
+      <div className="flex h-16 items-center justify-between pl-4 pr-2">
         <BrandMark connected={wsConnected} caption={adminSwitch ? 'User view' : undefined} />
         <div className="flex items-center gap-0.5">
           <NotificationBell align="left" />
@@ -2162,16 +2076,16 @@ function AgentsColumn({
         </div>
       </div>
 
-      {/* The Line, pinned above the agents */}
-      <div className="px-2 pt-2">
-        <KioskLineRow />
+      {/* What people come for, in plain words (the Line is the Inbox). */}
+      <div className="px-3">
+        <SimpleNav entries={nav} current={navCurrent} />
       </div>
 
-      {/* List header: what's here, the two ways to add to it, and the search */}
-      <div className="@container space-y-2 px-3 pb-2 pt-3">
-        <div className="flex items-center gap-2 px-0.5">
-          <h2 className="text-[13px] font-semibold text-zinc-200">Agents</h2>
-          <span className="rounded-full bg-zinc-800 px-1.5 text-[10px] font-medium leading-4 tabular-nums text-zinc-400">{agents.length}</span>
+      {/* The team: the agents, the two ways to add to it, and the search */}
+      <div className="@container space-y-2 px-4 pb-2 pt-3">
+        <div className="flex items-center gap-2">
+          <h2 className="fd-section-label">Team</h2>
+          <span className="fd-count">{agents.length}</span>
         </div>
         {/* While an agent is dragged the row is one drop target, the same height: nothing below moves. */}
         {agentDrag && canGroup ? (
@@ -2186,7 +2100,7 @@ function AgentsColumn({
               const id = e.dataTransfer.getData(AGENT_DRAG_TYPE)
               if (id) onGroup({ agentIds: [id] })
             }}
-            className={`flex h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed px-2 text-xs font-medium transition-colors ${
+            className={`flex h-9 w-full items-center justify-center gap-1.5 rounded-full border border-dashed px-2 text-xs font-medium transition-colors ${
               overNew ? 'border-violet-400 bg-violet-500/10 text-zinc-100' : 'border-zinc-600 text-zinc-300'}`}
           >
             <FolderPlus className="h-4 w-4 shrink-0" />
@@ -2199,7 +2113,7 @@ function AgentsColumn({
               onClick={onSpawn}
               aria-label="New agent"
               title={locked ? 'New agent from an archetype' : 'Spawn a new agent'}
-              className="flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-2 text-xs font-medium text-white shadow-sm shadow-black/10 transition-colors hover:bg-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60"
+              className="fd-btn-primary h-9 min-w-0 flex-1 px-3 text-xs"
             >
               <Plus className="h-4 w-4 shrink-0" />
               {/* A narrow column keeps the word that matters, not "New …". */}
@@ -2211,11 +2125,9 @@ function AgentsColumn({
                 onClick={() => onGroup({})}
                 aria-label="New group"
                 title="New group"
-                className="flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg border border-zinc-700 px-2 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
+                className="fd-btn-quiet h-9 w-9 shrink-0"
               >
-                <FolderPlus className="h-4 w-4 shrink-0 text-zinc-400" />
-                <span className="truncate @max-[14rem]:hidden">New group</span>
-                <span className="hidden truncate @max-[14rem]:inline">Group</span>
+                <FolderPlus className="h-4 w-4 shrink-0 text-[var(--fd-ink-faint)]" />
               </button>
             )}
           </div>
@@ -2230,7 +2142,7 @@ function AgentsColumn({
               onKeyDown={(e) => { if (e.key === 'Escape' && search) { e.stopPropagation(); setSearch('') } }}
               placeholder="Search agents…"
               aria-label="Search agents"
-              className="h-8 w-full rounded-lg border border-zinc-800 bg-zinc-950/60 pl-8 pr-7 text-xs text-zinc-200 placeholder-zinc-500 transition-colors focus:border-violet-500/60 focus:outline-none"
+              className="h-9 w-full rounded-full border border-[var(--fd-line)] bg-[var(--fd-surface)] pl-8 pr-7 text-xs text-zinc-200 placeholder-zinc-500 transition-colors focus:border-violet-500/60 focus:outline-none"
             />
             {search && (
               <button
@@ -2249,7 +2161,13 @@ function AgentsColumn({
       {/* Agents */}
       <div className="flex-1 overflow-y-auto px-2 pb-2">
         {agents.length === 0 && (
-          <p className="px-2.5 py-6 text-center text-xs text-zinc-500">No agents yet.</p>
+          <div className="mx-1 mt-2 rounded-[var(--fd-radius-card)] border border-dashed border-[var(--fd-line)] px-4 py-5 text-center">
+            <p className="text-sm font-semibold text-[var(--fd-ink)]">Your team is empty</p>
+            <p className="mt-1 text-xs leading-relaxed text-[var(--fd-ink-soft)]">Add an agent for a job you'd hand to a helper — inbox, research, reports.</p>
+            <button onClick={onSpawn} className="mt-3 text-xs font-semibold text-[var(--fd-accent-text)] hover:underline">
+              Add your first agent
+            </button>
+          </div>
         )}
         <AgentSections
           agents={agents}
@@ -2293,7 +2211,7 @@ function AgentsColumn({
               <li
                 key={a.id}
                 {...drag}
-                className={`group/row group relative flex items-center gap-0.5 rounded-lg pr-1 transition-colors ${active ? 'bg-zinc-800' : 'hover:bg-zinc-800/60'}`}
+                className={`group/row group relative flex items-center gap-0.5 rounded-[var(--fd-radius-control)] pr-1 transition-colors ${active ? 'bg-[var(--fd-selected)]' : 'hover:bg-[var(--fd-hover)]'}`}
               >
                 <button
                   onClick={() => onOpen(a)}
@@ -2301,17 +2219,17 @@ function AgentsColumn({
                   title={openable
                     ? a.asleep ? `Chat with ${a.name} — asleep, it wakes when you open it` : `Chat with ${a.name}`
                     : `${a.name} — ${isBooting ? 'Starting…' : stateLabel(a)}`}
-                  className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg py-1.5 pl-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
+                  className="flex min-w-0 flex-1 items-center gap-2.5 rounded-[var(--fd-radius-control)] py-1.5 pl-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
                 >
                   {/* Its picture (its initials unless one was picked), its state on the corner, working or a new reply on top. */}
-                  <span className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold transition-colors ${
-                    active ? 'bg-violet-600/20 text-violet-700 dark:text-violet-300'
-                      : powered ? 'bg-zinc-700/50 text-zinc-200' : 'bg-zinc-800/70 text-zinc-500'}`}
+                  <span className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-[11px] font-semibold transition-colors ${
+                    active ? 'bg-[var(--fd-accent-soft)] text-[var(--fd-accent-text)]'
+                      : powered ? 'bg-[var(--fd-selected)] text-[var(--fd-ink)]' : 'bg-[var(--fd-hover)] text-[var(--fd-ink-faint)]'}`}
                   >
                     {working || isBooting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <AgentPicture agentId={a.id} name={a.name} dim={!powered && !active} />}
-                    <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-zinc-900" />
-                    {busy && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-900 dark:bg-amber-400" title="Working" />}
-                    {unread && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-sky-400 ring-2 ring-zinc-900" title="New reply" />}
+                    <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-[var(--fd-shell)]" />
+                    {busy && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-[var(--fd-shell)] dark:bg-amber-400" title="Working" />}
+                    {unread && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-sky-400 ring-2 ring-[var(--fd-shell)]" title="New reply" />}
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
@@ -2387,32 +2305,18 @@ function AgentsColumn({
         />
       </div>
 
-      {(onTaskboard || onScheduled || onLibrary || onData || onFolders) && (
-        <ToolTiles
-          onTaskboard={onTaskboard}
-          taskboardCount={taskboardCount}
-          onScheduled={onScheduled}
-          scheduledCount={scheduledCount}
-          scheduledRunning={scheduledRunning}
-          onLibrary={onLibrary}
-          onData={onData}
-          onFolders={onFolders}
-        />
-      )}
+      <ToolTiles onLibrary={onLibrary} onData={onData} onFolders={onFolders} />
 
       {/* Footer — the kiosk's is one Settings button (KioskSettingsDialog). */}
       {onSettings ? (
-        <div className="flex items-center gap-1 border-t border-zinc-800 p-2">
-          <button
-            onClick={onSettings}
-            className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
-          >
-            <Settings className="h-[18px] w-[18px] text-zinc-400" />
+        <div className="flex items-center gap-1 px-3 pb-3 pt-1">
+          <button onClick={onSettings} className="fd-nav-item min-w-0 flex-1">
+            <Settings className="fd-nav-icon" />
             Settings
             {authEnabled && authUser && (
               <span
                 title={authUser.display_name || authUser.email}
-                className="ml-auto flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-violet-500/15 text-[10px] font-semibold text-violet-400"
+                className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--fd-accent-soft)] text-[10px] font-semibold text-[var(--fd-accent-text)]"
               >
                 {initials(authUser.display_name || authUser.email)}
               </span>
@@ -2423,9 +2327,9 @@ function AgentsColumn({
               onClick={onInfo}
               title="Info — models, agents, profile, plan"
               aria-label="Info"
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+              className="fd-nav-item fd-nav-rail shrink-0"
             >
-              <Info className="h-[18px] w-[18px]" />
+              <Info className="fd-nav-icon" />
             </button>
           )}
           {adminSwitch && (
@@ -2433,14 +2337,14 @@ function AgentsColumn({
               onClick={leaveKioskView}
               title="Switch to admin view — models, archetypes, connections, settings"
               aria-label="Switch to admin view"
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-violet-600 transition-colors hover:bg-violet-500/10 dark:text-violet-400"
+              className="fd-nav-item fd-nav-rail shrink-0 !text-[var(--fd-accent-text)]"
             >
               <ShieldCheck className="h-[18px] w-[18px]" />
             </button>
           )}
         </div>
       ) : (
-        <div className="flex items-center justify-between gap-2 border-t border-zinc-800 px-2 py-1.5">
+        <div className="flex items-center justify-between gap-2 px-3 pb-3 pt-1">
           <div className="flex items-center gap-0.5">
             <button onClick={toggleTheme} className={iconBtn} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
               {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
@@ -2485,48 +2389,53 @@ function StateDot({ agent, className = '' }: { agent: SimpleAgent; className?: s
 
 // ── Centre: nothing open yet ─────────────────────────────────────────
 
-function EmptyChat({ hasAgents, onSpawn, locked = false, onGuide }: {
+function EmptyChat({ hasAgents, onSpawn, locked = false, onGuide, startName, onStart }: {
   hasAgents: boolean
   onSpawn: () => void
   locked?: boolean
   /** Kiosk only: open the Getting started guide. */
   onGuide?: () => void
+  /** With agents but none on: the first one that can be switched on, and how. */
+  startName?: string
+  onStart?: () => void
 }) {
   return (
-    <div className="flex h-full items-center justify-center bg-zinc-950/80 p-6">
-      <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900/60 p-8 text-center">
-        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-violet-600/20 text-violet-400">
+    <div className="flex h-full items-center justify-center p-8">
+      <div className="w-full max-w-md text-center">
+        <div className="fd-empty-mark mx-auto mb-6">
           <MessagesSquare className="h-6 w-6" />
         </div>
-        <h2 className="mb-1.5 text-lg font-semibold text-zinc-100">
-          {hasAgents ? 'None of your agents is on' : 'No agents available'}
+        <h2 className="fd-empty-title mb-2 text-2xl">
+          {hasAgents ? 'Your team is taking a break' : 'Let\'s set up your first agent'}
         </h2>
-        <p className="text-sm text-zinc-400">
+        <p className="fd-empty-text text-[15px] leading-relaxed">
           {hasAgents
             ? locked
-              ? 'Switch one on from the list on the left to start a conversation. What it saves for you lands in Library, Data and Folders, bottom left.'
-              : 'Switch one on from the list on the left to start a conversation. Its files and data show up on the right.'
+              ? 'None of your agents is on right now. Switch one on in Team on the left and say hello. What it saves for you lands in Library, Data and Folders, bottom left.'
+              : 'None of your agents is on right now. Switch one on in Team on the left and say hello. Its files and data show up on the right.'
             : locked
-              ? 'Create an agent from an archetype to start chatting.'
-              : 'Spawn your first agent to start chatting.'}
+              ? 'An agent is a helper for one job — your inbox, research, a weekly report. Pick one from a ready-made role and it\'s ready in a minute.'
+              : 'An agent is a helper for one job — your inbox, research, a weekly report. Spawn one and start chatting.'}
         </p>
-        {!hasAgents && (
-          <button
-            onClick={onSpawn}
-            className="mt-6 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500"
-          >
-            {locked ? 'New agent' : 'Spawn an agent'}
-          </button>
-        )}
-        {onGuide && (
-          <button
-            onClick={onGuide}
-            className="mx-auto mt-4 flex items-center gap-1.5 text-xs font-medium text-zinc-500 transition-colors hover:text-violet-600 dark:hover:text-violet-400"
-          >
-            <Compass className="h-3.5 w-3.5" />
-            New here? Getting started
-          </button>
-        )}
+        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+          {hasAgents && onStart && startName ? (
+            <button onClick={onStart} className="fd-btn-primary h-11 px-6 text-sm">
+              <Power className="h-4 w-4" />
+              Switch on {startName}
+            </button>
+          ) : !hasAgents ? (
+            <button onClick={onSpawn} className="fd-btn-primary h-11 px-6 text-sm">
+              <Plus className="h-4 w-4" />
+              {locked ? 'New agent' : 'Spawn an agent'}
+            </button>
+          ) : null}
+          {onGuide && (
+            <button onClick={onGuide} className="fd-btn-quiet h-11 px-5 text-sm">
+              <Compass className="h-4 w-4" />
+              Getting started
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -2534,12 +2443,14 @@ function EmptyChat({ hasAgents, onSpawn, locked = false, onGuide }: {
 
 // ── Right: files + datastore of the active agent ─────────────────────
 
-function ContextColumn({ agentId, agentName, onOptions, menu }: {
+function ContextColumn({ agentId, agentName, onOptions, menu, onLibrary }: {
   agentId: string | null
   agentName: string
   onOptions?: () => void
   /** Kiosk only: the active agent's "⋯". */
   menu?: ReactNode
+  /** The File library: every agent's files, for when no chat is open. */
+  onLibrary?: () => void
 }) {
   const open = useUIStore((s) => s.simpleRightOpen)
   const setOpen = useUIStore((s) => s.setSimpleRightOpen)
@@ -2549,7 +2460,7 @@ function ContextColumn({ agentId, agentName, onOptions, menu }: {
 
   if (!open) {
     return (
-      <aside className="flex w-12 shrink-0 flex-col items-center gap-0.5 border-l border-zinc-800 bg-zinc-900/50 py-2">
+      <aside className="flex w-14 shrink-0 flex-col items-center gap-0.5 py-3">
         <button onClick={() => setOpen(true)} className={iconBtn} title="Show files and data">
           <ChevronLeft className="h-4 w-4" />
         </button>
@@ -2559,10 +2470,10 @@ function ContextColumn({ agentId, agentName, onOptions, menu }: {
           </button>
         )}
         <button onClick={() => setOpen(true)} className={iconBtn} title="Files">
-          <FolderOpen className="h-4 w-4 text-violet-400" />
+          <FolderOpen className="h-4 w-4" />
         </button>
         <button onClick={() => setOpen(true)} className={iconBtn} title="Datastore">
-          <Database className="h-4 w-4 text-emerald-400" />
+          <Database className="h-4 w-4" />
         </button>
       </aside>
     )
@@ -2570,7 +2481,7 @@ function ContextColumn({ agentId, agentName, onOptions, menu }: {
 
   return (
     <aside
-      className="relative flex shrink-0 flex-col border-l border-zinc-800 bg-zinc-950/40"
+      className="fd-main-panel relative my-2 mr-2 ml-2 flex shrink-0 flex-col overflow-hidden"
       style={{ width: width.size }}
     >
       {/* Left edge: drag to resize */}
@@ -2581,8 +2492,8 @@ function ContextColumn({ agentId, agentName, onOptions, menu }: {
       />
 
       {/* Header */}
-      <div className="flex h-10 shrink-0 items-center justify-between border-b border-zinc-800 px-3">
-        <span className="min-w-0 truncate text-xs font-medium text-zinc-400" title={agentName || undefined}>
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-[var(--fd-line)] pl-4 pr-2">
+        <span className="min-w-0 truncate text-sm font-semibold text-[var(--fd-ink)]" title={agentName || undefined}>
           {agentId ? agentName : 'Files & data'}
         </span>
         <div className="flex items-center gap-0.5">
@@ -2601,8 +2512,16 @@ function ContextColumn({ agentId, agentName, onOptions, menu }: {
       {agentId ? (
         <FilesDataPanels agentId={agentId} agentName={agentName} />
       ) : (
-        <div className="flex flex-1 items-center justify-center px-6 text-center text-xs text-zinc-500">
-          Open a chat to see that agent's files and datastore here.
+        <div className="flex flex-1 flex-col items-center justify-center px-8 text-center">
+          <div className="fd-empty-mark mb-4 h-12 w-12"><FolderOpen className="h-5 w-5" /></div>
+          <p className="fd-empty-title text-sm">Nothing open yet</p>
+          <p className="fd-empty-text mt-1 text-xs leading-relaxed">Open a chat and that agent's files and datastore appear here.</p>
+          {onLibrary && (
+            <button onClick={onLibrary} className="fd-btn-quiet mt-4 h-9 px-4 text-xs">
+              <LibraryBig className="h-3.5 w-3.5" />
+              Browse all files
+            </button>
+          )}
         </div>
       )}
     </aside>
@@ -2724,7 +2643,7 @@ function KioskFilesDataDialog({ agentId, agentName, onClose }: { agentId: string
 
 function PhoneLayout({
   agents, activeAgent, activeAgentId, activeSessionName, sessionInfo, switching, booting,
-  onOpen, onPower, onLeave, onSpawn, onGroup, onSettings, onInfo, onTaskboard, taskboardCount = 0, onScheduled, scheduledRunning = false,
+  onOpen, onPower, onLeave, onSpawn, onGroup, onSettings, onInfo, nav,
   onLibrary, onData, onFolders, menuFor, locked, adminSwitch = false, overlayOpen = false, onCloseOverlays, chatOpens = 0,
 }: {
   agents: SimpleAgent[]
@@ -2741,10 +2660,8 @@ function PhoneLayout({
   onGroup: (req: GroupRequest) => void
   onSettings?: () => void
   onInfo?: () => void
-  onTaskboard?: () => void
-  taskboardCount?: number
-  onScheduled?: () => void
-  scheduledRunning?: boolean
+  /** The outcome nav: tiles at the top of the list (the list itself is Today). */
+  nav: NavEntry[]
   onLibrary?: () => void
   onData?: () => void
   onFolders?: () => void
@@ -2765,6 +2682,8 @@ function PhoneLayout({
   const groups = useGroupStore((s) => s.groups)
   const [search, setSearch] = useState('')
   const [filesOpen, setFilesOpen] = useState(false)
+  // More, from the tiles at the top of the list.
+  const [phoneMore, setPhoneMore] = useState(false)
   // Back to the list keeps the chat open; opening any chat shows it again: a
   // tap, a new agent that just came up, a library's "Agent chat" — also the
   // one left for the list, whose id stays the same (`chatOpens` still
@@ -2843,9 +2762,8 @@ function PhoneLayout({
   const canGroup = agents.length > 1 || groups.some(isFolder)
 
   const phoneBtn = 'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors active:bg-zinc-800 hover:bg-zinc-800 hover:text-zinc-100'
-  // The agent list's header carries every tool: a little narrower, so seven
-  // of them and the bell still leave the logo its room on a 375 px phone.
-  const toolBtn = 'flex h-10 w-9 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors active:bg-zinc-800 hover:bg-zinc-800 hover:text-zinc-100'
+  // The agent list's header: the bell, Info and Settings (the tools are tiles below it).
+  const toolBtn = 'flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-[var(--fd-ink-soft)] transition-colors active:bg-[var(--fd-selected)] hover:bg-[var(--fd-hover)] hover:text-[var(--fd-ink)]'
 
   if (showChat) {
     const a = activeAgent
@@ -2895,48 +2813,26 @@ function PhoneLayout({
     )
   }
 
+  // The tiles at the top of the list: the nav's destinations (the list is
+  // Today), then what the agents keep and More.
+  const tiles: { key: string; label: string; hint: string; icon: NavEntry['icon']; count?: number; hot?: boolean; dot?: boolean; onSelect: () => void }[] = [
+    ...nav.filter((e) => e.id !== 'today'),
+    ...(onLibrary ? [{ key: 'library', label: 'Library', hint: 'File library', icon: LibraryBig, onSelect: onLibrary }] : []),
+    ...(onData ? [{ key: 'data', label: 'Data', hint: 'Data library', icon: Database, onSelect: onData }] : []),
+    ...(onFolders ? [{ key: 'folders', label: 'Folders', hint: 'Shared folders', icon: Folders, onSelect: onFolders }] : []),
+    { key: 'more', label: 'More', hint: 'More tools', icon: LayoutGrid, onSelect: () => setPhoneMore(true) },
+  ].map((t) => ('id' in t ? { ...t, key: t.id } : t))
+
   return (
-    <div className="flex h-[100dvh] flex-col overflow-hidden bg-zinc-950">
-      <header className="flex h-14 shrink-0 items-center gap-0.5 border-b border-zinc-800 pl-3 pr-1.5">
+    <div className="fd-shell flex h-[100dvh] flex-col overflow-hidden">
+      <header className="flex h-14 shrink-0 items-center gap-0.5 pl-4 pr-1.5">
         <div className="@container min-w-0 flex-1"><BrandMark connected={wsConnected} caption={adminSwitch ? 'User view' : undefined} compact /></div>
         {adminSwitch && (
           <button onClick={leaveKioskView} className={toolBtn} aria-label="Switch to admin view" title="Switch to admin view">
-            <ShieldCheck className="h-5 w-5 text-violet-600 dark:text-violet-400" />
+            <ShieldCheck className="h-5 w-5 text-[var(--fd-accent-text)]" />
           </button>
         )}
         <NotificationBell />
-        <KioskLineRow rail buttonClass={toolBtn} />
-        {onTaskboard && (
-          <button onClick={onTaskboard} className={`${toolBtn} relative`} aria-label="Taskboard" title="Taskboard">
-            <ListChecks className="h-5 w-5 text-teal-600 dark:text-teal-400" />
-            {taskboardCount > 0 && (
-              <span className="absolute right-0 top-1 min-w-[16px] rounded-full bg-teal-600 px-1 text-center text-[9px] font-semibold leading-4 text-white">
-                {taskboardCount > 99 ? '99+' : taskboardCount}
-              </span>
-            )}
-          </button>
-        )}
-        {onScheduled && (
-          <button onClick={onScheduled} className={`${toolBtn} relative`} aria-label="Scheduled tasks" title="Scheduled tasks">
-            <AlarmClock className="h-5 w-5 text-amber-600 dark:text-amber-400" />
-            {scheduledRunning && <span className="absolute right-1.5 top-2 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-950 dark:bg-amber-400" />}
-          </button>
-        )}
-        {onLibrary && (
-          <button onClick={onLibrary} className={toolBtn} aria-label="File library" title="File library">
-            <LibraryBig className="h-5 w-5 text-violet-600 dark:text-violet-400" />
-          </button>
-        )}
-        {onData && (
-          <button onClick={onData} className={toolBtn} aria-label="Data library" title="Data library">
-            <Database className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
-          </button>
-        )}
-        {onFolders && (
-          <button onClick={onFolders} className={toolBtn} aria-label="Shared folders" title="Shared folders">
-            <Folders className="h-5 w-5 text-sky-600 dark:text-sky-400" />
-          </button>
-        )}
         {onInfo && (
           <button onClick={onInfo} className={toolBtn} aria-label="Info" title="Info">
             <Info className="h-5 w-5" />
@@ -2949,19 +2845,34 @@ function PhoneLayout({
         )}
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3">
-        <KioskLineRow phone />
+      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-4 pt-2">
+        <nav aria-label="Main" className="mb-6 grid grid-cols-3 gap-2">
+          {tiles.map((t) => {
+            const Icon = t.icon
+            const count = t.count && t.count > 0 ? (t.count > 99 ? '99+' : String(t.count)) : ''
+            return (
+              <button key={t.key} onClick={t.onSelect} title={t.hint} aria-label={count && t.hot ? `${t.label} — ${t.hint}` : t.label}
+                className="fd-card relative flex h-[76px] flex-col items-center justify-center gap-1.5 px-1 text-[13px] font-medium text-[var(--fd-ink)] shadow-none transition-colors active:bg-[var(--fd-selected)]">
+                <Icon className="h-5 w-5 text-[var(--fd-ink-soft)]" />
+                <span className="max-w-full truncate">{t.label}</span>
+                {t.dot ? <span className="absolute right-2.5 top-2.5 h-2 w-2 animate-pulse rounded-full bg-[var(--fd-accent)]" />
+                  : count ? <span className={`fd-count absolute right-1.5 top-1.5 ${t.hot ? 'fd-count-hot' : ''}`}>{count}</span> : null}
+              </button>
+            )
+          })}
+        </nav>
+        {phoneMore && <MoreToolsDialog onPicked={() => setPhoneMore(false)} onClose={() => setPhoneMore(false)} />}
         <div className="mb-3 flex items-center justify-between gap-2 px-1">
           <div className="flex min-w-0 items-center gap-2">
-            <h2 className="text-base font-semibold text-zinc-100">Agents</h2>
-            <span className="rounded-full bg-zinc-800 px-2 text-xs font-medium leading-5 tabular-nums text-zinc-400">{agents.length}</span>
+            <h2 className="text-lg font-bold tracking-tight text-[var(--fd-ink)]">Team</h2>
+            <span className="fd-count">{agents.length}</span>
           </div>
           {canGroup && (
             <button
               onClick={() => onGroup({})}
-              className="flex h-10 shrink-0 items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900 px-3.5 text-sm font-medium text-zinc-200 transition-colors active:bg-zinc-800"
+              className="fd-btn-quiet h-10 shrink-0 px-4 text-sm"
             >
-              <FolderPlus className="h-[18px] w-[18px] text-zinc-400" />
+              <FolderPlus className="h-[18px] w-[18px] text-[var(--fd-ink-faint)]" />
               New group
             </button>
           )}
@@ -2979,13 +2890,15 @@ function PhoneLayout({
         )}
 
         {agents.length === 0 && (
-          <div className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6 text-center">
-            <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-violet-600/20 text-violet-400">
+          <div className="fd-card mt-2 p-6 text-center shadow-none">
+            <div className="fd-empty-mark mx-auto mb-4">
               <MessagesSquare className="h-6 w-6" />
             </div>
-            <h2 className="text-base font-semibold text-zinc-100">No agents yet</h2>
-            <p className="mt-1 text-sm text-zinc-400">
-              {locked ? 'Create an agent from an archetype to start chatting.' : 'Spawn your first agent to start chatting.'}
+            <h2 className="fd-empty-title text-lg">Your team is empty</h2>
+            <p className="fd-empty-text mt-1 text-sm leading-relaxed">
+              {locked
+                ? 'An agent is a helper for one job — your inbox, research, a weekly report. Tap New agent below to pick a ready-made role.'
+                : 'An agent is a helper for one job — your inbox, research, a weekly report. Tap New agent below to spawn one.'}
             </p>
           </div>
         )}
@@ -3010,8 +2923,8 @@ function PhoneLayout({
             return (
               <li
                 key={a.id}
-                className={`flex items-center gap-1 rounded-xl border pr-1 transition-colors ${
-                  a.id === activeAgentId ? 'border-violet-500/40 bg-violet-500/10' : busy ? 'border-amber-500/30 bg-amber-500/10' : 'border-zinc-800 bg-zinc-900/60'
+                className={`flex items-center gap-1 rounded-[var(--fd-radius-card)] border pr-1 transition-colors ${
+                  a.id === activeAgentId ? 'border-violet-500/40 bg-[var(--fd-accent-soft)]' : busy ? 'border-amber-500/30 bg-amber-500/10' : 'border-[var(--fd-line)] bg-[var(--fd-surface-raised)]'
                 }`}
               >
                 <button
@@ -3019,9 +2932,9 @@ function PhoneLayout({
                   disabled={!openable}
                   className="flex min-w-0 flex-1 items-center gap-3 py-3.5 pl-3.5 text-left disabled:opacity-60"
                 >
-                  <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zinc-800 text-xs font-semibold text-zinc-300">
+                  <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--fd-selected)] text-xs font-semibold text-[var(--fd-ink)]">
                     {working || isBooting ? <Loader2 className="h-4 w-4 animate-spin" /> : <AgentPicture agentId={a.id} name={a.name} size="md" />}
-                    <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-zinc-900" />
+                    <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-[var(--fd-shell)]" />
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
@@ -3071,10 +2984,10 @@ function PhoneLayout({
         />
       </div>
 
-      <div className="shrink-0 border-t border-zinc-800 bg-zinc-950 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+      <div className="shrink-0 px-4 pt-2 pb-[max(1rem,env(safe-area-inset-bottom))]">
         <button
           onClick={onSpawn}
-          className="flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-violet-600 text-[15px] font-medium text-white transition-colors active:bg-violet-700 hover:bg-violet-500"
+          className="fd-btn-primary h-12 w-full text-[15px]"
         >
           <Plus className="h-5 w-5" />
           New agent
