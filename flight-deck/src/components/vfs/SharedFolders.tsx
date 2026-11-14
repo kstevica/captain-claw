@@ -30,6 +30,7 @@ import {
   HardDrive,
   Image,
   Info,
+  LibraryBig,
   Link2,
   Loader2,
   Lock,
@@ -76,6 +77,12 @@ import { OneDriveConnect } from './OneDriveConnect'
 // browser: preview a file beside the list, open, edit, rename or download
 // it, drop files in. Search finds a file by name in every folder at once,
 // and Recent files shows what the agents wrote last.
+//
+// The person's own folders are in the File and Data libraries too: a
+// folder (or one of its files) opens there, summarised and searchable by
+// what is inside, and a folder's tables open in the Data library with
+// everything it does — when the kiosk hands those over (onOpenLibrary,
+// onOpenTables); otherwise its tables open in the datastore browser.
 
 type Group = 'mine' | 'runs' | 'shared' | 'link' | 'gdrive' | 'onedrive'
 type Nav = '' | 'recent' | Group
@@ -149,6 +156,10 @@ const cloudOf = (p: VFSProject) => (p.kind === 'onedrive' ? 'OneDrive' : 'Google
 
 // The explanation at the top of the folder lists, until the viewer hides it.
 const ABOUT_KEY = 'fd:folders-about-hidden'
+
+/** The user's own folder, made here or by an agent run — what the File and
+ *  Data libraries read (not a linked, mounted or shared one). */
+const inLibraries = (p: VFSProject | undefined) => !!p && (groupOf(p) === 'mine' || groupOf(p) === 'runs')
 
 /** Files can be added, changed and removed: the user's own folder, a linked
  *  one that isn't read-only, one shared with them to edit. Drive is read-only. */
@@ -245,13 +256,25 @@ function toAgentFile(item: FileItem, folder: VFSProject | undefined): AgentFile 
   }
 }
 
-export function SharedFolders({ phone = false, canLink = false, onClose, onConnect }: {
+export function SharedFolders({
+  phone = false, canLink = false, onClose, onConnect, onOpenLibrary, onOpenFileInLibrary, onOpenTables, at, covered = false,
+}: {
   phone?: boolean
   /** May link a folder from this computer (an admin, or a deck without sign-in). */
   canLink?: boolean
   onClose: () => void
   /** Connections on that account's tab — Drive and OneDrive folders want it. */
   onConnect?: (service: 'google' | 'microsoft') => void
+  /** One of the user's folders in the File library (its files summarised, searchable). */
+  onOpenLibrary?: (folder: string) => void
+  /** One file of theirs in the File library, with its summary. */
+  onOpenFileInLibrary?: (folder: string, path: string, name: string) => void
+  /** A folder's tables in the Data library (else the datastore browser opens). */
+  onOpenTables?: (folder: string) => void
+  /** Show this place: a folder, and the file in it to select (`n` changes each time). */
+  at?: { folder: string; path: string; n: number } | null
+  /** Another dialog is open over this one: its Escape isn't this one's. */
+  covered?: boolean
 }) {
   const notify = useNotificationStore((s) => s.add)
   const [projects, setProjects] = useState<VFSProject[] | null>(null)
@@ -449,6 +472,25 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
   }
   const pickNav = (n: Nav) => { closeFolder(); setNav(n) }
 
+  // Asked to show a place (the File library's Show in folder): open its
+  // folder, and select the file once the folder's listing has it.
+  const wantSelect = useRef<{ project: string; path: string } | null>(null)
+  useEffect(() => {
+    if (!at) return
+    wantSelect.current = at.path ? { project: at.folder, path: at.path } : null
+    openAt({ project: at.folder, owner: '' }, parentOf(at.path))
+    // Each ask once: `n` is new for every one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [at?.n])
+  useEffect(() => {
+    const want = wantSelect.current
+    if (!want || !open || !entries) return
+    const e = entries.find((x) => x.type === 'file' && x.project === want.project && x.path === want.path)
+    if (!e) return
+    wantSelect.current = null
+    setSelected(entryItem(e))
+  }, [entries, open, entryItem])
+
   // ── Files ──
 
   const viewable = (i: FileItem) => isViewable(asAgentFile(i.name))
@@ -629,6 +671,9 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
     const items: AgentMenuItem[] = []
     if (!inside) items.push({ icon: FolderOpen, label: 'Open', onSelect: () => openAt(refOf(p)) })
     // A Drive or OneDrive folder's files on disk are stand-ins until read: no .zip.
+    if (onOpenLibrary && inLibraries(p)) {
+      items.push({ icon: LibraryBig, label: 'Open in the File library', hint: 'Every file summarised, searchable by what is inside', onSelect: () => onOpenLibrary(p.name) })
+    }
     if (p.files && !isMount(p)) {
       items.push({ icon: Download, label: 'Download as .zip', hint: `${p.files} file${p.files === 1 ? '' : 's'} · ${formatSize(p.bytes)}`, onSelect: () => download(vfsApi.zipUrl(refOf(p)), `${p.name}.zip`) })
     }
@@ -675,7 +720,7 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
   // Escape: a viewer, dialog or menu closes itself first; then the open file
   // on a phone, then the dialog.
   const overlayRef = useRef(false)
-  overlayRef.current = !!(viewing || dialog || sharingFile)
+  overlayRef.current = !!(viewing || dialog || sharingFile || covered)
   const selectedRef = useRef(selected)
   selectedRef.current = selected
   useEffect(() => {
@@ -1112,8 +1157,17 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
                 <button onClick={newSubfolder} className={`${btn} py-1.5`}><FolderPlus className="h-4 w-4" />New folder</button>
               </>
             )}
+            {onOpenLibrary && inLibraries(p) && p && (
+              <button onClick={() => onOpenLibrary(p.name)} className={`${btn} py-1.5`} title="This folder's files in the File library — summarised, searchable by what is inside">
+                <LibraryBig className="h-4 w-4 text-violet-600 dark:text-violet-400" />In the library
+              </button>
+            )}
             {hasTables && p && (
-              <button onClick={() => setDialog({ kind: 'tables', folder: p })} className={`${btn} py-1.5`} title="The tables this folder's agents keep together">
+              <button
+                onClick={() => (onOpenTables && inLibraries(p) ? onOpenTables(p.name) : setDialog({ kind: 'tables', folder: p }))}
+                className={`${btn} py-1.5`}
+                title="The tables this folder's agents keep together"
+              >
                 <Database className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />Tables
               </button>
             )}
@@ -1214,6 +1268,9 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
       onRename={() => renameItem(selected.ref, selected.path, selected.name, false)}
       onDelete={() => deleteItem(selected.ref, selected.path, selected.name, false)}
       onShowInFolder={() => openAt(selected.ref, parentOf(selected.path), selected)}
+      // The library leaves hidden files and folders out.
+      onOpenInLibrary={onOpenFileInLibrary && inLibraries(selFolder) && !selected.path.split('/').some((s) => s.startsWith('.'))
+        ? () => onOpenFileInLibrary(selected.ref.project, selected.path, selected.name) : undefined}
     />
   )
 
@@ -1347,7 +1404,7 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
 
 function FileDetail({
   item, folder, phone, terms, writable: canWrite, viewerOpen, inFolder,
-  onClose, onOpen, onEdit, onDownload, onShare, onCopyAddress, onSaveToDrive, onAnonymize, onRename, onDelete, onShowInFolder,
+  onClose, onOpen, onEdit, onDownload, onShare, onCopyAddress, onSaveToDrive, onAnonymize, onRename, onDelete, onShowInFolder, onOpenInLibrary,
 }: {
   item: FileItem
   folder: VFSProject | undefined
@@ -1361,6 +1418,8 @@ function FileDetail({
   onClose: () => void; onOpen: () => void; onEdit: () => void; onDownload: () => void; onShare: () => void
   onCopyAddress: (address: string) => void; onSaveToDrive: () => void; onAnonymize?: () => void; onRename: () => void; onDelete: () => void
   onShowInFolder: () => void
+  /** The file in the File library: its summary, tags, and the library's actions. */
+  onOpenInLibrary?: () => void
 }) {
   const file = toAgentFile(item, folder)
   const group = getFileTypeGroup(file)
@@ -1450,6 +1509,11 @@ function FileDetail({
         {canView && <button onClick={onOpen} className={primaryBtn}><Eye className="h-4 w-4" />Open</button>}
         <button onClick={onDownload} className={btn}><Download className="h-4 w-4" />Download</button>
         {canEdit && <button onClick={onEdit} className={btn}><Pencil className="h-4 w-4" />Edit</button>}
+        {onOpenInLibrary && (
+          <button onClick={onOpenInLibrary} className={btn} title="Its summary and tags in the File library">
+            <LibraryBig className="h-4 w-4" />In library
+          </button>
+        )}
         {phone && canShareFiles && <button onClick={onShare} className={btn}><Share2 className="h-4 w-4" />Share</button>}
         {folder?.kind !== 'gdrive' && <button onClick={onSaveToDrive} className={btn} title="A copy into your Google Drive (My Drive)"><CloudUpload className="h-4 w-4" />To Drive</button>}
         {onAnonymize && <button onClick={onAnonymize} className={btn} title="An anonymized copy beside it"><ShieldCheck className="h-4 w-4" />Anonymize</button>}

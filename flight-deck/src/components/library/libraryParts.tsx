@@ -1,12 +1,13 @@
 import { useContext, type ReactNode } from 'react'
-import { AlertTriangle, Loader2, Maximize2, Minimize2, Sparkles } from 'lucide-react'
+import { AlertTriangle, Bot, Folder, Loader2, Maximize2, Minimize2, Sparkles } from 'lucide-react'
 import { fmtRelative } from '../../services/schedulerApi'
-import type { Facet, LibraryState } from '../../services/fileLibraryApi'
+import { isFolderSourceId, type Facet, type LibraryState } from '../../services/fileLibraryApi'
 import { DialogFullscreen } from './dialogFullscreen'
 
 // Pieces the File library and the Data library share: the scan's progress
-// line, a filter list with counts, search-term highlighting, and the
-// fullscreen switch (Shared folders has it too).
+// line, a filter list with counts, the agents-and-folders filter, where a
+// file or table lives, search-term highlighting, and the fullscreen switch
+// (Shared folders has it too).
 
 export const libraryIconBtn = 'rounded-lg p-2 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50'
 
@@ -105,6 +106,42 @@ export function FacetGroup({ title, allLabel, facets, value, onChange, dot, labe
         {rows.map((f) => row(f.id, f.label, f.count, dot?.(f.id)))}
       </ul>
     </div>
+  )
+}
+
+/** Where the files or tables are: one list of the agents and then the
+ *  person's shared folders (vfs:<folder>), each folder marked as one. */
+export function SourceFacetGroup({ agents, folders = [], value, onChange }: {
+  agents: Facet[]; folders?: Facet[]; value: string; onChange: (v: string) => void
+}) {
+  const both = folders.length > 0 || isFolderSourceId(value)
+  return (
+    <FacetGroup
+      title={both ? 'Agents & folders' : 'Agents'}
+      allLabel={both ? 'Everywhere' : 'All agents'}
+      facets={[...agents, ...folders]}
+      value={value}
+      onChange={onChange}
+      labelOf={(id) => (isFolderSourceId(id) ? id.slice(4) : id)}
+      dot={both ? (id) => <SourceIcon folder={isFolderSourceId(id)} /> : undefined}
+    />
+  )
+}
+
+export function SourceIcon({ folder, className = 'h-3.5 w-3.5' }: { folder: boolean; className?: string }) {
+  return folder
+    ? <Folder className={`${className} shrink-0 text-sky-600 dark:text-sky-400`} aria-label="Shared folder" />
+    : <Bot className={`${className} shrink-0 text-zinc-500`} aria-label="Agent" />
+}
+
+/** A file's or table's agent — or its shared folder, marked as one. */
+export function SourceName({ name, folder }: { name: string; folder: boolean }) {
+  if (!folder) return <>{name}</>
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1 align-bottom" title={`Shared folder ${name}`}>
+      <Folder className="h-3 w-3 shrink-0 text-sky-600 dark:text-sky-400" />
+      <span className="truncate">{name}</span>
+    </span>
   )
 }
 

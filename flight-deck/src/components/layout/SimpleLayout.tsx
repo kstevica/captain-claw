@@ -73,6 +73,7 @@ import { ScheduledTasks } from '../scheduler/ScheduledTasks'
 import { useGroupStore } from '../../stores/groupStore'
 import { agentSections, isFolder } from '../../utils/agentGroups'
 import { useFileLibraryStore } from '../../stores/fileLibraryStore'
+import { folderSourceId } from '../../services/fileLibraryApi'
 import { FileLibrary } from '../library/FileLibrary'
 import { useDataLibraryStore } from '../../stores/dataLibraryStore'
 import { DataLibrary } from '../library/DataLibrary'
@@ -415,6 +416,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const libraryAgent = useFileLibraryStore((s) => s.agentFilter)
   const libraryFocus = useFileLibraryStore((s) => s.focus)
   const openLibrary = useFileLibraryStore((s) => s.openLibrary)
+  const showLibraryFile = useFileLibraryStore((s) => s.showFile)
   const closeLibrary = useFileLibraryStore((s) => s.close)
   // Data library: every datastore table the agents keep, summarised.
   const dataOpen = useDataLibraryStore((s) => s.open)
@@ -458,6 +460,16 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // Shared folders: the files the agents keep together (vfs:<folder>/…).
   const [foldersOpen, setFoldersOpen] = useState(false)
   const openFolders = () => setFoldersOpen(true)
+  // A place Shared folders is asked to show (a library's Show in folder);
+  // `n` is new for every ask.
+  const [foldersAt, setFoldersAt] = useState<{ folder: string; path: string; n: number } | null>(null)
+  // The libraries' way back to a shared folder: the library gives way to it.
+  const showInFolder = (folder: string, path = '') => {
+    closeLibrary()
+    closeData()
+    setFoldersAt({ folder, path, n: Date.now() })
+    setFoldersOpen(true)
+  }
   // Linking a folder from the deck's own disk is the deck operator's: an
   // admin, or a deck nobody signs in to (the desktop app).
   const canLinkFolders = useAuthStore((s) => s.authEnabled === false || s.user?.role === 'admin')
@@ -1152,6 +1164,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
             onOpenAgent={openLibraryAgent}
             onOpenLive={locked ? openLibraryLive : undefined}
             liveReady={locked ? libraryLiveReady : undefined}
+            onShowInFolder={showInFolder}
           />
         </KioskWideDialog>
       )}
@@ -1215,7 +1228,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       )}
       {dataOpen && (
         <KioskWideDialog label="Data library" phone={isMobile} onClose={closeData} widest>
-          <DataLibrary phone={isMobile} initialAgent={dataAgent} onClose={closeData} onOpenAgent={openLibraryAgent} />
+          <DataLibrary
+            phone={isMobile}
+            initialAgent={dataAgent}
+            onClose={closeData}
+            onOpenAgent={openLibraryAgent}
+            onShowInFolder={(folder) => showInFolder(folder)}
+          />
         </KioskWideDialog>
       )}
       {activityOpen && (
@@ -1231,8 +1250,20 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         </KioskWideDialog>
       )}
       {foldersOpen && (
-        <KioskWideDialog label="Shared folders" phone={isMobile} onClose={() => setFoldersOpen(false)} widest>
-          <SharedFolders phone={isMobile} canLink={canLinkFolders} onClose={() => setFoldersOpen(false)} onConnect={foldersConnections} />
+        <KioskWideDialog label="Shared folders" phone={isMobile} onClose={() => { setFoldersOpen(false); setFoldersAt(null) }} widest>
+          {/* A folder's files and tables open in the File and Data libraries,
+              over this dialog — Escape there closes only them. */}
+          <SharedFolders
+            phone={isMobile}
+            canLink={canLinkFolders}
+            onClose={() => { setFoldersOpen(false); setFoldersAt(null) }}
+            onConnect={foldersConnections}
+            onOpenLibrary={(folder) => openLibrary(folderSourceId(folder))}
+            onOpenFileInLibrary={(folder, path, name) => showLibraryFile({ agent: folderSourceId(folder), relPath: path, filename: name })}
+            onOpenTables={(folder) => openData(folderSourceId(folder))}
+            at={foldersAt}
+            covered={libraryOpen || dataOpen}
+          />
         </KioskWideDialog>
       )}
       {locked && agentInfo && (

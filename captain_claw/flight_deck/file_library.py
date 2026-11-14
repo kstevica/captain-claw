@@ -22,6 +22,10 @@ said in a recording) and filterable by agent, category
 and kind. Tokens count toward the owner's daily allowance, and a scan stops
 when it is spent. Workers Flight Deck runs itself (a run's agents, a being's
 body) are not the user's library and are left out.
+
+The user's own shared folders (``vfs:<folder>/``) are sources too, beside
+the agents: their files are walked, summarised and searched the same way
+(see "Shared folders as sources" below).
 """
 
 from __future__ import annotations
@@ -276,11 +280,22 @@ class LibraryStore:
             return int(row[0])
 
     def drop_agents_except(self, slugs: set[str]) -> None:
-        """Forget the files of agents Flight Deck no longer has at all."""
+        """Forget the files of agents Flight Deck no longer has at all
+        (shared folders are kept — :meth:`drop_folders_except` sees to them)."""
         with self._lock:
             known = [r[0] for r in self._conn.execute("SELECT DISTINCT agent_slug FROM library_files")]
             for slug in known:
-                if slug not in slugs:
+                if slug not in slugs and not slug.startswith(FOLDER_PREFIX):
+                    self._conn.execute("DELETE FROM library_files WHERE agent_slug = ?", (slug,))
+            self._conn.commit()
+
+    def drop_folders_except(self, owner: str, keys: set[str]) -> None:
+        """Forget the files of *owner*'s shared folders that are gone."""
+        with self._lock:
+            known = [r[0] for r in self._conn.execute("SELECT DISTINCT agent_slug FROM library_files")]
+            for slug in known:
+                folder = folder_of(slug)
+                if folder and folder[0] == owner and slug not in keys:
                     self._conn.execute("DELETE FROM library_files WHERE agent_slug = ?", (slug,))
             self._conn.commit()
 
@@ -418,7 +433,132 @@ def caller_agents(user: dict) -> dict[str, dict]:
     return out
 
 
+# ── Shared folders as sources ─────────────────────────────────────────
+#
+# The caller's own shared folders — vfs:<folder>/, the ones they or their
+# agents made, an agent run's folder too — sit in both libraries beside the
+# agents: a folder's files are walked and summarised like a workspace, its
+# datastore (vfs:<folder>/.datastore) is in the Data library. A folder's key
+# carries its owner, since two people may each keep a "reports":
+# ``vfs:<owner>/<folder>``. The UI knows it as ``vfs:<folder>`` (what the
+# agents call it too); the key never leaves Flight Deck. Folders linked in
+# from this computer, Drive and OneDrive folders and folders other people
+# shared stay out: a linked repository would be summarised file by file, a
+# mount's files are stand-ins until read, and someone else's folder isn't
+# the caller's tokens to spend.
+
+FOLDER_PREFIX = "vfs:"
+
+
+def folder_of(slug: str) -> tuple[str, str] | None:
+    """(owner, folder) for a shared folder's key; None for an agent."""
+    if not slug.startswith(FOLDER_PREFIX):
+        return None
+    owner, _, folder = slug[len(FOLDER_PREFIX):].partition("/")
+    if not owner or not folder or "/" in folder or folder in (".", ".."):
+        return None
+    return owner, folder
+
+
+def _vfs_owner(uid: str) -> str:
+    """The caller's folder in the VFS root (as the VFS routes name it)."""
+    from captain_claw.vfs import safe_name
+    return safe_name(uid, fallback="local")
+
+
+def caller_folders(user: dict) -> dict[str, dict]:
+    """The caller's own shared folders as library sources:
+    ``{key: {id, name, running, source, folder}}`` (named by the folder; a
+    run's title comes with :func:`caller_sources`)."""
+    from captain_claw.vfs import read_links_at
+    owner = _vfs_owner(str(user.get("id") or ""))
+    root = _data_dir() / "vfs" / owner
+    out: dict[str, dict] = {}
+    try:
+        entries = sorted(root.iterdir(), key=lambda p: p.name.lower()) if root.is_dir() else []
+        linked = set(read_links_at(root))
+    except OSError:
+        return out
+    for p in entries:
+        name = p.name
+        # Dot folders are Flight Deck's own (.drive mount trees); a linked
+        # folder's name points elsewhere.
+        if name.startswith(".") or name in linked:
+            continue
+        try:
+            if p.is_symlink() or not p.is_dir():
+                continue
+        except OSError:
+            continue
+        out[f"{FOLDER_PREFIX}{owner}/{name}"] = {
+            "id": f"{FOLDER_PREFIX}{name}", "name": name, "running": False,
+            "source": "folder", "folder": name,
+        }
+    return out
+
+
+async def caller_sources(user: dict) -> dict[str, dict]:
+    """Everything the caller's libraries hold: their agents (keyed by slug)
+    and their shared folders (keyed ``vfs:<owner>/<folder>``). Each says the
+    id the UI knows it by, its name, whether it runs, and whether it is an
+    agent or a folder — a run's folder named by the run's title."""
+    agents = caller_agents(user)
+    out: dict[str, dict] = {slug: {**a, "id": slug, "source": "agent"} for slug, a in agents.items()}
+    folders = await asyncio.to_thread(caller_folders, user)
+    from captain_claw.flight_deck.vfs_routes import _project_origin, _run_titles
+    if any(_project_origin(f["folder"])[1] for f in folders.values()):
+        titles = await _run_titles(str(user.get("id") or ""))
+        for f in folders.values():
+            title = titles.get(_project_origin(f["folder"])[1], "")
+            if title:
+                f["name"] = title
+    out.update(folders)
+    return out
+
+
+def source_key(public: str, sources: dict[str, dict]) -> str:
+    """The key of the source the UI calls *public* (an agent's slug is both)."""
+    for key, s in sources.items():
+        if s.get("id") == public:
+            return key
+    return public
+
+
+def public_id(slug: str, sources: dict[str, dict]) -> str:
+    """What the UI calls the source with key *slug*."""
+    s = sources.get(slug)
+    if s and s.get("id"):
+        return str(s["id"])
+    folder = folder_of(slug)
+    return f"{FOLDER_PREFIX}{folder[1]}" if folder else slug
+
+
+def source_fields(slug: str, sources: dict[str, dict]) -> dict:
+    """A row's source as the UI shows it: ``agent_slug`` (its id),
+    ``agent_name``, ``agent_running``, ``source`` and, for a folder, ``folder``."""
+    s = sources.get(slug, {})
+    folder = folder_of(slug)
+    out = {
+        "agent_slug": public_id(slug, sources),
+        "agent_name": s.get("name") or (folder[1] if folder else slug),
+        "agent_running": bool(s.get("running")),
+        "source": "folder" if folder else "agent",
+    }
+    if folder:
+        out["folder"] = folder[1]
+    return out
+
+
+def where_line(row_slug: str, name: str) -> str:
+    """The prompt's line on where a file or table lives."""
+    return f"Shared folder: {name}" if folder_of(row_slug) else f"Agent: {name}"
+
+
 def _workspace(slug: str) -> Path:
+    """Where a source's files live: an agent's workspace, or a shared folder."""
+    folder = folder_of(slug)
+    if folder is not None:
+        return _data_dir() / "vfs" / folder[0] / folder[1]
     return _data_dir() / slug / "data" / "workspace"
 
 
@@ -799,6 +939,8 @@ _VISION_SIGN_IN = ("Not described: its agent sees pictures through its ChatGPT s
                    "library can't use — a library model that sees pictures can.")
 _VISION_TEXT_ONLY = ("Not described: its agent's model takes text only — a library model that sees "
                      "pictures can describe them.")
+_VISION_FOLDER = ("Not described: the library's model doesn't see pictures. Pick one that does in "
+                  "your model settings to have the pictures in your shared folders described.")
 
 
 def _tier_id(tier: dict) -> tuple[str, str, str]:
@@ -814,6 +956,13 @@ def _eyes_for(slug: str, tier: dict | None) -> tuple[list[dict], str]:
     that sees."""
     from captain_claw.flight_deck import server
     from captain_claw.llm.vision import normalize_vision_switch
+    if folder_of(slug) is not None:
+        # A shared folder has no agent of its own: the library's tier, if it sees.
+        if tier is not None and _sees(str(tier.get("provider") or ""), str(tier.get("model") or ""),
+                                      str(tier.get("base_url") or ""),
+                                      "on" if tier.get("vision") is True else "auto"):
+            return [tier], ""
+        return [], _VISION_FOLDER
     loaded = server._agent_config_model(slug)
     if loaded is None:
         return [], _VISION_OFF
@@ -941,7 +1090,7 @@ async def _summarize_picture(row: dict, path: Path, owner_id: str, reach: MediaR
         picture = await asyncio.to_thread(_encode_picture, path)
     except Exception as e:  # noqa: BLE001 — a broken picture is a skipped file
         return _metadata_only(row, f"Could not be opened: {str(e)[:160]}")
-    user_msg = (f"File: {row['rel_path']}\nAgent: {row.get('agent_name') or row['agent_slug']}\n"
+    user_msg = (f"File: {row['rel_path']}\n{where_line(row['agent_slug'], row.get('agent_name') or row['agent_slug'])}\n"
                 f"Picture: {picture.width}×{picture.height} pixels, attached.")
     failed: Exception | None = None
     for i, model in enumerate(eyes):
@@ -1119,7 +1268,7 @@ async def _summarize_transcript(row: dict, text: str, seconds: float, tier: dict
     what = "a video" if row["extension"] in _VIDEO_EXTS else "a recording"
     length = f", {_clock(seconds)} long" if seconds else ""
     body = text if len(text) <= _LLM_CHARS else text[:_LLM_CHARS] + "\n\n[… truncated]"
-    user_msg = (f"File: {row['rel_path']}\nAgent: {row.get('agent_name') or row['agent_slug']}\n"
+    user_msg = (f"File: {row['rel_path']}\n{where_line(row['agent_slug'], row.get('agent_name') or row['agent_slug'])}\n"
                 f"This is {what}{length}; below is the transcript of what is said in it.\n\n---\n{body}")
     try:
         content, tokens = await call_model(
@@ -1174,7 +1323,7 @@ async def summarize_row(row: dict, tier: dict, owner_id: str,
         return _metadata_only(row, why_not)
 
     body = text if len(text) <= _LLM_CHARS else text[:_LLM_CHARS] + "\n\n[… truncated]"
-    user_msg = (f"File: {row['rel_path']}\nAgent: {row.get('agent_name') or row['agent_slug']}\n"
+    user_msg = (f"File: {row['rel_path']}\n{where_line(row['agent_slug'], row.get('agent_name') or row['agent_slug'])}\n"
                 f"Size: {row['size']} bytes\n\n---\n{body}")
     content, tokens = await call_model(
         tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id)
@@ -1240,7 +1389,7 @@ async def run_scan(user: dict, job: ScanJob, retry_errors: bool = False) -> None
     uid = str(user.get("id") or "")
     store = get_store()
     try:
-        agents = caller_agents(user)
+        agents = await caller_sources(user)
         # Forget removed agents only on a registry read that worked: the
         # lenient reader returns {} on a failed read, which would drop them all.
         from captain_claw.flight_deck.server import _load_process_registry_strict
@@ -1248,6 +1397,7 @@ async def run_scan(user: dict, job: ScanJob, retry_errors: bool = False) -> None
             store.drop_agents_except(set(_load_process_registry_strict().keys()))
         except (OSError, ValueError):
             pass
+        store.drop_folders_except(_vfs_owner(uid), {k for k in agents if folder_of(k)})
         for slug in agents:
             files = await asyncio.to_thread(walk_workspace, slug)
             store.sync_agent(slug, files)
@@ -1343,17 +1493,18 @@ def _item(row: dict, agents: dict[str, dict], terms: list[str] | None = None) ->
     except (TypeError, ValueError):
         tags = []
     mt, _ = mimetypes.guess_type(row["filename"])
+    source = source_fields(row["agent_slug"], agents)
     item = {
         "id": row["id"],
-        "agent_slug": row["agent_slug"],
-        "agent_name": agents.get(row["agent_slug"], {}).get("name", row["agent_slug"]),
-        "agent_running": bool(agents.get(row["agent_slug"], {}).get("running")),
+        **source,
         "rel_path": row["rel_path"],
         # Named as the Files panel names a file on disk (the agent-files
         # proxy's workspace scan), so the agent's view, save, deck and
         # public-link routes take a library file as they take one from there.
+        # A shared folder's file is named as its agents name it.
         "physical": str(_workspace(row["agent_slug"]) / row["rel_path"]),
-        "logical": "workspace/" + row["rel_path"],
+        "logical": (f"{FOLDER_PREFIX}{source['folder']}/{row['rel_path']}" if "folder" in source
+                    else "workspace/" + row["rel_path"]),
         "filename": row["filename"],
         "extension": row["extension"],
         "kind": row["kind"],
@@ -1418,16 +1569,33 @@ _SORTS = {
 # ── Routes ────────────────────────────────────────────────────────────
 
 
-def _status_payload(user: dict) -> dict:
-    agents = caller_agents(user)
+def source_facets(counts: dict[str, int], sources: dict[str, dict]) -> tuple[list[dict], list[dict]]:
+    """The agents and the shared folders a filter offers, the fullest first."""
+    agents: list[dict] = []
+    folders: list[dict] = []
+    for key, n in counts.items():
+        pid = public_id(key, sources)
+        f = {"id": pid, "label": sources.get(key, {}).get("name") or pid, "count": n}
+        (folders if folder_of(key) else agents).append(f)
+
+    def order(x: dict) -> tuple:
+        return -x["count"], x["label"].lower()
+    return sorted(agents, key=order), sorted(folders, key=order)
+
+
+async def _status_payload(user: dict) -> dict:
+    sources = await caller_sources(user)
     job = _job_for(str(user.get("id") or ""))
-    return {"job": job.view(), "counts": get_store().counts(list(agents)), "agents": len(agents)}
+    counts = await asyncio.to_thread(get_store().counts, list(sources))
+    return {"job": job.view(), "counts": counts,
+            "agents": sum(1 for k in sources if not folder_of(k)),
+            "folders": sum(1 for k in sources if folder_of(k))}
 
 
 @router.get("/status")
 async def library_status(user: dict = Depends(get_current_user)) -> dict:
     """Where the caller's library stands: file counts and the running scan."""
-    return await asyncio.to_thread(_status_payload, user)
+    return await _status_payload(user)
 
 
 @router.post("/scan")
@@ -1436,7 +1604,7 @@ async def library_scan(retry_errors: bool = False, user: dict = Depends(get_curr
     (``retry_errors``: the files whose summary failed too, now). A scan
     already running is left to finish."""
     start_scan(user, retry_errors)
-    return _status_payload(user)
+    return await _status_payload(user)
 
 
 @router.get("/files")
@@ -1446,8 +1614,10 @@ async def library_files(
     user: dict = Depends(get_current_user),
 ) -> dict:
     """The caller's files, searched and filtered, with the counts each
-    filter would leave (computed under the other filters)."""
-    agents = caller_agents(user)
+    filter would leave (computed under the other filters). ``agent`` is an
+    agent's slug or a shared folder (``vfs:<folder>``)."""
+    agents = await caller_sources(user)
+    agent = source_key(agent, agents) if agent else ""
     terms = [t for t in q.casefold().split() if t][:8]
     rows = await asyncio.to_thread(get_store().search, list(agents), terms)
 
@@ -1471,13 +1641,13 @@ async def library_files(
     shown.sort(key=_SORTS.get(sort, _SORTS["recent"]))
     limit = max(1, min(limit, 1000))
     page = shown[max(0, offset):max(0, offset) + limit]
+    agent_facets, folder_facets = source_facets(agent_counts, agents)
     return {
         "items": [_item(r, agents, terms) for r in page],
         "total": len(shown),
         "facets": {
-            "agents": sorted(
-                ({"id": s, "label": agents.get(s, {}).get("name", s), "count": n} for s, n in agent_counts.items()),
-                key=lambda x: (-x["count"], x["label"].lower())),
+            "agents": agent_facets,
+            "folders": folder_facets,
             "categories": [{"id": c, "label": label, "count": category_counts[c]}
                            for c, label in [*CATEGORIES, ("pending", "Not summarised yet")]
                            if category_counts.get(c)],
@@ -1487,9 +1657,11 @@ async def library_files(
     }
 
 
-def _owned_row(file_id: str, user: dict) -> tuple[dict, dict[str, dict]]:
+async def _owned_row(file_id: str, user: dict) -> tuple[dict, dict[str, dict]]:
+    """The caller's file (one of their agents' or their shared folders'),
+    and their sources."""
     row = get_store().get(file_id)
-    agents = caller_agents(user)
+    agents = await caller_sources(user)
     if row is None or row["agent_slug"] not in agents:
         raise HTTPException(404, "file not found")
     return row, agents
@@ -1498,7 +1670,7 @@ def _owned_row(file_id: str, user: dict) -> tuple[dict, dict[str, dict]]:
 @router.post("/files/{file_id}/summarize")
 async def library_resummarize(file_id: str, user: dict = Depends(get_current_user)) -> dict:
     """Summarise one file again, now."""
-    row, agents = _owned_row(file_id, user)
+    row, agents = await _owned_row(file_id, user)
     uid = str(user.get("id") or "")
     if await _quota_spent(uid):
         raise HTTPException(429, "Today's token allowance is used up.")
@@ -1525,8 +1697,8 @@ async def library_resummarize(file_id: str, user: dict = Depends(get_current_use
     return _item(get_store().get(file_id) or row, agents)
 
 
-def _serve(file_id: str, user: dict, inline: bool):
-    row, _agents = _owned_row(file_id, user)
+async def _serve(file_id: str, user: dict, inline: bool):
+    row, _agents = await _owned_row(file_id, user)
     path = _resolve_path(row)
     if path is None:
         raise HTTPException(404, "file not found")
@@ -1545,12 +1717,12 @@ def _serve(file_id: str, user: dict, inline: bool):
 async def library_view(file_id: str, user: dict = Depends(get_current_user)):
     """The file itself, inline — straight from the agent's folder on disk, so
     it opens whether the agent is running or not."""
-    return _serve(file_id, user, inline=True)
+    return await _serve(file_id, user, inline=True)
 
 
 @router.get("/files/{file_id}/download")
 async def library_download(file_id: str, user: dict = Depends(get_current_user)):
-    return _serve(file_id, user, inline=False)
+    return await _serve(file_id, user, inline=False)
 
 
 # ── Thumbnails (the library's preview of a PDF) ──
@@ -1649,7 +1821,7 @@ async def library_thumb(file_id: str, user: dict = Depends(get_current_user)):
     """A PNG of a PDF's first page. 404 for anything else, when the file is
     gone, or when this install has no PDF renderer; 422 for a PDF that won't
     open (damaged, or locked with a password)."""
-    row, _agents = _owned_row(file_id, user)
+    row, _agents = await _owned_row(file_id, user)
     if not row["filename"].lower().endswith(".pdf"):
         raise HTTPException(404, "no thumbnail for this kind of file")
     path = _resolve_path(row)

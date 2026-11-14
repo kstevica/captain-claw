@@ -17,6 +17,11 @@ view is never stale.
 Scans run like the File library's (one per user, started when the dialog
 opens or by Rescan), on the same agents (the caller's own, minus the workers
 Flight Deck runs itself), and spend from the same daily token allowance.
+
+The caller's own shared folders are sources too: a folder whose agents keep
+a datastore together (``vfs:<folder>/.datastore/store.db``, the same kind of
+file) has its tables here beside the agents', read, edited and exported the
+same way.
 """
 
 from __future__ import annotations
@@ -48,10 +53,17 @@ from captain_claw.flight_deck.file_library import (
     _data_dir,
     _quota_spent,
     _resolve_tier,
+    _vfs_owner,
+    _workspace,
     call_model,
-    caller_agents,
+    caller_sources,
     clean_tags,
+    folder_of,
     reply_json,
+    source_facets,
+    source_fields,
+    source_key,
+    where_line,
 )
 from captain_claw.logging import get_logger
 
@@ -103,7 +115,12 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
 
 def datastore_path(slug: str) -> Path | None:
-    """The agent's datastore file, when it has one."""
+    """The source's datastore file, when it has one: an agent's own, or the
+    one a shared folder's agents keep together — only ever inside that folder."""
+    if folder_of(slug) is not None:
+        root = _workspace(slug).resolve()
+        path = (root / ".datastore" / "store.db").resolve()
+        return path if path.is_relative_to(root) and path.is_file() else None
     path = datastore_file(_data_dir() / slug)
     return path if path.is_file() else None
 
@@ -379,9 +396,20 @@ class DataStore:
             self._conn.commit()
 
     def drop_agents_except(self, slugs: set[str]) -> None:
+        """Forget the tables of agents Flight Deck no longer has (shared
+        folders are kept — :meth:`drop_folders_except` sees to them)."""
         with self._lock:
             for (slug,) in self._conn.execute("SELECT DISTINCT agent_slug FROM library_tables").fetchall():
-                if slug not in slugs:
+                if slug not in slugs and folder_of(slug) is None:
+                    self._conn.execute("DELETE FROM library_tables WHERE agent_slug = ?", (slug,))
+            self._conn.commit()
+
+    def drop_folders_except(self, owner: str, keys: set[str]) -> None:
+        """Forget the tables of *owner*'s shared folders that are gone."""
+        with self._lock:
+            for (slug,) in self._conn.execute("SELECT DISTINCT agent_slug FROM library_tables").fetchall():
+                folder = folder_of(slug)
+                if folder and folder[0] == owner and slug not in keys:
                     self._conn.execute("DELETE FROM library_tables WHERE agent_slug = ?", (slug,))
             self._conn.commit()
 
@@ -507,7 +535,7 @@ def _profile_line(p: dict, rows: int) -> str:
 
 def _prompt(t: dict, agent_name: str) -> str:
     cols = [c["name"] for c in t["columns"]]
-    lines = [f"Table: {t['table_name']}", f"Agent: {agent_name}",
+    lines = [f"Table: {t['table_name']}", where_line(t["agent_slug"], agent_name),
              f"Rows: {t['row_count']} · Last changed: {(t['updated_at'] or '')[:10]}", "", "Columns:"]
     lines += [_profile_line(p, t["row_count"]) for p in t["profile"]]
     lines += ["", f"Sample rows (first {_SAMPLE_HEAD}" + (f", last {_SAMPLE_TAIL}" if t["row_count"] > _SAMPLE_HEAD + _SAMPLE_TAIL else "") + "), tab-separated:",
@@ -568,12 +596,13 @@ async def run_scan(user: dict, job: ScanJob, retry_errors: bool = False) -> None
     uid = str(user.get("id") or "")
     store = get_store()
     try:
-        agents = caller_agents(user)
+        agents = await caller_sources(user)
         from captain_claw.flight_deck.server import _load_process_registry_strict
         try:
             store.drop_agents_except(set(_load_process_registry_strict().keys()))
         except (OSError, ValueError):
             pass
+        store.drop_folders_except(_vfs_owner(uid), {k for k in agents if folder_of(k)})
         for slug in agents:
             try:
                 tables = await asyncio.to_thread(scan_agent, slug, store.fingerprints(slug))
@@ -649,12 +678,9 @@ def start_scan(user: dict, retry_errors: bool = False) -> ScanJob:
 
 
 def _item(t: dict, agents: dict[str, dict], terms: list[str] | None = None, full: bool = False) -> dict:
-    a = agents.get(t["agent_slug"], {})
     item = {
         "id": t["id"],
-        "agent_slug": t["agent_slug"],
-        "agent_name": a.get("name", t["agent_slug"]),
-        "agent_running": bool(a.get("running")),
+        **source_fields(t["agent_slug"], agents),
         "table_name": t["table_name"],
         "columns": t["columns"],
         "row_count": t["row_count"],
@@ -715,22 +741,24 @@ _SORTS = {
 # ── Routes ────────────────────────────────────────────────────────────
 
 
-def _status_payload(user: dict) -> dict:
-    agents = caller_agents(user)
+async def _status_payload(user: dict) -> dict:
+    agents = await caller_sources(user)
     return {"job": _job_for(str(user.get("id") or "")).view(),
-            "counts": get_store().counts(list(agents)), "agents": len(agents)}
+            "counts": get_store().counts(list(agents)),
+            "agents": sum(1 for k in agents if not folder_of(k)),
+            "folders": sum(1 for k in agents if folder_of(k))}
 
 
 @router.get("/status")
 async def data_status(user: dict = Depends(get_current_user)) -> dict:
-    return _status_payload(user)
+    return await _status_payload(user)
 
 
 @router.post("/scan")
 async def data_scan(retry_errors: bool = False, user: dict = Depends(get_current_user)) -> dict:
     """Look for new and changed tables and summarise them, in the background."""
     start_scan(user, retry_errors)
-    return _status_payload(user)
+    return await _status_payload(user)
 
 
 @router.get("/tables")
@@ -739,8 +767,10 @@ async def data_tables(
     limit: int = 60, offset: int = 0, user: dict = Depends(get_current_user),
 ) -> dict:
     """The caller's tables, searched (names, summaries, columns and the data
-    itself) and filtered, with each filter's counts under the others."""
-    agents = caller_agents(user)
+    itself) and filtered, with each filter's counts under the others.
+    ``agent`` is an agent's slug or a shared folder (``vfs:<folder>``)."""
+    agents = await caller_sources(user)
+    agent = source_key(agent, agents) if agent else ""
     terms = [t for t in q.casefold().split() if t][:8]
     rows = [t for t in get_store().all_for(list(agents))
             if not terms or all(term in _haystack(t) for term in terms)]
@@ -761,14 +791,14 @@ async def data_tables(
     shown = sorted((t for t in rows if keep(t)), key=key, reverse=newest_first)
     limit = max(1, min(limit, 1000))
     page = shown[max(0, offset):max(0, offset) + limit]
+    agent_facets, folder_facets = source_facets(agent_counts, agents)
     return {
         "items": [_item(t, agents, terms) for t in page],
         "total": len(shown),
         "rows_total": sum(int(t["row_count"] or 0) for t in shown),
         "facets": {
-            "agents": sorted(
-                ({"id": s, "label": agents.get(s, {}).get("name", s), "count": n} for s, n in agent_counts.items()),
-                key=lambda x: (-x["count"], x["label"].lower())),
+            "agents": agent_facets,
+            "folders": folder_facets,
             "categories": [{"id": c, "label": label, "count": category_counts[c]}
                            for c, label in [*CATEGORIES, ("pending", "Not summarised yet")]
                            if category_counts.get(c)],
@@ -776,9 +806,11 @@ async def data_tables(
     }
 
 
-def _owned(table_id: str, user: dict) -> tuple[dict, dict[str, dict]]:
+async def _owned(table_id: str, user: dict) -> tuple[dict, dict[str, dict]]:
+    """The caller's table (one of their agents' or their shared folders'),
+    and their sources."""
     t = get_store().get(table_id)
-    agents = caller_agents(user)
+    agents = await caller_sources(user)
     if t is None or t["agent_slug"] not in agents:
         raise HTTPException(404, "table not found")
     return t, agents
@@ -787,14 +819,14 @@ def _owned(table_id: str, user: dict) -> tuple[dict, dict[str, dict]]:
 @router.get("/tables/{table_id}")
 async def data_table(table_id: str, user: dict = Depends(get_current_user)) -> dict:
     """One table with its column profile."""
-    t, agents = _owned(table_id, user)
+    t, agents = await _owned(table_id, user)
     return _item(t, agents, full=True)
 
 
 def _open_table(t: dict) -> tuple[sqlite3.Connection, str, list[dict]]:
     path = datastore_path(t["agent_slug"])
     if path is None:
-        raise HTTPException(404, "the agent's datastore is gone")
+        raise HTTPException(404, "the datastore is gone")
     c = _connect(path)
     internal = TABLE_PREFIX + t["table_name"]
     if not c.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (internal,)).fetchone():
@@ -843,7 +875,7 @@ async def data_rows(
 ) -> dict:
     """The table's rows, live from the agent's datastore: searched across
     every column, sorted by one, a page at a time."""
-    t, _agents = _owned(table_id, user)
+    t, _agents = await _owned(table_id, user)
     try:
         return await asyncio.to_thread(
             _read_rows, t, max(1, min(limit, _MAX_PAGE)), max(0, offset), q, sort, dir == "desc")
@@ -981,7 +1013,7 @@ async def _writer(t: dict):
 
     path = datastore_path(t["agent_slug"])
     if path is None:
-        raise HTTPException(404, "the agent's datastore is gone")
+        raise HTTPException(404, "the datastore is gone")
     mgr = DatastoreManager(db_path=path)
     try:
         yield mgr
@@ -1012,7 +1044,7 @@ async def _edited(t: dict, agents: dict[str, dict], rowid: int | None) -> dict:
 @router.post("/tables/{table_id}/rows")
 async def data_add_row(table_id: str, body: RowValues, user: dict = Depends(get_current_user)) -> dict:
     """Add one row by hand; columns left out stay empty."""
-    t, agents = _owned(table_id, user)
+    t, agents = await _owned(table_id, user)
     try:
         cols, _ = await asyncio.to_thread(_row_raw, t, 0)
     except sqlite3.Error as e:
@@ -1033,7 +1065,7 @@ async def data_edit_row(
 ) -> dict:
     """Change cells of one row by hand. ``expect`` holds what the person saw
     in them: one that holds something else now refuses the whole edit."""
-    t, agents = _owned(table_id, user)
+    t, agents = await _owned(table_id, user)
     try:
         cols, before = await asyncio.to_thread(_row_raw, t, rowid)
     except sqlite3.Error as e:
@@ -1067,7 +1099,7 @@ async def data_edit_row(
 @router.delete("/tables/{table_id}/rows/{rowid}")
 async def data_delete_row(table_id: str, rowid: int, user: dict = Depends(get_current_user)) -> dict:
     """Delete one row by hand."""
-    t, agents = _owned(table_id, user)
+    t, agents = await _owned(table_id, user)
     async with _writer(t) as mgr:
         deleted = await mgr.delete_rows(t["table_name"], {"_id": rowid})
     if not deleted:
@@ -1172,7 +1204,7 @@ async def data_export(table_id: str, format: str = "csv", user: dict = Depends(g
     fmt = format.lower()
     if fmt not in _EXPORTS:
         raise HTTPException(400, f"Unsupported format: {format}. Use csv, json or xlsx.")
-    t, _agents = _owned(table_id, user)
+    t, _agents = await _owned(table_id, user)
     write, media_type = _EXPORTS[fmt]
     try:
         body = await asyncio.to_thread(write, t)
@@ -1187,7 +1219,7 @@ async def data_export(table_id: str, format: str = "csv", user: dict = Depends(g
 @router.post("/tables/{table_id}/summarize")
 async def data_resummarize(table_id: str, user: dict = Depends(get_current_user)) -> dict:
     """Profile and summarise one table again, now."""
-    t, agents = _owned(table_id, user)
+    t, agents = await _owned(table_id, user)
     uid = str(user.get("id") or "")
     if await _quota_spent(uid):
         raise HTTPException(429, "Today's token allowance is used up.")
