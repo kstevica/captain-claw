@@ -665,6 +665,9 @@ def _pptx(pkg: _Package, scrub: bool) -> list[_Unit]:
 # ── Excel ───────────────────────────────────────────────────────────
 
 _CELL_REF = re.compile(r"^([A-Z]+)(\d+)$")
+HEADER_ROWS = 30  # a sheet's header row is looked for in its first rows
+# A Croatian phone number kept as a number: the "+" (or 00) is gone, 385 stays.
+_HR_PHONE_NUMBER = re.compile(r"385[1-9]\d{7,8}")
 
 
 def _xlsx(pkg: _Package, scrub: bool) -> tuple[list[_Unit], Callable[[], None]]:
@@ -682,28 +685,46 @@ def _xlsx(pkg: _Package, scrub: bool) -> tuple[list[_Unit], Callable[[], None]]:
     sheets = pkg.matching(r"xl/worksheets/sheet\d+\.xml")
     for name in sheets:
         root = pkg.tree(name)
-        hints: dict[str, str] = {}
+        # Column headers say what a column holds ("OIB", "Telefon") — in the
+        # header row, which is often below a title or two, not only row 1. A
+        # header applies to the rows under it, until the next header row.
+        headers: dict[str, list[tuple[int, str]]] = {}
         for row in root.iter(f"{{{S}}}row"):
-            if row.get("r") != "1":
+            try:
+                r = int(row.get("r") or 0)
+            except ValueError:
                 continue
+            if not 1 <= r <= HEADER_ROWS:
+                continue
+            found: dict[str, str] = {}
+            numbers = False
             for c in row.iter(f"{{{S}}}c"):
                 m = _CELL_REF.match(c.get("r") or "")
                 if not m:
                     continue
                 t = c.get("t")
+                v = c.find(f"{{{S}}}v")
                 text = ""
                 if t == "s":
-                    v = c.find(f"{{{S}}}v")
                     text = shared_text(int(v.text)) if v is not None and (v.text or "").isdigit() else ""
                 elif t == "inlineStr":
                     text = "".join(el.text or "" for el in _rph_free(c, f"{{{S}}}t"))
+                elif t in (None, "n") and v is not None:
+                    numbers = True
                 hint = hint_for(text)
                 if hint:
-                    hints[m.group(1)] = hint
+                    found[m.group(1)] = hint
+            if found and (r == 1 or not numbers):  # a row of data has numbers in it
+                for col, hint in found.items():
+                    headers.setdefault(col, []).append((r, hint))
+
+        def hint_at(col: str, rownum: int) -> str:
+            return next((h for r, h in reversed(headers.get(col, [])) if r < rownum), "")
+
         for c in root.iter(f"{{{S}}}c"):
             m = _CELL_REF.match(c.get("r") or "")
             col, rownum = (m.group(1), int(m.group(2))) if m else ("", 0)
-            hint = hints.get(col, "") if rownum > 1 else ""
+            hint = hint_at(col, rownum) if col else ""
             t = c.get("t")
             v = c.find(f"{{{S}}}v")
             if t == "s":
@@ -716,8 +737,18 @@ def _xlsx(pkg: _Package, scrub: bool) -> tuple[list[_Unit], Callable[[], None]]:
             elif t == "str":
                 if v is not None and (v.text or "").strip():
                     units.append(_Unit(name, [v], hint=hint))
-            elif t in (None, "n") and v is not None and re.fullmatch(r"-?\d{6,}", (v.text or "").strip()):
-                units.append(_Unit(name, [v], hint=hint, number_cell=c))
+            elif t in (None, "n") and v is not None:
+                # A whole number of 6+ digits may be an identifier kept as a
+                # number (an OIB, a JMBG, a phone number that lost its "+").
+                # Amounts and counts stay numbers: only what the detectors (or
+                # the column's header) take for an identifier is replaced.
+                whole = re.fullmatch(r"(-?\d{6,})(?:\.0+)?", (v.text or "").strip())
+                if whole:
+                    if v.text != whole.group(1):
+                        v.text = whole.group(1)  # "12345678903.0" is 12345678903
+                    if not hint and _HR_PHONE_NUMBER.fullmatch(whole.group(1)):
+                        hint = "PHONE"
+                    units.append(_Unit(name, [v], hint=hint, number_cell=c))
             f = c.find(f"{{{S}}}f")
             if f is not None and '"' in (f.text or ""):
                 units.append(_Unit(name, [f]))
