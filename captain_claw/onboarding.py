@@ -522,8 +522,8 @@ def run_onboarding_wizard(
 
     # Step 1 — Welcome
     intro = Panel(
-        "[bold cyan]Captain Claw Onboarding[/bold cyan]\n"
-        "Let's get Captain Claw ready. This takes about a minute.\n"
+        "[bold cyan]Captain Onboarding[/bold cyan]\n"
+        "Let's get Captain ready. This takes about a minute.\n"
         "The only requirement is one working model — everything else is optional.",
         border_style="cyan",
     )
@@ -597,7 +597,7 @@ def run_onboarding_wizard(
     # Step 7 — Additional models (optional)
     console.print()
     console.print(
-        f"[dim]Captain Claw comes pre-configured with {len(_DEFAULT_ALLOWED_MODELS)} additional models "
+        f"[dim]Captain comes pre-configured with {len(_DEFAULT_ALLOWED_MODELS)} additional models "
         f"(OpenAI, Anthropic, Gemini + image/OCR/vision). You can manage them later in /settings.[/dim]"
     )
     additional_models: list[dict[str, str]] = []

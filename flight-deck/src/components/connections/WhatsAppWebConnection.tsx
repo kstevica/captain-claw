@@ -583,6 +583,8 @@ export default function WhatsAppWebConnection() {
   const label = STATE[state] ?? STATE.off
   const spin = (key: string) => busy === key && <Loader2 className="h-3 w-3 animate-spin" />
   const messagesKept = link?.stats?.messages ?? 0
+  // The name the phone lists this link under: the one it linked with.
+  const deviceName = link?.device_name || 'Captain'
   const leave = (mode: 'disconnect' | 'switch', keepHistory: boolean) => {
     setLeaving(null)
     run('unlink', async () => {
@@ -591,8 +593,8 @@ export default function WhatsAppWebConnection() {
       setByPhone(false)
       setNotice([
         v.removed_from_phone
-          ? 'Disconnected. “Captain Claw” is gone from your phone’s Linked devices.'
-          : 'Disconnected here. Also remove “Captain Claw” on your phone: WhatsApp → Settings → Linked devices.',
+          ? `Disconnected. “${deviceName}” is gone from your phone’s Linked devices.`
+          : `Disconnected here. Also remove “${deviceName}” on your phone: WhatsApp → Settings → Linked devices.`,
         messagesKept > 0 && (keepHistory ? 'The history stays here.' : 'This number’s history is deleted.'),
         mode === 'switch' && 'Link the other number below.',
       ].filter(Boolean).join(' '))
@@ -820,7 +822,7 @@ export default function WhatsAppWebConnection() {
               {leaving === 'switch' ? 'Switch to another number' : 'Disconnect WhatsApp'}
             </div>
             <div className="text-zinc-300">
-              “Captain Claw” leaves the Linked devices of {link.number || 'your phone'}. Keep the history from
+              “{deviceName}” leaves the Linked devices of {link.number || 'your phone'}. Keep the history from
               this number ({messagesKept.toLocaleString()} message{messagesKept === 1 ? '' : 's'})?
             </div>
             <div className="flex flex-wrap gap-2">

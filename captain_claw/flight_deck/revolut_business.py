@@ -56,7 +56,7 @@ def environment(value: str) -> str:
     return "sandbox" if str(value or "").strip().lower() == "sandbox" else "production"
 
 
-def generate_key_and_certificate(common_name: str = "Captain Claw payments") -> tuple[str, str]:
+def generate_key_and_certificate(common_name: str = "Captain payments") -> tuple[str, str]:
     """(private key PEM, self-signed X.509 certificate PEM) — the certificate is
     what the user pastes into Revolut Business → APIs → Business API."""
     from cryptography import x509
@@ -66,7 +66,7 @@ def generate_key_and_certificate(common_name: str = "Captain Claw payments") -> 
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name[:64]),
-                      x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Captain Claw")])
+                      x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Captain")])
     now = dt.datetime.now(dt.timezone.utc)
     cert = (x509.CertificateBuilder()
             .subject_name(name).issuer_name(name).public_key(key.public_key())

@@ -57,7 +57,7 @@ export const PRESS = IS_GLASSES ? 'Pinch' : IS_TOUCH ? 'Tap' : 'Click'
 export function deviceLabel(): string {
   if (GLASSES_HOST === 'meta-display') return 'Meta Ray-Ban Display'
   if (GLASSES_HOST === 'rokid-lumen') return 'Rokid glasses (Lumen)'
-  if (IS_APP) return 'Captain Claw app (Android)'
+  if (IS_APP) return 'Captain app (Android)'
   const ua = navigator.userAgent || ''
   if (/Android/.test(ua)) return 'Android browser'
   if (/iPhone|iPad/.test(ua)) return 'iOS browser'

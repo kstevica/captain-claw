@@ -55,7 +55,7 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
-CLIENT_NAME = "Captain Claw Flight Deck"
+CLIENT_NAME = "Captain Flight Deck"
 _SOFTWARE_ID = "captain-claw-flight-deck"
 _HTTP_TIMEOUT = 20.0
 # Refresh this long before the access token's stated expiry.

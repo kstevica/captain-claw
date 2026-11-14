@@ -35,6 +35,8 @@ export interface WhatsAppWebLink {
   // "+385…" once paired.
   number?: string
   linked_at?: string | null
+  // What the phone's Linked devices list calls this link (the name it linked under).
+  device_name?: string
   connected_at?: string | null
   detail?: string
   ban_expires_at?: string | null

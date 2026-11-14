@@ -284,7 +284,7 @@ async def test_whatsapp_route(
     results = []
     for waid in recipients:
         ok, why = await send_text_checked(
-            waid, "Captain Claw: test nudge — autonomous nudges will reach you here.")
+            waid, "Captain: test nudge — autonomous nudges will reach you here.")
         results.append({"to": waid, "ok": ok, "error": why})
     return {"sent": sum(1 for r in results if r["ok"]), "total": len(results), "results": results}
 

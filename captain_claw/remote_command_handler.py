@@ -66,7 +66,7 @@ def format_active_configuration_text(ctx: RuntimeContext) -> str:
 
 
 def remote_help_text(ctx: RuntimeContext, platform_label: str) -> str:
-    lines = [f"Captain Claw {platform_label} commands:", ""]
+    lines = [f"Captain {platform_label} commands:", ""]
     for command, description in ctx.telegram_command_specs:
         lines.append(f"/{command} - {description}")
     lines.extend([
@@ -98,7 +98,7 @@ async def handle_remote_command(
     lowered_text = raw_text.strip().lower()
     if lowered_text == "/start" or lowered_text.startswith("/start "):
         await send_text(
-            "Captain Claw connected.\n"
+            "Captain connected.\n"
             "Use /help to see available commands.\n"
             "Send plain text to chat with the current session."
         )

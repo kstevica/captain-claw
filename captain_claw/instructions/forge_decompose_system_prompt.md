@@ -74,7 +74,7 @@ The lead agent's `additional_instructions` should additionally include:
 
 ## Tool Reference
 
-Agents have access to these Captain Claw tools. Select the most relevant ones per agent role (used for `new_archetype.tools` and any per-agent `tools` override):
+Agents have access to these Captain tools. Select the most relevant ones per agent role (used for `new_archetype.tools` and any per-agent `tools` override):
 
 ### File & Code Operations
 - `shell` — Execute shell commands (scripts, build tools, data processing pipelines)

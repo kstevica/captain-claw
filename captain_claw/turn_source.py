@@ -22,7 +22,7 @@ from typing import Any
 # The channels, as the settings list them.
 SOURCE_LABELS: dict[str, str] = {
     "web": "Web chat",
-    "app": "Captain Claw app",
+    "app": "Captain app",
     "glasses": "Smart glasses",
     "browser": "Browser extension",
     "whatsapp": "WhatsApp",
@@ -52,8 +52,8 @@ KIND_LABELS: dict[str, str] = {
     "device:epaper154_touch": "Waveshare Touch ePaper 1.54",
     "glasses:meta-display": "Meta Ray-Ban Display",
     "glasses:rokid-lumen": "Rokid glasses",
-    "app:android": "Captain Claw app (Android)",
-    "app:browser": "Captain Claw app (browser)",
+    "app:android": "Captain app (Android)",
+    "app:browser": "Captain app (browser)",
     "browser:mac": "Captain for Mac",
 }
 

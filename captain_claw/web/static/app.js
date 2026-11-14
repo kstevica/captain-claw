@@ -283,7 +283,7 @@
         } else if (role === 'error') {
             label.textContent = 'Error';
         } else {
-            label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain Claw';
+            label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain';
         }
 
         const meta = document.createElement('span');
@@ -430,7 +430,7 @@
         header.className = 'msg-header';
         const label = document.createElement('span');
         label.className = 'msg-label';
-        label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain Claw';
+        label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain';
         header.appendChild(label);
 
         const bubble = document.createElement('div');
@@ -469,7 +469,7 @@
         header.className = 'msg-header';
         const label = document.createElement('span');
         label.className = 'msg-label';
-        label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain Claw';
+        label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain';
         header.appendChild(label);
 
         const bubble = document.createElement('div');
@@ -505,7 +505,7 @@
         header.className = 'msg-header';
         const label = document.createElement('span');
         label.className = 'msg-label';
-        label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain Claw';
+        label.innerHTML = '<span class="msg-avatar">&#x1F980;</span> Captain';
         header.appendChild(label);
 
         const bubble = document.createElement('div');

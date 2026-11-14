@@ -446,7 +446,7 @@ def _append_handoff(repo: Path, section: str) -> str:
     else:
         target.write_text(
             f"{_HANDOFF_MARKER}\n# Handoff — how to run & use this project\n\n"
-            "_Auto-written at the end of each Captain Claw coding session; "
+            "_Auto-written at the end of each Captain coding session; "
             "newest session at the bottom._\n\n" + body)
     return str(target.relative_to(repo))
 

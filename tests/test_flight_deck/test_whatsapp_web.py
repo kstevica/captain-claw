@@ -97,6 +97,23 @@ def test_pairing_to_connected_and_the_transient_fields(tmp_path):
     assert again.jid == st.jid and again.qr == "" and again.sync["messages"] == 7643
 
 
+def test_the_phone_name_is_the_one_the_link_was_made_with(tmp_path):
+    # Not linked yet: the name it will get.
+    assert LinkState(state="pairing").view()["device_name"] == "Captain"
+    st = LinkState(state="pairing")
+    apply_event(st, "paired", {"jid": JID}, now=102)
+    assert st.view()["device_name"] == "Captain"
+    path = tmp_path / "state.json"
+    st.save(path)
+    assert LinkState.load(path).view()["device_name"] == "Captain"
+    # A link saved before the name was recorded was made as "Captain Claw",
+    # which is what the phone still lists.
+    old = LinkState(state="connected", jid=JID, linked_at="2026-10-01T09:00:00Z")
+    assert old.view()["device_name"] == "Captain Claw"
+    # The adapter registers new links under the same name.
+    assert na.DEVICE_NAME == "Captain"
+
+
 def test_problem_events_ring_bells_and_plain_ones_dont():
     for name in ("qr", "paired", "connected", "disconnected", "history", "expired"):
         assert apply_event(LinkState(state="connected"), name, {}, now=1) is None

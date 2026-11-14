@@ -39,7 +39,7 @@ class AgentTarget(BaseModel):
 # ── prompt ────────────────────────────────────────────────────────────
 
 
-SYSTEM_PROMPT = """You design **agent-app manifests** for the Captain Claw framework.
+SYSTEM_PROMPT = """You design **agent-app manifests** for the Captain framework.
 
 An app manifest is a declarative spec for a small SaaS-style app that
 binds to an agent's MCP tools. Renderers (web, voice, glasses) consume
@@ -134,7 +134,7 @@ Rules:
 - Use `$entity.id` (or `$entity.<field>`) inside `prefill`/`filter` to thread the currently-selected entity into a tool call.
 - Prefer feed/action ids that look like snake_case identifiers; use hyphens only in `agent.id`.
 - Keep the design tight. A few well-chosen feeds beat a sprawling dashboard.
-- For apps that receive uploads (images, PDFs, etc.): declare an action input with `type: "file"`, and add a surface with `layout: "upload"` whose `sources` list the action ids to run on uploaded files. The renderer uploads via the framework's file API and passes back a `file_id` string — your MCP tool should accept that `file_id` and resolve the bytes through Captain Claw's file store.
+- For apps that receive uploads (images, PDFs, etc.): declare an action input with `type: "file"`, and add a surface with `layout: "upload"` whose `sources` list the action ids to run on uploaded files. The renderer uploads via the framework's file API and passes back a `file_id` string — your MCP tool should accept that `file_id` and resolve the bytes through Captain's file store.
 - When the user has NOT selected an external MCP server, set `agent.mcp_server` to the reserved name `"__framework__"` and bind every `mcp_tool` to one of the framework's built-in tools listed below. Do NOT invent tool names; the only callable tools in this mode are `entities_list`, `entities_get`, `entities_create`, `entities_update`, `entities_delete`, and `files_list`. Pass the entity id you declared via the `entity` argument (e.g. `"arguments": {"entity": "post"}` for a list feed). For create/update actions, declare action inputs for each user-editable field of the entity; the renderer will forward them as flat arguments alongside `entity` (and `id` for update).
 
 Return ONLY the JSON object. No prose, no markdown fence.

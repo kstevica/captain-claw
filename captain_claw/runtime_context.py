@@ -75,7 +75,7 @@ class RuntimeContext:
 
     # Telegram command specs (shared by both registration and help text)
     telegram_command_specs: list[tuple[str, str]] = field(default_factory=lambda: [
-        ("start", "Start Captain Claw in Telegram"),
+        ("start", "Start Captain in Telegram"),
         ("help", "Show Telegram command guide"),
         ("new", "Create a new session"),
         ("sessions", "List recent sessions"),

@@ -143,10 +143,10 @@ let offs: Array<() => void> = []
  *  sets its reasoning effort by it): the Android app, glasses, or the HUD in
  *  a browser. The surface stays 'glasses' — its compact reply rules. */
 const HUD_SOURCE: { source: string; source_label: string } =
-  HUD_HOST === 'android-app' ? { source: 'app:android', source_label: 'Captain Claw app (Android)' }
+  HUD_HOST === 'android-app' ? { source: 'app:android', source_label: 'Captain app (Android)' }
   : HUD_HOST === 'meta-display' ? { source: 'glasses:meta-display', source_label: 'Meta Ray-Ban Display' }
   : HUD_HOST === 'rokid-lumen' ? { source: 'glasses:rokid-lumen', source_label: 'Rokid glasses' }
-  : { source: 'app:browser', source_label: 'Captain Claw app (browser)' }
+  : { source: 'app:browser', source_label: 'Captain app (browser)' }
 
 /** The next chat frame must carry the surface rules (new connection, /new). */
 let rulesNeeded = true

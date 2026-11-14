@@ -2069,7 +2069,7 @@ def format_help(speaker: bool = False) -> str:
     for cmd in commands:
         cat = cmd["category"]
         categories.setdefault(cat, []).append(cmd)
-    lines = ["## Captain Claw Commands\n"]
+    lines = ["## Captain Commands\n"]
     for cat, cmds in categories.items():
         lines.append(f"### {cat}")
         for c in cmds:

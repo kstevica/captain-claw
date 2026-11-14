@@ -29,6 +29,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+# What the phone's Linked devices list calls this link. The phone keeps the
+# name it was given when it linked, so each link records its own; one linked
+# before it was recorded was linked as the old name.
+DEVICE_NAME = "Captain"
+OLD_DEVICE_NAME = "Captain Claw"
+
 STATES = (
     "pairing", "connecting", "connected", "disconnected", "expired", "failed",
     "logged_out", "stream_replaced", "temporary_ban", "outdated",
@@ -90,6 +96,8 @@ class LinkState:
     consented_at: str = ""
     created_at: str = ""
     linked_at: str = ""
+    # The name the phone lists this link under (set when it links).
+    device_name: str = ""
     connected_at: str = ""
     last_event_at: str = ""
     detail: str = ""
@@ -135,6 +143,7 @@ class LinkState:
             "jid": self.jid,
             "number": number_of(self.jid),
             "linked_at": self.linked_at or None,
+            "device_name": (self.device_name or OLD_DEVICE_NAME) if self.linked_at else DEVICE_NAME,
             "connected_at": self.connected_at or None,
             "last_event_at": self.last_event_at or None,
             "detail": self.detail,
@@ -162,6 +171,7 @@ def apply_event(st: LinkState, name: str, data: dict[str, Any] | None = None,
     if name == "paired":
         st.jid = bare_jid(str(data.get("jid") or ""))
         st.linked_at = now_iso(now)
+        st.device_name = DEVICE_NAME
         st.state = "connecting"
         st.qr, st.qr_at, st.pair_code = "", 0.0, ""
         st.detail = ""
@@ -225,5 +235,5 @@ def apply_event(st: LinkState, name: str, data: dict[str, Any] | None = None,
         st.detail = "WhatsApp refuses this client version; the deck needs an update."
         return Notice("WhatsApp Web needs an update",
                       "WhatsApp no longer accepts this deck's WhatsApp Web client. Ask your "
-                      "admin to update Captain Claw.")
+                      "admin to update Captain.")
     return None

@@ -169,7 +169,7 @@ class AgentFileOpsMixin:
         encoded_code = json.dumps(raw, ensure_ascii=True)
         return (
             "#!/usr/bin/env python3\n"
-            "\"\"\"Captain Claw structured script wrapper.\"\"\"\n\n"
+            "\"\"\"Captain structured script wrapper.\"\"\"\n\n"
             "import contextlib\n"
             "import io\n"
             "import json\n"

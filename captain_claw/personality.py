@@ -33,9 +33,9 @@ _USER_PERSONALITIES_DIR = _PERSONALITY_DIR / "personalities"
 class Personality:
     """Agent personality profile."""
 
-    name: str = "Captain Claw"
+    name: str = "Captain"
     description: str = (
-        "A powerful AI assistant with claws — part of the Captain Claw family."
+        "A powerful AI assistant — part of the Captain family."
     )
     background: str = (
         "Born from the need for a capable, tool-wielding AI agent that can "
@@ -53,6 +53,13 @@ class Personality:
 
 
 DEFAULT_PERSONALITY = Personality()
+
+# The default before the product was renamed Captain. Every agent wrote it to
+# disk on its first run, so a file still holding exactly this name and
+# description is the untouched default, read as today's. Anything a person
+# changed stays as they wrote it.
+_OLD_DEFAULT_NAME = "Captain Claw"
+_OLD_DEFAULT_DESCRIPTION = "A powerful AI assistant with claws — part of the Captain Claw family."
 
 # ── Markdown serialization ────────────────────────────────────────────
 
@@ -125,6 +132,9 @@ def parse_personality_markdown(text: str) -> Personality:
 
     instructions = sections.get("instructions", "").strip()
 
+    if name == _OLD_DEFAULT_NAME and description == _OLD_DEFAULT_DESCRIPTION:
+        name, description = DEFAULT_PERSONALITY.name, DEFAULT_PERSONALITY.description
+
     return Personality(
         name=name or DEFAULT_PERSONALITY.name,
         description=description or DEFAULT_PERSONALITY.description,
@@ -188,8 +198,8 @@ def personality_to_prompt_block(p: Personality) -> str:
 
     escaped_name = _esc(p.name)
     # Auto-append family suffix if not already present.
-    if "captain claw" not in p.name.lower():
-        escaped_name += " of the Captain Claw family"
+    if "captain" not in p.name.lower():
+        escaped_name += " of the Captain family"
 
     block = (
         f"You are {escaped_name}.\n"

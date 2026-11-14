@@ -257,7 +257,7 @@ async def _run_agent_task(t: _MCPTask, host: str, auth: str, timeout: float) -> 
 MCP_TOOLS = [
     {
         "name": "list_agents",
-        "description": "List your running/known Captain Claw agents. Returns each agent's name, slug, port, kind (docker/process), status and description. Use a slug or name as the `agent` argument to send_task.",
+        "description": "List your running/known Captain agents. Returns each agent's name, slug, port, kind (docker/process), status and description. Use a slug or name as the `agent` argument to send_task.",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {

@@ -110,7 +110,7 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/history", "description": "Show recent conversation history", "category": "General"},
     {"command": "/compact", "description": "Manually compact session memory", "category": "General"},
     {"command": "/nuke", "description": "Delete all workspace files, memory, and datastore", "category": "General"},
-    {"command": "/exit", "description": "Exit Captain Claw", "category": "General"},
+    {"command": "/exit", "description": "Exit Captain", "category": "General"},
     {"command": "/flow status|pause|resume|stop", "description": "Control a running flow (add a handle or 'all' to target)", "category": "General"},
     {"command": "/new [name]", "description": "Create a new session", "category": "Sessions"},
     {"command": "/session", "description": "Show active session info", "category": "Sessions"},
@@ -3642,7 +3642,7 @@ async def _run_server(config: Config) -> None:
     )
     apply_old_man_config_overrides(config)
 
-    print("Initializing Captain Claw agent...")
+    print("Initializing Captain agent...")
     await server._init_agent()
 
     # Set up Old Man supervisor session (tags metadata + injects instructions).
@@ -3821,7 +3821,7 @@ async def _run_server(config: Config) -> None:
                 actual=port,
             )
 
-    print(f"\n  Captain Claw Web UI running at http://{host}:{port}")
+    print(f"\n  Captain Web UI running at http://{host}:{port}")
     if config.web.public_run:
         section = config.web.public_run.strip().lower()
         print(f"  PUBLIC MODE: only /{section} is accessible to anonymous visitors")
@@ -3937,7 +3937,7 @@ def run_web_server(config: Config) -> None:
 def main() -> None:
     """Standalone entry point for captain-claw-web."""
     import argparse as _ap
-    parser = _ap.ArgumentParser(prog="captain-claw-web", description="Captain Claw Web Server")
+    parser = _ap.ArgumentParser(prog="captain-claw-web", description="Captain Web Server")
     parser.add_argument("--public-run", default="", metavar="SECTION",
                         help="Run in public mode exposing only SECTION (e.g. 'computer')")
     parser.add_argument("--port", type=int, default=0, help="Override web server port")

@@ -1,4 +1,4 @@
-You are performing a self-reflection for an AI agent called Captain Claw.
+You are performing a self-reflection for an AI agent called Captain.
 
 Your task is to analyze the provided context — recent conversations, memory facts, task history, and the previous reflection — and produce actionable self-improvement instructions.
 

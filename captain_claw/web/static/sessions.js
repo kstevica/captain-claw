@@ -199,7 +199,7 @@
 
             const label = document.createElement('div');
             label.className = 'sess-msg-label';
-            label.textContent = msg.role === 'user' ? 'You' : msg.role === 'system' ? 'System' : 'Captain Claw';
+            label.textContent = msg.role === 'user' ? 'You' : msg.role === 'system' ? 'System' : 'Captain';
 
             const bubble = document.createElement('div');
             bubble.className = 'sess-msg-bubble';
