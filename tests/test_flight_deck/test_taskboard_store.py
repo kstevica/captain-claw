@@ -347,7 +347,7 @@ def test_people_lists_everyone_not_just_the_facets_top_50(store):
     res = store.people(ALICE, limit=200)
     assert res["total"] == 60 and len(res["people"]) == 60
     page = store.people(ALICE, sort="name", limit=25, offset=50)
-    assert [label for _, label, _, _ in page["people"]] == [f"Person {i:02d}" for i in range(50, 60)]
+    assert [label for _, label, *_ in page["people"]] == [f"Person {i:02d}" for i in range(50, 60)]
 
 
 def test_people_search_and_sort(store):
@@ -358,15 +358,15 @@ def test_people_search_and_sort(store):
         ("fd_user", "user-bob", "Bob", 4),
     ])
     by_count = store.people(ALICE, leave_out=("fd_user:",))
-    assert [(label, n) for _, label, n, _ in by_count["people"]] == [("Ana Babić", 3), ("Bo", 2), ("Zoë Šarić", 1)]
+    assert [(label, n) for _, label, n, *_ in by_count["people"]] == [("Ana Babić", 3), ("Bo", 2), ("Zoë Šarić", 1)]
     by_name = store.people(ALICE, sort="name", leave_out=("fd_user:",))
-    assert [label for _, label, _, _ in by_name["people"]] == ["Ana Babić", "Bo", "Zoë Šarić"]
+    assert [label for _, label, *_ in by_name["people"]] == ["Ana Babić", "Bo", "Zoë Šarić"]
     # Folded as the board's search: no accents needed; every word must match; the address counts.
-    assert [label for _, label, _, _ in store.people(ALICE, q="zoe saric")["people"]] == ["Zoë Šarić"]
-    assert [label for _, label, _, _ in store.people(ALICE, q="y.org")["people"]] == ["Bo"]
+    assert [label for _, label, *_ in store.people(ALICE, q="zoe saric")["people"]] == ["Zoë Šarić"]
+    assert [label for _, label, *_ in store.people(ALICE, q="y.org")["people"]] == ["Bo"]
     assert store.people(ALICE, q="ana zoe")["total"] == 0
     # The deck's own users stay out when asked; another board's people never show.
-    assert "fd_user:user-bob" in [v for v, _, _, _ in store.people(ALICE)["people"]]
+    assert "fd_user:user-bob" in [v for v, *_ in store.people(ALICE)["people"]]
     assert store.people(BOB)["total"] == 0
 
 
@@ -376,7 +376,29 @@ def test_people_count_their_done_tasks(store):
         store.ingest(ALICE, keys=[key], event=_ev(f"p{key}"),
                      parties=[{"role": "requester", "kind": "email", "address": "ana@x.co", "display": "Ana"},
                               {"role": "cc", "kind": "email", "address": "ana@x.co", "display": "Ana"}])
-    assert store.people(ALICE)["people"] == [("email:ana@x.co", "Ana", 3, 2)]
+    assert store.people(ALICE)["people"] == [("email:ana@x.co", "Ana", 3, 2, 1)]
+
+
+def test_people_by_how_many_tasks_are_pending(store):
+    k = 0
+    for addr, open_n, done_n in (("one@x.co", 1, 2), ("three@x.co", 3, 0), ("six@x.co", 6, 1), ("ten@x.co", 10, 0)):
+        for status in ["open"] * open_n + ["done"] * done_n:
+            k += 1
+            _task(store, key=f"t{k}", patch={"status": status})
+            store.ingest(ALICE, keys=[f"t{k}"], event=_ev(f"q{k}"),
+                         parties=[{"role": "requester", "kind": "email", "address": addr, "display": addr}])
+    _task(store, key="maybe", patch={"status": "maybe"})
+    store.ingest(ALICE, keys=["maybe"], event=_ev("qm"),
+                 parties=[{"role": "requester", "kind": "email", "address": "one@x.co", "display": "one@x.co"}])
+    pending = {label: p for _, label, _, _, p in store.people(ALICE, limit=200)["people"]}
+    assert pending == {"one@x.co": 2, "three@x.co": 3, "six@x.co": 6, "ten@x.co": 10}  # maybe counts as pending
+
+    def who(rng):
+        return sorted(label for _, label, *_ in store.people(ALICE, pending=rng)["people"])
+    assert who((2, 2)) == ["one@x.co"]
+    assert who((2, 5)) == ["one@x.co", "three@x.co"]
+    assert who((10, None)) == ["ten@x.co"]
+    assert who((7, 9)) == []
 
 
 def test_one_task_by_id_and_the_counts_follow_it(store):
