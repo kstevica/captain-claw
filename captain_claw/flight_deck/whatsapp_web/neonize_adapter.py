@@ -39,13 +39,12 @@ from pathlib import Path
 from typing import Any
 
 from captain_claw.flight_deck.whatsapp_web import NEONIZE_VERSION, parse
+from captain_claw.flight_deck.whatsapp_web.link_state import DEVICE_NAME
 
 log = logging.getLogger("whatsapp_web.neonize")
 
 EventSink = Callable[[str, dict[str, Any]], Awaitable[None]]
 
-# What the phone's Linked devices list calls this link.
-DEVICE_NAME = "Captain Claw"
 # The address book arrives by app-state sync a little after connecting; read
 # it (and the group names) then, and again now and then.
 _DIRECTORY_FIRST = 20.0
