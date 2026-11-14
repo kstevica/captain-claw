@@ -82,15 +82,22 @@ async def test_anonymize_blob_reports_its_steps(monkeypatch):
 
     token = ar.PROGRESS.set(hook)
     try:
-        text = "\n\n".join(f"Stavka {i}: Sastanak je održan u utorak prema dogovoru." for i in range(6)).encode()
+        text = "\n\n".join(f"Stavka {i}: Sastanak je održan u utorak prema dogovoru." for i in range(40)).encode()
         await ar.anonymize_blob("user-progress", "memo.txt", text, {"mode": "one_way", "lane": "both"},
                                 actor="test", source="test")
     finally:
         ar.PROGRESS.reset(token)
+    import asyncio
+
+    await asyncio.sleep(0.05)  # the engine's ticks come from its worker thread through the loop
     steps = [e["step"] for e in events]
     assert steps[0] == "reading" and steps[-1] == "replacing" and "model" in steps
     chunks = [e for e in events if e["step"] == "model"]
     assert chunks[0]["chunk"] == 0 and chunks[-1]["chunk"] == chunks[-1]["chunks"] >= 2
+    start = next(e for e in events if e["step"] == "replacing")
+    assert start["unit"] == "parts" and start["pieces"] >= 1
+    passes = {(e["round"], e["pass"]) for e in events if "pass" in e}
+    assert (1, "looking") in passes and (1, "replacing") in passes
 
 
 @pytest.mark.usefixtures("deck")

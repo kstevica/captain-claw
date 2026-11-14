@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import bisect
 import re
+import threading
+import time
 from collections.abc import Callable, Iterable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -975,20 +978,96 @@ def _mask_tokens(text: str) -> tuple[str, list[tuple[int, int]]]:
     return "".join(chars), ranges
 
 
-def _extra_spans(text: str, extra: tuple[tuple[str, str], ...]) -> list[Span]:
-    out = []
+_EXTRA_BEFORE = re.compile(r"[\w@.\-]")
+_EXTRA_AFTER = re.compile(r"[\w@\-]|\.\w")
+
+
+def _extra_finder(extra: tuple[tuple[str, str], ...]) -> Callable[[str], list[Span]]:
+    """Every place the caller's (or the trusted model's) terms appear in a
+    text, case-insensitively — never a piece of an email, a domain or a dotted
+    word ("marko" in marko.k@x.hr). Priority 2, so a longer find (the whole
+    email) wins.
+
+    Terms are indexed by their first word, and a text's words are looked up
+    once: the time grows with the text, not with the number of terms (one
+    regex per term per text took minutes on a big workbook, and past 512 terms
+    Python's regex cache recompiled every one of them every time)."""
+    index: dict[str, list[tuple[str, int, str]]] = {}
     for term, kind in extra:
         term = term.strip()
         if len(term) < 2:
             continue
-        # Never a piece of an email, a domain or a dotted word ("marko" in
-        # marko.k@x.hr); priority 2 so a longer find (the whole email) wins.
-        for m in re.finditer(rf"(?<![\w@.\-])(?i:{re.escape(term)})(?![\w@\-]|\.\w)", text):
-            out.append(Span(m.start(), m.end(), kind, 2, "extra"))
-    return out
+        words = _TEXT_TOKEN_RE.findall(term.casefold())
+        if words:
+            entry = (term.casefold(), len(term), kind)
+            if entry not in index.setdefault(words[0], []):
+                index[words[0]].append(entry)
+
+    def find(text: str) -> list[Span]:
+        out: list[Span] = []
+        if not index:
+            return out
+        for m in _TEXT_TOKEN_RE.finditer(text):
+            cands = index.get(m.group(0).casefold())
+            if not cands:
+                continue
+            pos = m.start()
+            if pos > 0 and _EXTRA_BEFORE.match(text, pos - 1):
+                continue
+            for term_cf, length, kind in cands:
+                end = pos + length
+                if text[pos:end].casefold() != term_cf or _EXTRA_AFTER.match(text, end):
+                    continue
+                out.append(Span(pos, end, kind, 2, "extra"))
+        return out
+
+    return find
+
+
+def _extra_spans(text: str, extra: tuple[tuple[str, str], ...]) -> list[Span]:
+    return _extra_finder(extra)(text)
 
 
 # ── the run ─────────────────────────────────────────────────────────
+
+
+# How far a long run is, for a caller that shows it: set it (a plain function —
+# run() works in a worker thread) and it gets {"round", "pass" ("looking" |
+# "replacing" | "checking"), "done", "of"} at most every TICK_SECONDS. Counts
+# only, never text.
+PROGRESS: ContextVar[Callable[[dict[str, Any]], None] | None] = ContextVar("engine_progress", default=None)
+# A run in a worker thread can't be killed: set this event and it stops at its
+# next piece of text, raising RunCancelled (a stopped data room, say).
+CANCEL: ContextVar[threading.Event | None] = ContextVar("engine_cancel", default=None)
+TICK_SECONDS = 0.5
+
+
+class RunCancelled(Exception):
+    """The run was asked to stop (CANCEL was set); nothing it made is kept."""
+
+
+class _Tick:
+    def __init__(self, round_no: int, name: str, total: int, report: bool = True) -> None:
+        # *report* False: a tiny run (a file's own name, a title) isn't worth showing.
+        self.hook = PROGRESS.get() if report else None
+        self.cancel = CANCEL.get()
+        self.round_no, self.name, self.total = round_no, name, total
+        self.last = 0.0
+        self(0, force=True)
+
+    def __call__(self, done: int, force: bool = False) -> None:
+        if self.cancel is not None and self.cancel.is_set():
+            raise RunCancelled()
+        if self.hook is None:
+            return
+        now = time.monotonic()
+        if not force and now - self.last < TICK_SECONDS:
+            return
+        self.last = now
+        try:
+            self.hook({"round": self.round_no, "pass": self.name, "done": done, "of": self.total})
+        except Exception:  # noqa: BLE001 — showing progress never stops a run
+            pass
 
 
 def run(segments: list[Segment], state: VaultState, options: Options | None = None) -> RunResult:
@@ -1015,6 +1094,9 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             e = resolver.resolve(kind, term.strip())
             if e.new and not e.found_by:
                 e.found_by = "extra"
+    extra_find = _extra_finder(options.extra)
+    # Progress for a document (many pieces, or one long text), not for a file's own name.
+    report = len(texts) >= 2 or sum(len(t) for t in texts) >= 2000
     used: dict[str, Entity] = {}
     order: list[str] = []
     fixed = 0
@@ -1024,7 +1106,9 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         # Detect in every segment (tokens already in the text are masked).
         found: list[list[Span]] = []
         masks: list[list[tuple[int, int]]] = []
+        tick = _Tick(round_no, "looking", len(texts), report)
         for i, text in enumerate(texts):
+            tick(i)
             masked, token_ranges = _mask_tokens(text)
             # The name model reads the original text only: on the engine's own
             # masked output it mistakes the words around a token for names,
@@ -1036,7 +1120,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
                 h = d.hint_span(masked, hints[i])
                 if h is not None and (options.kinds is None or h.kind in options.kinds):
                     spans.append(h)
-            spans.extend(_extra_spans(masked, options.extra))
+            spans.extend(extra_find(masked))
             spans = [_trim_org_span(masked, sp, cores) if sp.kind == "ORG"
                      else _trim_title_span(masked, sp) if sp.kind == "PERSON" else sp for sp in spans]
             masks.append(token_ranges)
@@ -1051,14 +1135,18 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             return (1 if single else 0, 0)
 
         items = [(i, sp) for i, spans in enumerate(found) for sp in spans]
-        for i, sp in sorted(items, key=order_key):
+        tick = _Tick(round_no, "matching", len(items), report)
+        for n, (i, sp) in enumerate(sorted(items, key=order_key)):
+            tick(n)
             pending[(i, sp.start, sp.end)] = resolver.resolve(sp.kind, texts[i][sp.start:sp.end])
 
         # Find every known entity again, then pick the final spans.
         finder = _known_spans_finder(state, options)
         changed = False
         new_texts: list[str] = []
+        tick = _Tick(round_no, "replacing", len(texts), report)
         for i, text in enumerate(texts):
+            tick(i)
             masked, token_ranges = _mask_tokens(text)
             known = finder(masked, _full_names_in(text, [pending[(i, sp.start, sp.end)] for sp in found[i]], state))
             by_span: dict[tuple[int, int], Entity] = {}
@@ -1128,6 +1216,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             edits[i] = sorted(edits[i] + new_edits)
         texts = new_texts
         rounds = round_no
+        tick(len(texts), force=True)
         if not changed:
             break
     else:
@@ -1135,11 +1224,13 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         # anything is still there, fail closed.
         leftover: dict[str, int] = {}
         finder = _known_spans_finder(state, options)
-        for text in texts:
+        tick = _Tick(MAX_ROUNDS + 1, "checking", len(texts), report)
+        for i, text in enumerate(texts):
+            tick(i)
             masked, token_ranges = _mask_tokens(text)
             spans = (d.detect(masked, options.kinds, opt_in=options.generalize & set(d.OPT_IN_KINDS), ner=False)
                      if options.deterministic else []) \
-                + _extra_spans(masked, options.extra) \
+                + extra_find(masked) \
                 + [sp for sp, _e in finder(masked, _full_names_in(text, [], state))]
             for sp in _select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep)):
                 leftover[sp.kind] = leftover.get(sp.kind, 0) + 1

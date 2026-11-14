@@ -731,6 +731,35 @@ detected from diacritics and common words.
   not run yet". A cancel from the deck shutting down still keeps the room
   "running", so it resumes at the next start.
 
+**The code pass on big workbooks (2026-11-14, branch `feat/rooms-replace-progress`):**
+
+- **The slowness:** a payroll journal (about 75,000 cells) sat in "Replacing
+  names" for over ten minutes on staging. The caller's terms (seed names plus
+  the names the trusted model found) were searched with one regex per term,
+  per cell, per round. Past 512 terms, Python's regex cache recompiled every
+  pattern every time.
+- **The fix:** `engine._extra_finder` indexes the terms by their first word
+  once per run and looks up each cell's words, as the known-entity finder
+  already did. Cost no longer grows with the number of terms.
+  - Old code: still running after more than 9.5 min (20,006 cells,
+    1,500 terms).
+  - New code: 0.8 s for the same; 3.1 s for 75,406 cells and 2,000 terms.
+  - A test checks the indexed finder against the old regex on emails, dotted
+    words, hyphens, case and overlapping terms.
+- **Progress:**
+  - **Engine:** `engine.PROGRESS`, a context variable read inside the worker
+    thread, gets `{round, pass, done, of}` at most twice a second. The passes
+    are looking, matching, replacing, and checking at the end.
+  - **Room job:** keeps it as `job.replace`, logs each pass with its time.
+  - **Run strip:** "round 1 · looking for names in cells 40,000 of 96,952",
+    a bar, and time left in that pass; the room's ETA counts the code pass.
+  - **Small runs:** a file's own name (under 2,000 characters, one piece)
+    isn't reported.
+- **Stop:** it now stops the code pass too. `engine.CANCEL` is a
+  `threading.Event` that `_anonymize` sets when its coroutine is cancelled,
+  and the engine raises `RunCancelled` at its next piece of text. Late ticks
+  from a stopped run are ignored.
+
 ## Later
 
 - **Fleet side door.** If the person turns on both connectors in one Claude chat,
