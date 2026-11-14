@@ -15,7 +15,7 @@ import { AlarmsNotice, ExportCard, ReadsCard } from './RoomsAccess'
 import { InboxSection, SectionHead, TasksSection } from './RoomsInbox'
 import { RoomFileViewer } from './RoomFileViewer'
 import { IconBtn, SearchField, TokenChip } from './roomParts'
-import { STATE_LABEL, STATE_TONE, clock, count, duration, errorText, fileSize, runEta } from './roomText'
+import { STATE_LABEL, STATE_TONE, clock, compact, count, duration, errorText, fileSize, runEta } from './roomText'
 
 // One data room: a left rail with what the room has (its files, as folders),
 // what you tell it (names to hide, roles) and what Claude did with it (its
@@ -274,7 +274,8 @@ export function RoomView({ id, onBack, onClose }: {
         </main>
       </div>
 
-      {viewing && <RoomFileViewer roomId={id} file={viewing} entries={entries} onClose={() => setViewing(null)} />}
+      {viewing && <RoomFileViewer roomId={id} file={viewing} entries={entries} onClose={() => setViewing(null)}
+        onChanged={() => void reload()} />}
       {confirmDelete && <DeleteDialog room={room} onClose={() => setConfirmDelete(false)} onDeleted={onBack} />}
     </div>
   )
@@ -328,6 +329,25 @@ function Health({ room }: { room: Room }) {
 
 const STEP_LABEL: Record<string, string> = {
   reading: 'Reading the file', model: 'Finding names', replacing: 'Replacing names',
+  saving: 'Saving the names it learned', writing: 'Writing the anonymized copy',
+  text: 'Making the text Claude reads', leaks: 'Looking for real names left', indexing: 'Indexing it for search',
+  hiding: 'Hiding what the sweep left',
+}
+// The sweep reads the anonymized copies, not the originals.
+const SWEEP_STEP_LABEL: Record<string, string> = {
+  reading: 'Reading the anonymized copy', replacing: 'Putting in names found later', writing: 'Writing the copy',
+  saving: 'Saving the names',
+}
+// The check, when it hides what the sweep left: the anonymizer's own steps.
+const CHECK_STEP_LABEL: Record<string, string> = {
+  reading: 'Reading the anonymized copy', replacing: 'Hiding what the sweep left', writing: 'Writing the copy',
+  saving: 'Saving the names',
+}
+const PHASE_HINT: Record<string, string> = {
+  sweeping: 'Files are done one by one, so a name first found in a later file can still be in an earlier one. '
+    + 'Code goes over every anonymized copy again with all the names the room knows now, until a round changes nothing (at most 3).',
+  checking: 'Every real value the room knows (its other spellings too) is looked for in the text Claude will read. '
+    + 'A file that still has one is blocked and never released.',
 }
 // The code pass, round by round: look for names in every piece of text, match
 // what it found to the room's names, put the tokens in; a final check if names
@@ -337,7 +357,7 @@ const PASS_LABEL: Record<string, string> = {
 }
 
 /** Where a run stands: the phase, the file it's on (size, step, the trusted
- *  model's chunk n of N), and how long the file and the room still take. */
+ *  model's chunk n of N), and how long the file and the phase still take. */
 function RunStrip({ room, files }: { room: Room; files: RoomFile[] }) {
   const job = room.job
   const [now, setNow] = useState(() => Date.now() / 1000)
@@ -348,45 +368,65 @@ function RunStrip({ room, files }: { room: Room; files: RoomFile[] }) {
   const total = job.total || 0
   const done = (job.done || 0) + (job.failed || 0)
   const anonymizing = job.phase === 'anonymizing'
+  const sweeping = job.phase === 'sweeping'
+  const checking = job.phase === 'checking'
   const eta = runEta(job, now)
-  const overall = anonymizing && (job.bytes_total || 0) > 0
-    ? Math.min(100, (((job.bytes_done || 0) + (job.current_size || 0) * eta.fileShare) / job.bytes_total!) * 100)
-    : total ? (done / total) * 100 : 0
+  const overall = anonymizing && !job.bytes_total ? (total ? (done / total) * 100 : 0) : eta.share * 100
   const file = job.current ? files.find((f) => f.id === job.current) : undefined
   const index = job.file_index
-  const count = anonymizing ? total : job.file_count
+  const fileCount = anonymizing ? total : job.file_count
   const chunks = job.chunks || 0
   const filePct = job.step === 'model' && chunks ? ((job.chunk || 0) / chunks) * 100 : job.step === 'replacing' ? 100 : 0
   const since = job.file_started_at ? now - job.file_started_at : 0
   const rp = job.replace
+  const stepLabel = job.step
+    ? (sweeping && SWEEP_STEP_LABEL[job.step]) || (checking && CHECK_STEP_LABEL[job.step]) || STEP_LABEL[job.step] || job.step
+    : ''
+  const left = anonymizing ? 'left for the room' : sweeping ? 'left in this round' : 'left for the check'
 
   return (
     <div className="space-y-1.5 border-b border-zinc-800 bg-violet-500/[0.04] px-4 py-2.5 text-xs">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-500" />
-        <span className="font-medium text-zinc-100">{PHASE_LABEL[job.phase || ''] || job.phase || 'Starting'}</span>
+        <span className="font-medium text-zinc-100" title={PHASE_HINT[job.phase || '']}>
+          {PHASE_LABEL[job.phase || ''] || job.phase || 'Starting'}
+        </span>
         {anonymizing && total > 0 && <span className="text-zinc-500">{done} of {total} done</span>}
-        {job.phase === 'sweeping' && job.sweep_round && <span className="text-zinc-500">round {job.sweep_round}</span>}
-        {(anonymizing || job.phase === 'sweeping' || job.phase === 'checking') && (
+        {sweeping && job.sweep_round && (
+          <span className="tabular-nums text-zinc-500">
+            round {job.sweep_round} of up to {job.sweep_rounds || 3}
+            {(job.round_changed || 0) > 0
+              ? ` · ${count(job.round_changed || 0, 'file')} fixed, ${count(job.round_found || 0, 'name')} put in`
+              : (job.file_index || 0) > 1 ? ' · nothing left over so far' : ''}
+          </span>
+        )}
+        {checking && (job.needles || 0) > 0 && (
+          <span className="tabular-nums text-zinc-500">{count(job.needles || 0, 'real value')} looked for in every file</span>
+        )}
+        {(anonymizing || sweeping || checking) && (
           <span className="h-1.5 w-48 overflow-hidden rounded-full bg-zinc-800">
             <span className="block h-full rounded-full bg-violet-500 transition-all duration-700" style={{ width: `${overall}%` }} />
           </span>
         )}
-        {anonymizing && eta.run !== null && <span className="text-zinc-400">{duration(eta.run)} left for the room</span>}
+        {(anonymizing || sweeping || checking) && eta.run !== null && <span className="text-zinc-400">{duration(eta.run)} {left}</span>}
         {(job.failed || 0) > 0 && <Pill tone="amber">{job.failed} failed</Pill>}
-        {room.trusted_model && anonymizing && (
+        {checking && (job.hidden || 0) > 0 && (
+          <span className="tabular-nums text-violet-700 dark:text-violet-300">{count(job.hidden || 0, 'leftover')} hidden</span>
+        )}
+        {checking && (job.blocked || 0) > 0 && <Pill tone="red">{job.blocked} blocked so far</Pill>}
+        {room.trusted_model && (anonymizing || sweeping || checking) && (
           <span className="ml-auto hidden text-zinc-500 xl:inline">You can close this; it keeps going.</span>
         )}
       </div>
       {file && (
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 pl-[26px] text-zinc-500">
-          {index && count ? <span className="tabular-nums">File {index} of {count}</span> : null}
+          {index && fileCount ? <span className="tabular-nums">File {index} of {fileCount}</span> : null}
           <span className="max-w-[28rem] truncate font-medium text-zinc-300" title={file.path}>{file.path.split('/').pop()}</span>
           <span>{fileSize(file.size)}{file.info?.rows ? ` · ${file.info.rows.toLocaleString()} rows` : ''}</span>
-          {anonymizing && job.step && (
+          {job.step && (
             <>
               <span className="text-zinc-600">·</span>
-              <span className="text-zinc-300">{STEP_LABEL[job.step] || job.step}</span>
+              <span className="text-zinc-300">{stepLabel}</span>
               {job.step === 'model' && chunks > 0 && (
                 <>
                   <span className="tabular-nums">chunk {Math.min((job.chunk || 0) + 1, chunks)} of {chunks}</span>
@@ -395,12 +435,21 @@ function RunStrip({ room, files }: { room: Room; files: RoomFile[] }) {
                   </span>
                 </>
               )}
+              {job.step === 'leaks' && (job.chars || 0) > 0 && (
+                <span className="tabular-nums">in {compact(job.chars || 0)} characters</span>
+              )}
+              {job.step === 'hiding' && (job.leftovers || 0) > 0 && (
+                <span className="tabular-nums">{count(job.leftovers || 0, 'spelling')} found as written</span>
+              )}
+              {job.step === 'indexing' && (job.pages || 0) > 0 && (
+                <span className="tabular-nums">{count(job.pages || 0, 'page')}</span>
+              )}
               {job.step === 'replacing' && rp && (
                 <>
                   {rp.pass ? (
                     <>
                       <span className="tabular-nums">
-                        round {rp.round > 3 ? 'final' : rp.round} · {PASS_LABEL[rp.pass] || rp.pass}{' '}
+                        {rp.round > 1 && rp.round <= 3 ? `round ${rp.round} · ` : ''}{PASS_LABEL[rp.pass] || rp.pass}{' '}
                         {rp.done.toLocaleString()} of {rp.of.toLocaleString()} {rp.pass === 'matching' ? 'names found' : rp.unit}
                       </span>
                       <span className="h-1 w-24 overflow-hidden rounded-full bg-zinc-800">
@@ -583,6 +632,9 @@ function FileRow({ f, depth, flat, running, onOpen, onDownload, onRemove }: {
             <span className="block truncate text-[11px] text-zinc-500" title={f.clean_path}>Claude sees {claudeName}</span>
           )}
           {f.error && <span className={`block truncate text-[11px] ${f.state === 'blocked' ? 'text-red-600 dark:text-red-400' : 'text-amber-700 dark:text-amber-300'}`}>{f.error}</span>}
+          {f.state === 'blocked' && (f.leftovers?.left || 0) > 0 && (
+            <span className="block text-[11px] font-medium text-red-600 dark:text-red-400">Open it to see where, and what you can do →</span>
+          )}
         </button>
         <div className="flex shrink-0 items-center gap-1.5">
           <span className="hidden whitespace-nowrap text-right text-[11px] tabular-nums text-zinc-500 md:inline">
@@ -591,6 +643,12 @@ function FileRow({ f, depth, flat, running, onOpen, onDownload, onRemove }: {
             {(f.info?.sheets || 0) > 1 && <> · {f.info!.sheets} sheets</>}
           </span>
           {replaced > 0 && <span className="hidden text-[11px] tabular-nums text-zinc-500 lg:inline">· {replaced} hidden</span>}
+          {(f.leftovers?.hidden || 0) > 0 && (
+            <span className="hidden text-[11px] tabular-nums text-violet-700 lg:inline dark:text-violet-300"
+              title="Real values the check found after the sweep (a surname alone, a company in lower case), given their name's token. Open the file to see them.">
+              +{f.leftovers!.hidden} after the check
+            </span>
+          )}
           {f.warnings.length > 0 && <span title={f.warnings.join('\n')}><AlertTriangle className="h-3.5 w-3.5 text-amber-500" /></span>}
           {f.released
             ? <Pill tone="emerald" icon={CheckCircle2}>Released</Pill>
@@ -768,6 +826,31 @@ function NamesSection({ room, disabled, onSaved, onError }: {
           </div>
         ))}
       </div>
+      {(room.allowed || []).length > 0 && (
+        <div className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-4">
+          <div className="text-sm font-medium text-zinc-100">Left as written — not names here</div>
+          <p className="mt-0.5 text-xs leading-relaxed text-zinc-500">
+            Words the check found that you said aren’t names in this room. They stay as they are in every file and the
+            check doesn’t look for them. Look for one again and it’s hidden at the next run.
+          </p>
+          <ul className="mt-3 flex flex-wrap gap-2">
+            {(room.allowed || []).map((a) => (
+              <li key={a.text} className="inline-flex items-center gap-1.5 rounded-full border border-zinc-700 bg-zinc-950 py-1 pl-3 pr-1.5 text-xs">
+                <span className="font-medium text-zinc-200">{a.text}</span>
+                {a.tokens.slice(0, 2).map((t) => <TokenChip key={t} token={t} />)}
+                <button type="button" disabled={disabled} title="Look for it again" aria-label={`Look for ${a.text} again`}
+                  className="rounded-full p-0.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-red-600 disabled:opacity-40 dark:hover:text-red-400"
+                  onClick={async () => {
+                    onError('')
+                    try { onSaved((await roomsApi.unallow(room.id, a.text)).room) } catch (e) { onError(errorText(e)) }
+                  }}>
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }

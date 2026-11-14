@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, Bot, ChevronDown, ChevronUp, Download, Eye, Link2, Link2Off, Lock, Tag, Type, User } from 'lucide-react'
-import { roomsApi, type FileText, type RoomFile } from '../../services/roomsApi'
+import {
+  AlertTriangle, Bot, ChevronDown, ChevronUp, Download, Eye, EyeOff, Link2, Link2Off, Lock, ShieldAlert, Tag, Type, User,
+} from 'lucide-react'
+import { roomsApi, type FileText, type Leftover, type RoomFile } from '../../services/roomsApi'
 import { TOKEN_RE, type VaultEntry } from '../../services/anonymizeApi'
 import { Button, Notice, Pill, Segmented } from '../console/parts'
 import { kindLabel } from '../anonymize/anonFormat'
@@ -39,11 +41,130 @@ function lineAt(el: HTMLElement, y: number): number {
   return best
 }
 
-export function RoomFileViewer({ roomId, file, entries, onClose }: {
+/** What the leak check found in this file, as written: what it hid with the
+ *  name's own token, and what is still there (why the file is blocked) — with
+ *  a way to show each, and to say a word isn't a name here. */
+function LeftoversPanel({ roomId, leftovers, byToken, onShowText, onShowToken, onChanged }: {
+  roomId: string
+  leftovers: { hidden: Leftover[]; left: Leftover[] }
+  byToken: Map<string, VaultEntry>
+  onShowText: (text: string) => void
+  onShowToken: (token: string) => void
+  onChanged?: () => void
+}) {
+  const [asking, setAsking] = useState('')
+  const [busy, setBusy] = useState('')
+  const [said, setSaid] = useState<Record<string, string>>({})
+  const [error, setError] = useState('')
+  const { hidden, left } = leftovers
+  if (!hidden.length && !left.length) return null
+
+  const allow = async (key: string, x: Leftover, rerun: boolean) => {
+    setBusy(key); setError('')
+    try {
+      const r = await roomsApi.allow(roomId, { text: x.text, tokens: [x.token], rerun })
+      setSaid((s) => ({
+        ...s, [key]: rerun
+          ? `Left as written from now on. ${r.requeued ? `${count(r.requeued, 'file')} will run again from the original` : 'Run the room'} to bring the word back.`
+          : 'Left as written. Click Check again at the top to clear the block.',
+      }))
+      setAsking('')
+      onChanged?.()
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const row = (x: Leftover, i: number, kind: 'left' | 'hidden') => {
+    const key = `${kind}:${x.token}:${x.text}:${i}`
+    const real = byToken.get(x.token)?.original || ''
+    return (
+      <li key={key} className="rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-sm">
+          {x.text
+            ? <mark className="rounded-md bg-yellow-200 px-1.5 py-px font-medium text-yellow-950 dark:bg-yellow-400/20 dark:text-yellow-200">{x.text}</mark>
+            : <span className="text-xs italic text-zinc-500">found, but not placed in the text</span>}
+          <span className="text-xs text-zinc-500">{kind === 'hidden' ? 'now' : 'is'}</span>
+          <TokenChip token={x.token} onClick={() => onShowToken(x.token)} />
+          {real && real.toLowerCase() !== x.text.toLowerCase() && (
+            <span className="max-w-[16rem] truncate text-xs text-zinc-500" title={real}>({real})</span>
+          )}
+          <span className="text-xs tabular-nums text-zinc-500">
+            {x.count}×{x.where === 'name' ? ' · in the file’s name' : ''}
+          </span>
+          <span className="ml-auto flex flex-wrap items-center gap-1.5">
+            {said[key] ? <span className="text-xs text-emerald-700 dark:text-emerald-300">{said[key]}</span> : asking === key ? (
+              <>
+                <span className="text-xs text-zinc-300">Leave “{x.text}” as written in every file of this room?</span>
+                <Button variant="primary" className="!px-2.5 !py-1 !text-xs" busy={busy === key}
+                  onClick={() => allow(key, x, kind === 'hidden')}>Yes, it’s not a name</Button>
+                <Button className="!px-2.5 !py-1 !text-xs" onClick={() => setAsking('')}>Cancel</Button>
+              </>
+            ) : (
+              <>
+                {x.text && x.where !== 'name' && (
+                  <Button className="!px-2.5 !py-1 !text-xs" icon={Eye}
+                    onClick={() => (kind === 'hidden' ? onShowToken(x.token) : onShowText(x.text))}>Show</Button>
+                )}
+                {x.text && (
+                  <Button className="!px-2.5 !py-1 !text-xs" onClick={() => setAsking(key)}>
+                    {kind === 'hidden' ? 'Not a name — put it back' : 'Not a name here'}
+                  </Button>
+                )}
+              </>
+            )}
+          </span>
+        </div>
+      </li>
+    )
+  }
+
+  return (
+    <div className="max-h-[40%] shrink-0 space-y-3 overflow-auto border-b border-zinc-800 px-4 py-3">
+      {error && <Notice tone="red">{error}</Notice>}
+      {left.length > 0 && (
+        <section className="rounded-2xl border border-red-500/30 bg-red-500/[0.04] p-3">
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-zinc-100">Still in this file — why it’s blocked</div>
+              <p className="mt-0.5 text-xs leading-relaxed text-zinc-500">
+                Captain couldn’t put a token in its place: the name may run across two cells, sit in a sheet name or
+                a formula, or in the file’s name. If a word isn’t a name here, leave it as written. If it is, remove
+                the file, or fix the original and add it again.
+              </p>
+            </div>
+          </div>
+          <ul className="mt-2.5 space-y-1.5">{left.map((x, i) => row(x, i, 'left'))}</ul>
+        </section>
+      )}
+      {hidden.length > 0 && (
+        <section className="rounded-2xl border border-zinc-800 bg-zinc-900/30 p-3">
+          <div className="flex items-start gap-2.5">
+            <EyeOff className="mt-0.5 h-4 w-4 shrink-0 text-violet-500" />
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-zinc-100">Hidden after the check</div>
+              <p className="mt-0.5 text-xs leading-relaxed text-zinc-500">
+                The sweep leaves a surname on its own, or a company written in lower case, to the trusted model. The
+                check still found these real values, so each got the token of the name it belongs to.
+              </p>
+            </div>
+          </div>
+          <ul className="mt-2.5 space-y-1.5">{hidden.map((x, i) => row(x, i, 'hidden'))}</ul>
+        </section>
+      )}
+    </div>
+  )
+}
+
+export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
   roomId: string
   file: RoomFile
   entries: VaultEntry[] | null
   onClose: () => void
+  onChanged?: () => void
 }) {
   const [text, setText] = useState<FileText | null>(null)
   const [error, setError] = useState('')
@@ -149,6 +270,8 @@ export function RoomFileViewer({ roomId, file, entries, onClose }: {
   }, [sync])
 
   const pickToken = (t: string) => { setMode('token'); setToken(t); setAt(0) }
+  // A blocked file whose leftovers are listed below: the list says it better than the error line.
+  const explained = file.state === 'blocked' && (text?.leftovers?.left.length || 0) > 0
   const replaced = Object.values(file.entities).reduce((a, b) => a + b, 0)
   const st = FILE_STATE[file.state] || FILE_STATE.unread
   const name = file.path.split('/').pop() || file.path
@@ -239,10 +362,10 @@ export function RoomFileViewer({ roomId, file, entries, onClose }: {
           ]} />
         </div>
       </div>
-      {(error || file.error || file.warnings.length > 0) && (
+      {(error || (file.error && !explained) || file.warnings.length > 0) && (
         <div className="space-y-2 border-b border-zinc-800 px-4 py-2.5">
           {error && <Notice tone="red">{error}</Notice>}
-          {file.error && <Notice tone={file.state === 'blocked' ? 'red' : 'amber'}>{file.error}</Notice>}
+          {file.error && !explained && <Notice tone={file.state === 'blocked' ? 'red' : 'amber'}>{file.error}</Notice>}
           {file.warnings.length > 0 && (
             <div className="flex items-start gap-2 text-xs text-amber-700 dark:text-amber-300">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -250,6 +373,10 @@ export function RoomFileViewer({ roomId, file, entries, onClose }: {
             </div>
           )}
         </div>
+      )}
+      {text?.leftovers && (
+        <LeftoversPanel roomId={roomId} leftovers={text.leftovers} byToken={byToken} onChanged={onChanged}
+          onShowText={(t) => { setMode('text'); setQuery(t); setAt(0) }} onShowToken={pickToken} />
       )}
       {!text ? (
         <div className="flex flex-1 items-center justify-center text-sm text-zinc-500">{error ? '' : 'Loading…'}</div>

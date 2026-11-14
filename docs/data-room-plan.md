@@ -760,6 +760,97 @@ detected from diacritics and common words.
   and the engine raises `RunCancelled` at its next piece of text. Late ticks
   from a stopped run are ignored.
 
+**Sweep and leftover check, step by step (2026-11-14, branch `feat/rooms-sweep-check-progress`):**
+
+- **What was missing:** after anonymizing, the strip only said "Final sweep" or
+  "Checking for leftovers", with the bar left full from the phase before.
+- **Each phase has its own clock and sizes:** a sweep round and the check
+  each start their own `phase_started_at`, `bytes_total` and `bytes_done`,
+  sized from the anonymized copies. The bar and the time left are for that
+  phase: "left in this round", "left for the check".
+- **Sweep:**
+  - Header: "round 1 of up to 3", then files fixed and names put in this
+    round.
+  - File line: file n of N, its size and rows, and the step: reading the
+    copy, then the engine's passes ("looking for names in 61,140 of 96,952
+    cells"), saving the names, writing the fixed copy.
+  - `anonymize_blob` now also reports `saving` (the vault) and `writing`
+    (the copy). Engine ticks that arrive after `saving` are dropped.
+- **Check:**
+  - Header: how many real values (spellings included) it looks for, and how
+    many files it has blocked so far.
+  - Steps: reading, "Making the text Claude reads", "Looking for real names
+    left" (with the text's length), "Indexing it for search" (with its pages).
+- **Log:** each sweep round and file (names found, seconds) and each check
+  file (characters, pages, leftovers, and the seconds for the text and for
+  the check), plus round and check totals.
+- **Leak check speed:** a value is matched as whole words, so `leaks` first
+  takes the set of the text's words. A value with a word the text doesn't
+  have isn't searched for. For a company matched loosely, `needles` now gives
+  a `Loose(pattern, words)`. Measured on 1.5 MB of text with 4,000 values and
+  500 company patterns: 6.5 s before, 0.08 s after. A test checks the
+  results are the same as a plain search.
+- **Why files still get blocked (made-up check):**
+  - The sweep runs with one-word names off, so a surname alone that the
+    vault holds as a person ("Uplata Horvat") stays in the copy.
+  - A company is only matched with a capital first letter, so one written in
+    lower case ("dobavljač sokol softver d.o.o.") stays in the copy too.
+  - The leak check is case-blind and looks for every value, so it blocks
+    both. Upper case, missing accents and a reversed full name are replaced.
+
+**Leftovers: hidden by the check, or explained (2026-11-14, same branch):**
+
+- **Where, as written:** `rooms_job.find_leftovers(text, needles)` maps each
+  hit back to the text as written, using the fold with a position map
+  (`_fold_map`). It gives one `{token, text, count}` per token and spelling.
+  The longest match wins: "softver d.o.o" inside "galeb softver d.o.o"
+  counts once, for the longer name. A token the check finds but can't place
+  keeps an empty text, and still blocks.
+- **Hidden with the token the check named:**
+  - `engine.Options.pinned` takes (text, token) pairs: wherever the text
+    stands as whole words (any case, any spacing), it is that vault entity.
+    A spelling that differs beyond case gets its own place (⟦PERSON_7:2⟧).
+    Through the route this is `data["pinned"]` (at most 2,000).
+  - In the check, a file with leftovers runs once more through
+    `anonymize_blob` with its spellings pinned (the sweep's settings). Then
+    its text is checked again.
+  - What went is listed as hidden; what is still there blocks the file. A
+    released file that changes this way is taken back, as in the sweep.
+- **Stored sealed:** `room_files.leftovers` holds `{hidden, left}` with the
+  real spellings, sealed like the paths. The file list gets counts only; the
+  file's text route gets the spellings (owner only). The hidden list stays
+  across later checks until the file runs again from its original.
+- **"Not a name here":** `rooms.allowed` (sealed), a list of
+  `{text, tokens, at}`:
+  - The room's runs keep the spelling as written (`keep`).
+  - `needles(state, allowed)` stops looking for it. `room_needles` is used by
+    every leak check of a room: the run, export, `room_get_file`, Claude's
+    deliveries, tasks, roles. The MCP vault cache is keyed by the list too.
+  - `POST /fd/rooms/{id}/allowed` adds a spelling. With `rerun`, files where
+    it was hidden go back to "not run yet", to come back with the word in
+    place. `POST …/allowed/remove` looks for it again. Values go in the
+    body, never the URL. At most 300; values shorter than 4 characters are
+    refused (they aren't looked for anyway).
+- **UI:**
+  - File viewer: a "Still in this file — why it's blocked" panel (red), and
+    a "Hidden after the check" panel. Each row has the spelling, its token
+    and real name, the count, **Show** (lights it up in both texts), and
+    **Not a name here** / **Not a name — put it back** with an inline
+    confirm.
+  - File list: "+N after the check", and on a blocked file "Open it to see
+    where, and what you can do".
+  - Names to hide: a "Left as written — not names here" list with ×.
+  - Run strip: "N leftovers hidden" during the check, and the step "Hiding
+    what the sweep left".
+- **Seen on a throwaway deck (made-up room):** a lower-case company in a
+  journal was hidden 16 times in a workbook and twice in a text file, and no
+  file was blocked. A name split across two cells was hidden too: code read
+  the column header. The red panel was checked on a file marked blocked by
+  hand.
+- **Not done:** a real value in a file's name is listed (`where: "name"`) but
+  not hidden. Names glued with underscores ("galeb_softver") aren't whole
+  words to the leak check, as before.
+
 ## Later
 
 - **Fleet side door.** If the person turns on both connectors in one Claude chat,

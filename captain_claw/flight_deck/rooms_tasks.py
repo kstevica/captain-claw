@@ -61,7 +61,7 @@ async def anonymize_prompt(room: dict[str, Any], prompt: Any) -> dict[str, Any]:
         raise TaskError(f"The task couldn't be anonymized: {detail}") from None
     tokens = out.decode("utf-8").strip()
     _row, _cipher, state = await inbox._vault(room)  # what the vault knows now, new names included
-    return {"prompt_tokens": tokens, "still_real": rj.leaks(tokens, rj.needles(state)),
+    return {"prompt_tokens": tokens, "still_real": rj.leaks(tokens, rj.room_needles(state, room)),
             "found": info.get("summary") or {}}
 
 

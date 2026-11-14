@@ -33,6 +33,8 @@ import tempfile
 import time
 import unicodedata
 import zipfile
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -51,6 +53,8 @@ log = get_logger(__name__)
 SWEEP_ROUNDS = 3
 PAGE_CHARS = 6000          # text without its own pages is indexed in pieces this long
 MIN_NEEDLE = 4             # shorter real values ("Ana") aren't looked for: too many false hits
+MAX_LEFTOVERS = 200        # leftovers kept per file (hidden, and still there), for the file's page
+MAX_ALLOWED = 300          # spellings a room can be told aren't names
 SEED_KINDS = {"orgs": "ORG", "people": "PERSON", "products": "ORG", "domains": "ORG", "ids": "ID_NUMBER",
               "other": "DETAIL"}
 
@@ -85,16 +89,45 @@ def _fold_loose(text: str) -> str:
     return re.sub(r"\s+", " ", text).casefold()
 
 
-def needles(state: Any) -> list[tuple[str, str | re.Pattern[str]]]:
+_WORD_RE = re.compile(r"\w+")
+
+
+@dataclass(frozen=True)
+class Loose:
+    """A company's name with a short word put in ("plava rijeka prc capital"):
+    the pattern, the words it can't match without, and spellings the room
+    allowed ("not a name here")."""
+    pattern: re.Pattern[str]
+    words: tuple[str, ...]
+    allowed: frozenset[str] = frozenset()
+
+
+Needle = str | Loose
+
+
+def allow_key(text: str) -> str:
+    """A spelling as the leak check compares it (case, accents, spacing and
+    end punctuation folded away)."""
+    return _fold_loose(detectors.fold(text))
+
+
+def allowed_texts(room: dict[str, Any]) -> list[str]:
+    """The spellings this room was told aren't names here."""
+    return [str(a.get("text") or "") for a in room.get("allowed") or [] if isinstance(a, dict) and a.get("text")]
+
+
+def needles(state: Any, allowed: Iterable[str] = ()) -> list[tuple[str, Needle]]:
     """(token, folded real value) for every value worth looking for — and, for a
-    company of two words or more, (token, pattern) for its name with a short
-    word put in ("plava rijeka prc capital"), as the anonymizer matches it too."""
-    out: list[tuple[str, str | re.Pattern[str]]] = []
+    company of two words or more, (token, Loose) for its name with a short
+    word put in, as the anonymizer matches it too. A value the room *allowed*
+    ("not a name here") isn't looked for."""
+    skip = frozenset(allow_key(a) for a in allowed if a)
+    out: list[tuple[str, Needle]] = []
     seen: set[tuple[str, str]] = set()
     for e in state.entities:
         for value in [e.original, *e.forms, *getattr(e, "spellings", [])]:
             folded = _fold_loose(detectors.fold(value))
-            if len(folded.replace(" ", "")) < MIN_NEEDLE or (e.token, folded) in seen:
+            if len(folded.replace(" ", "")) < MIN_NEEDLE or (e.token, folded) in seen or folded in skip:
                 continue
             seen.add((e.token, folded))
             out.append((e.token, folded))
@@ -102,20 +135,101 @@ def needles(state: Any) -> list[tuple[str, str | re.Pattern[str]]]:
             words = engine.loose_name_words(e.original)
             if words:
                 between = rf"\W{{1,3}}(?:\w{{1,{engine.LOOSE_INSERTED_LEN}}}\W{{1,3}})?"
-                out.append((e.token, re.compile(r"(?<!\w)" + between.join(map(re.escape, words)) + r"(?!\w)")))
+                pattern = re.compile(r"(?<!\w)" + between.join(map(re.escape, words)) + r"(?!\w)")
+                out.append((e.token, Loose(pattern, tuple(w for word in words for w in _WORD_RE.findall(word)),
+                                           skip)))
     return out
 
 
-def leaks(text: str, needle_list: list[tuple[str, str | re.Pattern[str]]]) -> list[str]:
-    """Tokens whose real value is still in *text* (as a whole word)."""
+def room_needles(state: Any, room: dict[str, Any]) -> list[tuple[str, Needle]]:
+    return needles(state, allowed_texts(room))
+
+
+def _fold_map(text: str) -> tuple[str, list[int]]:
+    """``_fold_loose(text)`` and, for each of its characters, where it came
+    from in *text* — so a hit can be read back as it is written."""
+    out: list[str] = []
+    where: list[int] = []
+    space = False
+    for i, ch in enumerate(text):
+        if ch.isspace():
+            if not space:
+                out.append(" ")
+                where.append(i)
+            space = True
+            continue
+        space = False
+        for c in unicodedata.normalize("NFKD", ch):
+            if unicodedata.combining(c):
+                continue
+            for f in ("d" if c in "đĐ" else c).casefold():
+                out.append(f)
+                where.append(i)
+    return "".join(out), where
+
+
+def find_leftovers(text: str, needle_list: list[tuple[str, Needle]]) -> list[dict[str, Any]]:
+    """Where real values are still in *text*: one ``{token, text, count}`` per
+    token and spelling, *text* as it is written. A token the check finds but
+    can't place is listed with an empty text (it still blocks)."""
+    hits = leaks(text, needle_list)
+    if not hits:
+        return []
+    wanted = set(hits)
+    hay, where = _fold_map(text)
+    matches: list[tuple[int, int, str]] = []
+    for token, needle in needle_list:
+        if token not in wanted:
+            continue
+        if isinstance(needle, Loose):
+            pattern, allowed = needle.pattern, needle.allowed
+        else:
+            pattern, allowed = re.compile(rf"(?<!\w){re.escape(needle)}(?!\w)"), frozenset()
+        matches.extend((m.start(), m.end(), token) for m in pattern.finditer(hay)
+                       if m.end() > m.start() and m.group(0) not in allowed)
+    # Longest first, no overlaps — as the anonymizer picks: "softver d.o.o"
+    # inside "galeb softver d.o.o" is the longer name's.
+    covered = bytearray(len(hay))
+    kept: list[tuple[int, int, str]] = []
+    for s, e, token in sorted(matches, key=lambda x: (x[0] - x[1], x[0])):
+        if covered.find(1, s, e) != -1:
+            continue
+        covered[s:e] = b"\x01" * (e - s)
+        kept.append((s, e, token))
+    found: dict[tuple[str, str], dict[str, Any]] = {}
+    for s, e, token in sorted(kept):
+        a, b = where[s], where[e - 1] + 1
+        while b < len(text) and unicodedata.combining(text[b]):
+            b += 1
+        spelling = text[a:b]
+        key = (token, allow_key(spelling))
+        if key in found:
+            found[key]["count"] += 1
+        else:
+            found[key] = {"token": token, "text": spelling, "count": 1}
+    matched = {t for _s, _e, t in matches}
+    return [*found.values(), *({"token": t, "text": "", "count": 1} for t in hits if t not in matched)]
+
+
+def leaks(text: str, needle_list: list[tuple[str, Needle]]) -> list[str]:
+    """Tokens whose real value is still in *text* (as a whole word).
+
+    A value is matched as whole words, so each of its words is a whole word of
+    the text too: values with a word the text doesn't have are skipped without
+    a search — the check grows with the text, not with text × vault."""
     hay = _fold_loose(text)
+    words = set(_WORD_RE.findall(hay))
     hits: list[str] = []
     for token, needle in needle_list:
         if token in hits:
             continue
-        if isinstance(needle, re.Pattern):
-            if needle.search(hay):
+        if isinstance(needle, Loose):
+            if all(w in words for w in needle.words) and any(
+                    m.group(0) not in needle.allowed for m in needle.pattern.finditer(hay)):
                 hits.append(token)
+            continue
+        own = _WORD_RE.findall(needle)
+        if own and not all(w in words for w in own):
             continue
         if needle not in hay:
             continue
@@ -268,6 +382,9 @@ def _data(room: dict[str, Any], vault_id: str) -> dict[str, Any]:
     data: dict[str, Any] = {"vault": vault_id, "mode": "reversible",
                             "pictures": "strip" if settings.get("pictures", "strip") == "strip" else "keep",
                             "extra": seed_terms(room.get("seed") or {}), "source": "data-room"}
+    keep = allowed_texts(room)
+    if keep:
+        data["keep"] = keep  # "not a name here": left as it is, in every file
     if settings.get("lane") in ar.LANES:
         data["lane"] = settings["lane"]
     return data
@@ -281,7 +398,8 @@ async def _run(room_id: str) -> None:
             room = await store.get_any(room_id)
             if room is None:
                 return
-            job = {"phase": "anonymizing", "started_at": time.time(), "done": 0, "failed": 0}
+            now = time.time()
+            job = {"phase": "anonymizing", "started_at": now, "phase_started_at": now, "done": 0, "failed": 0}
             await _set_job(room_id, job)
             await _work(room, job)
             final = "review"
@@ -306,8 +424,7 @@ async def _run(room_id: str) -> None:
         job["message"] = (f"Stopped by you — {left} file{'s' if left != 1 else ''} not run yet. Run the room to "
                           "finish them." if left else "Stopped by you.")
         log.info("Data room run stopped", room=room_id, files_left=left)
-    for key in ("current", "step", "chunk", "chunks", "file_started_at", "chunks_started_at", "chunk_at",
-                "current_size", "file_index", "file_count", "replace"):
+    for key in (*_FILE_KEYS, "phase_started_at", "needles", "round_changed", "round_found"):
         job.pop(key, None)
     job["phase"] = "done"
     job["finished_at"] = time.time()
@@ -316,6 +433,44 @@ async def _run(room_id: str) -> None:
         final = "setup"
     await _set_job(room_id, job)
     await store.update(room_id, state=final)
+
+
+# What the job says about the file it is on; gone between phases and at the end.
+_FILE_KEYS = ("current", "step", "chunk", "chunks", "file_started_at", "chunks_started_at", "chunk_at",
+              "current_size", "file_index", "file_count", "replace", "chars", "pages", "leftovers")
+
+
+def _phase(job: dict[str, Any], phase: str, sizes: list[int]) -> None:
+    """A phase (or a sweep round) begins: its own clock and sizes, for the
+    page's bar and time left."""
+    for key in _FILE_KEYS:
+        job.pop(key, None)
+    job.update({"phase": phase, "phase_started_at": time.time(), "bytes_total": sum(sizes), "bytes_done": 0})
+
+
+async def _at_file(room_id: str, job: dict[str, Any], f: dict[str, Any], index: int, count: int, size: int) -> None:
+    """The sweep or the check is on file *index* of *count* now."""
+    for key in _FILE_KEYS:
+        job.pop(key, None)
+    job.update({"current": f["id"], "file_index": index, "file_count": count, "current_size": size,
+                "step": "reading", "file_started_at": time.time()})
+    await _set_job(room_id, job)
+
+
+async def _step(room_id: str, job: dict[str, Any], step: str, **extra: Any) -> None:
+    job["step"] = step
+    job.update(extra)
+    await _set_job(room_id, job)
+
+
+def _sizes(paths: list[Path]) -> list[int]:
+    out = []
+    for p in paths:
+        try:
+            out.append(p.stat().st_size)
+        except OSError:
+            out.append(0)
+    return out
 
 
 async def _file_start(room_id: str, job: dict[str, Any], f: dict[str, Any]) -> None:
@@ -330,13 +485,15 @@ async def _file_start(room_id: str, job: dict[str, Any], f: dict[str, Any]) -> N
     await _set_job(room_id, job)
 
 
-def _file_progress(room_id: str, job: dict[str, Any], f: dict[str, Any]):
+def _file_progress(room_id: str, job: dict[str, Any], f: dict[str, Any], phase: str = "anonymizing"):
     """The hook anonymize_blob reports through: the step, and the trusted
     model's chunks (n of N), kept in the job for the page — and logged."""
     async def hook(event: dict[str, Any]) -> None:
-        if job.get("phase") != "anonymizing" or job.get("current") != f["id"]:
+        if job.get("phase") != phase or job.get("current") != f["id"]:
             return  # a late tick from a file (or a run) that's over — a stopped run's thread, say
         step = str(event.get("step") or "")
+        if "pass" in event and job.get("step") in ("saving", "writing"):
+            return  # the engine's last tick, handed over after it finished
         now = time.time()
         if step == "model":
             done, total = int(event.get("chunk") or 0), int(event.get("chunks") or 0)
@@ -354,17 +511,18 @@ def _file_progress(room_id: str, job: dict[str, Any], f: dict[str, Any]):
             fresh = prev.get("round") != r or prev.get("pass") != name
             started = now if fresh else prev.get("started_at", now)
             if fresh and prev.get("pass"):
-                log.info("Data room file pass done", room=room_id, file=f["id"], round=prev.get("round"),
+                log.info("Data room file pass done", room=room_id, file=f["id"], phase=phase, round=prev.get("round"),
                          stage=prev.get("pass"), of=prev.get("of"), seconds=round(now - prev.get("started_at", now), 1))
             if fresh:
-                log.info("Data room file pass", room=room_id, file=f["id"], round=r, stage=name, of=of,
+                log.info("Data room file pass", room=room_id, file=f["id"], phase=phase, round=r, stage=name, of=of,
                          unit=event.get("unit"))
             job["step"] = "replacing"
             job["replace"] = {"round": r, "pass": name, "done": done, "of": of, "unit": event.get("unit") or "parts",
                               "started_at": started}
         elif step:
             if step != job.get("step"):
-                log.info("Data room file step", room=room_id, file=f["id"], step=step,
+                log.info("Data room file step", room=room_id, file=f["id"], phase=phase, step=step,
+                         seconds=round(now - (job.get("file_started_at") or now), 1),
                          **({"pieces": event["pieces"]} if "pieces" in event else {}))
             job["step"] = step
             if step == "replacing":
@@ -372,6 +530,44 @@ def _file_progress(room_id: str, job: dict[str, Any], f: dict[str, Any]):
                                   "unit": event.get("unit") or "parts", "started_at": now}
         await _set_job(room_id, job)
     return hook
+
+
+async def _hide_leftovers(room_id: str, job: dict[str, Any], f: dict[str, Any], path: Path, blob: bytes, text: str,
+                          hideable: list[dict[str, Any]], data: dict[str, Any], needle_list: list[tuple[str, Needle]],
+                          owner: str, actor: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bytes, str]:
+    """Real values the sweep leaves on purpose — a surname alone, a company in
+    lower case — that the check then finds: each spelling, as written, gets
+    the token the check named (``data["pinned"]``). Returns what is still
+    left, what was hidden, and the copy and its text as they are now."""
+    rs_store = rs.store()
+    await _step(room_id, job, "hiding", leftovers=len(hideable))
+    log.info("Data room hiding leftovers", room=room_id, file=f["id"], spellings=len(hideable),
+             tokens=len({x["token"] for x in hideable}))
+    hook = ar.PROGRESS.set(_file_progress(room_id, job, f, "checking"))
+    try:
+        out, info = await ar.anonymize_blob(owner, posixpath.basename(f["clean_path"]), blob, data, actor=actor,
+                                            source="data-room-leftovers")
+    except Exception as exc:  # noqa: BLE001 — the file stays blocked, as before
+        log.warning("Data room leftovers not hidden", room=room_id, file=f["id"], error=type(exc).__name__)
+        return await asyncio.to_thread(find_leftovers, text, needle_list), [], blob, text
+    finally:
+        ar.PROGRESS.reset(hook)
+    if not sum((info.get("summary") or {}).values()):
+        return await asyncio.to_thread(find_leftovers, text, needle_list), [], blob, text
+    await _step(room_id, job, "writing")
+    await asyncio.to_thread(path.write_bytes, out)
+    await _step(room_id, job, "text")
+    text = await asyncio.to_thread(text_view, f["clean_path"], out)
+    await _step(room_id, job, "leaks", chars=len(text))
+    after = await asyncio.to_thread(find_leftovers, text, needle_list)
+    still = {(x["token"], allow_key(x["text"])) for x in after}
+    hidden = [x for x in hideable if (x["token"], allow_key(x["text"])) not in still]
+    if hidden and f["released"]:
+        await rs_store.set_file(room_id, f["id"], released=False, warnings=[
+            *f["warnings"], "Names left in this file were hidden after it was released — Claude may have read "
+            "the old copy. Release it again."])
+    log.info("Data room leftovers hidden", room=room_id, file=f["id"], hidden=len(hidden), left=len(after))
+    return after, hidden, out, text
 
 
 async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
@@ -421,7 +617,8 @@ async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
             await asyncio.to_thread(path.write_bytes, blob)
             await store.set_file(room_id, f["id"], state="done", error="", clean_path=name,
                                  kind=ext.lstrip(".").lower(), warnings=list(info.get("warnings") or []),
-                                 entities=dict(info.get("summary") or {}))
+                                 entities=dict(info.get("summary") or {}), leftovers={})
+            f["leftovers"] = {}  # a fresh copy: nothing hidden after a check yet
             job["done"] += 1
         finally:
             ar.PROGRESS.reset(hook)
@@ -430,8 +627,7 @@ async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
                 log.info("Data room file finished", room=room_id, file=f["id"], size=int(f["size"] or 0),
                          seconds=round(time.time() - job.get("file_started_at", time.time()), 1),
                          chunks=job.get("chunks", 0), files_left=len(todo) - job["done"] - job["failed"])
-    for key in ("current", "step", "chunk", "chunks", "file_started_at", "chunks_started_at", "chunk_at",
-                "current_size", "file_index", "replace"):
+    for key in _FILE_KEYS:
         job.pop(key, None)
     if room_id in _STOP:
         return
@@ -456,17 +652,23 @@ async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
 
     # 3. final sweep: code only, the final vault, until nothing changes
     sweep = {**data, "lane": "deterministic", "one_word_names": False, "pictures": "keep"}
-    job["phase"] = "sweeping"
+
+    def clean_path_of(f: dict[str, Any]) -> Path:
+        return store.clean_file(room_id, f["id"], PurePosixPath(f["clean_path"]).suffix)
+
     for round_no in range(1, SWEEP_ROUNDS + 1):
         if room_id in _STOP:
             return
-        job["sweep_round"] = round_no
+        sizes = await asyncio.to_thread(_sizes, [clean_path_of(f) for f in files])
+        _phase(job, "sweeping", sizes)
+        job.update({"sweep_round": round_no, "sweep_rounds": SWEEP_ROUNDS, "round_changed": 0, "round_found": 0})
         await _set_job(room_id, job)
+        log.info("Data room sweep round", room=room_id, round=round_no, files=len(files), size=sum(sizes))
         changed = 0
-        for i, f in enumerate(files, 1):
-            job.update({"current": f["id"], "file_index": i, "file_count": len(files)})
-            await _set_job(room_id, job)
-            path = store.clean_file(room_id, f["id"], PurePosixPath(f["clean_path"]).suffix)
+        for i, (f, size) in enumerate(zip(files, sizes, strict=True), 1):
+            await _at_file(room_id, job, f, i, len(files), size)
+            path = clean_path_of(f)
+            hook = ar.PROGRESS.set(_file_progress(room_id, job, f, "sweeping"))
             try:
                 blob = await asyncio.to_thread(path.read_bytes)
                 if not f.get("info") and PurePosixPath(f["path"]).suffix.lower() in ri.TABLE_KINDS:
@@ -477,45 +679,93 @@ async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
             except Exception as exc:  # noqa: BLE001 — the leak check below still looks at this file
                 log.warning("Data room sweep skipped a file", room=room_id, file=f["id"], error=type(exc).__name__)
                 continue
-            if sum((info.get("summary") or {}).values()):
+            finally:
+                ar.PROGRESS.reset(hook)
+                job["bytes_done"] = job.get("bytes_done", 0) + size
+            found = sum((info.get("summary") or {}).values())
+            if found:
+                await _step(room_id, job, "writing")
                 await asyncio.to_thread(path.write_bytes, out)
                 changed += 1
+                job["round_changed"] = changed
+                job["round_found"] = job.get("round_found", 0) + found
                 if f["released"]:
                     await store.set_file(room_id, f["id"], released=False, warnings=[
                         *f["warnings"], "A name found later was still in this file after it was released — "
                         "Claude may have read the old copy. Release it again."])
+            log.info("Data room sweep file", room=room_id, file=f["id"], round=round_no, index=i, of=len(files),
+                     size=size, names_found=found, seconds=round(time.time() - job["file_started_at"], 1))
         job["sweep_changed"] = job.get("sweep_changed", 0) + changed
+        log.info("Data room sweep round done", room=room_id, round=round_no, files_changed=changed,
+                 names_found=job.get("round_found", 0), seconds=round(time.time() - job["phase_started_at"], 1))
         if not changed:
             break
 
     # 4. the text Claude reads, and 5. the leak check
-    job["phase"] = "checking"
-    await _set_job(room_id, job)
     async with vaults.lock(vault_row["id"]):
         state = await vaults.load_state(vault_row)
-    needle_list = needles(state)
+    needle_list = room_needles(state, room)
+    sizes = await asyncio.to_thread(_sizes, [clean_path_of(f) for f in files])
+    _phase(job, "checking", sizes)
+    job.update({"blocked": 0, "hidden": 0, "needles": len(needle_list)})
+    await _set_job(room_id, job)
+    log.info("Data room check", room=room_id, files=len(files), size=sum(sizes), values=len(needle_list))
     blocked = 0
-    for i, f in enumerate(files, 1):
+    for i, (f, size) in enumerate(zip(files, sizes, strict=True), 1):
         if room_id in _STOP:
             return
-        job.update({"current": f["id"], "file_index": i, "file_count": len(files)})
-        await _set_job(room_id, job)
-        path = store.clean_file(room_id, f["id"], PurePosixPath(f["clean_path"]).suffix)
+        await _at_file(room_id, job, f, i, len(files), size)
+        t0 = time.time()
+        path = clean_path_of(f)
         blob = await asyncio.to_thread(path.read_bytes)
+        await _step(room_id, job, "text")
+        t1 = time.time()
         text = await asyncio.to_thread(text_view, f["clean_path"], blob)
-        hits = await asyncio.to_thread(leaks, text + "\n" + f["clean_path"], needle_list)
+        await _step(room_id, job, "leaks", chars=len(text))
+        t2 = time.time()
+        found = await asyncio.to_thread(find_leftovers, text, needle_list)
+        t3 = time.time()
+        hidden: list[dict[str, Any]] = []
+        hideable = [x for x in found if x["text"]][: ar.MAX_PINNED]
+        if hideable:
+            found, hidden, blob, text = await _hide_leftovers(room_id, job, f, path, blob, text, hideable,
+                                                              {**sweep, "pinned": [
+                                                                  {"text": x["text"], "token": x["token"]}
+                                                                  for x in hideable]}, needle_list, owner, actor)
+        left = found + [{**x, "where": "name"}
+                        for x in await asyncio.to_thread(find_leftovers, f["clean_path"], needle_list)]
+        job["hidden"] = job.get("hidden", 0) + sum(x["count"] for x in hidden)
+        # What earlier checks hid stays listed (the copy still has those tokens)
+        # until the file runs again from its original.
+        before = (f.get("leftovers") or {}).get("hidden") or []
+        new_keys = {(x["token"], allow_key(x["text"])) for x in hidden}
+        hidden = [*hidden, *(x for x in before if (x.get("token"), allow_key(str(x.get("text") or ""))) not in new_keys)]
         text_path = store.text_file(room_id, f["id"])
         text_path.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(text_path.write_text, text, "utf-8")
-        if hits:
+        pages: list[tuple[str, str]] = []
+        leftovers = {"hidden": hidden[:MAX_LEFTOVERS], "left": left[:MAX_LEFTOVERS]}
+        if left:
             blocked += 1
+            job["blocked"] = blocked
+            tokens = list(dict.fromkeys(x["token"] for x in left))
             await store.set_file(room_id, f["id"], state="blocked", released=False, text_chars=len(text),
-                                 error=f"Still holds the real value of {', '.join(hits[:12])}"
-                                       + (f" and {len(hits) - 12} more" if len(hits) > 12 else ""))
+                                 leftovers=leftovers,
+                                 error=f"Still holds the real value of {', '.join(tokens[:12])}"
+                                       + (f" and {len(tokens) - 12} more" if len(tokens) > 12 else ""))
             await store.index_text(room_id, f["id"], [])
-            continue
-        await store.set_file(room_id, f["id"], state="done", error="", text_chars=len(text))
-        await store.index_text(room_id, f["id"], pages_of(text))
+        else:
+            pages = pages_of(text)
+            await _step(room_id, job, "indexing", pages=len(pages))
+            await store.set_file(room_id, f["id"], state="done", error="", text_chars=len(text), leftovers=leftovers)
+            await store.index_text(room_id, f["id"], pages)
+        job["bytes_done"] = job.get("bytes_done", 0) + size
+        log.info("Data room check file", room=room_id, file=f["id"], index=i, of=len(files), size=size,
+                 chars=len(text), pages=len(pages), leftovers=len(left), hidden=len(hidden),
+                 read_seconds=round(t1 - t0, 1), text_seconds=round(t2 - t1, 1), check_seconds=round(t3 - t2, 1),
+                 seconds=round(time.time() - t0, 1))
     job["blocked"] = blocked
-    for key in ("current", "file_index", "file_count"):
+    log.info("Data room check done", room=room_id, files=len(files), blocked=blocked, hidden=job.get("hidden", 0),
+             seconds=round(time.time() - job["phase_started_at"], 1))
+    for key in _FILE_KEYS:
         job.pop(key, None)

@@ -109,7 +109,7 @@ async def deliver(room: dict[str, Any], client_id: str, *, title: Any, content: 
     restored_title, n_title, unknown_title = engine.restore(title, state)
     restored_body, n_body, unknown_body = engine.restore(content, state)
     not_in_room = sorted(set(unknown_title) | set(unknown_body))
-    real_values = rj.leaks(f"{title}\n{content}", rj.needles(state))
+    real_values = rj.leaks(f"{title}\n{content}", rj.room_needles(state, room))
     report = {"restored": n_title + n_body, "not_in_room": not_in_room[:200], "real_values": real_values[:200],
               "parts": total, "characters": len(content), "format": fmt}
     grammar = await rg.first_report(f"{title}\n{content}", state)
@@ -342,7 +342,7 @@ async def deliver_file(room: dict[str, Any], client_id: str, *, kind: str, title
     restored_blob, n_file, unknown_file, token_text = await asyncio.to_thread(_restore_file, token_blob, ext, state)
     restored_title, n_title, unknown_title = engine.restore(title, state)
     not_in_room = sorted(set(unknown_file) | set(unknown_title))
-    real_values = rj.leaks(f"{title}\n{token_text}", rj.needles(state))
+    real_values = rj.leaks(f"{title}\n{token_text}", rj.room_needles(state, room))
     name = safe_filename(restored_title, ext)
     view_tokens = await asyncio.to_thread(rj.text_view, f"{title}.{ext}", token_blob)
     view = await asyncio.to_thread(rj.text_view, name, restored_blob)
@@ -455,7 +455,7 @@ async def take_file(room: dict[str, Any], client_id: str, *, name: str, blob: by
     restored_name, n_name, unknown_name = engine.restore(name, state)
     stem = restored_name.rsplit(".", 1)[0] if "." in restored_name else restored_name
     not_in_room = sorted(set(unknown_file) | set(unknown_name))
-    real_values = rj.leaks(f"{name}\n{token_text}", rj.needles(state))
+    real_values = rj.leaks(f"{name}\n{token_text}", rj.room_needles(state, room))
     view_tokens = await asyncio.to_thread(rj.text_view, name, blob)
     view = await asyncio.to_thread(rj.text_view, safe_filename(stem, ext), restored_blob)
     restored = n_file + n_name

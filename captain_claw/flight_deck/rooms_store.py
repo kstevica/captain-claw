@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS rooms (
     job          TEXT NOT NULL DEFAULT '{}',
     created_at   REAL NOT NULL,
     updated_at   REAL NOT NULL,
-    released_at  REAL
+    released_at  REAL,
+    allowed      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_rooms_owner ON rooms(owner_id, updated_at);
 CREATE TABLE IF NOT EXISTS room_files (
@@ -77,6 +78,7 @@ CREATE TABLE IF NOT EXISTS room_files (
     released    INTEGER NOT NULL DEFAULT 0,
     updated_at  REAL NOT NULL,
     info        TEXT NOT NULL DEFAULT '{}',
+    leftovers   TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (room_id, id),
     UNIQUE (room_id, path_key)
 );
@@ -218,8 +220,14 @@ class RoomStore:
                 await db.executescript(_DDL)
                 # Columns added after a room store was first made.
                 cur = await db.execute("PRAGMA table_info(room_files)")
-                if "info" not in {r[1] for r in await cur.fetchall()}:
+                file_cols = {r[1] for r in await cur.fetchall()}
+                if "info" not in file_cols:
                     await db.execute("ALTER TABLE room_files ADD COLUMN info TEXT NOT NULL DEFAULT '{}'")
+                if "leftovers" not in file_cols:
+                    await db.execute("ALTER TABLE room_files ADD COLUMN leftovers TEXT NOT NULL DEFAULT ''")
+                cur = await db.execute("PRAGMA table_info(rooms)")
+                if "allowed" not in {r[1] for r in await cur.fetchall()}:
+                    await db.execute("ALTER TABLE rooms ADD COLUMN allowed TEXT NOT NULL DEFAULT ''")
                 await db.commit()
                 try:
                     os.chmod(self.path, 0o600)
@@ -277,6 +285,7 @@ class RoomStore:
         r["source"] = _open_json(r["source"], {})
         r["seed"] = _open_json(r["seed"], {})
         r["roles"] = _open_json(r["roles"], {})
+        r["allowed"] = _open_json(r.get("allowed") or "", [])
         r["settings"] = json.loads(r["settings"] or "{}")
         r["job"] = json.loads(r["job"] or "{}")
         return r
@@ -331,7 +340,7 @@ class RoomStore:
 
     async def update(self, room_id: str, **fields: Any) -> None:
         sealed = {"name": lambda v: fd_crypto.seal(v.strip()[:200]) if v and v.strip() else "",
-                  "source": _seal_json, "seed": _seal_json, "roles": _seal_json}
+                  "source": _seal_json, "seed": _seal_json, "roles": _seal_json, "allowed": _seal_json}
         plain_json = {"settings", "job"}
         cols, values = [], []
         for key, value in fields.items():
@@ -377,6 +386,7 @@ class RoomStore:
         f["warnings"] = json.loads(f["warnings"] or "[]")
         f["entities"] = json.loads(f["entities"] or "{}")
         f["info"] = json.loads(f.get("info") or "{}")
+        f["leftovers"] = _open_json(f.get("leftovers") or "", {})
         f["released"] = bool(f["released"])
         return f
 
@@ -398,7 +408,7 @@ class RoomStore:
                 return row["id"], False
             await db.execute(
                 """UPDATE room_files SET kind=?, size=?, sha256=?, state=?, error=?, warnings='[]',
-                   entities='{}', info='{}', text_chars=0, released=0, clean_path='', updated_at=?
+                   entities='{}', info='{}', leftovers='', text_chars=0, released=0, clean_path='', updated_at=?
                    WHERE room_id=? AND id=?""",
                 (kind, size, sha256, state, error, now, room_id, row["id"]))
             await db.execute("DELETE FROM room_text WHERE room_id=? AND file_id=?", (room_id, row["id"]))
@@ -430,6 +440,8 @@ class RoomStore:
         for key, value in fields.items():
             if key in ("warnings", "entities", "info"):
                 value = json.dumps(value, ensure_ascii=False)
+            elif key == "leftovers":
+                value = _seal_json(value)  # real spellings: sealed like the paths
             elif key == "released":
                 value = 1 if value else 0
             elif key == "state" and value not in FILE_STATES:

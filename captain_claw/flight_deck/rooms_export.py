@@ -125,7 +125,7 @@ async def build(room: dict[str, Any], *, text_only: bool) -> dict[str, Any]:
         raise ExportError("This room's vault is gone.")
     async with av.store().lock(vault["id"]):
         state = await av.store().load_state(vault)
-    needle_list = rj.needles(state)
+    needle_list = rj.room_needles(state, room)
     root = re.sub(r"[^\w\- ]+", "_", room["codename"]).strip() or "data-room"
 
     def make() -> tuple[bytes, list[str], int, list[str]]:
