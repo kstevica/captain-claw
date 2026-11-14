@@ -32,8 +32,11 @@ function when(epoch: number | null): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
+export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false }: {
   onClose: () => void
+  /** The Taskboard is open over it (a task opened from here): keys are the
+   *  board's, and closing the board comes back here, read again. */
+  covered?: boolean
   /** The Taskboard, every task. */
   onOpenTasks: () => void
   /** The Taskboard, showing this task. */
@@ -95,17 +98,17 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
   }
 
   // Escape closes it, as the nav's other views close (the Line, Scheduled tasks);
-  // in the search box with words in it, it clears them first.
+  // in the search box with words in it, it clears them first. Not while the
+  // Taskboard is over it: that Escape is the board's.
   useEffect(() => {
+    if (covered) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, covered])
 
-  const toggle = async (id: string) => {
-    if (openId === id) { setOpenId(null); return }
-    setOpenId(id)
-    if (Array.isArray(tasks[id])) return
+  // A person's latest tasks.
+  const readTasks = useCallback(async (id: string) => {
     setTasks((t) => ({ ...t, [id]: 'loading' }))
     try {
       const page = await taskboardApi.tasks({ view: 'all', party: [id], sort: 'recent', limit: 5 })
@@ -113,7 +116,34 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
     } catch {
       setTasks((t) => ({ ...t, [id]: 'failed' }))
     }
+  }, [])
+
+  const toggle = async (id: string) => {
+    if (openId === id) { setOpenId(null); return }
+    setOpenId(id)
+    if (Array.isArray(tasks[id])) return
+    await readTasks(id)
   }
+
+  // Back from the Taskboard: what was done there shows here — the counts,
+  // and the open person's tasks — with the search, the order and the place
+  // in the list kept.
+  const wasCovered = useRef(covered)
+  useEffect(() => {
+    if (wasCovered.current && !covered) {
+      const shownNow = people?.length ?? 0
+      void (async () => {
+        try {
+          const page = await taskboardApi.people({ q, sort, limit: Math.max(PAGE, shownNow) })
+          setPeople(page.people)
+          setTotal(page.total)
+        } catch { /* what was there stays */ }
+      })()
+      setTasks({})
+      if (openId) void readTasks(openId)
+    }
+    wasCovered.current = covered
+  }, [covered, people?.length, q, sort, openId, readTasks])
 
   return (
     <div className="flex h-full min-h-0 flex-col">

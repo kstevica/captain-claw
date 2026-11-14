@@ -927,6 +927,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     }
     closeScheduled()
     closeTaskboard()
+    setPeopleOpen(false)
     handleOpen(a)
     let tries = 0
     const attempt = () => {
@@ -969,6 +970,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen || toolsOpen
     || anonOpen || roomsOpen || !!teamWork || !!filesData || peopleOpen
   const closePhoneOverlays = () => {
+    if (taskboardOpen && peopleOpen) { closeTaskboard(); return }
     closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null); closeAnon(); closeRooms()
     closeTeamWork(); setPeopleOpen(false)
   }
@@ -1006,9 +1008,10 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         : scheduledOpen ? 'automations'
           : activityOpen ? 'activity'
             : hasActiveSession ? null : homeView
-  // People's links into the Taskboard.
-  const peopleToTasks = () => { setPeopleOpen(false); openTaskboard() }
-  const peopleToTask = (taskId: string) => { setPeopleOpen(false); showTaskboardTask(taskId) }
+  // People's links into the Taskboard: it opens over People, which waits
+  // under it — closing the board comes back to the same person.
+  const peopleToTasks = () => openTaskboard()
+  const peopleToTask = (taskId: string) => showTaskboardTask(taskId)
   // Drive and OneDrive folders want the user's Google or Microsoft account:
   // Connections, on that tab.
   const foldersConnections = (service: 'google' | 'microsoft') => {
@@ -1025,6 +1028,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // its settings' "Connect Jev" opens Connections → Jev.
   const taskboardConnections = (tab: ConnectionsTab = 'google') => {
     closeTaskboard()
+    setPeopleOpen(false)
     if (locked) { openConnections(tab); return }
     // Taskboard: the full Connections page opens on the tab it remembers — this one.
     try { localStorage.setItem('fd:connections-tab', tab) } catch { /* storage blocked: its last tab */ }
@@ -1235,7 +1239,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
             initialAgent={taskboardAgent}
             initialTask={taskboardFocus}
             onClose={closeTaskboard}
-            onOpenScheduled={(jobId) => { closeTaskboard(); openScheduled(jobId) }}
+            onOpenScheduled={(jobId) => { closeTaskboard(); setPeopleOpen(false); openScheduled(jobId) }}
             onOpenChat={openTaskChat}
             onOpenConnections={taskboardConnections}
           />
@@ -1389,7 +1393,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       )}
       {peopleOpen && (
         <KioskWideDialog label="People" phone={isMobile} onClose={() => setPeopleOpen(false)}>
-          <PeoplePanel onClose={() => setPeopleOpen(false)} onOpenTasks={peopleToTasks} onOpenTask={peopleToTask} />
+          <PeoplePanel onClose={() => setPeopleOpen(false)} onOpenTasks={peopleToTasks} onOpenTask={peopleToTask}
+            covered={taskboardOpen} />
         </KioskWideDialog>
       )}
       {lineOpen && (
