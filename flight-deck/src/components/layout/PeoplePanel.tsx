@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react'
-import { ChevronDown, ChevronRight, Contact, ListChecks, Loader2, RefreshCw, X } from 'lucide-react'
-import { taskboardApi, type TaskFacet, type TaskItem } from '../../services/taskboardApi'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { ChevronDown, ChevronRight, Contact, ListChecks, Loader2, RefreshCw, Search, X } from 'lucide-react'
+import type { Facet } from '../../services/fileLibraryApi'
+import { taskboardApi, type PeopleSort, type TaskItem } from '../../services/taskboardApi'
 
 // ── People ───────────────────────────────────────────────────────────
 //
@@ -10,9 +11,17 @@ import { taskboardApi, type TaskFacet, type TaskItem } from '../../services/task
 // user — with how many tasks each is on, and a person opens to their latest
 // tasks, each one a click from the Taskboard. Nobody yet: a friendly word on
 // how they get here, and the way to the Taskboard.
+//
+// The list is the server's (/fd/taskboard/people: everyone, not the board's
+// top 50), searched by name or address and sorted by task count or name, a
+// page at a time; the sort is remembered on this browser.
 
-/** Someone outside the deck: never you, never another deck user (a colleague). */
-const isOutside = (p: TaskFacet) => !p.me && !p.id.startsWith('fd_user:')
+const PAGE = 100
+const SORT_KEY = 'fd:people-sort'
+
+function savedSort(): PeopleSort {
+  try { return localStorage.getItem(SORT_KEY) === 'name' ? 'name' : 'count' } catch { return 'count' }
+}
 
 function when(epoch: number | null): string {
   if (!epoch) return ''
@@ -31,26 +40,63 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
   /** The Taskboard, showing this task. */
   onOpenTask: (taskId: string) => void
 }) {
-  const [people, setPeople] = useState<TaskFacet[] | null>(null)
+  const [people, setPeople] = useState<Facet[] | null>(null)
+  const [total, setTotal] = useState(0)
   const [failed, setFailed] = useState(false)
   const [loading, setLoading] = useState(false)
+  const [more, setMore] = useState(false)
   const [openId, setOpenId] = useState<string | null>(null)
   const [tasks, setTasks] = useState<Record<string, TaskItem[] | 'loading' | 'failed'>>({})
+  // What the box says, and the search it settled on (a moment after typing stops).
+  const [query, setQuery] = useState('')
+  const [q, setQ] = useState('')
+  const [sort, setSort] = useState<PeopleSort>(savedSort)
+  // Only the latest load lands: an older answer arriving late is dropped.
+  const loadSeq = useRef(0)
+
+  useEffect(() => {
+    const t = setTimeout(() => setQ(query.trim()), 200)
+    return () => clearTimeout(t)
+  }, [query])
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     setLoading(true)
     setFailed(false)
     try {
-      const page = await taskboardApi.tasks({ view: 'all', limit: 1 })
-      setPeople((page.facets?.party ?? []).filter(isOutside))
+      const page = await taskboardApi.people({ q, sort, limit: PAGE })
+      if (seq !== loadSeq.current) return
+      setPeople(page.people)
+      setTotal(page.total)
     } catch {
-      setFailed(true)
+      if (seq === loadSeq.current) setFailed(true)
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
-  }, [])
+  }, [q, sort])
   useEffect(() => { void load() }, [load])
-  // Escape closes it, as the nav's other views close (the Line, Scheduled tasks).
+
+  const showMore = async () => {
+    if (!people) return
+    const seq = loadSeq.current
+    setMore(true)
+    try {
+      const page = await taskboardApi.people({ q, sort, limit: PAGE, offset: people.length })
+      if (seq !== loadSeq.current) return
+      setPeople((cur) => [...(cur ?? []), ...page.people])
+      setTotal(page.total)
+    } catch { /* the button stays: try again */ } finally {
+      setMore(false)
+    }
+  }
+
+  const pickSort = (s: PeopleSort) => {
+    setSort(s)
+    try { localStorage.setItem(SORT_KEY, s) } catch { /* only this visit */ }
+  }
+
+  // Escape closes it, as the nav's other views close (the Line, Scheduled tasks);
+  // in the search box with words in it, it clears them first.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) onClose() }
     window.addEventListener('keydown', onKey)
@@ -87,6 +133,42 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
         </button>
       </header>
 
+      {/* Search and sort: shown once there is anyone (or a search) to work on. */}
+      {(total > 0 || q || query) && !failed && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 px-6 pb-4">
+          <label className="relative min-w-[12rem] flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape' && query) { e.preventDefault(); setQuery('') } }}
+              placeholder="Search by name or email"
+              aria-label="Search people"
+              className="h-10 w-full rounded-full border border-[var(--fd-line)] bg-transparent pl-9 pr-9 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-violet-500/50 focus:outline-none"
+            />
+            {query && (
+              <button onClick={() => setQuery('')} title="Clear" aria-label="Clear search"
+                className="absolute right-2 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-zinc-500 hover:text-zinc-200">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </label>
+          <div role="group" aria-label="Sort people" className="flex shrink-0 rounded-full border border-[var(--fd-line)] p-0.5">
+            {([['count', 'Most tasks'], ['name', 'Name A–Z']] as const).map(([key, label]) => (
+              <button key={key} onClick={() => pickSort(key)} aria-pressed={sort === key}
+                className={`h-8 rounded-full px-3 text-xs font-medium transition-colors ${
+                  sort === key ? 'bg-[var(--fd-selected)] text-zinc-100' : 'text-zinc-500 hover:text-zinc-200'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+          <span className="w-full text-xs text-zinc-500 wide:w-auto" aria-live="polite">
+            {q ? `${total} match${total === 1 ? '' : 'es'}` : `${total} ${total === 1 ? 'person' : 'people'}`}
+          </span>
+        </div>
+      )}
+
       <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-6">
         {people === null && !failed ? (
           <div className="flex h-40 items-center justify-center text-zinc-500"><Loader2 className="h-5 w-5 animate-spin" /></div>
@@ -97,6 +179,13 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
             action="Try again"
             onAction={() => void load()}
           />
+        ) : people!.length === 0 && q ? (
+          <Empty
+            title="No one matches"
+            text={`Nobody on your tasks has “${q}” in their name or address.`}
+            action="Clear search"
+            onAction={() => setQuery('')}
+          />
         ) : people!.length === 0 ? (
           <Empty
             title="No people yet"
@@ -105,6 +194,7 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
             onAction={onOpenTasks}
           />
         ) : (
+          <>
           <ul className="space-y-2">
             {people!.map((p) => {
               const open = openId === p.id
@@ -150,6 +240,15 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
               )
             })}
           </ul>
+          {people!.length < total && (
+            <div className="mt-4 flex justify-center">
+              <button onClick={() => void showMore()} disabled={more} className="fd-btn-quiet h-9 px-4 text-xs">
+                {more && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                Show more ({total - people!.length} left)
+              </button>
+            </div>
+          )}
+          </>
         )}
       </div>
     </div>

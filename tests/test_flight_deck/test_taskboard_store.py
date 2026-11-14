@@ -330,6 +330,46 @@ def test_party_facet_and_filter(store):
     assert {v: n for v, _, n in res["facets"]["party"]} == {"email:ana@x.co": 2, "email:bo@y.org": 1}
 
 
+def _on_tasks(store, people: list[tuple[str, str, int]], uid=ALICE) -> None:
+    """Each (kind, address, display) on *n* tasks of its own."""
+    k = 0
+    for kind, addr, display, n in people:
+        for _ in range(n):
+            k += 1
+            _task(store, uid=uid, key=f"p{k}")
+            store.ingest(uid, keys=[f"p{k}"], event=_ev(f"party{k}"),
+                         parties=[{"role": "requester", "kind": kind, "address": addr, "display": display}])
+
+
+def test_people_lists_everyone_not_just_the_facets_top_50(store):
+    _on_tasks(store, [("email", f"p{i:02d}@x.co", f"Person {i:02d}", 1) for i in range(60)])
+    assert len(store.query(ALICE, view="all")["facets"]["party"]) == 50
+    res = store.people(ALICE, limit=200)
+    assert res["total"] == 60 and len(res["people"]) == 60
+    page = store.people(ALICE, sort="name", limit=25, offset=50)
+    assert [label for _, label, _ in page["people"]] == [f"Person {i:02d}" for i in range(50, 60)]
+
+
+def test_people_search_and_sort(store):
+    _on_tasks(store, [
+        ("email", "zoe@x.co", "Zoë Šarić", 1),
+        ("email", "ana@x.co", "Ana Babić", 3),
+        ("email", "bo@y.org", "Bo", 2),
+        ("fd_user", "user-bob", "Bob", 4),
+    ])
+    by_count = store.people(ALICE, leave_out=("fd_user:",))
+    assert [(label, n) for _, label, n in by_count["people"]] == [("Ana Babić", 3), ("Bo", 2), ("Zoë Šarić", 1)]
+    by_name = store.people(ALICE, sort="name", leave_out=("fd_user:",))
+    assert [label for _, label, _ in by_name["people"]] == ["Ana Babić", "Bo", "Zoë Šarić"]
+    # Folded as the board's search: no accents needed; every word must match; the address counts.
+    assert [label for _, label, _ in store.people(ALICE, q="zoe saric")["people"]] == ["Zoë Šarić"]
+    assert [label for _, label, _ in store.people(ALICE, q="y.org")["people"]] == ["Bo"]
+    assert store.people(ALICE, q="ana zoe")["total"] == 0
+    # The deck's own users stay out when asked; another board's people never show.
+    assert "fd_user:user-bob" in [v for v, _, _ in store.people(ALICE)["people"]]
+    assert store.people(BOB)["total"] == 0
+
+
 def test_views_lanes_and_counts(store):
     now = time.time()
     me = _task(store, key="me", owes_next="me")
