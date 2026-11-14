@@ -62,6 +62,7 @@ import { BrowserLLMPage } from './pages/BrowserLLMPage'
 import { BeingsPage } from './pages/BeingsPage'
 import { PaymentsPage, paymentIdFromPath, purchaseIdFromPath } from './pages/PaymentsPage'
 import { PublicBeingPage } from './pages/PublicBeingPage'
+import { AgentStorePanel } from './components/store/AgentStorePanel'
 import { useUIStore, startInConsoleUnlessChosen, beginLayoutHydrate } from './stores/uiStore'
 import { useConsoleStore, syncConsoleFromUrl, dropConsoleRequest, selectConsoleAdmin, openConsole, startDesktop, consoleHome, pageFromPath } from './stores/consoleStore'
 import { isAppShell, reportAndroidSession, reportAndroidSignedOut } from './services/desktopShell'
@@ -470,6 +471,9 @@ function AppContent() {
       </div>
     </>
   )
+
+  // The Agent store (/store): a page of its own, on every form factor.
+  if (window.location.pathname === '/store') return <AgentStorePanel />
 
   // ── Kiosk lock (Admin → Settings → Kiosk mode; `--simple-chat` default) ──
   // Force the locked, chat-first Simple layout on every form factor and ignore
