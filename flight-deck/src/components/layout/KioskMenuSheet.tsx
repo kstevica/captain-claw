@@ -46,6 +46,17 @@ export interface MenuItem {
   direct?: boolean
   /** Under way: its icon spins. */
   busy?: boolean
+  /** A count on the corner of its icon (what needs you there). */
+  badge?: number
+}
+
+function Badge({ n }: { n?: number }) {
+  if (!n) return null
+  return (
+    <span className="absolute -right-2 -top-1.5 min-w-[18px] rounded-full bg-teal-600 px-1 text-center text-[10px] font-semibold leading-[18px] text-white ring-2 ring-zinc-900">
+      {n > 99 ? '99+' : n}
+    </span>
+  )
 }
 
 export interface MenuSection {
@@ -91,7 +102,7 @@ function CompactTile({ item, wholeRow }: { item: MenuItem; wholeRow: boolean }) 
 }
 
 function Tile({ item, across, wholeRow }: { item: MenuItem; across: boolean; wholeRow: boolean }) {
-  const { icon: Icon, label, hint, onSelect, disabled, tone = 'violet', busy, direct } = item
+  const { icon: Icon, label, hint, onSelect, disabled, tone = 'violet', busy, direct, badge } = item
   return (
     <button
       data-tile
@@ -100,8 +111,9 @@ function Tile({ item, across, wholeRow }: { item: MenuItem; across: boolean; who
       title={hint}
       className={`${TILE} rounded-2xl p-3.5 ${across ? 'items-center gap-3.5' : 'flex-col'} ${wholeRow ? 'col-span-full' : ''}`}
     >
-      <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ring-1 ${TONE[tone]}`}>
+      <span className={`relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ring-1 ${TONE[tone]}`}>
         <Icon className={`h-5 w-5 ${busy ? 'animate-spin' : ''}`} />
+        <Badge n={badge} />
       </span>
       <span className={`min-w-0 ${across ? 'flex-1' : 'mt-3'}`}>
         <span className="block text-sm font-semibold leading-snug text-zinc-100">{label}</span>
@@ -118,12 +130,13 @@ function Tile({ item, across, wholeRow }: { item: MenuItem; across: boolean; who
 // A row's tile: the icon beside its label, the word more under both — lower
 // than a tile with the icon on top, so four rows fit a laptop's screen.
 function RowTile({ item }: { item: MenuItem }) {
-  const { icon: Icon, label, hint, onSelect, disabled, tone = 'violet', busy, direct } = item
+  const { icon: Icon, label, hint, onSelect, disabled, tone = 'violet', busy, direct, badge } = item
   return (
     <button data-tile disabled={disabled} onClick={onSelect} title={hint} className={`${TILE} flex-col rounded-2xl p-3`}>
       <span className="flex min-w-0 items-center gap-2.5 pr-5">
-        <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ring-1 ${TONE[tone]}`}>
+        <span className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ring-1 ${TONE[tone]}`}>
           <Icon className={`h-[18px] w-[18px] ${busy ? 'animate-spin' : ''}`} />
+          <Badge n={badge} />
         </span>
         <span className="min-w-0 text-sm font-semibold leading-tight text-zinc-100">{label}</span>
       </span>

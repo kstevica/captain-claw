@@ -49,6 +49,7 @@ import {
   PinOff,
   Waypoints,
   Target,
+  LayoutGrid,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -1690,38 +1691,23 @@ const TILE_COLS: Record<number, string> = {
   9: 'grid-cols-[repeat(5,minmax(max-content,1fr))]',
 }
 
-/** The agent column's row of tools — the Taskboard (how many tasks need
- *  you), Scheduled tasks (how many are active, a pulse while one runs), the
- *  File library, the Data library and the shared folders — as tiles, an
- *  icon over its name. */
+/** The agent column's row of tools, as tiles — an icon over its name:
+ *  Scheduled tasks (how many are active, a pulse while one runs), the File
+ *  library, the Data library, and More — a menu with the rest (the Taskboard,
+ *  Crew, Swarm, shared folders, Anonymize, Data rooms). The Taskboard's count
+ *  of what needs you rides on More. */
 function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, scheduledRunning, onLibrary, onData, onFolders }: {
   onTaskboard?: () => void; taskboardCount: number
   onScheduled?: () => void; scheduledCount: number; scheduledRunning: boolean
   onLibrary?: () => void; onData?: () => void; onFolders?: () => void
 }) {
-  const crewAllowed = useCrewAllowed()
-  const openCrew = useCrewStore((s) => s.openCrew)
-  const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
-  const canSwarm = useCanSwarm()
-  const openAnonymize = useAnonymizeStore((s) => s.openAnonymize)
-  const openRooms = useRoomsStore((s) => s.openRooms)
-  // Anonymize and Data rooms are always there: two more tiles.
-  const n = [onTaskboard, onScheduled, onLibrary, onData, onFolders, crewAllowed, canSwarm, true, true].filter(Boolean).length
+  const [moreOpen, setMoreOpen] = useState(false)
+  const moreRef = useRef<HTMLButtonElement>(null)
+  // More is always there: Anonymize and Data rooms always are.
+  const n = [onScheduled, onLibrary, onData, true].filter(Boolean).length
+  const needsYou = onTaskboard ? taskboardCount : 0
   return (
     <div className={`grid gap-0.5 border-t border-zinc-800 p-2 pb-0 ${TILE_COLS[n] ?? 'grid-cols-1'}`}>
-      {onTaskboard && (
-        <button onClick={onTaskboard} className={toolTile} title="Taskboard — every task your agents got or sent, and what needs you">
-          <span className="relative">
-            <ListChecks className="h-[18px] w-[18px] text-teal-600 dark:text-teal-400" />
-            {taskboardCount > 0 && (
-              <span className="absolute -right-2.5 -top-1.5 min-w-[16px] rounded-full bg-teal-600 px-1 text-center text-[9px] font-semibold leading-4 text-white">
-                {taskboardCount > 99 ? '99+' : taskboardCount}
-              </span>
-            )}
-          </span>
-          <span className="max-w-full truncate">Tasks</span>
-        </button>
-      )}
       {onScheduled && (
         <button onClick={onScheduled} className={toolTile} title="Scheduled tasks — your agents on a timer">
           <span className="relative">
@@ -1732,18 +1718,6 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
             )}
           </span>
           <span className="max-w-full truncate">Scheduled</span>
-        </button>
-      )}
-      {crewAllowed && (
-        <button onClick={openCrew} className={toolTile} title="Crew — coding agents working for you">
-          <Ship className="h-[18px] w-[18px] text-teal-600 dark:text-teal-400" />
-          <span className="max-w-full truncate">Crew</span>
-        </button>
-      )}
-      {canSwarm && (
-        <button onClick={openSwarm} className={toolTile} title="Captain Swarm — many tries at one task, document or research, each checked by Captain">
-          <Target className="h-[18px] w-[18px] text-amber-600 dark:text-amber-400" />
-          <span className="max-w-full truncate">Swarm</span>
         </button>
       )}
       {onLibrary && (
@@ -1758,21 +1732,89 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
           <span className="max-w-full truncate">Data</span>
         </button>
       )}
-      {onFolders && (
-        <button onClick={onFolders} className={toolTile} title="Shared folders — the folders your agents work in together">
-          <Folders className="h-[18px] w-[18px] text-sky-600 dark:text-sky-400" />
-          <span className="max-w-full truncate">Folders</span>
-        </button>
+      <button
+        ref={moreRef}
+        onClick={() => setMoreOpen(true)}
+        className={toolTile}
+        aria-haspopup="dialog"
+        aria-label={needsYou > 0 ? `More tools — ${needsYou} task${needsYou === 1 ? '' : 's'} need${needsYou === 1 ? 's' : ''} you` : 'More tools'}
+        title={needsYou > 0 ? `More — Tasks (${needsYou} need${needsYou === 1 ? 's' : ''} you), Crew, Folders, Anonymize, Data rooms` : 'More — Tasks, Crew, Folders, Anonymize, Data rooms'}
+      >
+        <span className="relative">
+          <LayoutGrid className="h-[18px] w-[18px]" />
+          {needsYou > 0 && (
+            <span className="absolute -right-2.5 -top-1.5 min-w-[16px] rounded-full bg-teal-600 px-1 text-center text-[9px] font-semibold leading-4 text-white">
+              {needsYou > 99 ? '99+' : needsYou}
+            </span>
+          )}
+        </span>
+        <span className="max-w-full truncate">More</span>
+      </button>
+      {moreOpen && (
+        <MoreToolsDialog
+          taskboardCount={needsYou}
+          onTaskboard={onTaskboard}
+          onFolders={onFolders}
+          onPicked={() => setMoreOpen(false)}
+          onClose={() => { setMoreOpen(false); moreRef.current?.focus() }}
+        />
       )}
-      <button onClick={() => openAnonymize()} className={toolTile} title="Anonymize — names and numbers out of a text or a file; the real ones kept for you">
-        <EyeOff className="h-[18px] w-[18px] text-fuchsia-600 dark:text-fuchsia-400" />
-        <span className="max-w-full truncate">Anonymize</span>
-      </button>
-      <button onClick={() => openRooms()} className={toolTile} title="Data rooms — a data room anonymized for Claude; what Claude sends back restored here">
-        <FolderLock className="h-[18px] w-[18px] text-fuchsia-600 dark:text-fuchsia-400" />
-        <span className="max-w-full truncate">Data rooms</span>
-      </button>
     </div>
+  )
+}
+
+/** More, from the agent column: the tools that aren't tiles there. Choosing one
+ *  closes the menu and opens it; closing it without a choice puts the focus
+ *  back on More. */
+function MoreToolsDialog({ taskboardCount, onTaskboard, onFolders, onPicked, onClose }: {
+  taskboardCount: number
+  onTaskboard?: () => void
+  onFolders?: () => void
+  onPicked: () => void
+  onClose: () => void
+}) {
+  const { isMobile } = useIsMobile()
+  const crewAllowed = useCrewAllowed()
+  const openCrew = useCrewStore((s) => s.openCrew)
+  const canSwarm = useCanSwarm()
+  const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
+  const openAnonymize = useAnonymizeStore((s) => s.openAnonymize)
+  const openRooms = useRoomsStore((s) => s.openRooms)
+  const pick = (open: () => void) => () => { onPicked(); open() }
+
+  const sections: MenuSection[] = [
+    {
+      title: 'Your agents at work',
+      items: [
+        ...(onTaskboard ? [{
+          icon: ListChecks, label: 'Taskboard', tone: 'teal' as const, badge: taskboardCount,
+          hint: taskboardCount > 0 ? `${taskboardCount} need${taskboardCount === 1 ? 's' : ''} you` : 'Asked, sent, and what needs you',
+          onSelect: pick(onTaskboard),
+        }] : []),
+        ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: pick(openCrew), tone: 'teal' as const }] : []),
+        ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: pick(openSwarm), tone: 'amber' as const }] : []),
+      ],
+    },
+    {
+      title: 'What they keep',
+      items: [
+        ...(onFolders ? [{ icon: Folders, label: 'Shared folders', hint: 'The folders they work in together', onSelect: pick(onFolders), tone: 'sky' as const }] : []),
+        { icon: EyeOff, label: 'Anonymize', hint: 'Names and numbers out of a file; the real ones kept for you', onSelect: pick(() => openAnonymize()), tone: 'fuchsia' },
+        { icon: FolderLock, label: 'Data rooms', hint: 'A data room anonymized for Claude; results restored here', onSelect: pick(() => openRooms()), tone: 'fuchsia' },
+      ],
+    },
+  ]
+
+  return (
+    <MenuSheet
+      label="More tools"
+      picture={<LayoutGrid className="h-6 w-6" />}
+      title="More tools"
+      subtitle="Pick one to open it"
+      sections={sections}
+      columns={isMobile ? 2 : 3}
+      onClose={onClose}
+    />
   )
 }
 
