@@ -217,6 +217,9 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<TaskItem | null>(null)
+  // Opened on one task (a link, People, Today, the bell): the list shows only
+  // it until "Show all tasks". Its title is for the bar that says so.
+  const [onlyTask, setOnlyTask] = useState<{ id: string; title: string } | null>(null)
   // Bumped when a source moved the open task (a proposal answered): its detail reads again.
   const [rev, setRev] = useState(0)
   const [filtersOpen, setFiltersOpen] = useState(false)
@@ -261,8 +264,8 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
 
   const bounds = useMemo(() => dateBounds(dates), [dates])
   const params = useMemo<TaskQuery>(
-    () => ({ view, q: debounced, ...filters, from: bounds.from, to: bounds.to, sort }),
-    [view, debounced, filters, bounds, sort],
+    () => ({ view, q: debounced, ...filters, task: onlyTask ? [onlyTask.id] : undefined, from: bounds.from, to: bounds.to, sort }),
+    [view, debounced, filters, onlyTask, bounds, sort],
   )
 
   const load = useCallback(async (quiet = false) => {
@@ -275,12 +278,19 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       setError('')
       // The open task follows its fresh copy (a source moved it on).
       setSelected((cur) => (cur ? res.items.find((i) => i.id === cur.id) ?? cur : cur))
+      // Showing one task that moved to another tab (reopened, done): follow it there.
+      if (task1.current && !res.items.length && res.counts) {
+        const lane = VIEWS.find((v) => v.id !== 'all' && res.counts[v.id] > 0)
+        if (lane && lane.id !== view) setView(lane.id)
+      }
     } catch (e) {
       if (id === reqId.current && !quiet) setError(errText(e))
     } finally {
       if (id === reqId.current) setLoading(false)
     }
-  }, [params])
+  }, [params, view])
+  const task1 = useRef(false)
+  task1.current = !!onlyTask
 
   useEffect(() => { load() }, [load])
 
@@ -380,6 +390,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         if (!found) { notify('warning', 'Task not found', 'It isn\'t on the Taskboard (yet).'); return }
         const lane = found.lane
         setSelected(found)
+        setOnlyTask({ id: found.id, title: found.title || found.ask || '' })
         setView(VIEWS.some((v) => v.id === lane) ? (lane as TaskView) : 'all')
       } catch (e) {
         if (!gone) notify('warning', 'Task not found', errText(e))
@@ -749,12 +760,12 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   const terms = useMemo(() => foldText(debounced).split(/\s+/).filter(Boolean), [debounced])
   // "Between…" with no dates picked yet filters nothing.
   const datesOn = bounds.from !== undefined || bounds.to !== undefined
-  const filterCount = Object.values(filters).reduce((n, v) => n + v.length, 0) + (datesOn ? 1 : 0)
+  const filterCount = Object.values(filters).reduce((n, v) => n + v.length, 0) + (datesOn ? 1 : 0) + (onlyTask ? 1 : 0)
   const filtered = !!debounced || filterCount > 0
   // Only one agent's tasks (how an agent's menu opens it): an empty list
   // means that agent has none yet, not that a search missed.
   const agentOnly = filters.agent.length === 1 && filterCount === 1 && !debounced
-  const clearFilters = () => { setFilters(NO_FILTERS); setDates(NO_DATES) }
+  const clearFilters = () => { setFilters(NO_FILTERS); setDates(NO_DATES); setOnlyTask(null) }
   // "Connect Jev" in the settings: they close, and Connections opens on Jev.
   const connectJev = onOpenConnections && (() => { setSettingsOpen(false); onOpenConnections('jev') })
   const setFacet = (key: TaskFacetKey, values: string[]) => setFilters((cur) => ({ ...cur, [key]: values }))
@@ -934,6 +945,18 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   // Above the list, so a move that empties it can still be seen and undone.
   const batchPane = (
     <div className="flex min-h-0 flex-1 flex-col">
+      {onlyTask && (
+        <div className="flex items-center gap-2 border-b border-zinc-800 bg-teal-500/[0.06] px-3 py-2 text-xs wide:px-4">
+          <ListChecks className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+          <span className="min-w-0 flex-1 truncate text-zinc-400" title={onlyTask.title || undefined}>
+            Showing one task{onlyTask.title && <>: <span className="text-zinc-200">{onlyTask.title}</span></>}
+          </span>
+          <button onClick={() => setOnlyTask(null)}
+            className="shrink-0 rounded-md px-2 py-1 font-medium text-teal-700 transition-colors hover:bg-zinc-800 dark:text-teal-300">
+            Show all tasks
+          </button>
+        </div>
+      )}
       {batches.filter((b) => !batchesAside.has(b.id)).map((b) => (
         <BatchProgress
           key={b.id}

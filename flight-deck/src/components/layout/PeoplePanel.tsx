@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, Contact, ListChecks, Loader2, RefreshCw, Search, X } from 'lucide-react'
-import type { Facet } from '../../services/fileLibraryApi'
-import { taskboardApi, type PeopleSort, type TaskItem } from '../../services/taskboardApi'
+import { taskboardApi, type PeopleSort, type Person, type TaskItem } from '../../services/taskboardApi'
 
 // ── People ───────────────────────────────────────────────────────────
 //
@@ -40,7 +39,7 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
   /** The Taskboard, showing this task. */
   onOpenTask: (taskId: string) => void
 }) {
-  const [people, setPeople] = useState<Facet[] | null>(null)
+  const [people, setPeople] = useState<Person[] | null>(null)
   const [total, setTotal] = useState(0)
   const [failed, setFailed] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -208,7 +207,11 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-[15px] font-semibold text-zinc-100">{p.label || p.id}</span>
-                      <span className="block text-xs text-zinc-500">{p.count} task{p.count === 1 ? '' : 's'}</span>
+                      <span className="block text-xs text-zinc-500">
+                        {p.count} task{p.count === 1 ? '' : 's'}
+                        <span className="text-zinc-600"> · </span>
+                        <span className={p.done > 0 ? 'text-emerald-700 dark:text-emerald-400' : undefined}>{p.done} done</span>
+                      </span>
                     </span>
                     {open ? <ChevronDown className="h-4 w-4 text-zinc-500" /> : <ChevronRight className="h-4 w-4 text-zinc-500" />}
                   </button>

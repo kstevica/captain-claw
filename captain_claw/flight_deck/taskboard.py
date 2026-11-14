@@ -368,18 +368,22 @@ async def taskboard_status(user: dict = Depends(get_current_user)) -> dict:
 async def taskboard_tasks(
     view: str = "needs_me", q: str = "", status: str = "", channel: str = "", agent: str = "",
     direction: str = "", kind: str = "", party: str = "", evidence: str = "", result: str = "",
+    task: str = "",
     date_from: float | None = Query(None, alias="from"), date_to: float | None = Query(None, alias="to"),
     sort: str = "recent", limit: int = 50, offset: int = 0,
     user: dict = Depends(get_current_user),
 ) -> dict:
     """The caller's tasks in one view, searched (accent-folded, every word)
     and filtered (comma-separated values per filter), with each facet's
-    counts under the other filters and each view's count under all of them."""
+    counts under the other filters and each view's count under all of them.
+    ``task``: only these task ids (the board opened on one task)."""
     uid = _uid(user)
     if view not in VIEWS:
         raise HTTPException(400, f"view is one of {', '.join(VIEWS)}")
     filters = _filters(status=status, channel=channel, agent=agent, direction=direction, kind=kind, party=party,
                        evidence=evidence, result=result)
+    if task:
+        filters["task"] = _csv(task)[:50]
 
     def page() -> dict:
         proposals = _waiting_proposals(uid)
@@ -694,14 +698,15 @@ async def taskboard_people(
     user: dict = Depends(get_current_user),
 ) -> dict:
     """The People page: everyone on the caller's tasks but the deck's own
-    users (the caller and their colleagues), searched by name or address and
-    sorted by task count (``count``) or name (``name``), a page at a time."""
+    users (the caller and their colleagues), with how many of their tasks are
+    done, searched by name or address and sorted by task count (``count``) or
+    name (``name``), a page at a time."""
     uid = _uid(user)
     sort = sort if sort in ("count", "name") else "count"
     res = await asyncio.to_thread(store().people, uid, q=q[:200], sort=sort, limit=limit, offset=offset,
                                   leave_out=("fd_user:",))
-    return {"people": [{"id": v, "label": _facet_label("party", v, label), "count": n}
-                       for v, label, n in res["people"]],
+    return {"people": [{"id": v, "label": _facet_label("party", v, label), "count": n, "done": done}
+                       for v, label, n, done in res["people"]],
             "total": res["total"]}
 
 
