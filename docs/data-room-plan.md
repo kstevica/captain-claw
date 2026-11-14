@@ -881,13 +881,47 @@ detected from diacritics and common words.
   position, with no page errors.
 - **Not done:** cell formatting (bold, fills, merged cells) isn't in the
   text, so it isn't drawn.
-- **Gap found (before this change too):** `office.prepare` reads only text
-  cells (shared and inline strings). A number cell is never anonymized:
-  - an ID number stored as a number (an OIB typed into a number column);
-  - a date of birth in a date cell.
-  The leak check blocks such a value only if the vault learned it elsewhere.
-  A date of birth now reads as a date in Claude's text, where before it read
-  as a serial number (which a reader could convert anyway).
+- **Gap (corrected on 2026-11-14, see the next section):** this said number
+  cells are never anonymized. That was wrong. `office.prepare` does offer a
+  whole number of 6+ digits to the engine. What was missing was headers below
+  row 1, headers with other words in them, and phone numbers without a header.
+  A date of birth in a date cell is still not hidden.
+
+**Identifiers kept as numbers in a workbook (2026-11-14, branch `feat/xlsx-number-ids`):**
+
+- **Rule:** amounts, hours, counts and ordinary dates stay numbers (Claude
+  sums, filters and splits periods). Only identifiers get tokens: OIB, JMBG,
+  phone numbers, account numbers.
+- **What was there:** a number cell of 6+ digits already went to the engine,
+  with its column's header as a hint. A valid OIB or JMBG (check digits) was
+  found even with no header.
+- **What was missing, now done (`office._xlsx`, `detectors.hint_for`):**
+  - **Headers below row 1:** a header row is looked for in a sheet's first 30
+    rows. A row with numbers in it is data, not a header; row 1 counts as
+    before. A header applies to the rows under it, until the next header
+    row. This also lets names under "Ime i prezime" in row 2 get their hint.
+  - **Headers with other words:** an identifier named among other words is
+    taken as one: "OIB zaposlenika", "Kontakt telefon", "Broj mobitela",
+    "Tel.", "IBAN račun". The value still needs digits (`hint_span`), so a
+    cost line called "Telefon" in a data row isn't hidden.
+  - **Phone numbers with no header:** a number cell `385` + 8–9 digits (the
+    "+" is gone) is a phone number.
+  - **Float-style values:** a whole number written `12345678903.0` is read
+    as `12345678903`, so its token has no ".0" left beside it.
+  - A cell that gets a token becomes a text cell holding the token (as
+    before). The amounts beside it stay number cells.
+- **Tests:** `test_anonymize_xlsx_number_ids.py` (made-up values with valid
+  check digits):
+  - header words;
+  - a title row above the header;
+  - an OIB written as `….0`;
+  - a phone number with no header;
+  - amounts, codes and hours left as numbers;
+  - a data row that isn't a header.
+- **Not yet:** a date of birth in a date cell (a number to the office reader;
+  to be hidden or cut to the year). A 9-digit Croatian mobile number without
+  385 and without a phone header (`911234567`) isn't taken: it could be an
+  amount.
 
 ## Later
 

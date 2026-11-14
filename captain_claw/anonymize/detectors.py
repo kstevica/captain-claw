@@ -650,12 +650,27 @@ _HINTS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
+_PHONE_WORDS = {"tel", "phone", "telephone", "mobile", "mob", "gsm", "fax", "cell"}
+
+
 def hint_for(key: str) -> str:
     """The kind a column header / JSON key names ("" when none)."""
     k = re.sub(r"[^0-9a-zčćđšž]+", "_", str(key or "").casefold()).strip("_")
     for kind, rx in _HINTS:
         if rx.match(k):
             return kind
+    # An identifier named among other words: "OIB zaposlenika", "Kontakt
+    # telefon", "Broj mobitela", "IBAN račun". (Its value must still look
+    # like one: hint_span wants digits.)
+    words = set(k.split("_"))
+    if "oib" in words:
+        return "OIB"
+    if "jmbg" in words:
+        return "JMBG"
+    if "iban" in words:
+        return "IBAN"
+    if words & _PHONE_WORDS or any(w.startswith(("telefon", "mobitel")) for w in words):
+        return "PHONE"
     return ""
 
 
