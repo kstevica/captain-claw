@@ -23,6 +23,7 @@ from captain_claw.flight_deck import anonymize_routes as ar
 from captain_claw.flight_deck import anonymize_trusted as trusted
 from captain_claw.flight_deck import anonymize_vault as av
 from captain_claw.flight_deck import fd_crypto
+from captain_claw.flight_deck import rooms_describe as rd
 from captain_claw.flight_deck import rooms_intake as ri
 from captain_claw.flight_deck import rooms_job as rj
 from captain_claw.flight_deck import rooms_store as rs
@@ -59,6 +60,12 @@ def _counts(files: list[dict[str, Any]]) -> dict[str, int]:
     for state in rs.FILE_STATES:
         out[state] = sum(1 for f in files if f["state"] == state)
     out["warnings"] = sum(1 for f in files if f["state"] == "done" and f["warnings"])
+    # What each clean file is about (rooms_describe).
+    clean = [f for f in files if f["state"] == "done"]
+    out["described"] = sum(1 for f in clean if rd.has(f.get("about")))
+    out["describe_waiting"] = sum(1 for f in clean if (f.get("about") or {}).get("state") == "waiting")
+    out["describe_failed"] = sum(1 for f in clean if (f.get("about") or {}).get("state") in ("failed", "held"))
+    out["describe_needed"] = sum(1 for f in clean if (f.get("about") or {}).get("state") != "waiting" and rd.needs(f))
     return out
 
 
@@ -66,13 +73,15 @@ async def _summary(room: dict[str, Any]) -> dict[str, Any]:
     files = await rs.store().files(room["id"])
     job = dict(room.get("job") or {})
     job["running"] = rj.running(room["id"])
+    describing = rd.progress(room["id"])
     deliveries = await rs.store().deliveries(room["id"])
     tasks = await rs.store().tasks(room["id"])
     return {"id": room["id"], "codename": room["codename"], "name": room["name"], "state": room["state"],
             "counts": _counts(files), "job": job, "created_at": room["created_at"],
             "updated_at": room["updated_at"], "released_at": room["released_at"],
             "inbox": {"total": len(deliveries), "unseen": sum(1 for d in deliveries if not d["seen"])},
-            "tasks": {"total": len(tasks), "open": sum(1 for t in tasks if t["state"] in ("waiting", "taken"))}}
+            "tasks": {"total": len(tasks), "open": sum(1 for t in tasks if t["state"] in ("waiting", "taken"))},
+            "describing": describing}
 
 
 def _vault_name(codename: str, room_id: str) -> str:
@@ -425,21 +434,32 @@ async def _rewrite_room(room_id: str, mapping: dict[str, str]) -> tuple[int, int
             if new != blob:
                 await asyncio.to_thread(clean.write_bytes, new)
                 changed = True
+        fields: dict[str, Any] = {}
         if text_path.exists():
             text = await asyncio.to_thread(text_path.read_text, "utf-8")
             new_text = ra.rewrite_text(text, mapping)
             if new_text != text:
                 await asyncio.to_thread(text_path.write_text, new_text, "utf-8")
                 changed = True
+                fields["text_sha"] = rd.text_sha(new_text)
                 if f["state"] == "done":
                     await store.index_text(room_id, f["id"], rj.pages_of(new_text))
-        fields: dict[str, Any] = {}
         clean_path = ra.rewrite_text(f["clean_path"], mapping)
         if clean_path != f["clean_path"]:
             fields["clean_path"] = clean_path  # its name in a folder; on disk it's kept by its id
         leftovers = ra.rewrite_leftovers(f.get("leftovers") or {}, mapping)
         if leftovers != (f.get("leftovers") or {}):
             fields["leftovers"] = leftovers
+        # Its description: the same tokens, and still the text's own when it was before.
+        about = f.get("about") or {}
+        if rd.has(about) and (fields.get("text_sha") or "clean_path" in fields):
+            new_about = rd.rewrite(about, mapping, ra.rewrite_text)
+            if "text_sha" in fields and about.get("text_sha") == f.get("text_sha"):
+                new_about["text_sha"] = fields["text_sha"]
+            if new_about != about:
+                fields["about"] = new_about
+            if f["state"] == "done":
+                await store.index_about(room_id, f["id"], fields.get("clean_path", f["clean_path"]), new_about)
         if fields:
             await store.set_file(room_id, f["id"], **fields)
         rewritten += 1 if changed or fields else 0
@@ -474,6 +494,7 @@ async def delete_room(room_id: str, request: Request, vault: bool = Query(False)
     room = await _room(owner, room_id)
     if rj.running(room_id):
         raise HTTPException(409, "Stop the run first.")
+    await rd.stop(room_id)
     await rs.store().delete(owner, room_id)
     vault_deleted = await av.store().delete(owner, room["vault_id"], actor=f"person:{owner}") if vault else False
     return {"deleted": True, "vault_deleted": bool(vault_deleted)}
@@ -581,6 +602,12 @@ def _file_view(f: dict[str, Any]) -> dict[str, Any]:
     lo = f.get("leftovers") or {}
     out["leftovers"] = {"hidden": sum(int(x.get("count") or 0) for x in lo.get("hidden") or []),
                         "left": sum(int(x.get("count") or 0) for x in lo.get("left") or [])}
+    # Its one line (in tokens) and where describing it stands; the rest comes with its text.
+    about = f.get("about") or {}
+    if about or f["state"] == "done":
+        out["about"] = {"state": about.get("state") or "", "one": about.get("one") or "",
+                        "stale": f["state"] == "done" and rd.has(about) and rd.needs(f)
+                        and about.get("state") not in ("failed", "held", "waiting")}
     return out
 
 
@@ -631,6 +658,7 @@ async def file_text(room_id: str, file_id: str, request: Request, original: bool
     out["leftovers"] = {"hidden": lo.get("hidden") or [], "left": lo.get("left") or []}
     text_path = store.text_file(room_id, file_id)
     clean = await asyncio.to_thread(text_path.read_text, "utf-8") if text_path.exists() else ""
+    out["about"] = await _about_view(owner, room, f)
     out["clean"] = clean[:_TEXT_PREVIEW]
     out["clean_cut"] = len(clean) > _TEXT_PREVIEW  # the page shows the start of a long file
     if original:
@@ -645,6 +673,55 @@ async def file_text(room_id: str, file_id: str, request: Request, original: bool
         out["original"] = original_text[:_TEXT_PREVIEW]
         out["original_cut"] = len(original_text) > _TEXT_PREVIEW
     return out
+
+
+async def _about_view(owner: str, room: dict[str, Any], f: dict[str, Any]) -> dict[str, Any] | None:
+    """A file's description as Claude reads it (tokens), and with the real
+    names put back — for its owner's page."""
+    about = dict(f.get("about") or {})
+    if not about:
+        return None
+    about["stale"] = f["state"] == "done" and rd.has(about) and rd.needs(f) and about.get("state") == "done"
+    if rd.has(about):
+        vault = await av.store().get(owner, room["vault_id"])
+        if vault is not None:
+            state = await av.store().load_state(vault)
+
+            def real(text: str) -> str:
+                return engine.restore(text, state)[0] if text else text
+
+            about["real"] = {"one": real(about.get("one") or ""), "paragraph": real(about.get("paragraph") or ""),
+                             "summary": real(about.get("summary") or ""),
+                             "keywords": [real(k) for k in about.get("keywords") or []],
+                             "topics": [real(t) for t in about.get("topics") or []]}
+    return about
+
+
+@router.post("/{room_id}/describe")
+async def describe_files(room_id: str, request: Request, body: dict[str, Any] = Body(default={}),
+                         user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Describe the room's clean files in the background: the ones that need
+    it (new, changed, failed), or every one with {"again": true}; only
+    {"files": [ids]} when given."""
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    body = body or {}
+    if await trusted.usable(get_db()) is None:
+        raise HTTPException(409, "No trusted model is set up — an admin sets one under Anonymization, then the "
+                                 "files can be described.")
+    ids = body.get("files")
+    if ids is not None and (not isinstance(ids, list) or not all(isinstance(x, str) for x in ids) or len(ids) > 5000):
+        raise HTTPException(422, "files is a list of file ids.")
+    waiting = await rd.queue(room, force=bool(body.get("again")), file_ids=ids)
+    return {"waiting": waiting, "room": await _detail(await _room(owner, room_id))}
+
+
+@router.post("/{room_id}/describe/stop")
+async def stop_describing(room_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    owner = _owner(request, user)
+    await _room(owner, room_id)
+    stopped = await rd.stop(room_id)
+    return {"stopping": stopped, "room": await _detail(await _room(owner, room_id))}
 
 
 @router.get("/{room_id}/files/{file_id}/clean")

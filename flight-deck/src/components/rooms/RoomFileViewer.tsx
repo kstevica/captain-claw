@@ -8,6 +8,7 @@ import { TOKEN_RE, type VaultEntry } from '../../services/anonymizeApi'
 import { Button, Notice, Pill, Segmented } from '../console/parts'
 import { kindLabel } from '../anonymize/anonFormat'
 import { IconBtn, Marked, Picker, RoomDialog, SearchField, TokenChip, type PickOption } from './roomParts'
+import { AboutPanel } from './RoomsAbout'
 import {
   baseToken, colName, count, errorText, findAll, findRe, parseSheets, plural, sheetAt, tokenKind,
   type Range, type Sheet, type SheetCell,
@@ -287,10 +288,11 @@ function LeftoversPanel({ roomId, leftovers, byToken, onShowText, onShowToken, o
   )
 }
 
-export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
+export function RoomFileViewer({ roomId, file, entries, canDescribe = false, onClose, onChanged }: {
   roomId: string
   file: RoomFile
   entries: VaultEntry[] | null
+  canDescribe?: boolean
   onClose: () => void
   onChanged?: () => void
 }) {
@@ -310,6 +312,29 @@ export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
   useEffect(() => {
     roomsApi.text(roomId, file.id, true).then(setText).catch((e) => setError(errorText(e)))
   }, [roomId, file.id])
+
+  // Describing this file: ask, then look again until it's written.
+  const [describing, setDescribing] = useState(false)
+  const aboutState = text?.about?.state
+  useEffect(() => {
+    if (aboutState !== 'waiting') return
+    const t = setInterval(() => {
+      roomsApi.text(roomId, file.id, false).then((x) => setText((cur) => (cur ? { ...cur, about: x.about } : cur))).catch(() => {})
+    }, 3000)
+    return () => clearInterval(t)
+  }, [aboutState, roomId, file.id])
+  const describe = async () => {
+    setDescribing(true); setError('')
+    try {
+      await roomsApi.describe(roomId, { files: [file.id], again: true })
+      setText((cur) => (cur ? { ...cur, about: { ...(cur.about || {}), state: 'waiting', error: undefined } } : cur))
+      onChanged?.()
+    } catch (e) {
+      setError(errorText(e))
+    } finally {
+      setDescribing(false)
+    }
+  }
 
   const original = text?.original || ''
   const clean = text?.clean || ''
@@ -547,6 +572,10 @@ export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
             </div>
           )}
         </div>
+      )}
+      {text && (
+        <AboutPanel file={file} about={text.about} byToken={byToken} canDescribe={canDescribe} busy={describing}
+          onDescribe={() => void describe()} />
       )}
       {text?.leftovers && (
         <LeftoversPanel roomId={roomId} leftovers={text.leftovers} byToken={byToken} onChanged={onChanged}

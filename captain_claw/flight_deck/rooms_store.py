@@ -79,6 +79,8 @@ CREATE TABLE IF NOT EXISTS room_files (
     updated_at  REAL NOT NULL,
     info        TEXT NOT NULL DEFAULT '{}',
     leftovers   TEXT NOT NULL DEFAULT '',
+    text_sha    TEXT NOT NULL DEFAULT '',
+    about       TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (room_id, id),
     UNIQUE (room_id, path_key)
 );
@@ -88,6 +90,10 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS room_text USING fts5(
     room_id UNINDEXED, file_id UNINDEXED, page UNINDEXED, body,
+    tokenize = 'unicode61 remove_diacritics 2'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS room_about USING fts5(
+    room_id UNINDEXED, file_id UNINDEXED, path, one, keywords, topics, paragraph, summary,
     tokenize = 'unicode61 remove_diacritics 2'
 );
 CREATE TABLE IF NOT EXISTS mcp_grants (
@@ -225,6 +231,9 @@ class RoomStore:
                     await db.execute("ALTER TABLE room_files ADD COLUMN info TEXT NOT NULL DEFAULT '{}'")
                 if "leftovers" not in file_cols:
                     await db.execute("ALTER TABLE room_files ADD COLUMN leftovers TEXT NOT NULL DEFAULT ''")
+                for col in ("text_sha", "about"):
+                    if col not in file_cols:
+                        await db.execute(f"ALTER TABLE room_files ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
                 cur = await db.execute("PRAGMA table_info(rooms)")
                 if "allowed" not in {r[1] for r in await cur.fetchall()}:
                     await db.execute("ALTER TABLE rooms ADD COLUMN allowed TEXT NOT NULL DEFAULT ''")
@@ -370,8 +379,8 @@ class RoomStore:
         if not cur.rowcount:
             await db.commit()
             return False
-        for table in ("room_files", "room_text", "room_reads", "room_alarms", "deliveries", "delivery_parts",
-                      "room_tasks"):
+        for table in ("room_files", "room_text", "room_about", "room_reads", "room_alarms", "deliveries",
+                      "delivery_parts", "room_tasks"):
             await db.execute(f"DELETE FROM {table} WHERE room_id=?", (room_id,))
         await db.commit()
         await asyncio.to_thread(shutil.rmtree, self.room_dir(room_id), True)
@@ -387,6 +396,8 @@ class RoomStore:
         f["entities"] = json.loads(f["entities"] or "{}")
         f["info"] = json.loads(f.get("info") or "{}")
         f["leftovers"] = _open_json(f.get("leftovers") or "", {})
+        f["about"] = json.loads(f.get("about") or "{}")
+        f["text_sha"] = f.get("text_sha") or ""
         f["released"] = bool(f["released"])
         return f
 
@@ -408,10 +419,11 @@ class RoomStore:
                 return row["id"], False
             await db.execute(
                 """UPDATE room_files SET kind=?, size=?, sha256=?, state=?, error=?, warnings='[]',
-                   entities='{}', info='{}', leftovers='', text_chars=0, released=0, clean_path='', updated_at=?
-                   WHERE room_id=? AND id=?""",
+                   entities='{}', info='{}', leftovers='', text_chars=0, released=0, clean_path='', text_sha='',
+                   about='', updated_at=? WHERE room_id=? AND id=?""",
                 (kind, size, sha256, state, error, now, room_id, row["id"]))
             await db.execute("DELETE FROM room_text WHERE room_id=? AND file_id=?", (room_id, row["id"]))
+            await db.execute("DELETE FROM room_about WHERE room_id=? AND file_id=?", (room_id, row["id"]))
             await db.commit()
             return row["id"], True
         fid = "f_" + secrets.token_hex(8)
@@ -438,7 +450,9 @@ class RoomStore:
     async def set_file(self, room_id: str, file_id: str, **fields: Any) -> None:
         cols, values = [], []
         for key, value in fields.items():
-            if key in ("warnings", "entities", "info"):
+            if key == "about":
+                value = json.dumps(value, ensure_ascii=False) if value else ""
+            elif key in ("warnings", "entities", "info"):
                 value = json.dumps(value, ensure_ascii=False)
             elif key == "leftovers":
                 value = _seal_json(value)  # real spellings: sealed like the paths
@@ -446,7 +460,7 @@ class RoomStore:
                 value = 1 if value else 0
             elif key == "state" and value not in FILE_STATES:
                 raise RoomError(f"unknown file state: {value}")
-            elif key not in ("state", "clean_path", "error", "text_chars", "kind"):
+            elif key not in ("state", "clean_path", "error", "text_chars", "kind", "text_sha"):
                 raise RoomError(f"unknown file field: {key}")
             cols.append(f"{key}=?")
             values.append(value)
@@ -471,6 +485,7 @@ class RoomStore:
         db = await self._conn()
         await db.execute("DELETE FROM room_files WHERE room_id=? AND id=?", (room_id, file_id))
         await db.execute("DELETE FROM room_text WHERE room_id=? AND file_id=?", (room_id, file_id))
+        await db.execute("DELETE FROM room_about WHERE room_id=? AND file_id=?", (room_id, file_id))
         await db.commit()
 
     # ── originals (ZIP) ─────────────────────────────────────────────
@@ -509,6 +524,67 @@ class RoomStore:
             return []
         return [{"file_id": r["file_id"], "path": r["clean_path"], "page": r["page"], "snippet": r["snip"]}
                 for r in await cur.fetchall()]
+
+    # ── what each file is about (rooms_describe) ────────────────────
+
+    async def index_about(self, room_id: str, file_id: str, path: str, about: dict[str, Any] | None) -> None:
+        """A file's description in the index finding files searches; None takes it out."""
+        db = await self._conn()
+        await db.execute("DELETE FROM room_about WHERE room_id=? AND file_id=?", (room_id, file_id))
+        if about and about.get("one"):
+            await db.execute(
+                "INSERT INTO room_about (room_id, file_id, path, one, keywords, topics, paragraph, summary) "
+                "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM room_files WHERE room_id=? AND id=?)",
+                (room_id, file_id, path, about.get("one") or "", "; ".join(about.get("keywords") or []),
+                 "; ".join(about.get("topics") or []), about.get("paragraph") or "", about.get("summary") or "",
+                 room_id, file_id))
+        await db.commit()
+
+    async def find_files(self, room_id: str, query: str, *, limit: int = 15,
+                         released_only: bool = True) -> list[dict[str, Any]]:
+        """Files whose description (or, after those, whose text) matches any word
+        of *query*, best first: ``{file_id, path, matched}`` with *matched*
+        ``"description"`` or ``"text"``."""
+        match = find_match(query)
+        if not match:
+            return []
+        limit = max(1, min(int(limit), 100))
+        released = " AND f.released = 1" if released_only else ""
+        db = await self._conn()
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        try:
+            # Weights: room_id, file_id, path, one line, keywords, topics, paragraph, summary.
+            cur = await db.execute(
+                "SELECT a.file_id, f.clean_path FROM room_about a JOIN room_files f "
+                "ON f.room_id = a.room_id AND f.id = a.file_id WHERE room_about MATCH ? AND a.room_id = ?"
+                f"{released} AND f.state = 'done' ORDER BY bm25(room_about, 0, 0, 2.0, 4.0, 4.0, 3.0, 2.0, 1.0) "
+                "LIMIT ?", (match, room_id, limit))
+            for r in await cur.fetchall():
+                seen.add(r["file_id"])
+                out.append({"file_id": r["file_id"], "path": r["clean_path"], "matched": "description"})
+            if len(out) < limit:
+                cur = await db.execute(
+                    "SELECT t.file_id, f.clean_path FROM room_text t JOIN room_files f "
+                    "ON f.room_id = t.room_id AND f.id = t.file_id WHERE room_text MATCH ? AND t.room_id = ?"
+                    f"{released} AND f.state = 'done' ORDER BY rank LIMIT 400", (match, room_id))
+                for r in await cur.fetchall():
+                    if r["file_id"] in seen:
+                        continue
+                    seen.add(r["file_id"])
+                    out.append({"file_id": r["file_id"], "path": r["clean_path"], "matched": "text"})
+                    if len(out) >= limit:
+                        break
+        except aiosqlite.OperationalError:
+            return out
+        return out
+
+    async def describe_waiting(self) -> list[str]:
+        """Rooms with files still waiting for their description."""
+        db = await self._conn()
+        cur = await db.execute("SELECT DISTINCT room_id FROM room_files WHERE about != '' AND "
+                               "json_extract(about, '$.state') = 'waiting'")
+        return [r[0] for r in await cur.fetchall()]
 
 
     # ── Claude's access (the room connector, P2) ────────────────────
@@ -741,6 +817,29 @@ class RoomStore:
 
 def new_room_id() -> str:
     return "r_" + secrets.token_hex(8)
+
+
+_FIND_SKIP = frozenset("""a an and are as at be by for from in into is it its of on or that the this to with which
+what who all any about i ili je u na za od do se su""".split())
+
+
+def find_match(query: str) -> str:
+    """*query* as an FTS match where any word will do (finding files, not
+    passages). A token stays whole; longer words are cut short, so an ending
+    doesn't stop a match ("contracts" finds "contract", "plaće" "plaća")."""
+    terms: list[str] = []
+    for w in re.findall(r"⟦[^⟧]{1,40}⟧|\w+", str(query or ""), re.UNICODE)[:24]:
+        if w.startswith("⟦"):
+            terms.append('"' + w.replace('"', "") + '"')
+            continue
+        w = w.casefold()
+        if w in _FIND_SKIP or (len(w) < 2 and not w.isdigit()):
+            continue
+        stem = w[:-2] if len(w) >= 7 and w.isalpha() else w[:-1] if len(w) >= 5 and w.isalpha() else w
+        term = f'"{stem}"*' if stem != w else f'"{w}"'
+        if term not in terms:
+            terms.append(term)
+    return " OR ".join(terms)
 
 
 # ── the store this deck uses ────────────────────────────────────────

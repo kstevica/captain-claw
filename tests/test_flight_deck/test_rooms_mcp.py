@@ -225,7 +225,7 @@ async def test_protocol_instructions_and_no_stream():
         assert (await c.get("/fd/mcp-rooms")).status_code == 405
         tools = (await _rpc(c, _rooms_token(), "tools/list")).json()["result"]["tools"]
         reads = {"room_list", "room_overview", "room_list_files", "room_read", "room_search", "room_get_file",
-                 "room_tasks", "room_get_delivery"}
+                 "room_tasks", "room_get_delivery", "room_find_files", "room_file_summaries"}
         delivers = {"room_deliver", "room_deliver_workbook", "room_deliver_deck", "room_deliver_document",
                     "room_deliver_file"}
         assert {t["name"] for t in tools} == reads | delivers

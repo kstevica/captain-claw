@@ -19,6 +19,7 @@ from captain_claw.flight_deck import (
     anonymize_vault,
     auth,
     fd_crypto,
+    rooms_describe,
     rooms_intake,
     rooms_job,
     rooms_routes,
@@ -54,11 +55,17 @@ async def deck(monkeypatch, tmp_path):
     rooms = rooms_store.RoomStore(tmp_path / "data" / "rooms.db")
     rooms_store.set_store(rooms)
     monkeypatch.setattr(rooms_job, "_RUN_SLOT", asyncio.Semaphore(1))
+    monkeypatch.setattr(rooms_describe, "_TASKS", {})
     try:
         yield tmp_path
     finally:
-        for task in list(rooms_job._TASKS.values()):
+        for task in [*rooms_job._TASKS.values(), *rooms_describe._TASKS.values()]:
             task.cancel()
+        for task in list(rooms_describe._TASKS.values()):
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 — winding down
+                pass
         rooms_store.set_store(None)
         anonymize_vault.set_store(None)
         await rooms.close()
