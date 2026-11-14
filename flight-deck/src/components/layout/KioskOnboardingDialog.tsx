@@ -433,7 +433,8 @@ function buildSteps({ name, phone, authEnabled, sharingEnabled, info }: {
           <><B>Back</B> returns to the list: the agent keeps working meanwhile.</>,
         ]
       : [
-          <><B>Left: your agents.</B> Click one to chat. Green means running, amber working, blue a new reply.</>,
+          <><B>Today</B> (top left) shows what needs you, what is in progress and what got done; <B>Agents</B> shows your team as cards.</>,
+          <><B>Your agents</B> are under Team, on the left. Click one to chat. Green means running, amber working, blue a new reply.</>,
           <><B>Middle: the conversation.</B> Ask, attach files, and follow its work as it goes.</>,
           <><B>Library, Data and Folders</B> (bottom left) gather what the agents you create here save: documents, spreadsheets, tables, and the folders they share.</>,
         ],
