@@ -28,18 +28,33 @@ export interface RoomJob {
   blocked?: number
   current?: string
   sweep_round?: number
+  /** At most this many sweep rounds; they stop when a round changes nothing. */
+  sweep_rounds?: number
   sweep_changed?: number
+  /** This sweep round: files changed and names put in so far. */
+  round_changed?: number
+  round_found?: number
+  /** The leftover check: how many real values (spellings too) it looks for. */
+  needles?: number
   message?: string
   started_at?: number
   finished_at?: number
-  /** Sizes of the files to anonymize, and of those finished (for a run's ETA). */
+  /** When this phase (or sweep round) began. */
+  phase_started_at?: number
+  /** Sizes of this phase's files, and of those finished (for its time left). */
   bytes_total?: number
   bytes_done?: number
   /** The file being worked on: its size, its place in this phase, and how far it is. */
   current_size?: number
   file_index?: number
   file_count?: number
-  step?: 'reading' | 'model' | 'replacing'
+  step?: 'reading' | 'model' | 'replacing' | 'saving' | 'writing' | 'text' | 'leaks' | 'hiding' | 'indexing'
+  /** The check: real values hidden after it so far (all files), and in this file now. */
+  hidden?: number
+  leftovers?: number
+  /** The leftover check: the length of the text Claude reads, and its pages. */
+  chars?: number
+  pages?: number
   /** The trusted model's chunks of the current file: done of total. */
   chunk?: number
   chunks?: number
@@ -172,6 +187,20 @@ export interface Room extends RoomSummary {
   max_zip_mb: number
   max_file_mb: number
   warnings?: string[]
+  /** Spellings the check found that aren't names here: left as written, not looked for. */
+  allowed?: AllowedSpelling[]
+}
+
+export interface AllowedSpelling { text: string; tokens: string[]; at: number }
+
+/** A real value the leak check found in a file, as it is written there. */
+export interface Leftover {
+  token: string
+  /** Empty when the check found the token but couldn't place it. */
+  text: string
+  count: number
+  /** "name": in the file's name, not its text. */
+  where?: 'name'
 }
 
 export interface RoomFile {
@@ -190,6 +219,8 @@ export interface RoomFile {
   updated_at: number
   /** For Excel: rows with something in them, and sheets; for CSV/TSV: rows. */
   info?: { rows?: number; sheets?: number }
+  /** How many leftovers the check hid in this file, and how many are still there (they block it). */
+  leftovers?: { hidden: number; left: number }
 }
 
 export interface IntakeReport {
@@ -210,6 +241,8 @@ export interface FileText {
   state: FileState
   clean: string
   original?: string
+  /** Real values the check found here: hidden after the check, and still there. */
+  leftovers?: { hidden: Leftover[]; left: Leftover[] }
 }
 
 export interface SearchHit { file_id: string; path: string; page: string; snippet: string }
@@ -305,6 +338,12 @@ export const roomsApi = {
   files: (id: string) => api<{ files: RoomFile[] }>(`/fd/rooms/${enc(id)}/files`),
   text: (id: string, fileId: string, original: boolean) =>
     api<FileText>(`/fd/rooms/${enc(id)}/files/${enc(fileId)}/text?original=${original}`),
+  /** "Not a name here": leave a spelling as written in every file. `rerun`: files
+   *  where it was hidden go back to "not run yet", to come back with it in place. */
+  allow: (id: string, body: { text: string; tokens?: string[]; rerun?: boolean }) =>
+    api<{ requeued: number; room: Room }>(`/fd/rooms/${enc(id)}/allowed`, json('POST', body)),
+  unallow: (id: string, text: string) =>
+    api<{ room: Room }>(`/fd/rooms/${enc(id)}/allowed/remove`, json('POST', { text })),
   downloadClean: (id: string, f: RoomFile) =>
     download(`/fd/rooms/${enc(id)}/files/${enc(f.id)}/clean`, f.clean_path.split('/').pop() || 'file'),
   removeFile: (id: string, fileId: string) =>

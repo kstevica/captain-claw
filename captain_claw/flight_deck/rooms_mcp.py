@@ -234,21 +234,23 @@ def label_offset(text: str, label: str) -> int:
 
 # ── the vault behind a room: alarms and history ─────────────────────
 
-_VAULT_CACHE: dict[str, tuple[float, list[tuple[str, str]], set[str]]] = {}
+# room id → (vault's updated_at, the room's allowed spellings, needles, tokens)
+_VAULT_CACHE: dict[str, tuple[float, tuple[str, ...], list[tuple[str, rj.Needle]], set[str]]] = {}
 
 
-async def _vault(room: dict[str, Any]) -> tuple[dict[str, Any] | None, list[tuple[str, str]], set[str]]:
+async def _vault(room: dict[str, Any]) -> tuple[dict[str, Any] | None, list[tuple[str, rj.Needle]], set[str]]:
     vaults = av.store()
     row = await vaults.get(room["owner_id"], room["vault_id"])
     if row is None:
         return None, [], set()
+    allowed = tuple(rj.allowed_texts(room))
     cached = _VAULT_CACHE.get(room["id"])
-    if cached and cached[0] == row["updated_at"]:
-        return row, cached[1], cached[2]
+    if cached and cached[0] == row["updated_at"] and cached[1] == allowed:
+        return row, cached[2], cached[3]
     state = await vaults.load_state(row)
-    needle_list = rj.needles(state)
+    needle_list = rj.room_needles(state, room)
     tokens = set(state.by_token)
-    _VAULT_CACHE[room["id"]] = (row["updated_at"], needle_list, tokens)
+    _VAULT_CACHE[room["id"]] = (row["updated_at"], allowed, needle_list, tokens)
     return row, needle_list, tokens
 
 

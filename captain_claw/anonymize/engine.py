@@ -169,6 +169,11 @@ class Options:
     # for that person. Only when code is all there is: with a trusted model
     # looking too, names are its call — one word is no proof of who it is.
     one_word_names: bool = True
+    # (text, token): wherever *text* stands as whole words (any case, any
+    # spacing), it is that vault entity — a data room's leftover ("Horvat"
+    # alone, "sokol softver d.o.o." in lower case) given the token the leak
+    # check named. Tokens the vault doesn't know are ignored.
+    pinned: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass
@@ -1028,6 +1033,37 @@ def _extra_spans(text: str, extra: tuple[tuple[str, str], ...]) -> list[Span]:
     return _extra_finder(extra)(text)
 
 
+_WORD_RUN_RE = re.compile(r"\w+")
+
+
+def _pinned_finder(pinned: tuple[tuple[str, str], ...], state: VaultState,
+                   kinds: frozenset[str] | None) -> Callable[[str], list[tuple[Span, Entity]]]:
+    """Options.pinned as a finder: each text's first word indexed, the rest
+    matched where that word stands — whole words, any case, any spacing."""
+    index: dict[str, list[tuple[re.Pattern[str], Entity]]] = {}
+    for text, token in pinned:
+        e = state.by_token.get(token)
+        words = str(text or "").split()
+        first = _WORD_RUN_RE.match(words[0]) if words else None
+        if e is None or first is None or (kinds is not None and e.kind not in kinds):
+            continue
+        pattern = re.compile(r"\s+".join(map(re.escape, words)) + r"(?!\w)", re.IGNORECASE)
+        index.setdefault(first.group(0).casefold(), []).append((pattern, e))
+
+    def find(text: str) -> list[tuple[Span, Entity]]:
+        out: list[tuple[Span, Entity]] = []
+        if not index:
+            return out
+        for m in _WORD_RUN_RE.finditer(text):
+            for pattern, e in index.get(m.group(0).casefold(), ()):
+                hit = pattern.match(text, m.start())
+                if hit:
+                    out.append((Span(m.start(), hit.end(), e.kind, 2, "pinned"), e))
+        return out
+
+    return find
+
+
 # ── the run ─────────────────────────────────────────────────────────
 
 
@@ -1095,6 +1131,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             if e.new and not e.found_by:
                 e.found_by = "extra"
     extra_find = _extra_finder(options.extra)
+    pinned_find = _pinned_finder(options.pinned, state, options.kinds)
+    pinned_at: dict[tuple[int, int, int], Entity] = {}  # (segment, start, end) → the entity it is pinned to
     # Progress for a document (many pieces, or one long text), not for a file's own name.
     report = len(texts) >= 2 or sum(len(t) for t in texts) >= 2000
     used: dict[str, Entity] = {}
@@ -1123,6 +1161,9 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             spans.extend(extra_find(masked))
             spans = [_trim_org_span(masked, sp, cores) if sp.kind == "ORG"
                      else _trim_title_span(masked, sp) if sp.kind == "PERSON" else sp for sp in spans]
+            for sp, e in pinned_find(masked):  # as written: no trimming
+                spans.append(sp)
+                pinned_at[(i, sp.start, sp.end)] = e
             masks.append(token_ranges)
             found.append(_select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep)))
 
@@ -1138,7 +1179,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         tick = _Tick(round_no, "matching", len(items), report)
         for n, (i, sp) in enumerate(sorted(items, key=order_key)):
             tick(n)
-            pending[(i, sp.start, sp.end)] = resolver.resolve(sp.kind, texts[i][sp.start:sp.end])
+            pending[(i, sp.start, sp.end)] = pinned_at.get((i, sp.start, sp.end)) \
+                or resolver.resolve(sp.kind, texts[i][sp.start:sp.end])
 
         # Find every known entity again, then pick the final spans.
         finder = _known_spans_finder(state, options)
@@ -1231,6 +1273,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             spans = (d.detect(masked, options.kinds, opt_in=options.generalize & set(d.OPT_IN_KINDS), ner=False)
                      if options.deterministic else []) \
                 + extra_find(masked) \
+                + [sp for sp, _e in pinned_find(masked)] \
                 + [sp for sp, _e in finder(masked, _full_names_in(text, [], state))]
             for sp in _select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep)):
                 leftover[sp.kind] = leftover.get(sp.kind, 0) + 1

@@ -110,6 +110,7 @@ async def _detail(room: dict[str, Any]) -> dict[str, Any]:
     model = await trusted.usable(get_db())
     out.update({"vault_id": room["vault_id"], "vault_name": room["vault_name"], "source": room["source"],
                 "seed": room["seed"], "roles": room["roles"], "settings": room["settings"],
+                "allowed": room.get("allowed") or [],
                 "trusted_model": model.label if model else "", "ocr": await asyncio.to_thread(scans.available),
                 "max_zip_mb": ri.MAX_ZIP_BYTES // (1024 * 1024), "max_file_mb": ar.MAX_FILE_BYTES // (1024 * 1024)})
     return out
@@ -153,7 +154,7 @@ async def _roles(room: dict[str, Any], value: Any) -> dict[str, str]:
     vault = await av.store().get(room["owner_id"], room["vault_id"])
     if vault is not None and roles:
         state = await av.store().load_state(vault)
-        needle_list = rj.needles(state)
+        needle_list = rj.room_needles(state, room)
         named = [(token, rj.leaks(role, needle_list)) for token, role in roles.items()]
         named = [(token, hits) for token, hits in named if hits]
         if named:
@@ -194,6 +195,57 @@ async def update_room(room_id: str, request: Request, body: dict[str, Any] = Bod
     except rs.RoomError as exc:
         raise HTTPException(422, str(exc)) from None
     return await _detail(await _room(room["owner_id"], room_id))
+
+
+# ── "not a name here" ───────────────────────────────────────────────
+
+
+@router.post("/{room_id}/allowed")
+async def allow_spelling(room_id: str, request: Request, body: dict[str, Any] = Body(...),
+                         user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """A spelling the check found that isn't a name in this room ("Ured" the
+    office, not a person): it is left as it is in every file, and the check
+    stops looking for it. With ``rerun``, the files where it was hidden after
+    the check go back to "not run yet", to come back with the word in place."""
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    _not_running(room)
+    text = re.sub(r"\s+", " ", str(body.get("text") or "")).strip()
+    if not text or len(text) > 300:
+        raise HTTPException(422, "text is the spelling as the check found it (up to 300 characters)")
+    tokens = [str(t) for t in body.get("tokens") or [] if engine.TOKEN_RE.fullmatch(str(t))][:20]
+    key = rj.allow_key(text)
+    if len(key.replace(" ", "")) < rj.MIN_NEEDLE:
+        raise HTTPException(422, "That's too short to be looked for anyway.")
+    allowed = [a for a in room.get("allowed") or [] if rj.allow_key(str(a.get("text") or "")) != key]
+    if len(allowed) >= rj.MAX_ALLOWED:
+        raise HTTPException(422, f"A room can leave at most {rj.MAX_ALLOWED} words as they are.")
+    import time
+
+    allowed.append({"text": text, "tokens": tokens, "at": time.time()})
+    store = rs.store()
+    await store.update(room_id, allowed=allowed)
+    requeued = 0
+    if body.get("rerun"):
+        for f in await store.files(room_id):
+            hidden = (f.get("leftovers") or {}).get("hidden") or []
+            if any(rj.allow_key(str(x.get("text") or "")) == key for x in hidden):
+                await store.set_file(room_id, f["id"], state="new", released=False, error="")
+                requeued += 1
+    return {"requeued": requeued, "room": await _detail(await _room(owner, room_id))}
+
+
+@router.post("/{room_id}/allowed/remove")
+async def unallow_spelling(room_id: str, request: Request, body: dict[str, Any] = Body(...),
+                           user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Look for a spelling again (it is hidden again at the next run)."""
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    _not_running(room)
+    key = rj.allow_key(str(body.get("text") or ""))
+    allowed = [a for a in room.get("allowed") or [] if rj.allow_key(str(a.get("text") or "")) != key]
+    await rs.store().update(room_id, allowed=allowed)
+    return {"room": await _detail(await _room(owner, room_id))}
 
 
 @router.delete("/{room_id}")
@@ -304,8 +356,13 @@ async def stop_room(room_id: str, request: Request, user: dict = Depends(get_cur
 
 
 def _file_view(f: dict[str, Any]) -> dict[str, Any]:
-    return {k: f.get(k) for k in ("id", "origin", "path", "clean_path", "kind", "size", "state", "warnings", "error",
-                                  "entities", "text_chars", "released", "updated_at", "info")}
+    out = {k: f.get(k) for k in ("id", "origin", "path", "clean_path", "kind", "size", "state", "warnings", "error",
+                                 "entities", "text_chars", "released", "updated_at", "info")}
+    # Counts only: the spellings come with the file's own text (its page).
+    lo = f.get("leftovers") or {}
+    out["leftovers"] = {"hidden": sum(int(x.get("count") or 0) for x in lo.get("hidden") or []),
+                        "left": sum(int(x.get("count") or 0) for x in lo.get("left") or [])}
+    return out
 
 
 @router.get("/{room_id}/files")
@@ -349,6 +406,10 @@ async def file_text(room_id: str, file_id: str, request: Request, original: bool
     f = await _file(room_id, file_id)
     store = rs.store()
     out: dict[str, Any] = {"id": f["id"], "path": f["path"], "clean_path": f["clean_path"], "state": f["state"]}
+    # Real values the check found in this file (owner only): hidden after the
+    # check, and still there (what blocks it), each as it is written.
+    lo = f.get("leftovers") or {}
+    out["leftovers"] = {"hidden": lo.get("hidden") or [], "left": lo.get("left") or []}
     text_path = store.text_file(room_id, file_id)
     out["clean"] = (await asyncio.to_thread(text_path.read_text, "utf-8"))[:_TEXT_PREVIEW] \
         if text_path.exists() else ""

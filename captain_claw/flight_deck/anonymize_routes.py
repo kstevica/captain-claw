@@ -58,7 +58,8 @@ log = get_logger(__name__)
 
 # Where a long anonymization stands, for a caller that shows it (a data room's
 # run): set it around anonymize_blob; it gets {"step": "reading" | "model" |
-# "replacing", "chunk", "chunks"}. Nothing private goes through it.
+# "replacing" | "saving" | "writing", "chunk", "chunks"}, and the engine's
+# passes while replacing. Nothing private goes through it.
 PROGRESS: ContextVar[Callable[[dict[str, Any]], Awaitable[None]] | None] = ContextVar("anonymize_progress",
                                                                                       default=None)
 
@@ -101,6 +102,7 @@ router = APIRouter(prefix="/fd/anonymize", tags=["anonymize"])
 MAX_CHARS = 2_000_000
 MAX_SEGMENTS = 200_000
 MAX_TERMS = 500
+MAX_PINNED = 2000
 _CUSTOM_KIND_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,30}$")
 
 KIND_LABELS = {
@@ -173,10 +175,23 @@ def _options(data: dict[str, Any]) -> engine.Options:
     if generalize and str(data.get("mode") or "reversible") != "one_way":
         raise HTTPException(status_code=422, detail=(
             "generalize needs mode 'one_way': coarser values (a year, a city, a range) can't be put back"))
+    # pinned: [{"text", "token"}] — a data room's leftovers, each given the
+    # token its real value already has in the vault.
+    pinned: list[tuple[str, str]] = []
+    raw_pinned = data.get("pinned")
+    if raw_pinned is not None:
+        if not isinstance(raw_pinned, list) or len(raw_pinned) > MAX_PINNED:
+            raise HTTPException(status_code=422, detail=f"pinned must be a list of at most {MAX_PINNED} items")
+        for item in raw_pinned:
+            text = str(item.get("text") or "").strip() if isinstance(item, dict) else ""
+            token = str(item.get("token") or "") if isinstance(item, dict) else ""
+            if text and len(text) <= 300 and engine.TOKEN_RE.fullmatch(token):
+                pinned.append((text, token))
     # one_word_names=False: code never takes a lone first name or surname for a
     # known person (a data room's final sweep: it only looks for the vault's values).
     return engine.Options(kinds=kinds, keep=tuple(_str_list(data.get("keep"), "keep")), extra=tuple(extra),
-                          default_cc=cc, generalize=generalize, one_word_names=data.get("one_word_names") is not False)
+                          default_cc=cc, generalize=generalize, one_word_names=data.get("one_word_names") is not False,
+                          pinned=tuple(pinned))
 
 
 def _content(data: dict[str, Any]) -> tuple[str, str]:
@@ -434,6 +449,7 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
                 async with store.lock(vault_row["id"]):
                     state = await store.load_state(vault_row)
                     result, out_name = await asyncio.to_thread(work, state)
+                    await _progress(step="saving")
                     await store.save_run(vault_row, state)
         except asyncio.CancelledError:
             stop_event.set()
@@ -507,6 +523,7 @@ async def anonymize_blob(person: str, filename: str, blob: bytes, data: dict[str
     out = await _anonymize(person, doc, data, actor=actor, source=source, stem=Path(filename).stem,
                            one_way_state=one_way_state)
     result = out.pop("_result")
+    await _progress(step="writing")
     written = await asyncio.to_thread(doc.rebuild, result.outputs, result.edits)
     blob_out = written if isinstance(written, bytes) else written.encode("utf-8")
     out["filename"] = f"{out['filename'] or 'document'}.anonymized{doc.out_ext or Path(filename).suffix.lower()}"
