@@ -373,9 +373,12 @@ export interface TaskQuery {
 const BASE = '/fd/taskboard'
 
 export type PeopleSort = 'count' | 'name'
-export interface PeopleQuery { q?: string; sort?: PeopleSort; limit?: number; offset?: number }
-/** Someone on the user's tasks: how many tasks they are on, and how many of those are done. */
-export interface Person { id: string; label: string; count: number; done: number }
+/** Pending tasks, as the People filter asks: exactly one, a range, or that many or more. */
+export type PeoplePending = '' | '1' | '2-5' | '10+'
+export interface PeopleQuery { q?: string; sort?: PeopleSort; pending?: PeoplePending; limit?: number; offset?: number }
+/** Someone on the user's tasks: how many tasks they are on, how many of those
+ *  are done, and how many are still pending (open). */
+export interface Person { id: string; label: string; count: number; done: number; pending: number }
 const taskPath = (id: string, rest = '') => `${BASE}/tasks/${encodeURIComponent(id)}${rest}`
 
 /** A board task's own id (`tb_` and hex); anything with a colon is a key. */
@@ -483,6 +486,7 @@ export const taskboardApi = {
     const p = new URLSearchParams()
     if (o.q) p.set('q', o.q)
     if (o.sort) p.set('sort', o.sort)
+    if (o.pending) p.set('pending', o.pending)
     if (o.limit) p.set('limit', String(o.limit))
     if (o.offset) p.set('offset', String(o.offset))
     return api<{ people: Person[]; total: number }>(`${BASE}/people?${p}`)

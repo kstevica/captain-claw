@@ -692,21 +692,40 @@ async def taskboard_sync(user: dict = Depends(get_current_user)) -> dict:
             "sweep": taskboard_sources.sweep_state(uid)}
 
 
+def _pending_range(raw: str) -> tuple[int, int | None] | None:
+    """The People filter by pending tasks: ``3`` (exactly), ``2-5`` (between,
+    both included), ``10+`` (that many or more); anything else is no filter."""
+    raw = (raw or "").strip()
+    try:
+        if raw.endswith("+"):
+            return (max(0, int(raw[:-1])), None)
+        if "-" in raw:
+            low, high = (int(x) for x in raw.split("-", 1))
+            return (max(0, low), max(low, high))
+        if raw:
+            return (max(0, int(raw)), max(0, int(raw)))
+    except ValueError:
+        pass
+    return None
+
+
 @router.get("/people")
 async def taskboard_people(
-    q: str = "", sort: str = "count", limit: int = 100, offset: int = 0,
+    q: str = "", sort: str = "count", pending: str = "", limit: int = 100, offset: int = 0,
     user: dict = Depends(get_current_user),
 ) -> dict:
     """The People page: everyone on the caller's tasks but the deck's own
     users (the caller and their colleagues), with how many of their tasks are
-    done, searched by name or address and sorted by task count (``count``) or
-    name (``name``), a page at a time."""
+    done and how many still pending, searched by name or address, filtered by
+    how many are pending (``pending``: ``1``, ``2-5``, ``10+``) and sorted by
+    task count (``count``) or name (``name``), a page at a time."""
     uid = _uid(user)
     sort = sort if sort in ("count", "name") else "count"
     res = await asyncio.to_thread(store().people, uid, q=q[:200], sort=sort, limit=limit, offset=offset,
-                                  leave_out=("fd_user:",))
-    return {"people": [{"id": v, "label": _facet_label("party", v, label), "count": n, "done": done}
-                       for v, label, n, done in res["people"]],
+                                  leave_out=("fd_user:",), pending=_pending_range(pending))
+    return {"people": [{"id": v, "label": _facet_label("party", v, label), "count": n, "done": done,
+                        "pending": waiting}
+                       for v, label, n, done, waiting in res["people"]],
             "total": res["total"]}
 
 

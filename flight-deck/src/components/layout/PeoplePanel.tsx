@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, Contact, ListChecks, Loader2, RefreshCw, Search, X } from 'lucide-react'
-import { taskboardApi, type PeopleSort, type Person, type TaskItem } from '../../services/taskboardApi'
+import { taskboardApi, type PeoplePending, type PeopleSort, type Person, type TaskItem } from '../../services/taskboardApi'
 
 // ── People ───────────────────────────────────────────────────────────
 //
@@ -17,6 +17,14 @@ import { taskboardApi, type PeopleSort, type Person, type TaskItem } from '../..
 
 const PAGE = 100
 const SORT_KEY = 'fd:people-sort'
+
+// The pending filter's choices: how many of a person's tasks are still open.
+const PENDING: { id: PeoplePending; label: string; hint: string }[] = [
+  { id: '', label: 'All', hint: 'Everyone, however many tasks are pending' },
+  { id: '1', label: '1', hint: 'One pending task' },
+  { id: '2-5', label: '2–5', hint: 'Two to five pending tasks' },
+  { id: '10+', label: '10+', hint: 'Ten or more pending tasks' },
+]
 
 function savedSort(): PeopleSort {
   try { return localStorage.getItem(SORT_KEY) === 'name' ? 'name' : 'count' } catch { return 'count' }
@@ -53,6 +61,7 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
   const [query, setQuery] = useState('')
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<PeopleSort>(savedSort)
+  const [pending, setPending] = useState<PeoplePending>('')
   // Only the latest load lands: an older answer arriving late is dropped.
   const loadSeq = useRef(0)
 
@@ -66,7 +75,7 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
     setLoading(true)
     setFailed(false)
     try {
-      const page = await taskboardApi.people({ q, sort, limit: PAGE })
+      const page = await taskboardApi.people({ q, sort, pending, limit: PAGE })
       if (seq !== loadSeq.current) return
       setPeople(page.people)
       setTotal(page.total)
@@ -75,7 +84,7 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
     } finally {
       if (seq === loadSeq.current) setLoading(false)
     }
-  }, [q, sort])
+  }, [q, sort, pending])
   useEffect(() => { void load() }, [load])
 
   const showMore = async () => {
@@ -83,7 +92,7 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
     const seq = loadSeq.current
     setMore(true)
     try {
-      const page = await taskboardApi.people({ q, sort, limit: PAGE, offset: people.length })
+      const page = await taskboardApi.people({ q, sort, pending, limit: PAGE, offset: people.length })
       if (seq !== loadSeq.current) return
       setPeople((cur) => [...(cur ?? []), ...page.people])
       setTotal(page.total)
@@ -134,7 +143,7 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
       const shownNow = people?.length ?? 0
       void (async () => {
         try {
-          const page = await taskboardApi.people({ q, sort, limit: Math.max(PAGE, shownNow) })
+          const page = await taskboardApi.people({ q, sort, pending, limit: Math.max(PAGE, shownNow) })
           setPeople(page.people)
           setTotal(page.total)
         } catch { /* what was there stays */ }
@@ -143,7 +152,7 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
       if (openId) void readTasks(openId)
     }
     wasCovered.current = covered
-  }, [covered, people?.length, q, sort, openId, readTasks])
+  }, [covered, people?.length, q, sort, pending, openId, readTasks])
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -163,7 +172,7 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
       </header>
 
       {/* Search and sort: shown once there is anyone (or a search) to work on. */}
-      {(total > 0 || q || query) && !failed && (
+      {(total > 0 || q || query || pending) && !failed && (
         <div className="flex shrink-0 flex-wrap items-center gap-2 px-6 pb-4">
           <label className="relative min-w-[12rem] flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
@@ -192,8 +201,18 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
               </button>
             ))}
           </div>
+          <div role="group" aria-label="Pending tasks" className="flex shrink-0 items-center rounded-full border border-[var(--fd-line)] p-0.5">
+            <span className="px-2 text-xs text-zinc-500">Pending</span>
+            {PENDING.map((o) => (
+              <button key={o.id || 'all'} onClick={() => setPending(o.id)} aria-pressed={pending === o.id} title={o.hint}
+                className={`h-8 min-w-[2rem] rounded-full px-2.5 text-xs font-medium tabular-nums transition-colors ${
+                  pending === o.id ? 'bg-[var(--fd-selected)] text-zinc-100' : 'text-zinc-500 hover:text-zinc-200'}`}>
+                {o.label}
+              </button>
+            ))}
+          </div>
           <span className="w-full text-xs text-zinc-500 wide:w-auto" aria-live="polite">
-            {q ? `${total} match${total === 1 ? '' : 'es'}` : `${total} ${total === 1 ? 'person' : 'people'}`}
+            {q || pending ? `${total} match${total === 1 ? '' : 'es'}` : `${total} ${total === 1 ? 'person' : 'people'}`}
           </span>
         </div>
       )}
@@ -208,12 +227,15 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
             action="Try again"
             onAction={() => void load()}
           />
-        ) : people!.length === 0 && q ? (
+        ) : people!.length === 0 && (q || pending) ? (
           <Empty
             title="No one matches"
-            text={`Nobody on your tasks has “${q}” in their name or address.`}
-            action="Clear search"
-            onAction={() => setQuery('')}
+            text={[
+              q && `Nobody on your tasks has “${q}” in their name or address`,
+              pending && `${q ? 'with' : 'Nobody has'} ${PENDING.find((o) => o.id === pending)?.label} pending task${pending === '1' ? '' : 's'}`,
+            ].filter(Boolean).join(' ') + '.'}
+            action={q && pending ? 'Clear search and filter' : q ? 'Clear search' : 'Show everyone'}
+            onAction={() => { setQuery(''); setPending('') }}
           />
         ) : people!.length === 0 ? (
           <Empty
@@ -239,6 +261,8 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
                       <span className="block truncate text-[15px] font-semibold text-zinc-100">{p.label || p.id}</span>
                       <span className="block text-xs text-zinc-500">
                         {p.count} task{p.count === 1 ? '' : 's'}
+                        <span className="text-zinc-600"> · </span>
+                        <span className={p.pending > 0 ? 'text-amber-700 dark:text-amber-400' : undefined}>{p.pending} pending</span>
                         <span className="text-zinc-600"> · </span>
                         <span className={p.done > 0 ? 'text-emerald-700 dark:text-emerald-400' : undefined}>{p.done} done</span>
                       </span>

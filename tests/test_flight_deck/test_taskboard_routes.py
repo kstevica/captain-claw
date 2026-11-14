@@ -341,12 +341,17 @@ async def test_people_searched_sorted_and_without_the_decks_own_users(api):
                      parties=[{"role": "requester", "kind": kind, "address": addr, "display": display}],
                      event={"source": "t", "source_ref": key})
     out = await _get(api, "/fd/taskboard/people")
-    assert out == {"people": [{"id": "email:ana@x.co", "label": "Ana", "count": 2, "done": 0},
-                              {"id": "email:bo@y.org", "label": "Bo", "count": 1, "done": 0}], "total": 2}
+    assert out == {"people": [{"id": "email:ana@x.co", "label": "Ana", "count": 2, "done": 0, "pending": 2},
+                              {"id": "email:bo@y.org", "label": "Bo", "count": 1, "done": 0, "pending": 1}], "total": 2}
     by_name = await _get(api, "/fd/taskboard/people", sort="name", limit=1, offset=1)
-    assert by_name == {"people": [{"id": "email:bo@y.org", "label": "Bo", "count": 1, "done": 0}], "total": 2}
+    assert by_name == {"people": [{"id": "email:bo@y.org", "label": "Bo", "count": 1, "done": 0, "pending": 1}], "total": 2}
     assert [p["label"] for p in (await _get(api, "/fd/taskboard/people", q="y.org"))["people"]] == ["Bo"]
     assert (await _get(api, "/fd/taskboard/people", sort="weird"))["people"][0]["label"] == "Ana"
+    # By pending tasks: exactly, a range, or that many or more; nonsense is no filter.
+    assert [p["label"] for p in (await _get(api, "/fd/taskboard/people", pending="1"))["people"]] == ["Bo"]
+    assert [p["label"] for p in (await _get(api, "/fd/taskboard/people", pending="2-5"))["people"]] == ["Ana"]
+    assert (await _get(api, "/fd/taskboard/people", pending="10+"))["total"] == 0
+    assert (await _get(api, "/fd/taskboard/people", pending="lots"))["total"] == 2
     api.be(api.bob)
     assert (await _get(api, "/fd/taskboard/people"))["total"] == 0
 
