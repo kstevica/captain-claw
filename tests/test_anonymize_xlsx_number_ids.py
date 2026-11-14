@@ -30,7 +30,7 @@ def jmbg(first12: str) -> str:
 @pytest.mark.parametrize("header,kind", [
     ("OIB", "OIB"), ("OIB zaposlenika", "OIB"), ("JMBG", "JMBG"), ("Telefon", "PHONE"),
     ("Kontakt telefon", "PHONE"), ("Broj mobitela", "PHONE"), ("Tel.", "PHONE"), ("IBAN račun", "IBAN"),
-    ("Hotel", ""), ("Iznos", ""), ("Šifra", ""), ("Broj računa", "IBAN"),
+    ("Hotel", ""), ("Iznos", ""), ("Šifra", "CODE"), ("Broj računa", "IBAN"),
 ])
 def test_headers_that_name_an_identifier(header, kind):
     assert detectors.hint_for(header) == kind

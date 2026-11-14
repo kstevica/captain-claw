@@ -52,5 +52,5 @@ def test_other_people_stay_apart():
     assert _run(state, "Dino Šimunić", ("Dino Šimunić",)) == "⟦PERSON_3⟧"
     # "D. Šimunić" fits Darko and Dino: nobody's in particular.
     assert _run(state, "D. Šimunić", ("D. Šimunić",)) == "⟦PERSON_4⟧"
-    # A name with a middle name may be another person (a father and a son).
-    assert _run(state, "Darko Ivan Šimunić", ("Darko Ivan Šimunić",)) == "⟦PERSON_5⟧"
+    # A middle name more is the one Darko Šimunić known — the same person.
+    assert _run(state, "Darko Ivan Šimunić", ("Darko Ivan Šimunić",)) == "⟦PERSON_1:2⟧"

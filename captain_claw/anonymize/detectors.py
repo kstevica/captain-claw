@@ -247,7 +247,7 @@ def parse_date(text: str) -> str | None:
 _EMAIL_RE = re.compile(r"(?<![\w.+\-])[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?"
                        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}(?![\w\-])")
 
-_PHONE_INTL_RE = re.compile(r"(?<![\w+])(?:\+|00)[1-9]\d{0,2}(?:[ \t.\-/]?\(?\d{1,4}\)?){2,6}(?![\w])")
+_PHONE_INTL_RE = re.compile(r"(?<![\w+/])(?:\+|00)[1-9]\d{0,2}(?:[ \t.\-/]?\(?\d{1,4}\)?){2,6}(?![\w/])")
 _PHONE_NAT_RE = re.compile(r"(?<![\w/.\-+])\(?0[1-9]\d{0,2}\)?(?:[ \t.\-/]?\d{2,4}){2,3}(?![\w/\-])")
 _PHONE_LABEL_RE = re.compile(
     r"(?:(?i:\b(?:tel|telephone|phone|mob|mobile|cell|fax|gsm|telefon|mobitel|kontakt[ \t]+telefon))\.?[ \t]*[:\-–]?"
@@ -376,7 +376,10 @@ def _phone_digits_ok(text: str, low: int, high: int) -> bool:
 
 
 def _looks_like_date(text: str) -> bool:
-    return bool(re.fullmatch(r"\(?\d{1,4}[./\-][ \t]?\d{1,2}[./\-][ \t]?\d{2,4}\.?\)?", text.strip()))
+    t = text.strip()
+    # "07.11.2025", "2025-11-07" — and a period, "03-09 2025" (March to September).
+    return bool(re.fullmatch(r"\(?\d{1,4}[./\-][ \t]?\d{1,2}[./\-][ \t]?\d{2,4}\.?\)?", t)
+                or re.fullmatch(r"(?:0?[1-9]|1[0-2])[./\-](?:0?[1-9]|1[0-2])[ \t]+(?:19|20)\d{2}\.?", t))
 
 
 _CURRENCY = r"(?:€|EUR|eura?|USD|\$|£|GBP|CHF|HRK|kn|kuna)"
@@ -450,6 +453,10 @@ def detect(text: str, kinds: frozenset[str] | set[str] | None = None,
         add(m.start(), m.end(), "EMAIL", 2, "email")
     for m in _PHONE_INTL_RE.finditer(text):
         s, e = _trim(text, m.start(), m.end(), " \t.-/(")
+        # "001234/56/78" is an invoice's number (number/premises/device), not
+        # a call to Belgium: a "00" number in parts split by slashes.
+        if text.startswith("00", s) and text.count("/", s, e) >= 2:
+            continue
         if _phone_digits_ok(text[s:e], 8, 15):
             add(s, e, "PHONE", 2, "phone-intl")
     for m in _PHONE_LABEL_RE.finditer(text):
@@ -459,8 +466,8 @@ def detect(text: str, kinds: frozenset[str] | set[str] | None = None,
     for m in _PHONE_NAT_RE.finditer(text):
         s, e = m.start(), m.end()
         cand = text[s:e]
-        if _looks_like_date(cand):
-            continue
+        if _looks_like_date(cand) or cand.count("/") >= 2:
+            continue  # a date, or an invoice's number/premises/device ("012345/11/32")
         digits = re.sub(r"\D", "", cand)
         separated = bool(re.search(r"[ \t.\-/()]", cand))
         if 8 <= len(digits) <= 11 and (separated or (9 <= len(digits) <= 10 and digits[1] != "0")):
@@ -525,6 +532,11 @@ def detect(text: str, kinds: frozenset[str] | set[str] | None = None,
         add_name(m.start(1), m.end(1), 1, "signoff")
     for m in _ORG_RE.finditer(text):
         start = m.start(1)
+        # An amount glued to the name in a card payment's line ("41,30SOKOL
+        # d.o.o."): its cents aren't the company's.
+        cents = re.match(r"\d+(?=[^\W\d_])", text[start:m.end(1)])
+        if cents and start >= 2 and text[start - 1] in ",." and text[start - 2].isdigit():
+            start += cents.end()
         # Leading words that aren't part of a company's name ("Yesterday Acme d.o.o.").
         for w in re.finditer(r"\S+", text[m.start(1):m.end(1)]):
             if fold(w.group(0)) in _STOP:
@@ -651,6 +663,12 @@ _HINTS: list[tuple[str, re.Pattern[str]]] = [
 
 
 _PHONE_WORDS = {"tel", "phone", "telephone", "mobile", "mob", "gsm", "fax", "cell"}
+_SURNAME_WORDS = {"prezime", "prezimena", "surname", "lastname"}
+_CODE_WORDS = {"oznaka", "oznake", "sifra", "šifra", "code", "codes", "kod", "vrsta"}
+_NAME_WORDS = {"ime", "imena", "name", "names", "fullname"}
+_PERSON_WORDS = {"radnika", "radnik", "zaposlenika", "zaposlenik", "djelatnika", "djelatnik", "osobe", "osoba",
+                 "korisnika", "klijenta", "pacijenta", "kupca", "vlasnika", "employee", "employees", "staff",
+                 "worker", "client", "customer", "patient", "contact", "person", "owner", "holder", "member"}
 
 
 def hint_for(key: str) -> str:
@@ -663,6 +681,13 @@ def hint_for(key: str) -> str:
     # telefon", "Broj mobitela", "IBAN račun". (Its value must still look
     # like one: hint_span wants digits.)
     words = set(k.split("_"))
+    # A person's name column named in words: "Ime radnika", "Prezime i ime",
+    # "Employee name" (but "Ime tvrtke" names a company).
+    if words & _SURNAME_WORDS or (words & _NAME_WORDS and words & _PERSON_WORDS):
+        return "PERSON"
+    # A column of codes: "Oznaka isprave", "Šifra konta", "Document type".
+    if words & _CODE_WORDS:
+        return "CODE"
     if "oib" in words:
         return "OIB"
     if "jmbg" in words:
@@ -677,6 +702,67 @@ def hint_for(key: str) -> str:
 _NAME_VALUE_RE = re.compile(rf"^{name_seq(1, 4)}$")
 
 
+# Public bodies are no one's private data: a ledger's "HZZO" or "Porezna
+# uprava" stays as it is (folded, without diacritics). One word: exactly it
+# (and its case forms, "HZZO-u"); more words: it, or it with a place after it.
+PUBLIC_BODIES = frozenset({
+    "hzzo", "hzmo", "hzz", "hzjz", "hnb", "fina", "dzs", "mup", "regos", "hgk", "hok", "hok", "porezna uprava",
+    "carinska uprava", "drzavni proracun", "drzavna riznica", "financijska agencija", "hrvatska narodna banka",
+    "hrvatski zavod za zdravstveno osiguranje", "hrvatski zavod za mirovinsko osiguranje",
+    "hrvatski zavod za zaposljavanje", "hrvatski zavod za javno zdravstvo", "sredisnji registar osiguranika",
+    "ministarstvo financija", "ministarstvo rada", "ministarstvo zdravstva", "ministarstvo unutarnjih poslova",
+    "ministarstvo pravosuda", "ministarstvo gospodarstva", "trgovacki sud", "opcinski sud", "zemljisnoknjizni odjel",
+    "irs", "hmrc",
+})
+
+
+def public_body(value: str) -> bool:
+    """*value* names a public body (a tax office, a health insurance fund)."""
+    v = strip_accents(fold(value))
+    v = re.sub(r"\s+", " ", re.sub(r"[.,]", " ", v)).strip()
+    if v in PUBLIC_BODIES or re.sub(r"-[a-z]{1,3}$", "", v) in PUBLIC_BODIES:
+        return True
+    words = v.split()
+    return len(words) >= 3 and any(" ".join(words[:k]) in PUBLIC_BODIES for k in range(2, len(words)))
+
+
+_ANY_CASE_WORD = rf"[{UP}{LO}]+(?:[-'’][{UP}{LO}]+)*\.?"
+_NAME_CELL_RE = re.compile(rf"{_ANY_CASE_WORD}(?:,?[ \t]+{_ANY_CASE_WORD}){{0,7}}")
+_CAPS_ONLY_RE = re.compile(rf"[{UP}]{{2,}}(?:[-'’][{UP}]{{2,}})*")
+
+
+def _name_column_span(text: str, s: int, e: int) -> Span | None:
+    """A name column's value as a person, whatever its case: one to four
+    words of letters ("Horvat, Ivan" too), stop words off the ends. A note
+    after a name in capitals is left out ("HORVAT IVAN novi račun" →
+    "HORVAT IVAN"); a value with digits or other marks isn't taken ("NA 4
+    SATA")."""
+    if not _NAME_CELL_RE.fullmatch(text, s, e):
+        # A name in capitals with a note after it that has a number in it
+        # ("HORVAT IVAN NA 4 SATA"): the name before the note.
+        lead = re.match(rf"(?:{_CAPS_ONLY_RE.pattern}[ \t]+){{2,5}}(?=\d)", text[s:e])
+        if lead is None:
+            return None
+        e = s + lead.end()
+    words = [(m.start(), m.end(), m.group(0)) for m in re.finditer(_ANY_CASE_WORD, text[:e]) if m.start() >= s]
+    caps = 0
+    while caps < len(words) and _CAPS_ONLY_RE.fullmatch(words[caps][2]):
+        caps += 1
+    if caps >= 2 and caps < len(words) and words[caps][2][:1].islower():
+        words = words[:caps]
+
+    def stop(w: str) -> bool:
+        return fold(w) in _STOP and not re.fullmatch(INITIAL, w)
+
+    while words and stop(words[0][2]):
+        words.pop(0)
+    while words and stop(words[-1][2]):
+        words.pop()
+    if not 1 <= len(words) <= 4 or not any(len(w[2].rstrip(".")) >= 2 for w in words):
+        return None
+    return Span(words[0][0], words[-1][1], "PERSON", 2, "hint")
+
+
 def hint_span(text: str, hint: str) -> Span | None:
     """The whole value as the kind its column / key names, when it fits."""
     if not hint:
@@ -685,8 +771,12 @@ def hint_span(text: str, hint: str) -> Span | None:
     value = text[s:e]
     if not value or len(value) > 200:
         return None
-    if hint in ("PERSON", "PERSON?"):
-        if not _NAME_VALUE_RE.match(value) or (hint == "PERSON?" and " " not in value):
+    if hint == "PERSON":
+        # The column says it is a name: in any case ("HORVAT IVAN" in a
+        # register, "ivan horvat" typed in lower case, "marta ŽUPAN").
+        return _name_column_span(text, s, e)
+    if hint == "PERSON?":
+        if not _NAME_VALUE_RE.match(value) or " " not in value:
             return None
         trimmed = trim_name(text, s, e)
         return Span(trimmed[0], trimmed[1], "PERSON", 2, "hint") if trimmed else None
@@ -694,6 +784,6 @@ def hint_span(text: str, hint: str) -> Span | None:
         return Span(s, e, "DOB", 2, "hint") if parse_date(value) else None
     if hint in ("PHONE", "IBAN", "OIB", "JMBG", "ID_NUMBER"):
         return Span(s, e, hint, 2, "hint") if len(re.sub(r"\D", "", value)) >= 4 else None
-    if hint in ("EMAIL", "IP"):
-        return None  # their own patterns are exact
+    if hint in ("EMAIL", "IP", "CODE"):
+        return None  # their own patterns are exact; a code is no one's
     return Span(s, e, hint, 2, "hint")

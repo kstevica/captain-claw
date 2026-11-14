@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
-  Activity, AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Download, EyeOff, File, FileImage,
+  Activity, AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Combine, Download, EyeOff, File, FileImage,
   FileSpreadsheet, FileText, FileUp, Folder, FolderLock, FolderOpen, FolderTree, Inbox, List, ListTodo, Loader2, Play,
   Presentation, RotateCcw, ScanText, Send, ShieldCheck, Square, Tag, Trash2, X,
 } from 'lucide-react'
@@ -13,6 +13,7 @@ import { Button, Dialog, EmptyState, Field, Notice, Pill, Segmented, inputCls } 
 import { FullscreenButton } from '../library/libraryParts'
 import { AlarmsNotice, ExportCard, ReadsCard } from './RoomsAccess'
 import { InboxSection, SectionHead, TasksSection } from './RoomsInbox'
+import { AlikeSection } from './RoomsAlike'
 import { RoomFileViewer } from './RoomFileViewer'
 import { IconBtn, SearchField, TokenChip } from './roomParts'
 import { STATE_LABEL, STATE_TONE, clock, compact, count, duration, errorText, fileSize, runEta } from './roomText'
@@ -21,7 +22,7 @@ import { STATE_LABEL, STATE_TONE, clock, compact, count, duration, errorText, fi
 // what you tell it (names to hide, roles) and what Claude did with it (its
 // deliveries, your tasks for it, what it read); the chosen part on the right.
 
-type Section = 'files' | 'add' | 'names' | 'roles' | 'inbox' | 'tasks' | 'activity' | 'export'
+type Section = 'files' | 'add' | 'names' | 'roles' | 'alike' | 'inbox' | 'tasks' | 'activity' | 'export'
 
 const FILE_TONE: Record<FileState, 'zinc' | 'emerald' | 'red' | 'amber' | 'sky'> = {
   new: 'sky', done: 'emerald', blocked: 'red', failed: 'amber', unread: 'zinc',
@@ -60,6 +61,7 @@ export function RoomView({ id, onBack, onClose }: {
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [reads, setReads] = useState<RoomRead[]>([])
   const [alarms, setAlarms] = useState<RoomAlarm[]>([])
+  const [alikeCount, setAlikeCount] = useState(0)
 
   const reload = useCallback(async () => {
     try {
@@ -81,6 +83,12 @@ export function RoomView({ id, onBack, onClose }: {
   }, [vaultId, roomUpdated])
 
   const running = !!room && (room.job.running || room.state === 'running')
+  const doneFiles = room?.counts.done || 0
+  // How many "same party?" questions wait — for the rail's badge.
+  useEffect(() => {
+    if (running || doneFiles === 0) return
+    roomsApi.alike(id).then((r) => setAlikeCount(r.suggestions.length)).catch(() => {})
+  }, [id, running, doneFiles, roomUpdated])
   useEffect(() => {
     if (!running) return
     const t = setInterval(() => { void reload() }, 2000)
@@ -129,6 +137,7 @@ export function RoomView({ id, onBack, onClose }: {
       { key: 'names', icon: EyeOff, label: 'Names to hide',
         badge: Object.values(room.seed).reduce((n, v) => n + (v?.length || 0), 0) || undefined },
       { key: 'roles', icon: Tag, label: 'Roles', badge: Object.keys(room.roles).length || undefined },
+      { key: 'alike', icon: Combine, label: 'Same party?', badge: alikeCount ? <Badge tone="amber">{alikeCount}</Badge> : undefined },
     ] },
     { group: 'Claude', items: [
       { key: 'inbox', icon: Inbox, label: 'From Claude',
@@ -248,6 +257,7 @@ export function RoomView({ id, onBack, onClose }: {
             {current === 'add' && <AddFilesSection room={room} disabled={running} onDone={() => void reload()} onError={setError} />}
             {current === 'names' && <NamesSection room={room} disabled={running} onSaved={setRoom} onError={setError} />}
             {current === 'roles' && <RolesSection room={room} entries={entries} onSaved={setRoom} />}
+            {current === 'alike' && <AlikeSection room={room} disabled={running} onChanged={setAlikeCount} />}
             {current === 'inbox' && (
               <InboxSection roomId={id} onChanged={() => void reload()} openSeq={delivery} onOpen={openDelivery} />
             )}

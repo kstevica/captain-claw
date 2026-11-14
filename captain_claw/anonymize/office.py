@@ -712,8 +712,13 @@ def _xlsx(pkg: _Package, scrub: bool) -> tuple[list[_Unit], Callable[[], None]]:
                 elif t in (None, "n") and v is not None:
                     numbers = True
                 hint = hint_for(text)
-                if hint:
+                if hint and not (hint == "CODE" and len(text) > 40):
                     found[m.group(1)] = hint
+            # A column of codes keeps its codes from names — so it must be a
+            # real header row's (more than one column named), not a ledger
+            # line that happens to say "kod".
+            if list(found.values()).count("CODE") and len(found) < 2:
+                found = {}
             if found and (r == 1 or not numbers):  # a row of data has numbers in it
                 for col, hint in found.items():
                     headers.setdefault(col, []).append((r, hint))
