@@ -251,6 +251,7 @@ async def unallow_spelling(room_id: str, request: Request, body: dict[str, Any] 
 # ── "maybe the same" ────────────────────────────────────────────────
 
 MAX_NOT_SAME = 5000
+MAX_BATCH = 300  # pairs answered in one go: as many as are listed
 
 
 async def _room_vault(owner: str, room: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -297,11 +298,24 @@ async def alike_tokens(room_id: str, request: Request, user: dict = Depends(get_
     vaults, row = await _room_vault(owner, room)
     async with vaults.lock(row["id"]):
         state = await vaults.load_state(row)
-    by_file = ra.tokens_by_file(await _texts(room_id, await rs.store().files(room_id)))
+    by_file, counts = ra.token_stats(await _texts(room_id, await rs.store().files(room_id)))
     not_same = list((room.get("settings") or {}).get("not_same") or [])
-    suggestions = await asyncio.to_thread(ra.suggest, state, by_file, not_same)
+    suggestions = await asyncio.to_thread(ra.suggest, state, by_file, not_same, counts)
     merged = [{"token": e.token, "text": e.original, "into": e.same_as} for e in state.entities if e.same_as]
     return {"suggestions": suggestions, "answered": len(not_same), "merged": merged}
+
+
+def _pairs_in(body: dict[str, Any], first: str, second: str) -> tuple[list[tuple[str, str]], bool]:
+    """The pairs a body answers — {first, second} for one, {"pairs": [...]}
+    for many — and whether it was many."""
+    many = body.get("pairs")
+    if many is None:
+        return [(_bare_token(body.get(first)), _bare_token(body.get(second)))], False
+    if not isinstance(many, list) or not many or not all(isinstance(p, dict) for p in many):
+        raise HTTPException(422, "Give the pairs as a list of objects.")
+    if len(many) > MAX_BATCH:
+        raise HTTPException(422, f"At most {MAX_BATCH} pairs at once.")
+    return [(_bare_token(p.get(first)), _bare_token(p.get(second))) for p in many], True
 
 
 @router.post("/{room_id}/same")
@@ -310,29 +324,89 @@ async def make_same(room_id: str, request: Request, body: dict[str, Any] = Body(
     """*other* is the same party as *keep*: in the vault, *other*'s values
     become *keep*'s spellings, and every copy in the room — Office files, the
     text Claude reads, the search index — gets *keep*'s number in its place.
-    A file whose format can't be rewritten in place runs again."""
-    from captain_claw.flight_deck import rooms_alike as ra
+    A file whose format can't be rewritten in place runs again.
+
+    {"pairs": [{keep, other}, …]} makes many one at once, in that order, and
+    rewrites each file once; a pair that can't be (already one, a token the
+    vault hasn't) is skipped and said, not an error. A token already made
+    one with another is never made one with a third: that would join two
+    parties no one said are one."""
 
     owner = _owner(request, user)
     room = await _room(owner, room_id)
     _not_running(room)
-    keep_token, other_token = _bare_token(body.get("keep")), _bare_token(body.get("other"))
-    if keep_token == other_token:
-        raise HTTPException(422, "Those are the same token.")
+    pairs, many = _pairs_in(body, "keep", "other")
     vaults, row = await _room_vault(owner, room)
+    mapping: dict[str, str] = {}
+    made: list[str] = []
+    skipped: list[dict[str, str]] = []
+
+    def skip(keep_token: str, other_token: str, status: int, why: str) -> None:
+        if not many:
+            raise HTTPException(status, why)
+        skipped.append({"keep": keep_token, "other": other_token, "why": why})
+
     async with vaults.lock(row["id"]):
         state = await vaults.load_state(row)
-        keep, other = state.by_token.get(keep_token), state.by_token.get(other_token)
-        if keep is None or other is None:
-            raise HTTPException(404, "This room's vault doesn't have that token.")
-        keep = state.target(keep)
-        if other.same_as:
-            raise HTTPException(409, f"{other_token} is already one with {other.same_as}.")
-        try:
-            mapping = state.merge(keep, other)
-        except ValueError as exc:
-            raise HTTPException(422, f"These can't be one: {exc}.") from None
-        await vaults.save_run(row, state)
+        for keep_token, other_token in pairs:
+            if keep_token == other_token:
+                skip(keep_token, other_token, 422, "Those are the same token.")
+                continue
+            keep, other = state.by_token.get(keep_token), state.by_token.get(other_token)
+            if keep is None or other is None:
+                skip(keep_token, other_token, 404, "This room's vault doesn't have that token.")
+                continue
+            keep = state.target(keep)
+            if keep is other:
+                skip(keep_token, other_token, 409, f"{keep_token} and {other_token} are one already.")
+                continue
+            if other.same_as:
+                where = state.target(other).token
+                skip(keep_token, other_token, 409, f"{other_token} is already one with {where}.")
+                continue
+            try:
+                step = state.merge(keep, other)
+            except ValueError as exc:
+                skip(keep_token, other_token, 422, f"These can't be one: {exc}.")
+                continue
+            # A token an earlier pair rewrote to *other*'s spelling now goes to *keep*'s.
+            mapping = {k: step.get(v, v) for k, v in mapping.items()}
+            mapping.update(step)
+            made.append(other_token)
+        if made:
+            await vaults.save_run(row, state)
+    if not made:
+        return {"tokens": 0, "merged": 0, "skipped": skipped, "rewritten": 0, "requeued": 0,
+                "room": await _detail(room)}
+    rewritten, requeued = await _rewrite_room(room_id, mapping)
+    fields: dict[str, Any] = {}
+    roles = dict(room.get("roles") or {})
+    for token in made:
+        if token in roles:
+            roles.setdefault(state.target(state.by_token[token]).token, roles.pop(token))
+            fields["roles"] = roles
+    settings = dict(room.get("settings") or {})
+    answered = settings.get("not_same") or []
+
+    def one(key: str) -> bool:
+        a, _, b = key.partition("|")
+        ea, eb = state.by_token.get(a), state.by_token.get(b)
+        return ea is not None and eb is not None and state.target(ea) is state.target(eb)
+
+    if any(one(k) for k in answered):
+        settings["not_same"] = [k for k in answered if not one(k)]
+        fields["settings"] = settings
+    if fields:
+        await rs.store().update(room_id, **fields)
+    return {"tokens": len(mapping), "merged": len(made), "skipped": skipped, "rewritten": rewritten,
+            "requeued": requeued, "room": await _detail(await _room(owner, room_id))}
+
+
+async def _rewrite_room(room_id: str, mapping: dict[str, str]) -> tuple[int, int]:
+    """Every copy in the room with its tokens written as *mapping* says: (files
+    rewritten, files to run again because their format can't be)."""
+    from captain_claw.flight_deck import rooms_alike as ra
+
     store = rs.store()
     rewritten = requeued = 0
     for f in await store.files(room_id):
@@ -369,37 +443,26 @@ async def make_same(room_id: str, request: Request, body: dict[str, Any] = Body(
         if fields:
             await store.set_file(room_id, f["id"], **fields)
         rewritten += 1 if changed or fields else 0
-    fields = {}
-    roles = dict(room.get("roles") or {})
-    if other_token in roles:
-        role = roles.pop(other_token)
-        roles.setdefault(keep.token, role)
-        fields["roles"] = roles
-    settings = dict(room.get("settings") or {})
-    key = ra.pair_key(keep.token, other_token)
-    if key in (settings.get("not_same") or []):
-        settings["not_same"] = [k for k in settings["not_same"] if k != key]
-        fields["settings"] = settings
-    if fields:
-        await store.update(room_id, **fields)
-    return {"tokens": len(mapping), "rewritten": rewritten, "requeued": requeued,
-            "room": await _detail(await _room(owner, room_id))}
+    return rewritten, requeued
 
 
 @router.post("/{room_id}/not-same")
 async def not_same(room_id: str, request: Request, body: dict[str, Any] = Body(...),
                    user: dict = Depends(get_current_user)) -> dict[str, Any]:
-    """Two tokens that are two parties: the pair isn't suggested again."""
+    """Two tokens that are two parties: the pair isn't suggested again.
+    {"pairs": [{a, b}, …]} answers many at once."""
     from captain_claw.flight_deck import rooms_alike as ra
 
     owner = _owner(request, user)
     room = await _room(owner, room_id)
-    key = ra.pair_key(_bare_token(body.get("a")), _bare_token(body.get("b")))
+    pairs, _many = _pairs_in(body, "a", "b")
+    keys = list(dict.fromkeys(ra.pair_key(a, b) for a, b in pairs if a != b))
+    new = set(keys)
     settings = dict(room.get("settings") or {})
-    answered = [k for k in settings.get("not_same") or [] if k != key]
-    if len(answered) >= MAX_NOT_SAME:
+    answered = [k for k in settings.get("not_same") or [] if k not in new]
+    if len(answered) + len(keys) > MAX_NOT_SAME:
         raise HTTPException(422, f"A room remembers at most {MAX_NOT_SAME} answers.")
-    settings["not_same"] = [*answered, key]
+    settings["not_same"] = [*answered, *keys]
     await rs.store().update(room_id, settings=settings)
     return {"answered": len(settings["not_same"])}
 

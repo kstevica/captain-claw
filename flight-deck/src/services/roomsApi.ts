@@ -199,10 +199,15 @@ export interface AlikePair {
   kind: 'PERSON' | 'ORG' | 'ADDRESS'
   why: string
   strength: number
+  /** How sure code is that the two are one, 0–99. */
+  score: number
+  /** What moved the score ("Written 7× and 1×: a typo?", "Also like “…”"). */
+  notes: string[]
   key: string
   a: AlikeSide
   b: AlikeSide
 }
+export interface AlikeSkipped { keep: string; other: string; why: string }
 /** A token made one with another: it is written as `into`'s spelling now. */
 export interface AlikeMerged { token: string; text: string; into: string }
 
@@ -367,8 +372,14 @@ export const roomsApi = {
   same: (id: string, keep: string, other: string) =>
     api<{ tokens: number; rewritten: number; requeued: number; room: Room }>(
       `/fd/rooms/${enc(id)}/same`, json('POST', { keep, other })),
+  /** Many pairs made one at once, in order; each file is rewritten once. */
+  sameMany: (id: string, pairs: { keep: string; other: string }[]) =>
+    api<{ tokens: number; merged: number; skipped: AlikeSkipped[]; rewritten: number; requeued: number; room: Room }>(
+      `/fd/rooms/${enc(id)}/same`, json('POST', { pairs })),
   notSame: (id: string, a: string, b: string) =>
     api<{ answered: number }>(`/fd/rooms/${enc(id)}/not-same`, json('POST', { a, b })),
+  notSameMany: (id: string, pairs: { a: string; b: string }[]) =>
+    api<{ answered: number }>(`/fd/rooms/${enc(id)}/not-same`, json('POST', { pairs })),
   downloadClean: (id: string, f: RoomFile) =>
     download(`/fd/rooms/${enc(id)}/files/${enc(f.id)}/clean`, f.clean_path.split('/').pop() || 'file'),
   removeFile: (id: string, fileId: string) =>

@@ -20,7 +20,7 @@ import io
 import re
 import unicodedata
 import zipfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from typing import Any
 
@@ -85,25 +85,193 @@ def _letters_off(w1: list[str], w2: list[str]) -> bool:
     return True
 
 
-def tokens_by_file(texts: Iterable[tuple[str, str]]) -> dict[str, set[str]]:
-    """{token: the files it is in} from (file id, text Claude reads)."""
-    out: dict[str, set[str]] = defaultdict(set)
+def token_stats(texts: Iterable[tuple[str, str]]) -> tuple[dict[str, set[str]], Counter[str]]:
+    """({token: the files it is in}, {token: how often it is written}) from
+    (file id, text Claude reads); a spelling (⟦PERSON_1:2⟧) counts as its token."""
+    files: dict[str, set[str]] = defaultdict(set)
+    counts: Counter[str] = Counter()
     for fid, text in texts:
         for m in engine.TOKEN_RE.finditer(text or ""):
             kind, n = m.group(1) or m.group(3), m.group(2) or m.group(4)
-            out[engine.make_token(kind, int(n))].add(fid)
-    return out
+            token = engine.make_token(kind, int(n))
+            files[token].add(fid)
+            counts[token] += 1
+    return files, counts
+
+
+def tokens_by_file(texts: Iterable[tuple[str, str]]) -> dict[str, set[str]]:
+    """{token: the files it is in} from (file id, text Claude reads)."""
+    return token_stats(texts)[0]
 
 
 def pair_key(a: str, b: str) -> str:
     return "|".join(sorted((a, b)))
 
 
+# ── how alike: a score ──────────────────────────────────────────────
+#
+# Each pair gets a score, 0–99: how alike the two values read (their telling
+# words matched one to one — the same, a letter off, cut short), capped by
+# what kind of hint it is (a first name alone is never sure), moved by how
+# often each is written (a spelling written once beside one written forty
+# times is a typo; two written often are two parties), and split when the
+# less telling side fits others too ("Ivana" next to two Ivanas).
+
+# What a company's name says about its form, not who it is.
+_ORG_FORMS = frozenset({"d", "o", "doo", "dd", "kd", "jdoo", "j", "vl", "vlasnik", "vlasnica",
+                        "ltd", "gmbh", "inc", "llc", "ag", "sa", "srl", "bv", "nv", "plc"})
+# A name cut off where a ledger's column ends: the shorter one is the longer
+# one's start, and at least this long.
+CUT_MIN = 12
+_TYPO_WHY = frozenset({"One letter apart", "A letter or two apart"})
+_CAPS = {"A name alone": 0.6, "Share a name, never on the same list": 0.55,
+         "Same street and number, another town": 0.5}
+_TWO = {"PERSON": "two people", "ORG": "two companies", "ADDRESS": "two places"}
+
+
+def _core(kind: str, text: str) -> list[str]:
+    """The words that tell who or where: a company's without its legal form."""
+    if kind != "ORG":
+        return _words(text)
+    return [w for w in _words(d.LEGAL_SUFFIX_RE.sub("", text)) if w not in _ORG_FORMS and w not in d._STOP]
+
+
+def _weight(kind: str, word: str) -> float:
+    if (kind == "ORG" and word in _GENERIC_ORG_WORDS) or (kind == "ADDRESS" and word in engine._STREET_KINDS):
+        return 0.25
+    return 0.5 if len(word) <= 2 else 1.0
+
+
+def _word_match(a: str, b: str) -> float:
+    if a == b:
+        return 1.0
+    short = min(len(a), len(b))
+    if short < 3:
+        return 0.0
+    m = 0.0
+    if _one_edit(a, b):
+        # A letter off in a long word is a typo; in a short one, often another
+        # name ("Marić" / "Matić", "Ola" / "Ala").
+        m = 0.85 if short >= 6 else 0.75 if short >= 4 else 0.5
+    if a.startswith(b) or b.startswith(a):
+        m = max(m, 0.7)  # cut or shortened ("KOV." / "Kovačka")
+    return m
+
+
+def _overlap(kind: str, w1: list[str], w2: list[str]) -> tuple[float, float]:
+    """(how much of the shorter name the other has, how much of the longer),
+    weighing each word by how much it tells; each word matched once."""
+    t1, t2 = sum(_weight(kind, w) for w in w1), sum(_weight(kind, w) for w in w2)
+    if not t1 or not t2:
+        return 0.0, 0.0
+    cands = sorted(((m, i, j) for i, a in enumerate(w1) for j, b in enumerate(w2) if (m := _word_match(a, b))),
+                   reverse=True)
+    used1: set[int] = set()
+    used2: set[int] = set()
+    matched = 0.0
+    for m, i, j in cands:
+        if i in used1 or j in used2:
+            continue
+        used1.add(i)
+        used2.add(j)
+        matched += m * min(_weight(kind, w1[i]), _weight(kind, w2[j]))
+    return matched / min(t1, t2), matched / max(t1, t2)
+
+
+_FORM_RE = re.compile(r"jdoo|doo|dd|kd|jtd|obrt")
+_FORM_NAME = {"jdoo": "j.d.o.o.", "doo": "d.o.o.", "dd": "d.d.", "kd": "k.d.", "jtd": "j.t.d.", "obrt": "obrt"}
+
+
+def _forms(text: str) -> set[str]:
+    """A company's legal forms as its name writes them ("d.o.o.", "obrt")."""
+    out: set[str] = set()
+    run = ""
+    for w in [*_words(text), ""]:
+        if len(w) == 1:
+            run += w  # "d.o.o. k.d." is d, o, o, k, d
+            continue
+        out.update(_FORM_RE.findall(run))
+        run = ""
+        if w in _FORM_NAME:
+            out.add(w)
+    return out
+
+
+def similarity(kind: str, a: str, b: str) -> tuple[float, str]:
+    """How alike two values read, 0–1, and what says so when it's more than
+    their words ("One is the start of the other", "A short name")."""
+    w1, w2 = _core(kind, a), _core(kind, b)
+    if not w1 or not w2:
+        return 0.0, ""
+    if kind in ("ORG", "ADDRESS"):
+        short, long_ = sorted((" ".join(_words(a)), " ".join(_words(b))), key=len)
+        if short != long_ and len(short) >= CUT_MIN and long_.startswith(short):
+            return 0.97, "One is the start of the other"
+    contain, cover = _overlap(kind, w1, w2)
+    sim, note = 0.6 * contain + 0.4 * cover, ""
+    if kind == "ORG":
+        short_w, long_w = sorted((w1, w2), key=len)
+        if len(short_w) < len(long_w) and long_w[:len(short_w)] == short_w \
+                and any(_weight(kind, w) == 1.0 for w in short_w) and 0.8 + 0.05 * cover > sim:
+            # A short name — or a sister company ("… Nekretnine d.o.o."): never sure.
+            sim, note = 0.8 + 0.05 * cover, "A short name"
+        f1, f2 = _forms(a), _forms(b)
+        if f1 and f2 and not f1 & f2:
+            sim -= 0.15
+            x, y = _FORM_NAME[min(f1)], _FORM_NAME[min(f2)]
+            note = f"One is {'an' if x[0] in 'aeiou' else 'a'} {x}, the other {'an' if y[0] in 'aeiou' else 'a'} {y}"
+    return sim, note
+
+
+def _score(pairs: list[dict[str, Any]], counts: dict[str, int] | None) -> None:
+    """Give each pair its score and the notes that moved it."""
+    partners: dict[str, set[str]] = defaultdict(set)
+    text_of: dict[str, str] = {}
+    for p in pairs:
+        partners[p["a"]["token"]].add(p["b"]["token"])
+        partners[p["b"]["token"]].add(p["a"]["token"])
+        text_of[p["a"]["token"]], text_of[p["b"]["token"]] = p["a"]["text"], p["b"]["text"]
+    counts = counts or {}
+
+    def rank(kind: str, side: dict[str, Any]) -> tuple[int, int, int, int, int]:
+        # The less telling side: fewer words, written less often, in fewer
+        # files, like fewer others (one of a name's typos, not the name), shorter.
+        token = side["token"]
+        return (len(_core(kind, side["text"])), counts.get(token, 0), side["files"], len(partners[token]),
+                len(side["text"]))
+
+    for p in pairs:
+        kind, a, b = p["kind"], p["a"], p["b"]
+        sim, note = similarity(kind, a["text"], b["text"])
+        notes = [note] if note and note != p["why"] else []
+        if p["why"] in _CAPS:
+            sim = min(sim, _CAPS[p["why"]])
+        ca, cb = counts.get(a["token"], 0), counts.get(b["token"], 0)
+        if p["why"] in _TYPO_WHY and ca and cb:
+            lo, hi = sorted((ca, cb))
+            if lo <= 3 and hi >= 3 * lo:
+                sim += 0.05
+                notes.append(f"Written {hi}× and {lo}×: a typo?")
+            elif lo >= 5 and hi < 3 * lo:
+                sim -= 0.2
+                notes.append(f"Each written often ({ca}× and {cb}×): {_TWO[kind]}?")
+        ra, rb = rank(kind, a), rank(kind, b)
+        sides = [(a, b)] if ra < rb else [(b, a)] if rb < ra else [(a, b), (b, a)]
+        rivals = sorted({r for g, s in sides for r in partners[g["token"]] - {s["token"]} - partners[s["token"]]})
+        if rivals:
+            sim /= 1 + len(rivals)
+            notes.append("Also like " + ", ".join(f"“{text_of[r]}”" for r in rivals[:2])
+                         + (f" and {len(rivals) - 2} more" if len(rivals) > 2 else ""))
+        p["score"] = max(0, min(99, round(sim * 100)))
+        p["notes"] = notes
+
+
 def suggest(state: engine.VaultState, files: dict[str, set[str]],
-            not_same: Iterable[str] = ()) -> list[dict[str, Any]]:
+            not_same: Iterable[str] = (), counts: dict[str, int] | None = None) -> list[dict[str, Any]]:
     """Pairs of tokens that may be one party, for the person to say: each
-    {kind, a, b, why}, a and b {token, text, files}. Only tokens in the
-    room's files; never a pair already answered."""
+    {kind, a, b, why, score, notes}, a and b {token, text, files}, the
+    likeliest first. Only tokens in the room's files; never a pair already
+    answered. *counts* (how often each token is written) sharpens the score."""
     skip = set(not_same)
     live = [e for e in state.entities if not e.same_as and not e.key.startswith(("~", "/")) and files.get(e.token)]
     out: list[dict[str, Any]] = []
@@ -114,8 +282,9 @@ def suggest(state: engine.VaultState, files: dict[str, set[str]],
         if key in skip or key in seen:
             return
         seen.add(key)
-        if len(files.get(a.token, ())) < len(files.get(b.token, ())):
-            a, b = b, a  # the one in more files first: the likely one to keep
+        if (len(files.get(a.token, ())), (counts or {}).get(a.token, 0)) \
+                < (len(files.get(b.token, ())), (counts or {}).get(b.token, 0)):
+            a, b = b, a  # the one in more files (written more often) first: the likely one to keep
         out.append({"kind": kind, "why": why, "strength": strength, "key": key,
                     "a": {"token": a.token, "text": a.original, "files": len(files.get(a.token, ()))},
                     "b": {"token": b.token, "text": b.original, "files": len(files.get(b.token, ()))}})
@@ -194,6 +363,18 @@ def suggest(state: engine.VaultState, files: dict[str, set[str]],
                 if set(w1) & set(w2) and not (set(w1) <= set(w2) or set(w2) <= set(w1)):
                     add("PERSON", e1, e2, "Share a name, never on the same list", 1)
 
+    # Companies cut off where a ledger's column ends: one is the start of the
+    # other. Sorted, every name that starts with another follows it.
+    norms = sorted(((" ".join(_words(e.original)), e) for e in live if e.kind == "ORG"), key=lambda x: x[0])
+    for i, (n1, e1) in enumerate(norms):
+        if len(n1) < CUT_MIN:
+            continue
+        for n2, e2 in norms[i + 1:i + 21]:
+            if not n2.startswith(n1):
+                break
+            if e1.token != e2.token:
+                add("ORG", e2, e1, "Written alike" if n1 == n2 else "One is the start of the other", 3)
+
     # Companies: one's words inside the other's, a typo, or a rare word shared.
     orgs = [(e, [w for w in _words(d.LEGAL_SUFFIX_RE.sub("", e.original)) if w not in ("d", "o", "doo", "dd")])
             for e in live if e.kind == "ORG"]
@@ -245,7 +426,8 @@ def suggest(state: engine.VaultState, files: dict[str, set[str]],
                         and all(a == b or (min(len(a), len(b)) >= 4 and _one_edit(a, b)) for a, b in zip(s1, s2)):
                     add("ADDRESS", e1, e2, "One letter apart", 3)
 
-    out.sort(key=lambda s: (-s["strength"], s["kind"], s["a"]["text"].casefold()))
+    _score(out, counts)
+    out.sort(key=lambda s: (-s["score"], -s["strength"], s["kind"], s["a"]["text"].casefold()))
     return out[:MAX_SUGGESTIONS]
 
 
