@@ -851,6 +851,44 @@ detected from diacritics and common words.
   not hidden. Names glued with underscores ("galeb_softver") aren't whole
   words to the leak check, as before.
 
+**Workbooks shown as sheets (2026-11-14, branch `feat/rooms-sheet-view`):**
+
+- **Viewer:** a workbook's text (`## Sheet: name`, then a markdown table) is
+  parsed into sheets (`roomText.parseSheets`). Each cell knows its offset in
+  the text, so search marks, the current match and token chips work as
+  before.
+  - Both sides draw the same grid: column letters, row numbers, Excel-style
+    tabs at the bottom. Each tab shows its number of search matches.
+  - Both sides share one width per column (the longest line on either side,
+    4–40 characters), and each cell is one line (its own line breaks kept,
+    the rest cut with "…" and shown on hover). So the two grids line up
+    cell for cell, and scrolling follows by row, and side to side.
+  - The search jumps to the sheet of the current match. A tab you pick stays
+    until the next match. The text picture alt text goes on a "Pictures" tab.
+  - A text longer than the page shows (200,000 characters) says so at the
+    end (`clean_cut` / `original_cut` from the text route).
+- **Numbers in the text (all workbook text, Claude's included):**
+  `document_extract._xlsx_number`:
+  - A date cell (built-in date formats, or a custom one with d/m/y) reads
+    as `2023-03-15`, a date and time as `2023-03-15 12:00`, a time as
+    `8:30`. 1904 workbooks are handled.
+  - Other numbers lose the float noise: 15 significant digits, so
+    `1234.5599999999999` becomes `1234.56`. Integers and ID numbers stored
+    as numbers stay as they are.
+- **Checked:** a stubbed UI check (real bundle, `/fd/*` from fixtures, the
+  texts from the real extractor and code lane) on a made-up two-sheet
+  payroll workbook, in dark and light. Both panes ended at the same scroll
+  position, with no page errors.
+- **Not done:** cell formatting (bold, fills, merged cells) isn't in the
+  text, so it isn't drawn.
+- **Gap found (before this change too):** `office.prepare` reads only text
+  cells (shared and inline strings). A number cell is never anonymized:
+  - an ID number stored as a number (an OIB typed into a number column);
+  - a date of birth in a date cell.
+  The leak check blocks such a value only if the vault learned it elsewhere.
+  A date of birth now reads as a date in Claude's text, where before it read
+  as a serial number (which a reader could convert anyway).
+
 ## Later
 
 - **Fleet side door.** If the person turns on both connectors in one Claude chat,

@@ -1,13 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle, Bot, ChevronDown, ChevronUp, Download, Eye, EyeOff, Link2, Link2Off, Lock, ShieldAlert, Tag, Type, User,
+  AlertTriangle, Bot, ChevronDown, ChevronUp, Download, Eye, EyeOff, Image as ImageIcon, Link2, Link2Off, Lock,
+  ShieldAlert, Tag, Type, User,
 } from 'lucide-react'
 import { roomsApi, type FileText, type Leftover, type RoomFile } from '../../services/roomsApi'
 import { TOKEN_RE, type VaultEntry } from '../../services/anonymizeApi'
 import { Button, Notice, Pill, Segmented } from '../console/parts'
 import { kindLabel } from '../anonymize/anonFormat'
 import { IconBtn, Marked, Picker, RoomDialog, SearchField, TokenChip, type PickOption } from './roomParts'
-import { baseToken, count, errorText, findAll, findRe, plural, tokenKind, type Range } from './roomText'
+import {
+  baseToken, colName, count, errorText, findAll, findRe, parseSheets, plural, sheetAt, tokenKind,
+  type Range, type Sheet, type SheetCell,
+} from './roomText'
 
 // One file of a room: the original next to what Claude reads, scrolling
 // together line by line. Search by words, by a token, or by a real name — the
@@ -39,6 +43,130 @@ function lineAt(el: HTMLElement, y: number): number {
     if ((kids[mid] as HTMLElement).offsetTop <= y) { best = mid; lo = mid + 1 } else hi = mid - 1
   }
   return best
+}
+
+// ── a workbook, as sheets ──────────────────────────────────────────
+
+interface MarkProps {
+  ranges: Range[]
+  current: number
+  tokens: boolean
+  onToken?: (token: string) => void
+  activeToken?: string
+}
+
+// An amount, a count, a date or a time: right-aligned, as a spreadsheet does.
+const NUMBERISH = /^[-+(]?\d[\d.,: ]*(?:%|\))?$|^\d{4}-\d{2}-\d{2}(?: \d{1,2}:\d{2}(?::\d{2})?)?$/
+const GRID_HEAD = 'border-b border-r border-zinc-800 bg-zinc-900 py-1 text-[11px] font-normal text-zinc-500'
+
+/** A cell's text: line breaks kept (<br> in the room's text), search marks and tokens drawn. */
+function CellText({ cell, ...mark }: { cell: SheetCell } & MarkProps) {
+  const parts = cell.text.split('<br>')
+  // Where each part starts: the parts before it and a <br> (4 characters) after each.
+  const starts = parts.map((_, i) => cell.at + parts.slice(0, i).reduce((n, p) => n + p.length + 4, 0))
+  return (
+    <>
+      {parts.map((p, i) => (
+        <Fragment key={i}>{i > 0 && <br />}<Marked text={p} offset={starts[i]} {...mark} /></Fragment>
+      ))}
+    </>
+  )
+}
+
+/** Column widths (in characters) both sides share, so the two grids line up
+ *  cell for cell: the longest line in each column, on either side. */
+function sheetWidths(...sheets: (Sheet | undefined)[]): number[] {
+  const out: number[] = []
+  for (const s of sheets) {
+    for (const row of s?.rows || []) {
+      row.forEach((cell, c) => {
+        const longest = Math.max(...cell.text.split('<br>').map((p) => p.length))
+        out[c] = Math.max(out[c] || 0, longest)
+      })
+    }
+  }
+  return out.map((n) => Math.min(40, Math.max(4, n + 1)))
+}
+
+/** One sheet as a grid: column letters, row numbers, the cells. */
+function SheetGrid({ sheet, widths, ...mark }: { sheet: Sheet; widths: number[] } & MarkProps) {
+  if (sheet.kind === 'pictures' || !sheet.rows.length) {
+    return (
+      <div data-lines="" className="space-y-2 px-5 py-4 text-[13px] leading-relaxed text-zinc-300">
+        {sheet.notes.length === 0 && <div className="text-zinc-500">Nothing on this sheet.</div>}
+        {sheet.notes.map((n, i) => (
+          <div key={i} className="whitespace-pre-wrap break-words"><Marked text={n.text} offset={n.at} {...mark} /></div>
+        ))}
+      </div>
+    )
+  }
+  const cols = Array.from({ length: Math.max(1, sheet.width, widths.length) }, (_, i) => i)
+  const ch = cols.map((c) => widths[c] || 4)
+  // Fixed widths, one line per cell (a cell's own line breaks kept): both
+  // sides draw the same grid, whatever names or tokens are in it.
+  return (
+    <table className="table-fixed border-separate border-spacing-0 text-[12.5px] leading-5 text-zinc-200"
+      style={{ width: `calc(3rem + ${ch.reduce((a, b) => a + b, 0)}ch + ${cols.length}rem)` }}>
+      <colgroup>
+        <col style={{ width: '3rem' }} />
+        {ch.map((w, c) => <col key={c} style={{ width: `calc(${w}ch + 1rem)` }} />)}
+      </colgroup>
+      <thead>
+        <tr>
+          <th className={`${GRID_HEAD} sticky left-0 top-0 z-20`} />
+          {cols.map((c) => (
+            <th key={c} className={`${GRID_HEAD} sticky top-0 z-10 px-2 text-center`}>{colName(c)}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody data-lines="">
+        {sheet.rows.map((row, r) => (
+          <tr key={r}>
+            <th className={`${GRID_HEAD} sticky left-0 z-10 px-2 text-right tabular-nums`}>{r + 1}</th>
+            {cols.map((c) => {
+              const cell = row[c]
+              // The room's text names an empty cell of the first row by its letter.
+              const blank = !cell || !cell.text || (r === 0 && cell.text === colName(c))
+              return (
+                <td key={c} title={blank ? undefined : cell.text.replaceAll('<br>', '\n')}
+                  className={`overflow-hidden text-ellipsis whitespace-nowrap border-b border-r border-zinc-800 px-2 py-1 align-top ${
+                    !blank && NUMBERISH.test(cell.text) ? 'text-right tabular-nums' : ''}`}>
+                  {blank ? null : <CellText cell={cell} {...mark} />}
+                </td>
+              )
+            })}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+/** A workbook's sheets as tabs, as a spreadsheet shows them — with how many
+ *  search matches each has. */
+function SheetTabs({ sheets, active, onPick, ranges, tokens }: {
+  sheets: Sheet[]; active: number; onPick: (i: number) => void; ranges: Range[]; tokens: boolean
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-t border-zinc-800 bg-zinc-900/40 px-2 py-1.5" role="tablist">
+      {sheets.map((s, i) => {
+        const n = ranges.filter((r) => r[0] >= s.start && r[0] < s.end).length
+        return (
+          <button key={i} type="button" role="tab" aria-selected={i === active} onClick={() => onPick(i)}
+            className={`inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs transition-colors ${
+              i === active ? 'bg-zinc-950 font-medium text-zinc-100 shadow-sm ring-1 ring-zinc-700' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}>
+            {s.kind === 'pictures' && <ImageIcon className="h-3 w-3" />}
+            <span className="max-w-[14rem] truncate">
+              {tokens && s.kind === 'sheet' ? <Marked text={s.name} offset={s.nameAt} ranges={[]} tokens /> : s.name}
+            </span>
+            {n > 0 && (
+              <span className="rounded-full bg-yellow-200 px-1.5 text-[10px] font-medium tabular-nums text-yellow-950 dark:bg-yellow-400/20 dark:text-yellow-200">{n}</span>
+            )}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 /** What the leak check found in this file, as written: what it hid with the
@@ -187,6 +315,11 @@ export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
   const clean = text?.clean || ''
   const oLines = useMemo(() => lines(original), [original])
   const cLines = useMemo(() => lines(clean), [clean])
+  // A workbook: its sheets as tabs and grids, on both sides.
+  const oSheets = useMemo(() => parseSheets(original), [original])
+  const cSheets = useMemo(() => parseSheets(clean), [clean])
+  // The sheet you picked — until the search moves to a match on another one.
+  const [pick, setPick] = useState<{ idx: number; at: number }>({ idx: 0, at: -1 })
 
   const byToken = useMemo(() => new Map((entries || []).map((e) => [e.token, e])), [entries])
   const inFile = useMemo(() => {
@@ -236,6 +369,13 @@ export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
 
   const step = useCallback((dir: 1 | -1) => { if (total) setAt((a) => (Math.min(a, total - 1) + dir + total) % total) }, [total])
 
+  const pSheets = primary === 'r' ? cSheets : oSheets
+  const pRanges = primary === 'r' ? rRanges : lRanges
+  const matchSheet = cur >= 0 && pSheets && pRanges[cur] ? sheetAt(pSheets, pRanges[cur][0]) : -1
+  const sheetIdx = matchSheet >= 0 && pick.at !== cur ? matchSheet : pick.idx
+  const pickSheet = (i: number) => setPick({ idx: i, at: cur })
+  const widths = useMemo(() => sheetWidths(oSheets?.[sheetIdx], cSheets?.[sheetIdx]), [oSheets, cSheets, sheetIdx])
+
   // The current match in view (in its pane; the other follows by scroll sync).
   useEffect(() => {
     if (cur < 0) return
@@ -243,8 +383,12 @@ export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
     const el = pane?.querySelector('[data-current]') as HTMLElement | null
     if (!pane || !el) return
     const box = pane.getBoundingClientRect(), r = el.getBoundingClientRect()
-    pane.scrollTo({ top: pane.scrollTop + (r.top - box.top) - box.height / 3, behavior: 'smooth' })
-  }, [cur, primary, lRanges, rRanges, side])
+    pane.scrollTo({
+      top: pane.scrollTop + (r.top - box.top) - box.height / 3,
+      left: r.left < box.left + 48 || r.right > box.right ? pane.scrollLeft + (r.left - box.left) - box.width / 4 : pane.scrollLeft,
+      behavior: 'smooth',
+    })
+  }, [cur, primary, lRanges, rRanges, side, sheetIdx])
 
   // Scroll together: the same line at the top of both panes.
   const follow = useCallback((from: 'l' | 'r') => {
@@ -252,7 +396,10 @@ export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
     if (quiet.current[from]) { quiet.current[from] = false; return }
     const a = from === 'l' ? left.current : right.current
     const b = from === 'l' ? right.current : left.current
-    const la = a?.firstElementChild as HTMLElement | null, lb = b?.firstElementChild as HTMLElement | null
+    // The lines (or a sheet's rows) of each side.
+    const linesOf = (el: HTMLElement | null) =>
+      (el?.querySelector('[data-lines]') as HTMLElement | null) ?? (el?.firstElementChild as HTMLElement | null)
+    const la = linesOf(a), lb = linesOf(b)
     if (!a || !b || !la || !lb) return
     let top: number
     if (la.children.length === lb.children.length && la.children.length > 1) {
@@ -264,9 +411,13 @@ export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
       const span = a.scrollHeight - a.clientHeight
       top = span > 0 ? (a.scrollTop / span) * (b.scrollHeight - b.clientHeight) : 0
     }
-    if (Math.abs(b.scrollTop - top) < 1) return
+    // Side to side too (a wide sheet): the same share of the way across.
+    const wide = a.scrollWidth - a.clientWidth
+    const leftTo = wide > 0 ? (a.scrollLeft / wide) * Math.max(0, b.scrollWidth - b.clientWidth) : 0
+    if (Math.abs(b.scrollTop - top) < 1 && Math.abs(b.scrollLeft - leftTo) < 1) return
     quiet.current[from === 'l' ? 'r' : 'l'] = true
     b.scrollTop = top
+    b.scrollLeft = leftTo
   }, [sync])
 
   const pickToken = (t: string) => { setMode('token'); setToken(t); setAt(0) }
@@ -282,6 +433,12 @@ export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
     const ls = isR ? cLines : oLines
     const ranges = isR ? rRanges : lRanges
     const curHere = primary === which ? cur : -1
+    const sheets = isR ? cSheets : oSheets
+    const cut = isR ? text?.clean_cut : text?.original_cut
+    const mark: MarkProps = {
+      ranges, current: curHere, tokens: isR, onToken: isR ? pickToken : undefined,
+      activeToken: isR && mode !== 'text' ? token : undefined,
+    }
     return (
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-2 text-xs">
@@ -294,9 +451,24 @@ export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
             </span>
           )}
         </div>
+        {sheets ? (
+          <>
+            <div ref={isR ? right : left} onScroll={() => follow(which)} className="relative min-h-0 flex-1 overflow-auto bg-zinc-950">
+              {sheets[sheetIdx]
+                ? <SheetGrid sheet={sheets[sheetIdx]} widths={widths} {...mark} />
+                : <div className="px-5 py-4 text-sm text-zinc-500">No such sheet on this side.</div>}
+              {cut && (
+                <div className="sticky left-0 px-4 py-3 text-xs text-zinc-500">
+                  Showing the start of this file — the rest is in the {isR ? 'anonymized copy' : 'original'}.
+                </div>
+              )}
+            </div>
+            <SheetTabs sheets={sheets} active={sheetIdx} onPick={pickSheet} ranges={ranges} tokens={isR} />
+          </>
+        ) : (
         <div ref={isR ? right : left} onScroll={() => follow(which)}
           className="relative min-h-0 flex-1 overflow-auto bg-zinc-950 px-5 py-4">
-          <div className="font-[450] text-[13.5px] leading-[1.7] text-zinc-300">
+          <div data-lines="" className="font-[450] text-[13.5px] leading-[1.7] text-zinc-300">
             {ls.map(({ line, at: off }, i) => (
               <div key={i} className="min-h-[1.7em] whitespace-pre-wrap break-words">
                 {line
@@ -307,7 +479,9 @@ export function RoomFileViewer({ roomId, file, entries, onClose, onChanged }: {
             ))}
           </div>
           {isR && !clean && <div className="text-sm text-zinc-500">Not run yet.</div>}
+          {cut && <div className="pt-3 text-xs text-zinc-500">Showing the start of this file — the rest is in the {isR ? 'anonymized copy' : 'original'}.</div>}
         </div>
+        )}
       </div>
     )
   }

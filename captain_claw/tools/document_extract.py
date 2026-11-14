@@ -3,6 +3,8 @@
 import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timedelta
+import math
 from pathlib import Path
 import posixpath
 import re
@@ -318,6 +320,78 @@ def _xlsx_index_to_col(idx: int) -> str:
     return "".join(reversed(letters)) or "A"
 
 
+# Built-in number formats (by id) that show a date, a date and time, or a time.
+_XLSX_DATE_IDS = {14, 15, 16, 17}
+_XLSX_DATETIME_IDS = {22}
+_XLSX_TIME_IDS = {18, 19, 20, 21, 45, 46, 47}
+
+
+def _xlsx_format_kind(code: str) -> str:
+    """What a custom number format shows: "date", "datetime", "time" or ""."""
+    # Quoted text, escaped characters, [colours / locales / elapsed], padding.
+    c = re.sub(r'"[^"]*"|\\.|\[[^\]]*\]|_.|\*.', "", code or "").lower()
+    if re.search(r"\[(h+|m+|s+)\]", (code or "").lower()):
+        return "time"  # an elapsed time ([h]:mm)
+    if not c or "general" in c or "@" in c:
+        return ""
+    time = bool(re.search(r"[hs]", c))
+    date = bool(re.search(r"[dy]", c)) or ("m" in c and not time)
+    return "datetime" if date and time else "date" if date else "time" if time else ""
+
+
+def _xlsx_styles(archive: zipfile.ZipFile, ns: dict[str, str]) -> list[str]:
+    """For each cell style (a cell's ``s``), what its number format shows."""
+    if "xl/styles.xml" not in archive.namelist():
+        return []
+    try:
+        root = ET.fromstring(archive.read("xl/styles.xml"))
+    except ET.ParseError:
+        return []
+    custom: dict[int, str] = {}
+    for fmt in root.findall("./x:numFmts/x:numFmt", ns):
+        try:
+            custom[int(fmt.get("numFmtId", ""))] = fmt.get("formatCode", "")
+        except ValueError:
+            continue
+    out: list[str] = []
+    for xf in root.findall("./x:cellXfs/x:xf", ns):
+        try:
+            fid = int(xf.get("numFmtId", "0"))
+        except ValueError:
+            fid = 0
+        out.append(_xlsx_format_kind(custom[fid]) if fid in custom
+                   else "date" if fid in _XLSX_DATE_IDS else "datetime" if fid in _XLSX_DATETIME_IDS
+                   else "time" if fid in _XLSX_TIME_IDS else "")
+    return out
+
+
+def _xlsx_number(raw: str, kind: str = "", date1904: bool = False) -> str:
+    """A number cell as Excel shows it, near enough: a date as a date
+    (2017-10-23), a time as a time, other numbers to 15 significant digits
+    (Excel stores 1102.84 as 1102.8399999999999)."""
+    try:
+        value = float(raw)
+    except ValueError:
+        return raw
+    if not math.isfinite(value):
+        return raw
+    if kind and 0 <= value < 2958466:  # up to 9999-12-31
+        seconds = round(value * 86400)
+        if kind == "time":
+            h, rest = divmod(seconds % 86400 if value < 1 else seconds, 3600)
+            m, s = divmod(rest, 60)
+            return f"{h}:{m:02d}:{s:02d}" if s else f"{h}:{m:02d}"
+        when = (datetime(1904, 1, 1) if date1904 else datetime(1899, 12, 30)) + timedelta(seconds=seconds)
+        if kind == "date" or not seconds % 86400:
+            return when.strftime("%Y-%m-%d")
+        return when.strftime("%Y-%m-%d %H:%M:%S" if when.second else "%Y-%m-%d %H:%M")
+    if abs(value) >= 1e15:
+        return raw
+    if value.is_integer():
+        return str(int(value))
+    return format(value, ".15g")
+
+
 def _xlsx_part(target: str) -> str:
     """A workbook relationship's target as a member of the package: relative
     to ``xl/`` (Excel), or absolute from the package root (openpyxl writes
@@ -347,6 +421,9 @@ def _extract_xlsx_markdown(path: Path, max_rows: int) -> str:
                 shared_strings.append(_normalize_text("".join(chunks)))
 
         workbook_root = ET.fromstring(archive.read("xl/workbook.xml"))
+        styles = _xlsx_styles(archive, ns_main)
+        props = workbook_root.find("./x:workbookPr", ns_main)
+        date1904 = props is not None and str(props.get("date1904", "")).lower() in ("1", "true")
         rel_root = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
         rel_map: dict[str, str] = {}
         for rel in rel_root.findall(".//rel:Relationship", rel_ns):
@@ -399,6 +476,12 @@ def _extract_xlsx_markdown(path: Path, max_rows: int) -> str:
                             value = shared_strings[idx] if 0 <= idx < len(shared_strings) else raw
                         elif cell_type == "b":
                             value = "TRUE" if raw == "1" else "FALSE"
+                        elif cell_type in ("", "n") and raw and not raw.startswith("="):
+                            try:
+                                kind = styles[int(cell.get("s", "0"))]
+                            except (ValueError, IndexError):
+                                kind = ""
+                            value = _xlsx_number(raw, kind, date1904)
                         else:
                             value = raw
                     row_values[col_idx] = _normalize_text(value)
