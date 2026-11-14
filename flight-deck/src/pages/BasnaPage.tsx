@@ -240,7 +240,9 @@ function StageChip({ n, label, summary, state, busy, open, onClick }: {
 
 const QUALITY_LABEL: Record<string, string> = { off: 'Basic', balanced: 'Balanced', thorough: 'Thorough', custom: 'Custom' }
 
-export function BasnaPage() {
+/** `mode` opens a new run on Vatra or Basna (the kiosk's More has both);
+ *  without it, the last one picked. `onClose`: in a kiosk dialog, its Close. */
+export function BasnaPage({ mode, onClose }: { mode?: 'basna' | 'vatra'; onClose?: () => void } = {}) {
   const {
     sessions, activeSession, routePlan, runs, lastExecute, progress, attachments,
     routing, planning, executing, recompiling, resuming, error,
@@ -299,7 +301,7 @@ export function BasnaPage() {
   const [title, setTitle] = useState('')
   // Compose mode for a NEW run; a selected run locks to its own mode (effectiveMode).
   const [composeMode, setComposeMode] = useState<'basna' | 'vatra'>(
-    () => ((typeof localStorage !== 'undefined' && localStorage.getItem('basna.composeMode')) as 'basna' | 'vatra') || 'basna',
+    () => mode || ((typeof localStorage !== 'undefined' && localStorage.getItem('basna.composeMode')) as 'basna' | 'vatra') || 'basna',
   )
   // Optional user-fixed team: archetype ids the route/plan MUST use (empty = auto).
   const [team, setTeam] = useState<string[]>([])
@@ -319,6 +321,12 @@ export function BasnaPage() {
       className="ml-auto flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
     >
       <Scale className="h-3.5 w-3.5" /> Judge calibration
+    </button>
+  )
+  const closeButton = onClose && (
+    <button onClick={onClose} aria-label="Close" title="Close"
+      className="rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100">
+      <X className="h-4 w-4" />
     </button>
   )
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -561,6 +569,7 @@ export function BasnaPage() {
           >
             <HelpCircle className="h-3.5 w-3.5" /> Help
           </button>
+          {closeButton}
         </div>
         <div className="flex-1 overflow-auto">
           <ProjectPicker
@@ -635,6 +644,7 @@ export function BasnaPage() {
         >
           <HelpCircle className="h-3.5 w-3.5" /> Help
         </button>
+        {closeButton}
       </div>
       {wizardOpen && (
         <BasnaWizardModal
