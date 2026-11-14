@@ -975,6 +975,12 @@ class TaskboardStore:
                 continue
             where.append(f"t.{col} IN ({_marks(values)})")
             args += values
+        # One task (or a few) by id: how the board opens on the task a link
+        # pointed at — every count then follows it.
+        ids = filters.get("task") or []
+        if ids:
+            where.append(f"t.id IN ({_marks(ids)})")
+            args += ids
         parties = filters.get("party") or []
         if parties and skip != "party":
             # v2: a person by their facet id (``party:<id>``), an address by ``<kind>:<address>``.
@@ -1028,22 +1034,24 @@ class TaskboardStore:
                     f"SELECT t.{col}{label}, COUNT(*) FROM tasks t WHERE {w} GROUP BY t.{col} "
                     "ORDER BY COUNT(*) DESC", a)]
             w, a = self._where(user_id, **common, skip="party")
-            facets["party"] = self._party_rows(w, a, limit=50)
+            facets["party"] = [r[:3] for r in self._party_rows(w, a, limit=50)]
             counts = self._counts(user_id, **{**common, "view": "all"}, skip="view")
         return {"rows": [dict(r) for r in rows], "total": int(total), "facets": facets, "counts": counts}
 
-    def _party_rows(self, where: str, args: list, *, limit: int | None = None) -> list[tuple[str, str, int]]:
-        """The People values under *where*: (facet id, name, task count), most
-        tasks first. v2: a person the board knows is one value, under their
-        name (``party:<id>``); an address nobody is known by stays itself."""
+    def _party_rows(self, where: str, args: list, *, limit: int | None = None) -> list[tuple[str, str, int, int]]:
+        """The People values under *where*: (facet id, name, task count, done
+        count), most tasks first. v2: a person the board knows is one value,
+        under their name (``party:<id>``); an address nobody is known by stays
+        itself."""
         rows = self._conn.execute(
             f"SELECT {_PARTY_FACET} AS pid, COALESCE(NULLIF(MAX(pp.display_name), ''), "
-            "NULLIF(MAX(p.display), ''), MAX(p.address)), COUNT(DISTINCT t.id) FROM tasks t "
+            "NULLIF(MAX(p.display), ''), MAX(p.address)), COUNT(DISTINCT t.id), "
+            "COUNT(DISTINCT CASE WHEN t.status = 'done' THEN t.id END) FROM tasks t "
             "JOIN task_parties p ON p.task_id = t.id AND p.user_id = t.user_id "
             f"LEFT JOIN parties pp ON pp.id = p.party_id AND pp.user_id = p.user_id WHERE {where} "
             "GROUP BY pid ORDER BY COUNT(DISTINCT t.id) DESC" + (" LIMIT ?" if limit else ""),
             (*args, limit) if limit else args)
-        return [(str(r[0] or ""), str(r[1] or ""), int(r[2])) for r in rows]
+        return [(str(r[0] or ""), str(r[1] or ""), int(r[2]), int(r[3])) for r in rows]
 
     def people(self, user_id: str, *, q: str = "", sort: str = "count", limit: int = 100, offset: int = 0,
                leave_out: tuple[str, ...] = (), now: float | None = None) -> dict:

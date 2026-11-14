@@ -361,6 +361,8 @@ export interface TaskQuery {
   party?: string[]
   evidence?: string[]
   result?: string[]
+  /** Only these tasks, by id (the board opened on one task). */
+  task?: string[]
   from?: number
   to?: number
   sort?: TaskSort
@@ -372,6 +374,8 @@ const BASE = '/fd/taskboard'
 
 export type PeopleSort = 'count' | 'name'
 export interface PeopleQuery { q?: string; sort?: PeopleSort; limit?: number; offset?: number }
+/** Someone on the user's tasks: how many tasks they are on, and how many of those are done. */
+export interface Person { id: string; label: string; count: number; done: number }
 const taskPath = (id: string, rest = '') => `${BASE}/tasks/${encodeURIComponent(id)}${rest}`
 
 /** A board task's own id (`tb_` and hex); anything with a colon is a key. */
@@ -481,7 +485,7 @@ export const taskboardApi = {
     if (o.sort) p.set('sort', o.sort)
     if (o.limit) p.set('limit', String(o.limit))
     if (o.offset) p.set('offset', String(o.offset))
-    return api<{ people: Facet[]; total: number }>(`${BASE}/people?${p}`)
+    return api<{ people: Person[]; total: number }>(`${BASE}/people?${p}`)
   },
   tasks: (query: TaskQuery = {}) => api<TaskPage>(`${BASE}/tasks?${queryString(query)}`),
   task: (id: string) => api<TaskDetail>(taskPath(id)),

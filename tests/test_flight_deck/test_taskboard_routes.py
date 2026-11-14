@@ -341,14 +341,31 @@ async def test_people_searched_sorted_and_without_the_decks_own_users(api):
                      parties=[{"role": "requester", "kind": kind, "address": addr, "display": display}],
                      event={"source": "t", "source_ref": key})
     out = await _get(api, "/fd/taskboard/people")
-    assert out == {"people": [{"id": "email:ana@x.co", "label": "Ana", "count": 2},
-                              {"id": "email:bo@y.org", "label": "Bo", "count": 1}], "total": 2}
+    assert out == {"people": [{"id": "email:ana@x.co", "label": "Ana", "count": 2, "done": 0},
+                              {"id": "email:bo@y.org", "label": "Bo", "count": 1, "done": 0}], "total": 2}
     by_name = await _get(api, "/fd/taskboard/people", sort="name", limit=1, offset=1)
-    assert by_name == {"people": [{"id": "email:bo@y.org", "label": "Bo", "count": 1}], "total": 2}
+    assert by_name == {"people": [{"id": "email:bo@y.org", "label": "Bo", "count": 1, "done": 0}], "total": 2}
     assert [p["label"] for p in (await _get(api, "/fd/taskboard/people", q="y.org"))["people"]] == ["Bo"]
     assert (await _get(api, "/fd/taskboard/people", sort="weird"))["people"][0]["label"] == "Ana"
     api.be(api.bob)
     assert (await _get(api, "/fd/taskboard/people"))["total"] == 0
+
+
+async def test_the_list_can_be_one_task(api):
+    """How the board opens on the task a link points at: ``task`` keeps only
+    it, and the view counts follow it."""
+    board, uid = api.env.board, api.env.alice
+    ids = {}
+    for key, owes in (("a", "me"), ("b", "agent"), ("c", "agent")):
+        ids[key], _ = board.ingest(uid, keys=[key], create={"title": key, "channel": "gmail", "owes_next": owes},
+                                   event={"source": "t", "source_ref": key})
+    out = await _tasks(api, view="all", task=ids["b"])
+    assert [i["id"] for i in out["items"]] == [ids["b"]] and out["total"] == 1
+    assert out["counts"]["working"] == 1 and out["counts"]["needs_me"] == 0 and out["counts"]["all"] == 1
+    both = await _tasks(api, view="all", task=f"{ids['a']},{ids['c']}")
+    assert sorted(i["id"] for i in both["items"]) == sorted([ids["a"], ids["c"]])
+    api.be(api.bob)
+    assert (await _tasks(api, view="all", task=ids["b"]))["total"] == 0
 
 
 async def test_the_query_the_dialog_sends(api):
