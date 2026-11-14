@@ -13,7 +13,9 @@ The order, and what each step is there for:
    code is imported. A version that can't start ends here, with nothing changed.
 2. **Count down.** Everyone signed in has been told an update is coming since step 1
    began (a toast, :func:`notice`). Now they get a toast they can't close with a
-   countdown, 2 minutes by default, and nothing is stopped until it ends.
+   countdown, and nothing is stopped until it ends. The admin who clicks picks how long:
+   10 seconds ("restart now"), 2, 5 or 10 minutes (:data:`COUNTDOWN_CHOICES`). An
+   Approve on an agent's ask and the switch don't ask, and use ``FD_UPDATE_COUNTDOWN_S``.
 3. **Stop the agents**, because they read their code from the checkout. Optionally
    after waiting for the ones mid-turn. Crew's workers keep going through this.
 4. **Pull**, with ``deck_update_guard.py`` already running outside the deck, then
@@ -32,7 +34,7 @@ The order, and what each step is there for:
 ``FD_UPDATE_REPO`` names the checkout when it can't be worked out, ``FD_UPDATE_POLL_S``
 is how often the switch's check runs (default 15 minutes), ``FD_UPDATE_BOOT_TIMEOUT_S``
 how long the new version gets to come up (default 5 minutes), ``FD_UPDATE_COUNTDOWN_S``
-how long the countdown is (default 2 minutes).
+how long the countdown is when nobody picked one (default 2 minutes).
 """
 
 from __future__ import annotations
@@ -77,7 +79,10 @@ _SETTING = "fd:deck-update"
 _WAIT_FOR_TURNS_S = 300.0
 _REHEARSAL_TIMEOUT_S = 240.0
 # Pages look every 15 seconds, and a test start can take 6: long enough that each sees "soon".
+# A shorter countdown cuts it short too: an admin who picked "restart now" picked speed.
 _SOON_S = 20.0
+# What an admin can pick when they start one, in seconds: now (10 seconds), 2, 5 or 10 minutes.
+COUNTDOWN_CHOICES = (10, 120, 300, 600)
 _SHUTDOWN_TIMEOUT_S = 60.0
 _MAX_COMMITS = 30
 STARTUP_FAILURE = 3  # uvicorn's exit code for a start that failed
@@ -97,6 +102,16 @@ def _boot_timeout() -> float:
 
 def _countdown_s() -> float:
     return float(os.environ.get("FD_UPDATE_COUNTDOWN_S", "120") or 0)
+
+
+def chosen_countdown(seconds: float | None) -> float:
+    """The countdown an admin picked, one of :data:`COUNTDOWN_CHOICES`; ``None`` (nobody picked:
+    an agent's ask, the switch) is ``FD_UPDATE_COUNTDOWN_S``. Anything else is refused."""
+    if seconds is None:
+        return _countdown_s()
+    if isinstance(seconds, bool) or seconds not in COUNTDOWN_CHOICES:
+        raise RefusedError("The restart can be in 10 seconds, 2 minutes, 5 minutes or 10 minutes.")
+    return float(seconds)
 
 
 def _poll_s() -> float:
@@ -150,7 +165,8 @@ def _step(text: str, **changes: Any) -> None:
 
 def _view(state: dict[str, Any]) -> dict[str, Any]:
     """What the page gets. The environment, the command line and the paths stay here."""
-    keep = ("phase", "from", "to", "by", "started_at", "finished_at", "steps", "error", "refused", "detached_log", "mail")
+    keep = ("phase", "from", "to", "by", "started_at", "finished_at", "countdown_s", "steps", "error", "refused",
+            "detached_log", "mail")
     view = {k: state[k] for k in keep if k in state}
     if state.get("phase") == "countdown":
         view["seconds_left"] = _seconds_left(state)
@@ -531,10 +547,14 @@ def in_progress() -> bool:
     return read_state().get("phase") in _ACTIVE
 
 
-async def start(*, by: str, target: str, wait: bool = False, user_id: str = "", agent: dict | None = None) -> dict[str, Any]:
-    """Begin an update to exactly *target*, the commit the admin saw; a newer one isn't covered."""
+async def start(*, by: str, target: str, wait: bool = False, user_id: str = "", agent: dict | None = None,
+                countdown_s: float | None = None) -> dict[str, Any]:
+    """Begin an update to exactly *target*, the commit the admin saw; a newer one isn't covered.
+    *countdown_s* is how long everyone gets before the restart, one of :data:`COUNTDOWN_CHOICES`;
+    left out, it's ``FD_UPDATE_COUNTDOWN_S``."""
     global _task
 
+    countdown = chosen_countdown(countdown_s)
     if in_progress():
         raise RefusedError("An update is already under way.")
     repo, editable = find_repo()
@@ -559,14 +579,14 @@ async def start(*, by: str, target: str, wait: bool = False, user_id: str = "", 
     refused = read_state().get("refused")
     _state_path().unlink(missing_ok=True)
     _write_state(phase="rehearsing", to=full, **{"from": head}, by=by, user_id=user_id, agent=agent or {},
-                 started_at=time.time(), steps=[], reported=False, refused=refused, told=full)
-    _task = asyncio.create_task(_run(repo, editable, head, full, wait))
+                 started_at=time.time(), steps=[], reported=False, refused=refused, told=full, countdown_s=countdown)
+    _task = asyncio.create_task(_run(repo, editable, head, full, wait, countdown))
     return _view(read_state())
 
 
-async def _run(repo: Path, editable: bool, head: str, target: str, wait: bool) -> None:
+async def _run(repo: Path, editable: bool, head: str, target: str, wait: bool, countdown: float) -> None:
     stopped = False
-    soon_until = time.monotonic() + min(_SOON_S, _countdown_s())
+    soon_until = time.monotonic() + min(_SOON_S, countdown)
     try:
         needs = await _new_requirements(repo, head, target)
         if needs:
@@ -579,7 +599,7 @@ async def _run(repo: Path, editable: bool, head: str, target: str, wait: bool) -
         _step("The new version starts")
 
         await asyncio.sleep(max(0.0, soon_until - time.monotonic()))
-        await _count_down()
+        await _count_down(countdown)
         if wait:
             await _wait_for_turns()
         _step(f"Stopping {len(_running_agents())} agent(s)", phase="stopping")
@@ -628,9 +648,10 @@ async def _fail(why: str, target: str, stopped: bool) -> None:
     await _report()
 
 
-async def _count_down() -> None:
-    seconds = _countdown_s()
-    _step(f"Telling everyone it restarts in {int(seconds)} seconds", phase="countdown", restart_at=time.time() + seconds)
+async def _count_down(seconds: float) -> None:
+    n = int(seconds)
+    span = f"{n // 60} minute{'s' if n != 60 else ''}" if n >= 60 and n % 60 == 0 else f"{n} second{'s' if n != 1 else ''}"
+    _step(f"Telling everyone it restarts in {span}", phase="countdown", restart_at=time.time() + seconds)
     await asyncio.sleep(seconds)
 
 

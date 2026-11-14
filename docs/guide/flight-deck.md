@@ -333,7 +333,7 @@ The step-by-step checklist is [docs/team-deployment.md](../team-deployment.md).
 New in 0.8.5: **Console → Updates → Check now**, then **Update now**, on a deck running from a git checkout. It follows the branch it's on, so a fork follows the fork, and it only moves forward, to the commit you saw.
 
 1. **Test start.** The new commit runs from a temp folder on a spare port, with an empty data folder and none of the deck's keys. If that fails, nothing has been touched.
-2. **Warning.** Everyone signed in gets a toast, then one they can't close, counting down two minutes.
+2. **Warning.** Everyone signed in gets a toast, then one they can't close, counting down as long as you pick: **Restart now** (10 seconds), 2, 5 or 10 minutes.
 3. **Stop the agents.** Mid-turn ones can be waited for, up to 5 more minutes. Crew's workers keep going.
 4. **Pull**, with any new packages already installed.
 5. **Restart in place**: the same process, command line and tmux pane.
