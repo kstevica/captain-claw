@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
+import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
 import {
   AlarmClock,
   Info,
@@ -877,6 +877,19 @@ function ChatContent({
     inputRef.current?.focus()
   }, [])
 
+  // An approval's Edit: its message goes in the box, to change and send.
+  const draftInBox = useCallback((text: string) => {
+    setInput(text)
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (!el) return
+      el.style.height = 'auto'
+      el.style.height = Math.min(el.scrollHeight, 192) + 'px'
+      el.focus()
+      el.setSelectionRange(text.length, text.length)
+    })
+  }, [])
+
   // Keep the full transcript — every tool call is shown. The intermediary
   // activity (tools + narration) is grouped into a collapsible panel that
   // streams while the turn runs and collapses to a tools-history summary once
@@ -1018,6 +1031,7 @@ function ChatContent({
           </div>
         ))}
 
+        <DraftInBox.Provider value={closed || quotaSpent ? null : draftInBox}>
         {groups.map((grp, gi) => {
           // The live group is the last one (a payment card, or a question
           // the agent waits on, after it doesn't count).
@@ -1039,6 +1053,7 @@ function ChatContent({
             <MessageBubble key={grp.items[0].id} message={grp.items[0]} sourceName={session.containerName} agentId={session.containerId} large={simple} panels={!simple} />
           )
         })}
+        </DraftInBox.Provider>
 
         {fresh && (
           <ChatGreeting
@@ -2430,63 +2445,82 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
   )
 })
 
+/** Set by the chat around its messages: puts a text in the message box, to
+ *  change and send. Null where there is no box to write in. */
+const DraftInBox = createContext<((text: string) => void) | null>(null)
+
 /** An approval request in words: what the agent wants to do, as a question,
  *  and what it would do (the request's own text, tidied). The agent's
  *  requests are one of a few shapes (web_server / consult_peer / playbooks);
- *  anything else shows its text as it is. */
+ *  anything else gets a plain question, its own text kept for "See what
+ *  happened". `draft` is a message the user may rewrite (Edit). */
 function readApproval(content: string, category: string | undefined, agentName: string) {
   const peer = content.match(/^Agent wants to consult peer "(.+?)"\s*(?:\n+Message:\s*([\s\S]*))?$/)
   if (peer) {
+    const body = (peer[2] || '').trim()
     return {
       ask: `${agentName} wants to check with ${peer[1]} first. Good to go?`,
       what: `check with ${peer[1]}`,
-      label: peer[2] ? `Here's what it would send ${peer[1]}:` : '',
-      body: (peer[2] || '').trim(),
+      label: body ? `Here's what it would send ${peer[1]}:` : '',
+      body,
+      draft: body ? `Check with ${peer[1]}, but send this instead:\n\n${body}` : '',
     }
   }
   if (category === 'playbook' || /^Playbook match found:/.test(content)) {
     const list = content.replace(/^Playbook match found:\s*\n?/, '').split('\n')
       .map((l) => l.trim()).filter(Boolean).map((l) => `- ${l}`).join('\n')
-    return { ask: `${agentName} found a playbook that fits this. Use it?`, what: 'use a playbook', label: '', body: list }
+    return { ask: `${agentName} found a playbook that fits this. Use it?`, what: 'use a playbook', label: '', body: list, draft: '' }
   }
-  return { ask: `${agentName} needs your OK before it goes on.`, what: 'go ahead', label: '', body: content }
+  if (category === 'peer_consult') {
+    return { ask: `${agentName} wants to check with another agent first. Good to go?`, what: 'check with another agent',
+      label: 'The exact request is under See what happened.', body: '', draft: '' }
+  }
+  return { ask: `${agentName} wants your OK before it goes on. Good to go?`, what: 'go ahead',
+    label: 'The exact request is under See what happened.', body: '', draft: '' }
 }
 
-/** Approve or dismiss, as the agent's question to you. The agent goes ahead
- *  by itself when nobody answers in time (its own timeout): the card says so. */
+/** Approve, edit or dismiss, as the agent's question to you. Edit turns the
+ *  request down and puts its message in the box, to change and send yourself
+ *  (the agent's answer is yes or no). The agent goes ahead by itself when
+ *  nobody answers in time (its own timeout): the card says so. */
 function ApprovalCard({ message, agentId, agentName, large }: { message: ChatMessage; agentId?: string; agentName: string; large: boolean }) {
   const [details, setDetails] = useState(false)
+  const draftInBox = useContext(DraftInBox)
   const read = readApproval(message.content || '', message.approval_category, agentName)
   const respond = (approved: boolean) => {
     if (agentId) useChatStore.getState().respondToApproval(agentId, message.approval_request_id!, approved)
   }
+  const detailsToggle = (
+    <button onClick={() => setDetails((d) => !d)} aria-expanded={details}
+      className="flex shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 text-xs font-medium text-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-300">
+      {details ? 'Hide details' : 'See what happened'}
+      {details ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+    </button>
+  )
+  const request = details && (
+    <div className="fd-markdown mt-1.5 border-l-2 border-zinc-700 py-1 pl-3 text-xs text-zinc-400">
+      <MarkdownMessage content={message.content} />
+    </div>
+  )
   if (message.approval_resolved) {
     return (
       <div id={`fd-msg-${message.id}`} className="mb-3">
         <div className="flex items-center gap-1.5 text-xs text-zinc-500">
           <Check className="h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0 truncate">You answered — {agentName} asked to {read.what}</span>
-          <button onClick={() => setDetails((d) => !d)} aria-expanded={details}
-            className="flex shrink-0 items-center gap-0.5 rounded-md px-1.5 py-0.5 font-medium hover:bg-zinc-800/60 hover:text-zinc-300">
-            {details ? 'Hide details' : 'See what happened'}
-            {details ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-          </button>
+          {detailsToggle}
         </div>
-        {details && (
-          <div className="fd-markdown mt-1.5 border-l-2 border-zinc-800 py-1 pl-3 text-xs text-zinc-400">
-            <MarkdownMessage content={message.content} />
-          </div>
-        )}
+        {request}
       </div>
     )
   }
   return (
     <div id={`fd-msg-${message.id}`} data-fd-approval className="mb-3 flex justify-start">
-      <div className="w-full max-w-[85%] rounded-2xl border border-zinc-700 bg-zinc-900 px-4 py-3.5 shadow-sm">
+      <div className="w-full max-w-[85%] rounded-2xl border border-violet-200 bg-white px-4 py-3.5 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
         <p className={`font-semibold leading-snug text-zinc-100 ${large ? 'text-base' : 'text-sm'}`}>{read.ask}</p>
         {read.label && <p className="mt-2 text-xs text-zinc-500">{read.label}</p>}
         {read.body && (
-          <div className={`fd-markdown mt-1.5 rounded-r-lg border-l-2 border-violet-500/60 bg-zinc-800/50 px-3 py-2 text-zinc-300 ${large ? 'text-[15px] leading-relaxed' : 'text-sm'}`}>
+          <div className={`fd-markdown mt-1.5 rounded-r-lg border-l-2 border-violet-500/60 bg-violet-50 px-3 py-2 text-zinc-300 dark:bg-zinc-800/50 ${large ? 'text-[15px] leading-relaxed' : 'text-sm'}`}>
             <MarkdownMessage content={read.body} />
           </div>
         )}
@@ -2498,14 +2532,26 @@ function ApprovalCard({ message, agentId, agentName, large }: { message: ChatMes
             <Check className="h-4 w-4" />
             Approve
           </button>
+          {read.draft && draftInBox && (
+            <button
+              onClick={() => { respond(false); draftInBox(read.draft) }}
+              title="Turn this down and put the message in your box, to change and send yourself"
+              className="flex items-center gap-1.5 rounded-xl border border-zinc-700 px-3 py-1.5 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              Edit
+            </button>
+          )}
           <button
             onClick={() => respond(false)}
             className="rounded-xl px-3 py-1.5 text-sm font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
           >
             Dismiss
           </button>
-          <span className="ml-auto text-[11px] text-zinc-500">No answer soon, and it goes ahead.</span>
+          <span className="ml-auto">{detailsToggle}</span>
         </div>
+        {request}
+        <p className="mt-2 text-[11px] text-zinc-500">No answer soon, and it goes ahead.</p>
       </div>
     </div>
   )
