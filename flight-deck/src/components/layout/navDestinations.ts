@@ -1,5 +1,5 @@
 import type { ComponentType } from 'react'
-import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Sun } from 'lucide-react'
+import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Store, Sun } from 'lucide-react'
 
 // ── Simple layout: the outcome nav's destinations ────────────────────
 //
@@ -8,10 +8,11 @@ import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Sun } from 'luci
 // agents that are up, as cards), Inbox (the Line: what the
 // deck and the agents said on their own), Tasks (the Taskboard), People
 // (the people on those tasks), Automations (Scheduled tasks) and Activity
-// (every tool the agents used). Each opens the same view as before; only
+// (every tool the agents used), then Store (the Agent store at /store,
+// for accounts that can reach it). Each opens the same view as before; only
 // the way in changed. SimpleNav.tsx draws them.
 
-export type NavTarget = 'today' | 'agents' | 'inbox' | 'tasks' | 'people' | 'automations' | 'activity'
+export type NavTarget = 'today' | 'agents' | 'inbox' | 'tasks' | 'people' | 'automations' | 'activity' | 'store'
 
 export interface NavEntry {
   id: NavTarget
@@ -27,7 +28,7 @@ export interface NavEntry {
   onSelect: () => void
 }
 
-/** The seven destinations, in the order the nav shows them. */
+/** The destinations, in the order the nav shows them. */
 export function navEntries(o: {
   onToday: () => void
   onAgents: () => void
@@ -41,6 +42,8 @@ export function navEntries(o: {
   automationsCount: number
   automationsRunning: boolean
   onActivity: () => void
+  /** Left out where the Agent store can't be reached (a kiosk-locked account). */
+  onStore?: () => void
 }): NavEntry[] {
   const inboxCount = o.inboxWaiting || o.inboxUnread
   return [
@@ -63,5 +66,6 @@ export function navEntries(o: {
       count: o.automationsCount, dot: o.automationsRunning,
     },
     { id: 'activity', label: 'Activity', icon: Activity, hint: 'Every tool your agents used, and how it went', onSelect: o.onActivity },
+    ...(o.onStore ? [{ id: 'store' as const, label: 'Store', icon: Store, hint: 'Ready-made agents to add to your team', onSelect: o.onStore }] : []),
   ]
 }

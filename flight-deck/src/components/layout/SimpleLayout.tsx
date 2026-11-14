@@ -1001,6 +1001,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     automationsCount: scheduledCount,
     automationsRunning: scheduledRunning,
     onActivity: goTo(() => openActivity()),
+    // The Agent store is a page of its own; a locked account never reaches it.
+    onStore: locked ? undefined : () => { window.location.assign('/store') },
   })
   const navCurrent: NavTarget | null = lineOpen ? 'inbox'
     : taskboardOpen ? 'tasks'
