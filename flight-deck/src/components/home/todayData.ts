@@ -3,6 +3,7 @@ import { api } from '../../services/fileLibraryApi'
 import { asksApi, type OpenAsk } from '../../services/asksApi'
 import { schedulerApi, type TaskRun } from '../../services/schedulerApi'
 import { taskboardApi, type TaskItem, type TaskProposal } from '../../services/taskboardApi'
+import { priorityTasks } from './todayLists'
 
 // ── The Today home's data ──
 //
@@ -12,7 +13,10 @@ import { taskboardApi, type TaskItem, type TaskProposal } from '../../services/t
 // them), the open questions (/fd/asks, at once: no long wait) and the
 // scheduler's recent runs. Each source loads and fails on its own, so one
 // that is down leaves the others showing. Read again every minute and when
-// the tab comes back into view.
+// the tab comes back into view: seven light reads (priorities takes two),
+// only while the tab is visible — kept on purpose, so what was answered
+// elsewhere doesn't linger here. The questions are also waited on (one
+// request held open, as PersonAsks holds its own): they change by the second.
 
 /** How far back "today" looks for things done on their own. */
 export const HANDLED_WINDOW_S = 24 * 60 * 60
@@ -73,9 +77,16 @@ async function waitingActions(): Promise<WaitingAction[]> {
 
 const LOADERS: { [K in keyof TodayData]: () => Promise<NonNullable<TodayData[K]['data']>> } = {
   needsMe: async () => (await taskboardApi.tasks({ view: 'needs_me', sort: 'urgency', limit: 20 })).items,
-  // Open and not the person's move: what the agents are on, or waiting on someone else.
-  open: async () => (await taskboardApi.tasks({ view: 'all', status: ['open'], sort: 'urgency', limit: 30 })).items
-    .filter((t) => t.lane !== 'needs_me' && t.lane !== 'snoozed'),
+  // Open and not the person's move, as the Taskboard's lanes have it: what
+  // the agents are working on (in progress: the "working" lane — the board
+  // has no in-progress status) and what waits on someone else.
+  open: async () => {
+    const [working, waiting] = await Promise.all([
+      taskboardApi.tasks({ view: 'working', sort: 'urgency', limit: 30 }),
+      taskboardApi.tasks({ view: 'waiting', sort: 'urgency', limit: 30 }),
+    ])
+    return priorityTasks(working.items, waiting.items)
+  },
   done: async () => {
     const since = now() - HANDLED_WINDOW_S
     return (await taskboardApi.tasks({ view: 'done', sort: 'recent', limit: 20 })).items
@@ -104,6 +115,27 @@ export function useToday(): { data: TodayData; reload: () => Promise<void> } {
         if (alive.current) setData((d) => ({ ...d, [key]: { data: d[key].data, error: message(e) } }))
       }
     }))
+  }, [])
+
+  // The questions are answered in their own window (PersonAsks), not here:
+  // wait on /fd/asks the way it does, so one answered there goes at once.
+  useEffect(() => {
+    let watching = true
+    let known: string[] = []
+    const loop = async () => {
+      while (watching) {
+        try {
+          const asks = (await asksApi.list(known, 25)).asks
+          if (!watching) return
+          known = asks.map((a) => a.id)
+          setData((d) => ({ ...d, asks: { data: asks, error: '' } }))
+        } catch {
+          await new Promise((res) => window.setTimeout(res, 5000))
+        }
+      }
+    }
+    void loop()
+    return () => { watching = false }
   }, [])
 
   useEffect(() => {

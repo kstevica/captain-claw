@@ -4,12 +4,13 @@ import { AgentPicture } from '../agents/AgentPicture'
 import { useActivityStore } from '../../stores/activityStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useTaskboardStore } from '../../stores/taskboardStore'
-import { asksApi, type OpenAsk } from '../../services/asksApi'
+import type { OpenAsk } from '../../services/asksApi'
 import { resolveProposal } from '../../services/notifications'
 import { taskboardApi, type TaskAction, type TaskItem } from '../../services/taskboardApi'
 import type { TaskRun } from '../../services/schedulerApi'
 import { ago, countWord, isoSeconds, useToday, type WaitingAction } from '../home/todayData'
 import { Calm, Draft, List, Loading, Pill, Row, Section, Trouble, WaitingCard } from '../home/TodayParts'
+import { allFailed, allSettled } from '../home/todayLists'
 
 // ── Centre: no chat open — Today ──
 //
@@ -17,9 +18,9 @@ import { Calm, Draft, List, Loading, Pill, Row, Section, Trouble, WaitingCard } 
 // the agents to talk to, then what waits for them (proposals to approve,
 // Taskboard tasks that are their move, open questions), today's open work,
 // and what got handled on its own (done tasks, scheduled runs) — each with
-// "See what happened". Every answer here is the same call the bell, the
-// Taskboard and the question dialog make. With no agent at all, the
-// caller's empty card shows instead.
+// "See what happened". Every answer here is the same call the bell and the
+// Taskboard make; open questions are answered in their own window. With no
+// agent at all, the caller's empty card shows instead.
 
 /** What the home needs of an agent row (SimpleLayout's agents fit it). */
 export interface HomeAgent {
@@ -177,10 +178,13 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
   if (agents.length === 0) return <>{empty}</>
 
   const firstName = (user?.display_name || '').trim().split(/\s+/)[0]
-  const waitingLoaded = data.needsMe.data !== null || data.proposals.data !== null || data.asks.data !== null
-  const waitingFailed = !waitingLoaded && !!(data.needsMe.error && data.proposals.error && data.asks.error)
-  const handledLoaded = data.done.data !== null || data.runs.data !== null
-  const handledFailed = !handledLoaded && !!(data.done.error && data.runs.error)
+  // A section shows what it has (or that it's empty) once every one of its
+  // sources has answered or failed: one still loading may hold the very thing.
+  const waitingSources = [data.needsMe, data.proposals, data.asks]
+  const waitingFailed = allFailed(...waitingSources)
+  const waitingLoaded = allSettled(...waitingSources) && !waitingFailed
+  const handledFailed = allFailed(data.done, data.runs)
+  const handledLoaded = allSettled(data.done, data.runs) && !handledFailed
   const handledToday = handled.filter((h) => h.kind === 'task' || h.run.status === 'ok').length
 
   const summary = !waitingLoaded
@@ -221,21 +225,17 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
 
   const waitingCard = (w: Waiting) => {
     if (w.kind === 'ask') {
+      // Answered in its own window (PersonAsks): it opens over every screen
+      // and stays in front until answered, so a button here could never be
+      // reached. The card only says it's there, and goes once it's answered.
       const { ask } = w
       const who = ask.agent_name || ask.title || 'Captain'
       const first = ask.questions[0]
-      const yesNo = ask.questions.length === 1 && first?.kind === 'confirm'
       return (
-        <WaitingCard key={w.key} who={who} when={ago(w.at)} error={errors[w.key]}
+        <WaitingCard key={w.key} who={who} when={ago(w.at)}
           headline={`${who} has a question for you.`}
           title={first ? `${first.question}${ask.questions.length > 1 ? ` (and ${ask.questions.length - 1} more)` : ''}` : ask.title}
-          actions={yesNo && first ? [
-            pill(w.key, 'yes', 'Yes', () => asksApi.answer(ask.id, { answers: { [first.id]: true } })),
-            pill(w.key, 'no', 'No', () => asksApi.answer(ask.id, { answers: { [first.id]: false } })),
-          ] : [
-            <span key="where" className="mr-1 text-sm text-zinc-500">It’s open in a window on this screen.</span>,
-            pill(w.key, 'no', 'Don’t answer', () => asksApi.answer(ask.id, { declined: true })),
-          ]} />
+          actions={<span className="text-sm text-zinc-500">Answer it in the question window on this screen.</span>} />
       )
     }
     if (w.kind === 'proposal') {
@@ -409,6 +409,9 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
             : handled.length === 0
               ? <Calm icon={<Sparkles className="h-4 w-4 shrink-0 text-violet-600 dark:text-violet-400" />}>Nothing yet today. What your agents finish on their own lands here.</Calm>
               : <List>{handled.map(handledRow)}</List>}
+          {handledLoaded && (data.done.error || data.runs.error) && (
+            <p className="mt-2 text-xs text-zinc-500">Some of it couldn’t load just now — this list may be missing a thing or two.</p>
+          )}
         </Section>
 
         <footer className="mt-14 flex flex-col items-center gap-2 text-center text-xs text-zinc-500">
