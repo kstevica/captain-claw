@@ -6,12 +6,12 @@ import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Sun } from 'luci
 // What the person comes for, in plain words, above their team of agents:
 // Today (the briefing: what waits for the person, today's work), Agents (the
 // agents that are up, as cards), Inbox (the Line: what the
-// deck and the agents said on their own), Tasks (the Taskboard), Customers
+// deck and the agents said on their own), Tasks (the Taskboard), People
 // (the people on those tasks), Automations (Scheduled tasks) and Activity
 // (every tool the agents used). Each opens the same view as before; only
 // the way in changed. SimpleNav.tsx draws them.
 
-export type NavTarget = 'today' | 'agents' | 'inbox' | 'tasks' | 'customers' | 'automations' | 'activity'
+export type NavTarget = 'today' | 'agents' | 'inbox' | 'tasks' | 'people' | 'automations' | 'activity'
 
 export interface NavEntry {
   id: NavTarget
@@ -36,7 +36,7 @@ export function navEntries(o: {
   inboxWaiting: number
   onTasks: () => void
   tasksNeedMe: number
-  onCustomers: () => void
+  onPeople: () => void
   onAutomations: () => void
   automationsCount: number
   automationsRunning: boolean
@@ -56,7 +56,7 @@ export function navEntries(o: {
       hint: o.tasksNeedMe ? `${o.tasksNeedMe} need${o.tasksNeedMe === 1 ? 's' : ''} you` : 'Everything asked and sent, and what needs you',
       count: o.tasksNeedMe, hot: o.tasksNeedMe > 0,
     },
-    { id: 'customers', label: 'Customers', icon: Contact, hint: 'The people your agents work with', onSelect: o.onCustomers },
+    { id: 'people', label: 'People', icon: Contact, hint: 'The people your agents work with', onSelect: o.onPeople },
     {
       id: 'automations', label: 'Automations', icon: AlarmClock, onSelect: o.onAutomations,
       hint: o.automationsRunning ? 'One is running now' : 'Jobs your agents do on a schedule',

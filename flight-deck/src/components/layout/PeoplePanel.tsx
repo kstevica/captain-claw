@@ -2,17 +2,17 @@ import { useCallback, useEffect, useState } from 'react'
 import { ChevronDown, ChevronRight, Contact, ListChecks, Loader2, RefreshCw, X } from 'lucide-react'
 import { taskboardApi, type TaskFacet, type TaskItem } from '../../services/taskboardApi'
 
-// ── Customers ────────────────────────────────────────────────────────
+// ── People ───────────────────────────────────────────────────────────
 //
-// Flight Deck keeps no customer records. What it does know is who is on the
+// Flight Deck keeps no contact records. What it does know is who is on the
 // Taskboard's tasks: the people a task came from, went to or mentions (the
 // board's People filter). This lists them — never you, never another deck
 // user — with how many tasks each is on, and a person opens to their latest
 // tasks, each one a click from the Taskboard. Nobody yet: a friendly word on
 // how they get here, and the way to the Taskboard.
 
-/** Another deck user is a colleague, not a customer. */
-const isCustomer = (p: TaskFacet) => !p.me && !p.id.startsWith('fd_user:')
+/** Someone outside the deck: never you, never another deck user (a colleague). */
+const isOutside = (p: TaskFacet) => !p.me && !p.id.startsWith('fd_user:')
 
 function when(epoch: number | null): string {
   if (!epoch) return ''
@@ -24,7 +24,7 @@ function when(epoch: number | null): string {
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 }
 
-export function CustomersPanel({ onClose, onOpenTasks, onOpenTask }: {
+export function PeoplePanel({ onClose, onOpenTasks, onOpenTask }: {
   onClose: () => void
   /** The Taskboard, every task. */
   onOpenTasks: () => void
@@ -42,7 +42,7 @@ export function CustomersPanel({ onClose, onOpenTasks, onOpenTask }: {
     setFailed(false)
     try {
       const page = await taskboardApi.tasks({ view: 'all', limit: 1 })
-      setPeople((page.facets?.party ?? []).filter(isCustomer))
+      setPeople((page.facets?.party ?? []).filter(isOutside))
     } catch {
       setFailed(true)
     } finally {
@@ -74,7 +74,7 @@ export function CustomersPanel({ onClose, onOpenTasks, onOpenTask }: {
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex shrink-0 items-center gap-3 px-6 pb-4 pt-6">
         <div className="min-w-0 flex-1">
-          <h2 className="text-xl font-bold tracking-tight text-zinc-100">Customers</h2>
+          <h2 className="text-xl font-bold tracking-tight text-zinc-100">People</h2>
           <p className="mt-0.5 text-sm text-zinc-500">The people on your agents' tasks — who asked, who was answered, who was mentioned.</p>
         </div>
         <button onClick={() => void load()} disabled={loading} title="Check again" aria-label="Check again"
@@ -93,13 +93,13 @@ export function CustomersPanel({ onClose, onOpenTasks, onOpenTask }: {
         ) : failed ? (
           <Empty
             title="Couldn't reach your tasks just now"
-            text="Customers come from your Taskboard, and it didn't answer. Give it another try in a moment."
+            text="People come from your Taskboard, and it didn't answer. Give it another try in a moment."
             action="Try again"
             onAction={() => void load()}
           />
         ) : people!.length === 0 ? (
           <Empty
-            title="No customers yet"
+            title="No people yet"
             text="When someone emails or messages one of your agents, or a task names them, they'll show up here with everything they've asked for."
             action="Open Tasks"
             onAction={onOpenTasks}

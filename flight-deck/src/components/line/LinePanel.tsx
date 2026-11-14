@@ -3,7 +3,7 @@ import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   ArrowUp, Bot, CheckCheck, ChevronDown, ChevronLeft, CircleHelp, ClipboardCheck, Inbox, Lightbulb, Loader2, Mail,
-  MessageCircle, MessagesSquare, Network, Radio, Receipt, Server, Share2, SlidersHorizontal, Sunrise, Waypoints, X,
+  MessageCircle, MessagesSquare, Network, Radio, Receipt, Server, Share2, SlidersHorizontal, Sunrise, X,
   type LucideIcon,
 } from 'lucide-react'
 import {
@@ -403,7 +403,7 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {loading && items.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-16 text-xs text-zinc-500">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading your Line…
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading your Inbox…
           </div>
         ) : items.length === 0 ? (
           <EmptyList error={error} filtered={!!filter} />
@@ -450,14 +450,14 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
     <div ref={rootRef} className="flex h-full min-h-0 flex-col bg-zinc-950">
       <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 px-4 py-3">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-violet-500/15 text-violet-600 dark:text-violet-300">
-          <Waypoints className="h-[18px] w-[18px]" />
+          <Inbox className="h-[18px] w-[18px]" />
         </span>
         <div className="min-w-0 flex-1">
-          <h2 className="text-sm font-semibold text-zinc-100">Line</h2>
+          <h2 className="text-sm font-semibold text-zinc-100">Inbox</h2>
           <p className="truncate text-[11px] text-zinc-500">What the deck and your agents did and said on their own</p>
         </div>
         <button onClick={() => setChannels((v) => !v)} aria-pressed={channels} className={iconBtn(channels)}
-          title="Where your Line reaches you: WhatsApp, Telegram, devices, one agent's chat — and a daily summary">
+          title="Where your Inbox reaches you: WhatsApp, Telegram, devices, one agent's chat — and a daily summary">
           <SlidersHorizontal className="h-4 w-4" /><span className={wide ? '' : 'sr-only'}>Channels</span>
         </button>
         <button onClick={() => void readAll()} disabled={!counts.unread} className={`${iconBtn()} disabled:opacity-40`}
@@ -626,7 +626,7 @@ function ThreadView({ threadId, known, proposals, pending, onBack, onAnswered }:
     <div className="flex min-h-0 flex-1 flex-col">
       {onBack && (
         <button onClick={onBack} className="flex shrink-0 items-center gap-1 border-b border-zinc-800 px-3 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200">
-          <ChevronLeft className="h-4 w-4" /> Line
+          <ChevronLeft className="h-4 w-4" /> Inbox
         </button>
       )}
       <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto">
@@ -881,7 +881,7 @@ function EmptyDetail({ unread, waiting }: { unread: number; waiting: number }) {
         {waiting ? `${waiting} waiting for you` : unread ? `${unread} new` : 'All caught up'}
       </p>
       <p className="mt-1 max-w-xs text-xs leading-relaxed text-zinc-500">
-        Open an item to read it whole, answer it, or hand it to one of your agents. Or ask an agent about your Line below.
+        Open an item to read it whole, answer it, or hand it to one of your agents. Or ask an agent about your Inbox below.
       </p>
     </div>
   )
@@ -890,7 +890,7 @@ function EmptyDetail({ unread, waiting }: { unread: number; waiting: number }) {
 function EmptyList({ error, filtered }: { error: string; filtered: boolean }) {
   return (
     <div className="px-6 py-16 text-center">
-      <p className="text-sm font-medium text-zinc-300">{error ? "Couldn't load the Line" : filtered ? 'Nothing here' : 'Nothing on your Line yet'}</p>
+      <p className="text-sm font-medium text-zinc-300">{error ? "Couldn't load your Inbox" : filtered ? 'Nothing here' : 'Nothing in your Inbox yet'}</p>
       <p className="mx-auto mt-1 max-w-xs text-xs leading-relaxed text-zinc-500">
         {error || (filtered ? 'Try another filter.'
           : 'Results, finished runs, proposals, payments to look at and fleet changes land here as they happen.')}
@@ -905,11 +905,11 @@ function ChannelsView({ agent, onBack, onClose }: { agent: string; onBack?: () =
       <div className="flex shrink-0 items-center gap-2 border-b border-zinc-800 px-4 py-2">
         {onBack ? (
           <button onClick={onBack} className="-ml-1 flex items-center gap-1 text-xs font-medium text-zinc-400 hover:text-zinc-200">
-            <ChevronLeft className="h-4 w-4" /> Line
+            <ChevronLeft className="h-4 w-4" /> Inbox
           </button>
         ) : (
           <>
-            <span className="text-xs font-medium text-zinc-300">Where your Line reaches you</span>
+            <span className="text-xs font-medium text-zinc-300">Where your Inbox reaches you</span>
             <button onClick={onClose} className="ml-auto rounded-md p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" aria-label="Close channels">
               <X className="h-3.5 w-3.5" />
             </button>
@@ -984,7 +984,7 @@ function Composer({ agents, lineAgent, talkedTo, target, about, more, pending, c
   if (!agents.length) {
     return (
       <div className={`${shell} text-xs text-zinc-500`}>
-        Create an agent to ask it about your Line.{' '}
+        Create an agent to ask it about your Inbox.{' '}
         <button onClick={onSetUp} className="text-violet-600 hover:underline dark:text-violet-400">Channels</button>
       </div>
     )
@@ -1007,7 +1007,7 @@ function Composer({ agents, lineAgent, talkedTo, target, about, more, pending, c
     <div className={shell}>
       {pending && (
         <div className="mb-2 flex items-center gap-1.5 text-[11px] text-zinc-500">
-          <Loader2 className="h-3 w-3 animate-spin" /> {pending} is on it — the answer lands on the Line.
+          <Loader2 className="h-3 w-3 animate-spin" /> {pending} is on it — the answer lands in your Inbox.
         </div>
       )}
       {target && (
@@ -1032,7 +1032,7 @@ function Composer({ agents, lineAgent, talkedTo, target, about, more, pending, c
         <textarea ref={box} value={text} rows={1} maxLength={2000}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }}
-          placeholder={target ? `What should ${name} do ${more ? 'next' : 'with it'}?` : `Ask ${name ? `${name} ` : ''}about your Line…`}
+          placeholder={target ? `What should ${name} do ${more ? 'next' : 'with it'}?` : `Ask ${name ? `${name} ` : ''}about your Inbox…`}
           aria-label={target ? `Hand it to ${name}` : `Ask ${name}`}
           className="max-h-[132px] min-h-[32px] min-w-0 flex-1 resize-none bg-transparent px-1.5 py-1.5 text-base text-zinc-100 placeholder-zinc-500 focus:outline-none sm:text-[13px]" />
         <button onClick={() => void send()} disabled={busy || (!text.trim() && !target)}
@@ -1057,7 +1057,7 @@ function SummaryRow({ agent }: { agent: string }) {
   if (!agent) {
     return (
       <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 px-5 py-4 text-xs text-zinc-500">
-        <span className="font-medium text-zinc-300">Daily summary</span> — pick an agent for your Line above (One agent's chat) and it can sum the Line up every morning.
+        <span className="font-medium text-zinc-300">Daily summary</span> — pick an agent for your Inbox above (One agent's chat) and it can sum your Inbox up every morning.
       </div>
     )
   }
@@ -1066,7 +1066,7 @@ function SummaryRow({ agent }: { agent: string }) {
     try {
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''
       const r = await addLineSummary({ time, tz, telegram, email })
-      setNote(`${r.updated ? 'Updated' : 'Added'}: ${r.agent} sums up your Line every day at ${time} — in its chat and on the Line${
+      setNote(`${r.updated ? 'Updated' : 'Added'}: ${r.agent} sums up your Inbox every day at ${time} — in its chat and in your Inbox${
         telegram ? ', and on Telegram' : ''}${email ? ', and by email' : ''}. Change it in Scheduled tasks.`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -1083,7 +1083,7 @@ function SummaryRow({ agent }: { agent: string }) {
         </span>
         <div className="min-w-0 flex-1">
           <h3 className="text-sm font-semibold text-zinc-100">Daily summary</h3>
-          <p className="mt-0.5 text-xs text-zinc-500">{agent} sums up your Line — what waits for you first, then what failed, then results.</p>
+          <p className="mt-0.5 text-xs text-zinc-500">{agent} sums up your Inbox — what waits for you first, then what failed, then results.</p>
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <label className={check}>
               At

@@ -140,7 +140,7 @@ import {
 import { AGENT_DRAG_TYPE, AgentGroupDialog, AgentGroupPicker, AgentSections, RailGroupMark, type RowParts } from './KioskAgentGroups'
 import { SimpleNav } from './SimpleNav'
 import { navEntries, type NavEntry, type NavTarget } from './navDestinations'
-import { CustomersPanel } from './CustomersPanel'
+import { PeoplePanel } from './PeoplePanel'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import { NetworkBadge, networkShareAction } from '../agents/NetworkShare'
 import { dockerShareKey, processShareKey, useNetworkShareStore } from '../../stores/networkShareStore'
@@ -148,7 +148,7 @@ import { dockerShareKey, processShareKey, useNetworkShareStore } from '../../sto
 // ── Simple layout ────────────────────────────────────────────────────
 //
 // A chat-first arrangement of the same Flight Deck: on the left the outcome
-// nav (Today, Agents, Inbox, Tasks, Customers, Automations, Activity —
+// nav (Today, Agents, Inbox, Tasks, People, Automations, Activity —
 // SimpleNav) over the person's team of agents, and the conversation (or, with
 // none open, Today or the Agents cards) on one rounded panel. No right column:
 // an agent's files and data are the File and Data libraries (bottom left) and
@@ -462,8 +462,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const teamWork = useTeamWorkStore((s) => s.open)
   const closeTeamWork = useTeamWorkStore((s) => s.close)
   const taskboardCount = useTaskboardStore((s) => s.needsMe)
-  // Customers: the people on the Taskboard's tasks (the nav's Customers).
-  const [customersOpen, setCustomersOpen] = useState(false)
+  // People: who is on the Taskboard's tasks (the nav's People).
+  const [peopleOpen, setPeopleOpen] = useState(false)
   // With no chat open, the centre shows Today or the Agents cards (the nav picks).
   const [homeView, setHomeView] = useState<'today' | 'agents'>('today')
   // The Line's counts, for the nav's Inbox.
@@ -967,10 +967,10 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   }
   // What a phone's Back closes before it leaves a chat (or Flight Deck).
   const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen || toolsOpen
-    || anonOpen || roomsOpen || !!teamWork || !!filesData || customersOpen
+    || anonOpen || roomsOpen || !!teamWork || !!filesData || peopleOpen
   const closePhoneOverlays = () => {
     closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null); closeAnon(); closeRooms()
-    closeTeamWork(); setCustomersOpen(false)
+    closeTeamWork(); setPeopleOpen(false)
   }
 
   // The outcome nav. Each destination opens the view it always did (the
@@ -978,7 +978,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // one picked is the one in front; Today closes them and the chat, leaving
   // the home. A chat's session stays connected: its agent opens it again.
   const closeDestinations = () => {
-    setLineOpen(false); closeTaskboard(); setCustomersOpen(false); closeScheduled(); closeActivity()
+    setLineOpen(false); closeTaskboard(); setPeopleOpen(false); closeScheduled(); closeActivity()
   }
   const goTo = (open: () => void) => () => { closeDestinations(); open() }
   const goHome = (view: 'today' | 'agents') => () => {
@@ -994,7 +994,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     inboxWaiting: lineWaiting,
     onTasks: goTo(() => openTaskboard()),
     tasksNeedMe: taskboardCount,
-    onCustomers: goTo(() => setCustomersOpen(true)),
+    onPeople: goTo(() => setPeopleOpen(true)),
     onAutomations: goTo(() => openScheduled()),
     automationsCount: scheduledCount,
     automationsRunning: scheduledRunning,
@@ -1002,13 +1002,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   })
   const navCurrent: NavTarget | null = lineOpen ? 'inbox'
     : taskboardOpen ? 'tasks'
-      : customersOpen ? 'customers'
+      : peopleOpen ? 'people'
         : scheduledOpen ? 'automations'
           : activityOpen ? 'activity'
             : hasActiveSession ? null : homeView
-  // Customers' links into the Taskboard.
-  const customersToTasks = () => { setCustomersOpen(false); openTaskboard() }
-  const customersToTask = (taskId: string) => { setCustomersOpen(false); showTaskboardTask(taskId) }
+  // People's links into the Taskboard.
+  const peopleToTasks = () => { setPeopleOpen(false); openTaskboard() }
+  const peopleToTask = (taskId: string) => { setPeopleOpen(false); showTaskboardTask(taskId) }
   // Drive and OneDrive folders want the user's Google or Microsoft account:
   // Connections, on that tab.
   const foldersConnections = (service: 'google' | 'microsoft') => {
@@ -1387,13 +1387,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           <CoursePage kiosk />
         </KioskDialog>
       )}
-      {customersOpen && (
-        <KioskWideDialog label="Customers" phone={isMobile} onClose={() => setCustomersOpen(false)}>
-          <CustomersPanel onClose={() => setCustomersOpen(false)} onOpenTasks={customersToTasks} onOpenTask={customersToTask} />
+      {peopleOpen && (
+        <KioskWideDialog label="People" phone={isMobile} onClose={() => setPeopleOpen(false)}>
+          <PeoplePanel onClose={() => setPeopleOpen(false)} onOpenTasks={peopleToTasks} onOpenTask={peopleToTask} />
         </KioskWideDialog>
       )}
       {lineOpen && (
-        <KioskWideDialog label="Line" phone={isMobile} widest onClose={() => setLineOpen(false)}>
+        <KioskWideDialog label="Inbox" phone={isMobile} widest onClose={() => setLineOpen(false)}>
           <LinePanel onClose={() => setLineOpen(false)} />
         </KioskWideDialog>
       )}
