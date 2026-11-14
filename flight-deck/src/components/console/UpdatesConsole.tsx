@@ -4,7 +4,7 @@ import {
   checkDeckUpdate, fetchDeckUpdate, setDeckUpdateMode, startDeckUpdate,
   type DeckUpdateJob, type DeckUpdateMode, type DeckUpdateStatus,
 } from './consoleApi'
-import { Page, PageHeader, Card, Button, Notice, Pill, Dialog, Segmented, EmptyState, SettingRow } from './parts'
+import { Page, PageHeader, Card, Button, Notice, Pill, Dialog, Segmented, EmptyState, SettingRow, Field } from './parts'
 
 // Updates: this deck's version, what's new on its branch, and the one button that
 // stops the agents, pulls and restarts (deck_update.py). While one runs the page
@@ -28,6 +28,19 @@ const MODES: { value: DeckUpdateMode; label: string; hint: string }[] = [
   { value: 'notify', label: 'Tell me', hint: 'It looks every 15 minutes, and tells admins in the bell when there\'s a new version.' },
   { value: 'install', label: 'Install by itself', hint: 'It looks every 15 minutes, and installs a new version when no agent is mid-turn. Everything merged to this branch goes live, as long as it passes the test start.' },
 ]
+
+// When the restart comes, in seconds of everyone's countdown: the only ones the deck
+// takes (deck_update.COUNTDOWN_CHOICES).
+type RestartIn = '10' | '120' | '300' | '600'
+const RESTART_IN: { value: RestartIn; label: string }[] = [
+  { value: '10', label: 'Restart now' },
+  { value: '120', label: 'In 2 minutes' },
+  { value: '300', label: 'In 5 minutes' },
+  { value: '600', label: 'In 10 minutes' },
+]
+
+// "a 2-minute countdown", "a 10-second countdown".
+const countdownWords = (s: number) => (s >= 60 && s % 60 === 0 ? `${s / 60}-minute` : `${s}-second`)
 
 const short = (sha?: string) => (sha || '').slice(0, 9)
 
@@ -73,7 +86,11 @@ function Result({ job }: { job: DeckUpdateJob }) {
 
 function Progress({ job, gone }: { job: DeckUpdateJob; gone: boolean }) {
   return (
-    <Card title={`Updating to ${short(job.to)}`} icon={RefreshCw} hint={`Started by ${job.by}`}>
+    <Card
+      title={`Updating to ${short(job.to)}`}
+      icon={RefreshCw}
+      hint={`Started by ${job.by}${job.countdown_s ? ` · ${countdownWords(job.countdown_s)} countdown` : ''}`}
+    >
       <ul className="space-y-2 text-sm text-zinc-400">
         {(job.steps || []).map((s) => (
           <li key={`${s.at}-${s.text}`} className="flex items-start gap-2">
@@ -97,6 +114,7 @@ export function UpdatesConsole() {
   const [checking, setChecking] = useState(false)
   const [starting, setStarting] = useState(false)
   const [confirm, setConfirm] = useState(false)
+  const [restartIn, setRestartIn] = useState<RestartIn>('120')
   // Asked and not answered, while one runs: that's the restart.
   const [gone, setGone] = useState(false)
   const following = useRef(false)
@@ -140,12 +158,19 @@ export function UpdatesConsole() {
     }
   }
 
+  const ask = () => {
+    // The deck's own countdown when it's one of the choices (2 minutes unless someone changed it).
+    const own = RESTART_IN.find((r) => r.value === String(status?.countdown_s ?? 120))
+    setRestartIn(own ? own.value : '120')
+    setConfirm(true)
+  }
+
   const begin = async (wait: boolean) => {
     if (!status?.target) return
     setStarting(true)
     setError('')
     try {
-      await startDeckUpdate(status.target, wait)
+      await startDeckUpdate(status.target, wait, Number(restartIn))
       following.current = true
       setConfirm(false)
       await load()
@@ -173,16 +198,18 @@ export function UpdatesConsole() {
   const blocked = (status?.blockers || []).length > 0
   const busy = status?.agents_busy || []
   const mode = status?.mode || 'off'
-  // "a 2-minute countdown", "a 90-second countdown": as long as this deck's runs.
+  // The deck's own countdown, for when nobody picks one: Install by itself.
   const cs = status?.countdown_s ?? 120
-  const countdown = cs % 60 === 0 ? `${cs / 60}-minute` : `${cs}-second`
+  const modeHint = MODES.find((m) => m.value === mode)?.hint
+  // What the one being asked about gives everyone.
+  const chosen = countdownWords(Number(restartIn))
 
   return (
     <Page>
       <PageHeader
         icon={RefreshCw}
         title="Updates"
-        description={`Bring this deck up to the newest version on its branch. It tries the new version first, gives everyone a ${countdown} countdown, stops the agents, pulls and restarts. If the new version doesn't come up, it goes back by itself. Admins get an email either way.`}
+        description="Bring this deck up to the newest version on its branch. It tries the new version first, gives everyone a countdown you choose, from 10 seconds to 10 minutes, stops the agents, pulls and restarts. If the new version doesn't come up, it goes back by itself. Admins get an email either way."
         actions={status?.available && !active
           ? <Button icon={RefreshCw} busy={checking} onClick={() => { void check() }}>Check now</Button>
           : undefined}
@@ -225,7 +252,7 @@ export function UpdatesConsole() {
               <Card
                 title={`${behind} new commit${behind === 1 ? '' : 's'}`}
                 icon={Download}
-                action={<Button variant="primary" icon={Download} disabled={blocked} onClick={() => setConfirm(true)}>Update now</Button>}
+                action={<Button variant="primary" icon={Download} disabled={blocked} onClick={ask}>Update now</Button>}
               >
                 <div className="space-y-4">
                   {blocked && (
@@ -251,7 +278,10 @@ export function UpdatesConsole() {
             )}
 
           <Card title="Automatically">
-            <SettingRow title="When there's a new version" hint={MODES.find((m) => m.value === mode)?.hint}>
+            <SettingRow
+              title="When there's a new version"
+              hint={mode === 'install' && cs > 0 ? `${modeHint} Everyone gets a ${countdownWords(cs)} countdown first.` : modeHint}
+            >
               <Segmented label="When there's a new version" value={mode} options={MODES} onChange={(m) => { void changeMode(m) }} />
             </SettingRow>
           </Card>
@@ -268,14 +298,17 @@ export function UpdatesConsole() {
               <Button variant="ghost" onClick={() => setConfirm(false)}>Cancel</Button>
               {busy.length > 0 && <Button variant="danger" disabled={starting} onClick={() => { void begin(false) }}>Stop them after the countdown</Button>}
               <Button variant="primary" busy={starting} onClick={() => { void begin(busy.length > 0) }}>
-                {busy.length > 0 ? 'Wait for them too' : 'Update now'}
+                {busy.length > 0 ? 'Wait for them too' : 'Start the update'}
               </Button>
             </>
           )}
         >
-          <div className="space-y-3 text-sm leading-relaxed text-zinc-400">
+          <div className="space-y-4 text-sm leading-relaxed text-zinc-400">
+            <Field label="When should it restart?" hint="The countdown starts once the new version has passed its test start.">
+              <Segmented label="When should it restart?" value={restartIn} options={RESTART_IN} onChange={setRestartIn} />
+            </Field>
             <p>
-              Everyone signed in gets a {countdown} countdown first, and this can't be cancelled once it starts.{' '}
+              Everyone signed in gets a {chosen} countdown first, and this can't be cancelled once it starts.{' '}
               {status.agents_running
                 ? `The ${status.agents_running} running agent${status.agents_running === 1 ? '' : 's'} then stop and come back when the deck is up. `
                 : ''}

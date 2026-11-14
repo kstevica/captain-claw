@@ -147,6 +147,8 @@ export interface DeckUpdateJob {
   error?: string
   refused?: string
   detached_log?: string
+  // How long everyone's countdown runs for this update: what the admin picked, or the deck's own.
+  countdown_s?: number
   seconds_left?: number
   mail?: { sent: number; of: number; from: string; error: string }
 }
@@ -154,7 +156,8 @@ export interface DeckUpdateJob {
 export interface DeckUpdateStatus {
   available: boolean
   why?: string
-  // How long everyone's countdown runs before the restart.
+  // How long everyone's countdown runs before the restart when nobody picks (Install by itself,
+  // an agent's ask): FD_UPDATE_COUNTDOWN_S.
   countdown_s?: number
   active?: boolean
   job: DeckUpdateJob
@@ -188,8 +191,11 @@ export async function fetchDeckUpdate(): Promise<DeckUpdateStatus> {
 
 export const checkDeckUpdate = () => call<DeckUpdateStatus>('/fd/system/update/check', { method: 'POST' })
 
-export const startDeckUpdate = (target: string, wait: boolean) =>
-  call<DeckUpdateJob>('/fd/system/update/start', { method: 'POST', body: JSON.stringify({ target, wait }) })
+// countdownS: how long everyone gets before the restart, 10, 120, 300 or 600 seconds.
+export const startDeckUpdate = (target: string, wait: boolean, countdownS: number) =>
+  call<DeckUpdateJob>('/fd/system/update/start', {
+    method: 'POST', body: JSON.stringify({ target, wait, countdown_s: countdownS }),
+  })
 
 export const setDeckUpdateMode = (mode: DeckUpdateMode) =>
   call<{ mode: DeckUpdateMode }>('/fd/system/update/mode', { method: 'PUT', body: JSON.stringify({ mode }) })

@@ -595,7 +595,8 @@ async def _dispatch_crew_merge(user_id: str, action: dict[str, Any], *, approved
 
 async def _dispatch_deck_update(user_id: str, action: dict[str, Any], *, approved_by_human: bool) -> dict[str, Any]:
     """An admin's Approve on a deck update their agent asked for. How it ends reaches
-    them, and the agent, from the deck that comes up."""
+    them, and the agent, from the deck that comes up. An Approve is one click wherever it's
+    shown, so it doesn't ask how long the countdown is: it's the deck's own, FD_UPDATE_COUNTDOWN_S."""
     store = get_store()
     if not approved_by_human:
         return {"ok": False, "target": "", "note": "a deck update waits for a person's Approve"}
