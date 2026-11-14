@@ -544,13 +544,62 @@ def test_one_person_one_number_in_a_text():
     assert out.count("⟦PERSON_1") == 6 and "G. Vidović" not in out  # "G. Vidović" is someone else
     assert re.search(r"⟦PERSON_(\d+)⟧ is his cousin", out).group(1) != "1"
     assert E.restore(out, state)[0] == text
-    two = "Lana Kordić and Davor Kordić joined; Kordić left."
+    two = "Lana Barišić and Goran Barišić joined; Barišić left."
     out = E.anonymize_text(two, state, E.Options(one_word_names=False, extra=(
-        ("Lana Kordić", "PERSON"), ("Davor Kordić", "PERSON"), ("Kordić", "PERSON"))))[0]
-    assert len(set(re.findall(r"⟦PERSON_(\d+)", out))) == 3  # "Kordić" alone: two fit, no link
+        ("Lana Barišić", "PERSON"), ("Goran Barišić", "PERSON"), ("Barišić", "PERSON"))))[0]
+    assert len(set(re.findall(r"⟦PERSON_(\d+)", out))) == 3  # "Barišić" alone: two fit, no link
     later = E.anonymize_text("Vidović wrote again.", state, E.Options(one_word_names=False,
                                                                     extra=(("Vidović", "PERSON"),)))[0]
     assert not later.startswith("⟦PERSON_1")  # another text: no link
+
+
+def test_a_lone_surname_after_the_full_name_the_model_found():
+    """The trusted model names "Marin Vidović" once: "Vidović said" in the same
+    text is him too, with no title and no help from the model; a surname two
+    people here share is one "a Barišić". In another text a lone surname is
+    the model's call again."""
+    state = E.VaultState()
+    opts = E.Options(one_word_names=False, extra=(
+        ("Marin Vidović", "PERSON"), ("Lana Barišić", "PERSON"), ("Goran Barišić", "PERSON")))
+    text = ('Marin Vidović founded it. "We were three," Vidović said; Vidovića pamte svi. '
+            "Lana Barišić and Goran Barišić joined. Barišić declined.")
+    out = E.anonymize_text(text, state, opts)[0]
+    assert "Vidovi" not in out and "Barišić" not in out and out.count("⟦PERSON_1") == 3
+    kordic = re.search(r"(⟦PERSON_\d+⟧) declined", out).group(1)
+    assert kordic not in out.split(" joined")[0]  # neither Lana nor Davor
+    assert E.restore(out, state)[0] == text
+    # The full name already a token in the text counts the same.
+    again = E.anonymize_text("⟦PERSON_1⟧ came back; Vidović waved.", state, E.Options(one_word_names=False))[0]
+    assert again.startswith("⟦PERSON_1⟧ came back; ⟦PERSON_1:")
+    later = "Vidović is a common surname."
+    assert E.anonymize_text(later, state, E.Options(one_word_names=False))[0] == later
+
+
+def test_a_company_or_product_in_another_case_form():
+    """Whichever form the model gave — the product "Taru" (accusative) or
+    "Nebula Robotika" — the name's other case forms are it too; a lowercase
+    word with the same stem is not."""
+    state = E.VaultState()
+    opts = E.Options(one_word_names=False, extra=(("Nebula Robotika", "ORG"), ("Taru", "ORG")))
+    text = ("Nebula Robotika predstavila je robota Taru. Robotom Tarom zadovoljni su kupci Nebule Robotike, "
+            "a Nebulom Robotikom upravlja osnivač.")
+    out = E.anonymize_text(text, state, opts)[0]
+    assert "Tar" not in out and "Nebul" not in out and "Robotik" not in out
+    assert set(re.findall(r"⟦ORG_(\d+)", out)) == {"1", "2"} and E.restore(out, state)[0] == text
+    plain = "Robot ima tarom zaštitu."
+    assert E.anonymize_text(plain, state, E.Options(one_word_names=False))[0] == plain
+
+
+def test_a_one_word_name_from_the_model_in_its_case_forms():
+    """A surname the model gave alone is found in its other case forms in the
+    same text — never in another (code still takes no one by a single word)."""
+    state = E.VaultState()
+    text = "Babić je stigao. Babića smo pitali, a s Babićem smo se dogovorili."
+    out = E.anonymize_text(text, state, E.Options(one_word_names=False, extra=(("Babić", "PERSON"),)))[0]
+    assert "Babić" not in out and set(re.findall(r"⟦PERSON_(\d+)", out)) == {"1"}
+    assert E.restore(out, state)[0] == text
+    later = "Babića nema."
+    assert E.anonymize_text(later, state, E.Options(one_word_names=False))[0] == later
 
 
 def test_a_company_in_a_file_path_or_name():

@@ -138,6 +138,32 @@ def _json_block(raw: str) -> object:
     raise ValueError("no JSON in the answer")
 
 
+# A label the model took in with the value ("JMBG 1503…", "profil
+# linkedin.com/…", "Auto ZG 1234-AB"): the value is what's private, and a
+# label hidden with it leaves a sentence nobody can read. Known label words
+# only — "ZG" in a plate or "Ilica" in an address is the value itself.
+_LABEL_KINDS = frozenset({"ID_NUMBER", "CARD", "IP", "PROFILE_URL", "PLATE", "PHONE", "EMAIL", "IBAN", "DOB",
+                          "ADDRESS"})
+_LABELS = frozenset("""
+jmbg oib mbs mb mbo mbg iban kartica broj br tel telefon mob mobitel fax faks e-mail email mail adresa profil
+auto vozilo reg registracija tablica tablice osobna putovnica rođen rođena datum rođenja sjedište prebivalište
+card cvv phone mobile cell no nr number id passport ssn plate car licence license account born dob address
+profile ip handy ausweis kennzeichen geboren steuer-id steuernummer konto anschrift adresse wohnort
+""".split())
+_LABEL_RE = re.compile(r"([^\W\d_]+(?:-[^\W\d_]+)*)\.?[ \t]*[:#]?[ \t]+(?=\S)")
+
+
+def strip_label(text: str) -> str:
+    """*text* without the label words in front of its value (never all of it)."""
+    rest = text
+    for _ in range(3):  # "datum rođenja: …"
+        m = _LABEL_RE.match(rest)
+        if m is None or m.group(1).casefold() not in _LABELS:
+            break
+        rest = rest[m.end():]
+    return rest if len(rest) >= 2 else text
+
+
 def normalize_kind(kind: str) -> str:
     k = re.sub(r"[^A-Z_]", "_", str(kind or "").strip().upper()).strip("_")
     k = _ALIASES.get(k, k)
@@ -161,6 +187,8 @@ def parse(raw: str, chunk: str, kinds: frozenset[str] | None = None) -> tuple[li
             continue
         text = str(item.get("text") or "").strip()
         kind = normalize_kind(str(item.get("kind") or ""))
+        if kind in _LABEL_KINDS:
+            text = strip_label(text)
         if (not (2 <= len(text) <= MAX_TERM_CHARS) or "⟦" in text or "⟧" in text or text not in chunk
                 or not re.search(r"\w", text) or fold(text) in _STOP):
             dropped += 1

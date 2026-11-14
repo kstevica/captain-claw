@@ -1238,14 +1238,39 @@ class TestWholeChat:
                                  attested=False, on_failure="refuse", enabled=True, source="settings")
         assert await trusted.completer(m)("system", "user") == ("[]", 3)
         assert made == [trusted.CALL_TIMEOUT] and trusted.CALL_TIMEOUT >= 600
-        assert kwargs["max_tokens"] == trusted.MAX_TOKENS >= 32000
+        # On Ollama: the smallest context the call fits (memory is held for all
+        # of it), the answer limit what is left of it.
+        assert kwargs["num_ctx"] == 8192 and 4096 <= kwargs["max_tokens"] < 8192
         assert kwargs["think"] is False  # off by default: finding names needs no thinking
+        kwargs.clear()
+        cloud = trusted.TrustedModel(provider="anthropic", model="claude-haiku-5-5", attested=True)
+        await trusted.completer(cloud)("system", "user")
+        assert kwargs["max_tokens"] == trusted.MAX_TOKENS >= 32000 and "num_ctx" not in kwargs
         monkeypatch.setenv("FD_ANONYMIZE_MODEL_THINK", "model")
         await trusted.completer(m)("system", "user")
         assert kwargs["think"] is None  # the model's own
         monkeypatch.setenv("FD_ANONYMIZE_MODEL_THINK", "low")
         await trusted.completer(m)("system", "user")
         assert kwargs["think"] == "low"
+
+    def test_the_ollama_window_fits_the_call(self, monkeypatch):
+        """8K for an ordinary part; more for a script that takes a token a
+        character (Ollama would cut the prompt from the front: instructions
+        first); more for thinking; fixed when the deck says so."""
+        from captain_claw.anonymize import llm_lane as L
+        from captain_claw.flight_deck import anonymize_trusted as trusted
+
+        monkeypatch.delenv("FD_ANONYMIZE_MODEL_NUM_CTX", raising=False)
+        latin = L.user_prompt("Ivan Horvat radi u Zagrebu. " * 214, 1, 1)  # ~6,000 characters
+        ctx, limit = trusted.ollama_window(L.SYSTEM, latin, False)
+        assert ctx == 8192 and limit >= trusted.ANSWER_ROOM
+        cjk = L.user_prompt("张伟在北京工作。" * 750, 1, 1)
+        ctx, limit = trusted.ollama_window(L.SYSTEM, cjk, False)
+        assert ctx == 16384 and limit >= trusted.ANSWER_ROOM
+        assert trusted.ollama_window(L.SYSTEM, latin, "low")[0] == 16384
+        assert trusted.ollama_window(L.SYSTEM, latin, False)[0] == trusted.ollama_window(L.SYSTEM, "x", False)[0]
+        monkeypatch.setenv("FD_ANONYMIZE_MODEL_NUM_CTX", "32768")
+        assert trusted.ollama_window(L.SYSTEM, latin, False)[0] == 32768
 
     def test_a_provider_can_keep_model_output_out_of_its_logs(self):
         from captain_claw.llm import OllamaProvider

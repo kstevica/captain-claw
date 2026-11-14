@@ -52,6 +52,16 @@ class TestParse:
                             kinds=frozenset({"DETAIL"}))
         assert terms == [("Acme", "DETAIL")]
 
+    def test_a_label_taken_in_with_the_value_stays_readable(self):
+        """"JMBG 1503…", "Auto ZG 1234-AB": only the value is private; "ZG" in
+        a plate and a street's own name are the value."""
+        chunk = "JMBG 1503985336097, profil linkedin.com/in/ana-k-77, Auto ZG 1234-AB, Adresa: Ilica 12."
+        terms, _d = L.parse(_answer(
+            ("JMBG 1503985336097", "ID_NUMBER"), ("profil linkedin.com/in/ana-k-77", "PROFILE_URL"),
+            ("Auto ZG 1234-AB", "PLATE"), ("Adresa: Ilica 12", "ADDRESS")), chunk)
+        assert terms == [("1503985336097", "ID_NUMBER"), ("linkedin.com/in/ana-k-77", "PROFILE_URL"),
+                         ("ZG 1234-AB", "PLATE"), ("Ilica 12", "ADDRESS")]
+
     def test_not_json(self):
         with pytest.raises(ValueError):
             L.parse("I found Marko.", "Marko")

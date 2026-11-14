@@ -50,6 +50,38 @@ CALL_TIMEOUT = float(os.environ.get("FD_ANONYMIZE_MODEL_TIMEOUT") or 600.0)
 # answer cut at the limit is asked again in smaller pieces (llm_lane.AnswerCut).
 # FD_ANONYMIZE_MODEL_MAX_TOKENS changes it.
 MAX_TOKENS = int(os.environ.get("FD_ANONYMIZE_MODEL_MAX_TOKENS") or 32000)
+# The context an Ollama model is loaded with. Ollama holds memory for all of
+# it up front, and its default ceiling (32K) took an 8B model from 5.8 to
+# 9.5 GB — past an ordinary 8 GB graphics card — while one call (the
+# instructions, a 6,000-character part, the answer) needs about 3K tokens.
+# So: the smallest step the call fits, with room for the answer; one bigger
+# for thinking. Too small would be worse than slow — Ollama cuts a prompt that
+# doesn't fit from the front, instructions first. The same steps every time,
+# so the model isn't reloaded between calls. FD_ANONYMIZE_MODEL_NUM_CTX fixes it.
+CTX_STEPS = (8192, 16384, 32768)
+ANSWER_ROOM = 4096
+THINK_ROOM = 12288
+
+
+def _tokens_guess(text: str) -> int:
+    """A generous count of a prompt's tokens: about three characters a token
+    for plain Latin text, one for every other character (č, Cyrillic, CJK)."""
+    plain = sum(1 for c in text if ord(c) < 128)
+    return plain // 3 + (len(text) - plain) + 64
+
+
+def ollama_window(system: str, user: str, think: bool | str | None) -> tuple[int, int]:
+    """``(num_ctx, answer limit)`` for one call to an Ollama model, *think*
+    being the configured thinking (not one call's — a retry without thinking
+    keeps the window, so the model stays loaded)."""
+    need = _tokens_guess(system) + _tokens_guess(user)
+    raw = os.environ.get("FD_ANONYMIZE_MODEL_NUM_CTX", "").strip()
+    if raw.isdigit() and int(raw) >= 2048:
+        ctx = int(raw)
+    else:
+        room = ANSWER_ROOM if think is False else THINK_ROOM
+        ctx = next((s for s in CTX_STEPS if s >= need + room), CTX_STEPS[-1])
+    return ctx, max(1024, min(MAX_TOKENS, ctx - need))
 # Thinking on the trusted model's calls: off by default — finding names in a
 # text needs none of it, and a local model that thought without end ran to
 # the answer limit twice on a ~1,000-token chunk (16k, then 32k tokens).
@@ -233,14 +265,17 @@ def completer(m: TrustedModel):
     """``complete(system, user) -> (answer, tokens)`` on the trusted model."""
     from captain_claw.llm import Message, create_provider
 
-    async def ask(system: str, user: str, think: bool | str | None) -> Any:
+    ollama = m.provider.strip().lower() == "ollama"
+
+    async def ask(system: str, user: str, think: bool | str | None, limit: int, ctx: int | None) -> Any:
         from captain_claw.llm import reasoning
 
         level = "off" if think is False else ("on" if think is True else think)  # None: the model's own
         try:
+            window = {"num_ctx": ctx} if ctx else {}
             provider = create_provider(
                 provider=m.provider, model=m.model, api_key=m.api_key or None, base_url=m.base_url or None,
-                temperature=0.0, max_tokens=MAX_TOKENS, think=think)
+                temperature=0.0, max_tokens=limit, think=think, **window)
             # The provider's own per-request timeout (Ollama 120 s, LiteLLM
             # 180 s) would cut a long answer short of the cap below.
             provider.request_timeout = CALL_TIMEOUT
@@ -249,7 +284,7 @@ def completer(m: TrustedModel):
                 return await asyncio.wait_for(
                     provider.complete(messages=[Message(role="system", content=system),
                                                 Message(role="user", content=user)],
-                                      temperature=0.0, max_tokens=MAX_TOKENS),
+                                      temperature=0.0, max_tokens=limit),
                     CALL_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — the error may quote the document: type only
             log.warning("Anonymization trusted model call failed", model=m.label, error=type(exc).__name__)
@@ -262,15 +297,16 @@ def completer(m: TrustedModel):
         from captain_claw.anonymize.llm_lane import AnswerCut
 
         think = model_think()
-        resp = await ask(system, user, think)
+        ctx, limit = ollama_window(system, user, think) if ollama else (None, MAX_TOKENS)
+        resp = await ask(system, user, think, limit, ctx)
         if cut(resp) and think is not False:
             # What runs on is thinking: the same piece, without it.
             log.info("Anonymization trusted model hit its answer limit; asking again without thinking",
-                     model=m.label, limit=MAX_TOKENS)
-            resp = await ask(system, user, False)
+                     model=m.label, limit=limit)
+            resp = await ask(system, user, False, limit, ctx)
         if cut(resp):
-            log.info("Anonymization trusted model hit its answer limit", model=m.label, limit=MAX_TOKENS)
-            raise AnswerCut(MAX_TOKENS)
+            log.info("Anonymization trusted model hit its answer limit", model=m.label, limit=limit)
+            raise AnswerCut(limit)
         return str(getattr(resp, "content", "") or ""), _tokens(getattr(resp, "usage", None))
 
     return call
