@@ -557,7 +557,7 @@ export function SpawnerPage() {
                 {activePresetId ? presets.find((p) => p.id === activePresetId)?.label || 'Edit Agent' : 'New Agent'}
               </h1>
               <p className="text-xs text-zinc-500 sm:text-sm">
-                Configure a Captain Claw instance — {spawnMode === 'docker' ? 'Docker container' : 'local process (pip)'}
+                Configure a Captain agent — {spawnMode === 'docker' ? 'Docker container' : 'local process (pip)'}
               </p>
             </div>
             <div className="flex items-center gap-2 shrink-0">

@@ -161,7 +161,7 @@ export default function ConnectionsPage({ kiosk = false, initialTab }: { kiosk?:
           <div>
             <h1 className="text-xl font-semibold text-zinc-100">Connections</h1>
             <p className="text-sm text-zinc-500">
-              Link Captain Claw to external services so your agents can read and write on your behalf.
+              Link Captain to external services so your agents can read and write on your behalf.
             </p>
           </div>
         </div>

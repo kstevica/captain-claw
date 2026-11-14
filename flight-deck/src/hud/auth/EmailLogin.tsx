@@ -215,7 +215,7 @@ export function EmailLogin(props: {
   )
 
   return (
-    <ScreenFrame title="Sign in with email" subtitle="Captain Claw" className="hud-login-screen">
+    <ScreenFrame title="Sign in with email" subtitle="Captain" className="hud-login-screen">
       {IS_GLASSES ? fields : (
         <form ref={formRef} className="hud-login-form" noValidate onSubmit={(e) => { e.preventDefault(); void submit() }}>
           {fields}

@@ -429,7 +429,7 @@ export function PairScreen() {
   }
 
   return (
-    <ScreenFrame title="Sign in" subtitle="Captain Claw" className="hud-pair-screen">
+    <ScreenFrame title="Sign in" subtitle="Captain" className="hud-pair-screen">
       {body}
     </ScreenFrame>
   )

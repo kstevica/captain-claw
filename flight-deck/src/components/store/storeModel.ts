@@ -58,7 +58,7 @@ export function creatorOf(a: Archetype): string {
     case 'team': return 'Your team'
     case 'user': return 'You'
     case 'shared': return a.shared_owner_name || a.shared_owner_email || 'Shared with you'
-    default: return 'Captain Claw'
+    default: return 'Captain'
   }
 }
 

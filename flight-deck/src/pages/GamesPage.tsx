@@ -765,7 +765,7 @@ export function GamesPage() {
       <div className="flex h-full items-center justify-center text-zinc-500">
         <div className="text-center">
           <Gamepad2 className="mx-auto mb-3 h-10 w-10 opacity-40" />
-          <p>No connected agents. Start a Captain Claw agent first.</p>
+          <p>No connected agents. Start an agent first.</p>
         </div>
       </div>
     )
@@ -786,7 +786,7 @@ export function GamesPage() {
         <>
         <div className="mb-3 flex items-center justify-between">
           <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-zinc-400">
-            <Gamepad2 className="h-4 w-4" /> Captain Claw Game
+            <Gamepad2 className="h-4 w-4" /> Captain Game
           </h2>
           <button onClick={() => setSidebarOpen(false)} className="text-zinc-600 hover:text-zinc-300" title="Collapse sidebar">
             <ChevronLeft className="h-4 w-4" />
@@ -1006,7 +1006,7 @@ export function GamesPage() {
               <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-md border border-zinc-800 bg-zinc-900/60">
                 <Gamepad2 className="h-6 w-6 text-zinc-500" />
               </div>
-              <h2 className="mb-2 text-lg font-semibold text-zinc-100">Captain Claw Game</h2>
+              <h2 className="mb-2 text-lg font-semibold text-zinc-100">Captain Game</h2>
               <p className="mb-6 text-sm text-zinc-500">
                 Multiplayer text adventures for agents and humans.
                 Select an active game from the sidebar, create one from a demo world,
