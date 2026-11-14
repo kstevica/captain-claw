@@ -472,9 +472,6 @@ function AppContent() {
     </>
   )
 
-  // The Agent store (/store): a page of its own, on every form factor.
-  if (window.location.pathname === '/store') return <AgentStorePanel />
-
   // ── Kiosk lock (Admin → Settings → Kiosk mode; `--simple-chat` default) ──
   // Force the locked, chat-first Simple layout on every form factor and ignore
   // the stored layoutMode entirely. `locked` strips the escape hatches (full
@@ -493,6 +490,10 @@ function AppContent() {
       </>
     )
   }
+
+  // The Agent store (/store): a page of its own, on every form factor — after
+  // the kiosk lock, so a locked account stays in its chat-first layout.
+  if (window.location.pathname === '/store') return <AgentStorePanel />
 
   // The desktop app decides between the kiosk and the console after a sign-in
   // (startDesktop): nothing to show until it has.

@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ArrowLeft, Check, Plus, Sparkles, X } from 'lucide-react'
+import { ArrowLeft, Check, Link2, Plus, Sparkles, X } from 'lucide-react'
 import { archetypeLook } from '../layout/archetypeLook'
 import type { SetupRequest } from '../layout/ArchetypeSpawnDialog'
 import { Button, Switch, inputCls, labelCls } from '../console/parts'
 import { ErrorNote } from '../forge/forgeParts'
 import { spawnArchetypeProcess } from '../../services/docker'
 import type { Archetype } from '../../services/tierConfig'
+import { probeGoogle, probeMicrosoft } from '../../stores/connectionsStore'
 import { useProcessStore } from '../../stores/processStore'
-import { agentSlug, creatorOf, uniqueName } from './storeModel'
+import { agentSlug, creatorOf, uniqueName, worksInMail } from './storeModel'
 
 // ── "Add" from the Agent store ───────────────────────────────────────
 //
@@ -36,6 +37,21 @@ export function AddAgentDialog({ archetype: a, takenSlugs, onClose, onAdded }: {
   const nameRef = useRef<HTMLInputElement>(null)
   const look = archetypeLook(a.id, a.family || 'Other')
   const Icon = look.icon
+
+  // Works in mail or a calendar and none of this person's accounts is connected:
+  // say so before it's created, as the New agent picker does. null = unknown.
+  const [mail, setMail] = useState<{ connected: boolean; microsoft: boolean } | null>(null)
+  const needsMail = worksInMail(a)
+  useEffect(() => {
+    if (!needsMail) return
+    let live = true
+    Promise.all([probeGoogle(), probeMicrosoft()]).then(([g, m]) => {
+      if (!live || g.health === 'gray') return  // sign-in off: no accounts to connect
+      const up = (c: { health: string } | null) => !!c && (c.health === 'green' || c.health === 'yellow')
+      setMail({ connected: up(g) || up(m), microsoft: m !== null })
+    }).catch(() => {})
+    return () => { live = false }
+  }, [needsMail])
 
   useEffect(() => { nameRef.current?.select() }, [])
   useEffect(() => {
@@ -114,6 +130,15 @@ export function AddAgentDialog({ archetype: a, takenSlugs, onClose, onAdded }: {
         ) : (
           <form className="space-y-3 px-6 pb-6" onSubmit={(e) => { e.preventDefault(); add() }}>
             {err && <ErrorNote>{err}</ErrorNote>}
+            {needsMail && mail?.connected === false && (
+              <p role="note" className="flex items-start gap-2 rounded-xl border border-sky-500/30 bg-sky-500/5 px-3 py-2.5 text-xs leading-relaxed text-sky-800 dark:text-sky-200">
+                <Link2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span className="min-w-0">
+                  It works in your mail and calendar, and {mail.microsoft ? 'neither Google nor Microsoft is' : 'Google isn\'t'} connected
+                  yet. Connect {mail.microsoft ? 'one' : 'it'} under Connections in Flight Deck, or it can't read your inbox.
+                </span>
+              </p>
+            )}
             <div>
               <label className={labelCls} htmlFor="store-agent-name">Its name on your team</label>
               <input id="store-agent-name" ref={nameRef} value={name} onChange={(e) => setName(e.target.value)} disabled={busy}

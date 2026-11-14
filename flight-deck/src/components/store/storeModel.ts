@@ -39,9 +39,17 @@ export function storeSections(list: Archetype[]): StoreSection[] {
   return sections
 }
 
-/** The Featured row: the first agent of each of the first few categories, so it shows the range. */
-export function featured(sections: StoreSection[], count = 4): Archetype[] {
-  return sections.slice(0, count).map((s) => s.agents[0])
+/** The Featured row: the first few archetypes, in the catalog's own order. */
+export function featured(list: Archetype[], count = 4): Archetype[] {
+  return list.slice(0, count)
+}
+
+/** Tools that work in someone's mail or calendar (as the New agent picker lists them). */
+const MAIL_TOOLS = new Set(['google_mail', 'google_calendar', 'microsoft_mail', 'microsoft_calendar'])
+
+/** It does its work in someone's mail or calendar: it needs a connected account. */
+export function worksInMail(a: Archetype): boolean {
+  return (a.tools || []).some((t) => MAIL_TOOLS.has(t))
 }
 
 /** Who made it, as the store credits it. */

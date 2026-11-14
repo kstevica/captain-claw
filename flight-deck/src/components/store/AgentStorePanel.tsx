@@ -20,6 +20,12 @@ import { creatorOf, featured, matchesSearch, storeSections, type StoreSection } 
 // what the admin published, the person's own and those shared with them);
 // a category is a family on its shelf. Add creates the agent for real
 // (AddAgentDialog → POST /fd/spawn-process, as the New agent picker does).
+//
+// Both themes: the zinc utilities are the app's themed surface colours —
+// html.light remaps the zinc scale (index.css), so `bg-zinc-950` is the page
+// in either theme — and only the accents outside it (violet, emerald, sky)
+// carry a dark: variant, as everywhere else in the app. A light-first zinc
+// class (`text-zinc-900 dark:text-zinc-100`) would turn pale in light.
 
 /** Rows a category shows under "All" before its "See all". */
 const SECTION_PREVIEW = 6
@@ -61,7 +67,7 @@ export function AgentStorePanel() {
     .map((s) => ({ ...s, agents: s.agents.filter((a) => matchesSearch(a, q)) }))
     .filter((s) => s.agents.length > 0), [sections, category, q])
   const browsing = !category && !q
-  const picks = useMemo(() => (browsing ? featured(sections) : []), [browsing, sections])
+  const picks = useMemo(() => (browsing ? featured(catalog || []) : []), [browsing, catalog])
   const current = sections.find((s) => s.key === category)
   // A search that finds nothing in this category may find something in another.
   const elsewhere = useMemo(() => (q && category && !shown.length
