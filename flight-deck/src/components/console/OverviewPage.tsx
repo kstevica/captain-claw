@@ -162,7 +162,7 @@ export function OverviewPage() {
   const agentsRunning = f.system?.available ? f.system.summary.agents : null
   const checking = loading && needs.length === 0
   const headline = checking ? 'Checking in…'
-    : needs.length === 0 ? 'Everything\'s running'
+    : needs.length === 0 ? "Everything's running"
     : `${needs.length} thing${needs.length === 1 ? ' needs' : 's need'} you`
   const firstName = user?.display_name ? user.display_name.split(' ')[0] : ''
 
@@ -198,37 +198,39 @@ export function OverviewPage() {
         )}
       </section>
 
-      <SectionTitle>At a glance</SectionTitle>
-      <div className={`grid grid-cols-2 gap-3 ${accounts ? 'lg:grid-cols-4' : 'lg:grid-cols-3'}`}>
-        {accounts && (
+      <section aria-labelledby="fd-overview-glance" className="space-y-3">
+        <h2 id="fd-overview-glance" className="text-sm font-semibold text-zinc-400">At a glance</h2>
+        <div className={`grid grid-cols-2 gap-3 ${accounts ? 'lg:grid-cols-4' : 'lg:grid-cols-3'}`}>
+          {accounts && (
+            <StatTile
+              icon={Users} tone="violet" label="People" value={f.users ?? '—'} loading={loading && f.users === undefined}
+              sub={f.users !== undefined ? `${f.admins ?? 0} admin${f.admins === 1 ? '' : 's'}${f.invites ? ` · ${f.invites} invited` : ''}` : undefined}
+              onClick={() => go('users')}
+            />
+          )}
           <StatTile
-            icon={Users} tone="violet" label="People" value={f.users ?? '—'} loading={loading && f.users === undefined}
-            sub={f.users !== undefined ? `${f.admins ?? 0} admin${f.admins === 1 ? '' : 's'}${f.invites ? ` · ${f.invites} invited` : ''}` : undefined}
-            onClick={() => go('users')}
+            icon={Boxes} tone="emerald" label="Agents running"
+            value={f.system?.available ? f.system.summary.agents : '—'}
+            loading={loading && f.system === undefined}
+            sub={f.system?.available && (f.system.summary.stopped || f.system.summary.asleep)
+              ? [f.system.summary.asleep ? `${f.system.summary.asleep} asleep` : '', f.system.summary.stopped ? `${f.system.summary.stopped} stopped` : '']
+                .filter(Boolean).join(' · ')
+              : accounts ? 'across every user' : undefined}
           />
-        )}
-        <StatTile
-          icon={Boxes} tone="emerald" label="Agents running"
-          value={f.system?.available ? f.system.summary.agents : '—'}
-          loading={loading && f.system === undefined}
-          sub={f.system?.available && (f.system.summary.stopped || f.system.summary.asleep)
-            ? [f.system.summary.asleep ? `${f.system.summary.asleep} asleep` : '', f.system.summary.stopped ? `${f.system.summary.stopped} stopped` : '']
-              .filter(Boolean).join(' · ')
-            : accounts ? 'across every user' : undefined}
-        />
-        <StatTile
-          icon={MessageSquare} tone="cyan" label="Messages today" value={f.messagesToday !== undefined ? fmtNumber(f.messagesToday) : '—'}
-          loading={loading && f.messagesToday === undefined}
-          sub={f.tokensToday !== undefined ? `${fmtNumber(f.tokensToday)} AI tokens` : undefined}
-          onClick={accounts ? () => go('usage') : undefined}
-        />
-        <StatTile
-          icon={DollarSign} tone="amber" label="Spend, 30 days" value={f.spend30 !== undefined ? `$${f.spend30.toFixed(2)}` : '—'}
-          loading={loading && f.spend30 === undefined}
-          sub="on models"
-          onClick={accounts ? () => go('usage') : undefined}
-        />
-      </div>
+          <StatTile
+            icon={MessageSquare} tone="cyan" label="Messages today" value={f.messagesToday !== undefined ? fmtNumber(f.messagesToday) : '—'}
+            loading={loading && f.messagesToday === undefined}
+            sub={f.tokensToday !== undefined ? `${fmtNumber(f.tokensToday)} AI tokens` : undefined}
+            onClick={accounts ? () => go('usage') : undefined}
+          />
+          <StatTile
+            icon={DollarSign} tone="amber" label="Spend, 30 days" value={f.spend30 !== undefined ? `$${f.spend30.toFixed(2)}` : '—'}
+            loading={loading && f.spend30 === undefined}
+            sub="on models"
+            onClick={accounts ? () => go('usage') : undefined}
+          />
+        </div>
+      </section>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
         <Card
@@ -319,10 +321,6 @@ function NeedRow({ need: n }: { need: Need }) {
       {n.action && <Button variant="primary" icon={n.action.icon} onClick={n.action.onClick} className="shrink-0 self-start wide:self-auto">{n.action.label}</Button>}
     </li>
   )
-}
-
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h2 className="-mb-3 text-sm font-semibold text-zinc-400">{children}</h2>
 }
 
 function Meter({ label, value, pct }: { label: string; value: string; pct: number | null }) {
