@@ -105,6 +105,10 @@ class Entity:
     # company, one number — "vrtlog" in a link is ⟦ORG_7:2⟧, not a token
     # of its own, and restores as "vrtlog", not the name.
     spellings: list[str] = field(default_factory=list)
+    # The token of the entity this one turned out to be (a person said to be
+    # "the same" in a data room): what finds it gives that entity — its own
+    # values are that entity's spellings by then. Its own tokens still restore.
+    same_as: str = ""
 
     def spelling_token(self, surface: str) -> str:
         """The token that restores exactly *surface*: this entity's own when
@@ -148,7 +152,10 @@ def _better_name(candidate: str, current: str) -> bool:
     if [stem_key(w) for w in cw if not _is_initial(w)] != [stem_key(w) for w in ow if not _is_initial(w)] \
             and sum(map(_is_initial, cw)) >= sum(map(_is_initial, ow)):
         return False
-    score = lambda words, text: (sum(map(_is_initial, words)), len(text))  # noqa: E731
+    # Fewer initials, then fewer words in lower case ("Ivan Horvat" over a
+    # ledger's "ivan horvat"), then the shorter.
+    score = lambda words, text: (sum(map(_is_initial, words)),  # noqa: E731
+                                 sum(1 for w in words if w[:1].islower()), len(text))
     return score(cw, candidate) < score(ow, current)
 
 
@@ -226,9 +233,35 @@ class VaultState:
 
     def snapshot(self) -> "VaultState":
         """A copy to run on without changing this one (a preview pass)."""
-        copies = [Entity(e.token, e.kind, e.key, e.original, list(e.forms), spellings=list(e.spellings))
-                  for e in self.entities]
+        copies = [Entity(e.token, e.kind, e.key, e.original, list(e.forms), spellings=list(e.spellings),
+                         same_as=e.same_as) for e in self.entities]
         return VaultState(copies, dict(self.counters))
+
+    def target(self, e: Entity) -> Entity:
+        """*e*, or the entity it was said to be the same as."""
+        seen = 0
+        while e.same_as and seen < 8:
+            nxt = self.by_token.get(e.same_as)
+            if nxt is None or nxt is e:
+                break
+            e, seen = nxt, seen + 1
+        return e
+
+    def merge(self, keep: Entity, other: Entity) -> dict[str, str]:
+        """*other* is *keep* (two tokens found to be one party): its value and
+        spellings become *keep*'s spellings, and it points to *keep* from now
+        on. Returns how each of *other*'s tokens is written now
+        ({"⟦PERSON_9⟧": "⟦PERSON_2:4⟧", "⟦PERSON_9:2⟧": "⟦PERSON_2:5⟧"})."""
+        if keep.kind != other.kind or keep is other or self.target(keep) is other:
+            raise ValueError("only two different values of one kind can be one")
+        mapping = {other.token: keep.spelling_token(other.original)}
+        for place, spelling in enumerate(other.spellings, 2):
+            mapping[f"{other.token[:-1]}:{place}⟧"] = keep.spelling_token(spelling)
+        for form in other.forms:
+            keep.add_form(form)
+        other.same_as = keep.token
+        other.changed = keep.changed = True
+        return mapping
 
     def add(self, kind: str, key: str, original: str) -> Entity:
         n = self.counters.get(kind, 0) + 1
@@ -278,8 +311,27 @@ name_stem = d.name_stem
 _TRANSLIT = (("ü", ("u", "ue")), ("ö", ("o", "oe")), ("ä", ("a", "ae")), ("ß", ("ss",)), ("đ", ("d", "dj")))
 
 
+# A name value's words in any case: "ivan horvat" from a ledger, "ana HORVAT"
+# typed into a register. Not a particle ("van", "de") or an abbreviation
+# ("dipl.", "mag.") — those stay out of the name, as in "Ivan Horvat, dipl. oec.".
+_ANY_NAME_WORD_RE = re.compile(rf"{NAME_WORD}|{CAPS_WORD}|{INITIAL}|[{d.UP}{d.LO}][{d.LO}{d.UP}]*(?:[-'’][{d.UP}{d.LO}]+)*\.?")
+_PARTICLES = frozenset(re.findall(r"[a-z]+", d.PARTICLE))
+
+
 def _name_words(text: str) -> list[str]:
-    return _NAME_TOKEN_RE.findall(text)
+    """The words of a name value. Capitalized and all-caps words, initials —
+    and a lower-case word too (an initial or abbreviation with its dot aside):
+    with only capitals counted, "ivan horvat" had no words at all and every
+    lower-case name became one person."""
+    out: list[str] = []
+    for w in _ANY_NAME_WORD_RE.findall(text):
+        if _NAME_TOKEN_RE.fullmatch(w):
+            out.append(w)
+        elif w.endswith(".") or len(w) < 2 or w.casefold() in _PARTICLES or w.casefold() in d._STOP:
+            continue  # "dipl.", "mag.", "van", "de", "i", "za"
+        elif re.fullmatch(rf"[{d.LO}]+(?:[-'’][{d.LO}]+)*|[{d.UP}][{d.LO}]*[{d.UP}].*", w):
+            out.append(w)
+    return out
 
 
 def _is_initial(word: str) -> bool:
@@ -346,13 +398,141 @@ def _name_bag(stems: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted(stems))
 
 
-def _person_view(e: Entity) -> _Person | None:
+def _person_view(e: Entity, text: str | None = None) -> _Person | None:
     if e.kind != "PERSON" or e.key.startswith(("~", "/")):  # "/…": a spelling in a link, not a name
         return None
-    words = [w for w in _name_words(e.original) if not _is_initial(w)]
+    if e.same_as:
+        return None  # found by the one it is the same as (its words are that one's spellings)
+    words = [w for w in _name_words(e.original if text is None else text) if not _is_initial(w)]
     if not words:
         return None
     return _Person(e, words, tuple(stem_key(w) for w in words))
+
+
+# A person's other written form that is a plain name ("Reyes Maribel" kept
+# for one who is "MARIBEL SANTOS REYES"): words of letters with spaces
+# between — not a link's or a file name's spelling ("ivan-horvat", "Ivan_Horvat").
+_PLAIN_NAME_RE = re.compile(rf"[{d.UP}{d.LO}'’.\-]+(?:,?[ \t]+[{d.UP}{d.LO}'’.\-]+)+")
+
+
+def _spelling_views(e: Entity) -> list[_Person]:
+    """Views of a person by the full-name forms and spellings it was written
+    with (two words or more), other than its value's own words."""
+    if e.kind != "PERSON" or e.key.startswith(("~", "/")):
+        return []
+    own = _person_view(e)
+    seen = {_name_bag(own.stems)} if own else set()
+    out: list[_Person] = []
+    for text in (*e.forms, *e.spellings):
+        if not _PLAIN_NAME_RE.fullmatch(text.strip()):
+            continue
+        p = _person_view(e, text)
+        if p is None or len(p.words) < 2 or len(p.words) > MAX_NAME_RUN:
+            continue
+        bag = _name_bag(p.stems)
+        if bag not in seen:
+            seen.add(bag)
+            out.append(p)
+    return out
+
+
+def _alt_bags(words: list[str]) -> set[tuple[str, ...]]:
+    """A name's bags with a two-part first name written the other way: two
+    words joined ("Ana Marija" → "Anamarija"), a hyphenated word joined or
+    split ("Ana-Marija" → "Anamarija" / "Ana Marija")."""
+    folded = [d.strip_accents(w).casefold() for w in words]
+    stems = [stem_key(w) for w in words]
+    out: set[tuple[str, ...]] = set()
+    for i, w in enumerate(folded):
+        if "-" in w:
+            parts = [stem_key(x) for x in w.split("-") if x]
+            out.add(_name_bag((*stems[:i], stem_key(w.replace("-", "")), *stems[i + 1:])))
+            if len(parts) >= 2:
+                out.add(_name_bag((*stems[:i], *parts, *stems[i + 1:])))
+    if len(folded) >= 3:
+        for i in range(len(folded) - 1):
+            out.add(_name_bag((*stems[:i], stem_key(folded[i] + folded[i + 1]), *stems[i + 2:])))
+    out.discard(_name_bag(tuple(stems)))
+    return out
+
+
+# A full name with up to this many more words than another, the rest the
+# same, is the same person when nobody else known fits: "MARIBEL SANTOS
+# REYES" in a register is "Reyes Maribel" in a payroll.
+MAX_EXTRA_NAMES = 2
+
+
+# ── addresses ───────────────────────────────────────────────────────
+
+# Short forms of a street's kind, as registers write them ("Zagrebačka c. 5").
+_STREET_ABBR = {"c": "cesta", "ul": "ulica", "av": "avenija", "str": "strasse", "st": "street", "rd": "road",
+                "ave": "avenue"}
+_STREET_KINDS = frozenset({"cesta", "ulica", "avenija", "put", "trg", "obala", "prilaz", "odvojak", "naselje",
+                           "strasse", "street", "road", "avenue", "lane"})
+_ADDR_TOKEN_RE = re.compile(r"\d+(?:[ \t]*[a-z](?![a-z]))?|[a-z]+\.?")
+
+
+@dataclass(frozen=True)
+class _Address:
+    street: tuple[str, ...]  # folded, short forms of a street's kind written out
+    number: str              # "92", "33a"
+    town: tuple[str, ...]
+
+
+def _address_parts(text: str) -> _Address | None:
+    """A street address as (street words, house number, town) — None when it
+    has no house number after a street's name (then only the same text again
+    is the same address)."""
+    t = d.strip_accents(str(text or "")).casefold()
+    street_part, _comma, town_part = t.partition(",")
+    tokens = _ADDR_TOKEN_RE.findall(street_part)
+    street: list[str] = []
+    number = ""
+    after: list[str] = []
+    for tok in tokens:
+        if tok[:1].isdigit():
+            if street and not number:
+                number = re.sub(r"[ \t]+", "", tok)
+                continue
+            if not number:
+                return None  # a number before any street word ("10000 Zagreb")
+        if number:
+            after.append(tok.rstrip("."))
+        else:
+            word = tok.rstrip(".")
+            street.append(_STREET_ABBR.get(word, word))
+    if not street or not number:
+        return None
+    town = tuple(w.rstrip(".") for w in _ADDR_TOKEN_RE.findall(town_part) if not w[:1].isdigit()) \
+        or tuple(w for w in after if not w[:1].isdigit())
+    return _Address(tuple(street), number, town)
+
+
+def _word_fits(a: str, b: str) -> bool:
+    """One street word the same as another, or written short ("kov" for "kovacka")."""
+    if a == b:
+        return True
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return len(short) >= 3 and long_.startswith(short)
+
+
+def _same_place(a: _Address, b: _Address) -> bool:
+    """Two addresses that are one place: the same house number, the street's
+    name the same or written short, its kind ("cesta") said or left out, the
+    town the same or left out."""
+    if a.number != b.number:
+        return False
+    sa = [w for w in a.street if w not in _STREET_KINDS] or list(a.street)
+    sb = [w for w in b.street if w not in _STREET_KINDS] or list(b.street)
+    if len(sa) != len(sb) or not all(_word_fits(x, y) for x, y in zip(sa, sb)):
+        return False
+    ka = [w for w in a.street if w in _STREET_KINDS]
+    kb = [w for w in b.street if w in _STREET_KINDS]
+    if ka and kb and ka != kb:
+        return False  # "Zagrebačka cesta 5" is not "Zagrebačka ulica 5"
+    if a.town and b.town and not (len(a.town) == len(b.town) and all(map(_word_fits, a.town, b.town))):
+        return False
+    return True
 
 
 class _Resolver:
@@ -367,21 +547,68 @@ class _Resolver:
         # A full name's stems in any order: "ŠIMUNIĆ DARKO" in a register and
         # "Darko Šimunić" in a payroll are one person.
         self.by_bag: dict[tuple[str, ...], list[_Person]] = {}
+        # The same with a two-part first name joined or split ("Anamarija").
+        self.by_alt_bag: dict[tuple[str, ...], list[_Person]] = {}
+        # Full names by each of their stems, for a name with a middle name
+        # more or less.
+        self.by_stem: dict[str, list[_Person]] = {}
+        # Addresses by house number, each as the parts of its written forms.
+        self.by_number: dict[str, list[tuple[Entity, _Address]]] = {}
+        self._addr_seen = 0
 
     def _refresh(self) -> None:
         # Entities are only ever appended (or their canonical form improved,
-        # which keeps its stems): index the new ones.
+        # which keeps its stems): index the new ones — by their value and by
+        # the other full-name forms the vault kept for them.
         for e in self.state.entities[self._seen:]:
             p = _person_view(e)
             if p is None:
                 continue
-            self.by_bag.setdefault(_name_bag(p.stems), []).append(p)
-            if len(p.words) > 1:
-                self.by_last.setdefault(p.stems[-1], []).append(p)
-                self.by_first.setdefault(p.stems[0], []).append(p)
+            for i, v in enumerate([p, *_spelling_views(e)]):
+                self.by_bag.setdefault(_name_bag(v.stems), []).append(v)
+                if len(v.words) > 1:
+                    for bag in _alt_bags(v.words):
+                        self.by_alt_bag.setdefault(bag, []).append(v)
+                    for s in set(v.stems):
+                        self.by_stem.setdefault(s, []).append(v)
+                if i == 0 and len(p.words) > 1:
+                    self.by_last.setdefault(p.stems[-1], []).append(p)
+                    self.by_first.setdefault(p.stems[0], []).append(p)
         self._seen = len(self.state.entities)
 
+    def _alike(self, words: list[str]) -> Entity | None:
+        """The one known person a full name is written otherwise for: a
+        two-part first name joined or split, or a middle name more or less
+        ("MARIBEL SANTOS REYES" / "Reyes Maribel"). None when nobody, or more
+        than one person, fits — then it is somebody else."""
+        stems = tuple(stem_key(w) for w in words)
+        bag = _name_bag(stems)
+        found: dict[str, Entity] = {}
+        for v in self.by_alt_bag.get(bag, ()):
+            found[v.entity.token] = v.entity
+        for alt in _alt_bags(words):
+            for v in self.by_bag.get(alt, ()):
+                found[v.entity.token] = v.entity
+        if not found and len(set(stems)) >= 2:
+            mine = set(stems)
+            cands: dict[int, _Person] = {}
+            for s in mine:
+                for v in self.by_stem.get(s, ()):
+                    cands[id(v)] = v
+            for v in cands.values():
+                theirs = set(v.stems)
+                if len(theirs) < 2 or theirs == mine:
+                    continue
+                if (mine < theirs and len(theirs) - len(mine) <= MAX_EXTRA_NAMES) \
+                        or (theirs < mine and len(mine) - len(theirs) <= MAX_EXTRA_NAMES):
+                    found[v.entity.token] = v.entity
+        return next(iter(found.values())) if len(found) == 1 else None
+
     def resolve(self, kind: str, text: str) -> Entity:
+        """The entity *text* is — the one it was said to be the same as, if so."""
+        return self.state.target(self._resolve(kind, text))
+
+    def _resolve(self, kind: str, text: str) -> Entity:
         key = normalize(kind, text, self.options.default_cc)
         if kind == "PERSON":
             e = self._person(text, key)
@@ -390,7 +617,28 @@ class _Resolver:
         found = self.state.by_key.get((kind, key))
         if found is not None:
             return found
+        if kind == "ADDRESS":
+            e = self._address(text)
+            if e is not None:
+                return e
         return self.state.add(kind, key, text)
+
+    def _address(self, text: str) -> Entity | None:
+        """The one known address *text* is another way of writing ("KOV. C.
+        12" / "Kovačka cesta 12, Selo"); None when none, or several, fit."""
+        parts = _address_parts(text)
+        if parts is None:
+            return None
+        for e in self.state.entities[self._addr_seen:]:
+            if e.kind != "ADDRESS" or e.key.startswith("/"):
+                continue
+            for value in dict.fromkeys([e.original, *e.forms, *e.spellings]):
+                p = _address_parts(value)
+                if p is not None:
+                    self.by_number.setdefault(p.number, []).append((e, p))
+        self._addr_seen = len(self.state.entities)
+        found = {e.token: e for e, p in self.by_number.get(parts.number, ()) if _same_place(parts, p)}
+        return next(iter(found.values())) if len(found) == 1 else None
 
     def _person(self, text: str, key: str) -> Entity | None:
         words = _name_words(text)
@@ -421,7 +669,9 @@ class _Resolver:
             # diacritics: the person the vault knew first by them (a vault
             # that split one person before keeps its first token).
             same = self.by_bag.get(_name_bag(tuple(stem_key(w) for w in full)))
-            return same[0].entity if same else exact
+            if same:
+                return same[0].entity
+            return exact if exact is not None else self._alike(full)
         if exact is not None:
             return exact
         # Initials: "I. Horvat" (or "Horvat I.") is Ivan Horvat when only one
@@ -498,6 +748,44 @@ def loose_name_words(org_value: str) -> tuple[str, ...]:
     return words
 
 
+_LETTER_WORD_RE = re.compile(rf"[{d.UP}{d.LO}]+(?:[-'’][{d.UP}{d.LO}]+)*")
+# A known name word glued to the word before it is looked for at this length
+# or more — or from 3 letters where the case changes there ("zaIVO").
+GLUE_MIN = 4
+
+
+def _loose_words(text: str, glue_words: set[str], glue_lens: list[int],
+                 stems: set[str]) -> list[tuple[int, int, str, bool]]:
+    """*text*'s words in any case, and a known name word glued to the end of
+    another ("PRISTOJBAIVAN" → "IVAN"): (start, end, word, odd), odd for a
+    lower-case or glued word. Empty when no odd word can be a known name's —
+    the usual case, so the extra look costs little."""
+    out: list[tuple[int, int, str, bool]] = []
+    hit = False
+    for m in _LETTER_WORD_RE.finditer(text):
+        s, e, w = m.start(), m.end(), m.group(0)
+        if not (s > 0 and (text[s - 1].isalnum() or text[s - 1] in "@.")):
+            odd = w[:1].islower()
+            out.append((s, e, w, odd))
+            if odd and not hit and name_stem(d.strip_accents(w)) in stems:
+                hit = True
+        if not glue_lens or len(w) < glue_lens[0] + 2:
+            continue
+        f = d.strip_accents(w).casefold()
+        if len(f) != len(w):
+            continue
+        for n in glue_lens:
+            if n > len(w) - 2:
+                break
+            if f[-n:] in glue_words and (n >= GLUE_MIN or (w[-n].isupper() and w[-n - 1].islower())):
+                out.append((e - n, e, w[-n:], True))
+                hit = True
+    if not hit:
+        return []
+    out.sort(key=lambda x: (x[0], -x[1]))
+    return out
+
+
 def _known_spans_finder(state: VaultState, options: Options) -> Callable[..., list[tuple[Span, Entity]]]:
     """A function that finds every known entity in a text: people by their
     name words (case endings, initials, spellings without diacritics), other
@@ -563,12 +851,21 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[..., li
         # call — or the one person named in full in the same text (find()).
         persons = [p for p in persons if len(p.words) > 1]
     want_people = options.kinds is None or "PERSON" in options.kinds
+    # Full names by every word (theirs and their other full-name spellings):
+    # a name written with a middle name less is the one person it fits.
+    any_word: dict[str, list[tuple[Entity, list[_WordInfo]]]] = {}
+    views: list[_Person] = []
     if want_people:
-        for p in persons:
+        kept_tokens = {p.entity.token for p in persons}
+        views = [*persons, *(v for e in state.entities if e.token in kept_tokens for v in _spelling_views(e))]
+        for p in views:
             if len(p.words) > 1:
                 infos = [_WordInfo.of(w) for w in p.words]
                 index(multi, infos[0], (p.entity, infos))
-            elif len(p.stems[0]) >= 3 and fold(p.words[0]) not in d._STOP:
+                for info in infos:
+                    index(any_word, info, (p.entity, infos))
+        for p in persons:
+            if len(p.words) == 1 and len(p.stems[0]) >= 3 and fold(p.words[0]) not in d._STOP:
                 info = _WordInfo.of(p.words[0])
                 index(singles, info, (info, p.entity))
         if options.one_word_names:
@@ -662,6 +959,119 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[..., li
         elif e.kind == "PERSON" and not e.key.startswith("~"):
             add_slug(tuple(_slug_fold(w) for w in _name_words(e.original) if not _is_initial(w)), e, False)
 
+    # Known full names' words as a ledger may glue them to the word before
+    # ("PRISTOJBAIVAN HORVAT"), and their stems (a text's lower-case words
+    # are looked at only when one of them is a known name's).
+    glue_words: set[str] = set()
+    stem_set: set[str] = set()
+    own_infos: dict[str, list[_WordInfo]] = {}  # a person's name words, from all their full-name forms
+    for p in views:
+        if len(p.words) < 2:
+            continue
+        own_infos.setdefault(p.entity.token, []).extend(_WordInfo.of(w) for w in p.words)
+        for w in p.words:
+            stem_set |= _key_variants(w)
+            f = d.strip_accents(w).casefold()
+            if len(f) >= 3 and len(f) == len(w):
+                glue_words.add(f)
+    glue_lens = sorted({len(w) for w in glue_words})
+
+    def full_names(text: str, words: list[tuple[int, int, str]], keys: list[tuple[str, bool]],
+                   covered: set[int], named: list[Entity], emit: Callable[..., None],
+                   odd: list[bool] | None = None) -> None:
+        """Known full names in *words*: in their own order, the other way
+        round, or with a middle name more or less when only one known person
+        fits ("Reyes Maribel" for "MARIBEL SANTOS REYES"). With
+        *odd*, only a match with an odd word in it (lower case, glued) counts."""
+
+        def adjacent(i: int) -> bool:
+            return bool(_GAP_RE.fullmatch(text, words[i][1], words[i + 1][0]))
+
+        def own_word(j: int, e: Entity) -> bool:
+            return not _is_initial(words[j][2]) and fold(words[j][2]) not in d._STOP \
+                and any(_word_matches(keys[j], inf) for inf in own_infos.get(e.token, ()))
+
+        def take(a: int, b: int, e: Entity) -> bool:
+            if odd is not None and not any(odd[a:b + 1]):
+                return False
+            # The person's other name words right next to it are theirs too
+            # ("reyes maribel santos" found by its spelling "Reyes Maribel").
+            while b + 1 < len(words) and b - a < MAX_NAME_RUN + MAX_EXTRA_NAMES - 1 and adjacent(b) \
+                    and own_word(b + 1, e):
+                b += 1
+            while a > 0 and b - a < MAX_NAME_RUN + MAX_EXTRA_NAMES - 1 and adjacent(a - 1) and own_word(a - 1, e):
+                a -= 1
+            emit(words[a][0], words[b][1], e, "known")
+            covered.update(range(a, b + 1))
+            named.append(e)
+            return True
+
+        for i, (_start, _end, w) in enumerate(words):
+            if _is_initial(w):
+                continue
+            for e, infos in multi.get(keys[i][0], ()):
+                n = len(infos)
+                if i + n <= len(words) and all(
+                        not _is_initial(words[i + k][2]) and _word_matches(keys[i + k], infos[k])
+                        for k in range(n)) and all(adjacent(i + k) for k in range(n - 1)):
+                    take(i, i + n - 1, e)
+
+        def namey(j: int) -> bool:
+            w = words[j][2]
+            return j not in covered and not _is_initial(w) and len(w) >= 2 and fold(w) not in d._STOP
+
+        def known_by_words(a: int, b: int) -> Entity | None:
+            """The known person whose full name is exactly words a..b in
+            another order ("HORVAT ANA"), if there is one."""
+            n = b - a + 1
+            for j in range(a, b + 1):
+                for e, infos in multi.get(keys[j][0], ()):
+                    if len(infos) == n and all(any(_word_matches(keys[k], inf) for inf in infos)
+                                               for k in range(a, b + 1)) \
+                            and all(any(_word_matches(keys[k], inf) for k in range(a, b + 1)) for inf in infos):
+                        return e
+            return None
+
+        def fewer_words(a: int, b: int) -> Entity | None:
+            """The one known person whose full name has words a..b and up to
+            MAX_EXTRA_NAMES more; None when nobody or several fit."""
+            n = b - a + 1
+            found: dict[str, Entity] = {}
+            for j in range(a, b + 1):
+                for e, infos in any_word.get(keys[j][0], ()):
+                    if e.token in found or not n < len(infos) <= n + MAX_EXTRA_NAMES:
+                        continue
+                    free = list(infos)
+                    for k in range(a, b + 1):
+                        hit = next((inf for inf in free if _word_matches(keys[k], inf)), None)
+                        if hit is None:
+                            break
+                        free.remove(hit)
+                    else:
+                        found[e.token] = e
+            return next(iter(found.values())) if len(found) == 1 else None
+
+        # The other way round, or a middle name less: the longest run of
+        # name words first, then the runs inside it.
+        i = 0
+        while i < len(words):
+            if not namey(i):
+                i += 1
+                continue
+            b = i
+            while b + 1 < len(words) and b - i < MAX_NAME_RUN - 1 and adjacent(b) and namey(b + 1):
+                b += 1
+            nxt = b + 1
+            for length in range(b - i + 1, 1, -1):
+                hit = next(((s, s + length - 1, e) for s in range(i, b - length + 2)
+                            for e in [known_by_words(s, s + length - 1) or fewer_words(s, s + length - 1)]
+                            if e is not None and (odd is None or any(odd[s:s + length]))), None)
+                if hit is not None:
+                    take(*hit)
+                    nxt = hit[1] + 1
+                    break
+            i = nxt
+
     def find(text: str, here: Sequence[Entity] = ()) -> list[tuple[Span, Entity]]:
         """*here*: the people named in full in this text already (tokens, or
         found by other means) — their surnames and first names alone are
@@ -669,7 +1079,7 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[..., li
         out: list[tuple[Span, Entity]] = []
 
         def emit(start: int, end: int, target: Target, source: str) -> None:
-            e = target if isinstance(target, Entity) else target()
+            e = state.target(target if isinstance(target, Entity) else target())
             out.append((Span(start, end, e.kind, 2, source), e))
 
         def slug(start: int, end: int, base: Entity) -> None:
@@ -686,49 +1096,20 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[..., li
             # Known full names first: their words are theirs.
             covered: set[int] = set()
             named: list[Entity] = list(here)
-            for i, (start, _end, w) in enumerate(words):
-                if _is_initial(w):
-                    continue
-                for e, infos in multi.get(keys[i][0], ()):
-                    n = len(infos)
-                    if i + n <= len(words) and all(
-                            not _is_initial(words[i + k][2]) and _word_matches(keys[i + k], infos[k])
-                            for k in range(n)) and all(adjacent(i + k) for k in range(n - 1)):
-                        emit(start, words[i + n - 1][1], e, "known")
-                        covered.update(range(i, i + n))
-                        named.append(e)
+            full_names(text, words, keys, covered, named, emit)
+            if any_word:
+                # Again with words in any case and words glued to the one
+                # before ("ivan horvat", "zaIVAN HORVAT", "PRISTOJBAIVAN
+                # HORVAT" in a ledger) — only matches with such a word in them.
+                lwords = _loose_words(text, glue_words, glue_lens, stem_set)
+                if lwords:
+                    full_names(text, [(s, e, w) for s, e, w, _odd in lwords],
+                               [_text_word_key(w) for _s, _e, w, _odd in lwords], set(), named, emit,
+                               odd=[odd for *_r, odd in lwords])
 
             def namey(j: int) -> bool:  # a word that can be part of a name
                 w = words[j][2]
                 return j not in covered and not _is_initial(w) and len(w) >= 2 and fold(w) not in d._STOP
-
-            def known_by_words(a: int, b: int) -> Entity | None:
-                """The known person whose full name is exactly words a..b in
-                another order ("HORVAT ANA"), if there is one."""
-                n = b - a + 1
-                for j in range(a, b + 1):
-                    for e, infos in multi.get(keys[j][0], ()):
-                        if len(infos) == n and all(any(_word_matches(keys[k], inf) for inf in infos)
-                                                   for k in range(a, b + 1)) \
-                                and all(any(_word_matches(keys[k], inf) for k in range(a, b + 1)) for inf in infos):
-                            return e
-                return None
-
-            # A known full name the other way round is that person too.
-            i = 0
-            while i < len(words):
-                if not namey(i):
-                    i += 1
-                    continue
-                b = i
-                while b + 1 < len(words) and b - i < MAX_NAME_RUN - 1 and adjacent(b) and namey(b + 1):
-                    b += 1
-                e = known_by_words(i, b) if b > i else None
-                if e is not None:
-                    emit(words[i][0], words[b][1], e, "known")
-                    covered.update(range(i, b + 1))
-                    named.append(e)
-                i = b + 1
 
             def alone(i: int) -> bool:
                 """No other name word right next to word *i*: with one there, it
@@ -894,6 +1275,8 @@ def _select(text: str, spans: list[Span], blocked: list[tuple[int, int]], keep_f
         value = text[sp.start:sp.end]
         if fold(value) in keep_folded or (sp.kind == "ORG" and fold(d.LEGAL_SUFFIX_RE.sub("", value)) in keep_folded):
             continue
+        if sp.kind in ("ORG", "PERSON") and d.public_body(value):
+            continue
         if any(ks <= sp.start and sp.end <= ke for ks, ke in keep_ranges):
             continue
         i = bisect.bisect_left(starts, sp.start)
@@ -941,6 +1324,8 @@ def _full_names_in(text: str, chosen: list[Entity], state: VaultState) -> list[E
     here = {e.token: e for e in chosen if _full_name(e)}
     for m in TOKEN_RE.finditer(text):
         e = state.by_token.get(make_token(m.group(1) or m.group(3), int(m.group(2) or m.group(4))))
+        if e is not None:
+            e = state.target(e)
         if e is not None and _full_name(e):
             here[e.token] = e
     return list(here.values())
@@ -1067,24 +1452,40 @@ def _pinned_finder(pinned: tuple[tuple[str, str], ...], state: VaultState,
     """Options.pinned as a finder: each text's first word indexed, the rest
     matched where that word stands — whole words, any case, any spacing."""
     index: dict[str, list[tuple[re.Pattern[str], Entity]]] = {}
+    # Values of two words or more, also where the first is glued to the word
+    # before it ("pristojbaivan horvat" — the leak check finds those too).
+    glued: dict[str, list[tuple[re.Pattern[str], Entity]]] = {}
     for text, token in pinned:
         e = state.by_token.get(token)
+        e = state.target(e) if e is not None else None
         words = str(text or "").split()
         first = _WORD_RUN_RE.match(words[0]) if words else None
         if e is None or first is None or (kinds is not None and e.kind not in kinds):
             continue
         pattern = re.compile(r"\s+".join(map(re.escape, words)) + r"(?!\w)", re.IGNORECASE)
         index.setdefault(first.group(0).casefold(), []).append((pattern, e))
+        if len(words) >= 2 and len(first.group(0)) >= GLUE_MIN and first.group(0) == words[0]:
+            glued.setdefault(first.group(0).casefold(), []).append((pattern, e))
+    glue_lens = sorted({len(w) for w in glued})
 
     def find(text: str) -> list[tuple[Span, Entity]]:
         out: list[tuple[Span, Entity]] = []
         if not index:
             return out
         for m in _WORD_RUN_RE.finditer(text):
-            for pattern, e in index.get(m.group(0).casefold(), ()):
+            word = m.group(0)
+            for pattern, e in index.get(word.casefold(), ()):
                 hit = pattern.match(text, m.start())
                 if hit:
                     out.append((Span(m.start(), hit.end(), e.kind, 2, "pinned"), e))
+            for n in glue_lens:
+                if n > len(word) - 2:
+                    break
+                at = m.end() - n
+                for pattern, e in glued.get(word[-n:].casefold(), ()):
+                    hit = pattern.match(text, at)
+                    if hit:
+                        out.append((Span(at, hit.end(), e.kind, 2, "pinned"), e))
         return out
 
     return find
@@ -1132,6 +1533,16 @@ class _Tick:
             pass
 
 
+_NAME_KINDS = frozenset({"PERSON", "ORG", "ADDRESS"})
+_CODE_VALUE_RE = re.compile(r"\s*\w{1,8}\s*")
+
+
+def _code_cell(text: str, hint: str) -> bool:
+    """A short code alone in a column of codes ("UFAK" under "Oznaka
+    isprave"): no one's name, whatever a model or another file says."""
+    return hint == "CODE" and bool(_CODE_VALUE_RE.fullmatch(text))
+
+
 def run(segments: list[Segment], state: VaultState, options: Options | None = None) -> RunResult:
     """Anonymize *segments* (one text, or the cells of a table) against
     *state*, which gains this run's new entities. Raises :class:`VerifyFailed`
@@ -1145,9 +1556,11 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
     # A company named with words stuck in front ("Overview Acme d.o.o." from a
     # page's heading) is the known company; the words stay plain text.
     cores = _org_cores(state, options.extra)
+    # A public body a model named ("HZZO", "Porezna uprava") is no one's: left out.
     options = replace(options, extra=tuple(
         (_trim_org_text(t, cores - {_org_core(t)}), k) if k == "ORG"
-        else (_strip_title(t), k) if k == "PERSON" else (t, k) for t, k in options.extra))
+        else (_strip_title(t), k) if k == "PERSON" else (t, k) for t, k in options.extra
+        if not (k in ("ORG", "PERSON") and d.public_body(t))))
     # Names and companies the caller (or the trusted model) named are known
     # from the start, so their other forms are found too ("Ana Kovač" also
     # catches "Ane Kovač"). Stored only if they turn up.
@@ -1187,6 +1600,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             spans.extend(extra_find(masked))
             spans = [_trim_org_span(masked, sp, cores) if sp.kind == "ORG"
                      else _trim_title_span(masked, sp) if sp.kind == "PERSON" else sp for sp in spans]
+            if _code_cell(masked, hints[i]):
+                spans = [sp for sp in spans if sp.kind not in _NAME_KINDS]
             for sp, e in pinned_find(masked):  # as written: no trimming
                 spans.append(sp)
                 pinned_at[(i, sp.start, sp.end)] = e
@@ -1223,8 +1638,11 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
                 spans.append(sp)
                 by_span[(sp.start, sp.end)] = pending[(i, sp.start, sp.end)]
             slug_at: set[tuple[int, int]] = set()
+            code_cell = _code_cell(masked, hints[i])
             for sp, e in known:
                 if options.kinds is not None and e.kind not in options.kinds:
+                    continue
+                if code_cell and e.kind in _NAME_KINDS:
                     continue
                 spans.append(sp)
                 if sp.source == "known-slug":
@@ -1260,12 +1678,13 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
                 # number with its own place (⟦ORG_7:2⟧): in a link or a file
                 # name ("?first=Ivan" never gets the full name), a company's
                 # other form ("Acme d.o.o.", its registry name), a person's
-                # other form ("M. Vidović", "Marina Vidovića", "Vidović").
+                # other form ("M. Vidović", "Marina Vidovića", "Vidović"), an
+                # address written otherwise ("Kovačka c. 12" / "KOV CESTA 12").
                 exact = surface != e.original and (
                     who is not None
                     or (sp.start, sp.end) in slug_at
                     or any(a <= sp.start and sp.end <= b for a, b in links)
-                    or (e.kind in ("ORG", "PERSON") and fold(surface) != fold(e.original)))
+                    or (e.kind in ("ORG", "PERSON", "ADDRESS") and fold(surface) != fold(e.original)))
                 token = e.spelling_token(surface) if exact else e.token
                 if e.new and not e.found_by:
                     e.found_by = sp.source

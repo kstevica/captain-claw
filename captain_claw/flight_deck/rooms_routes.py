@@ -248,6 +248,162 @@ async def unallow_spelling(room_id: str, request: Request, body: dict[str, Any] 
     return {"room": await _detail(await _room(owner, room_id))}
 
 
+# ── "maybe the same" ────────────────────────────────────────────────
+
+MAX_NOT_SAME = 5000
+
+
+async def _room_vault(owner: str, room: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    vaults = av.store()
+    row = await vaults.get(owner, room["vault_id"])
+    if row is None:
+        raise HTTPException(409, "This room's vault is gone.")
+    return vaults, row
+
+
+async def _texts(room_id: str, files: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    """(file id, the text Claude reads) for every file that has it."""
+    store = rs.store()
+
+    def read() -> list[tuple[str, str]]:
+        out = []
+        for f in files:
+            try:
+                out.append((f["id"], store.text_file(room_id, f["id"]).read_text("utf-8")))
+            except OSError:
+                continue
+        return out
+
+    return await asyncio.to_thread(read)
+
+
+def _bare_token(value: Any) -> str:
+    token = str(value or "").strip()
+    m = engine.TOKEN_RE.fullmatch(token)
+    if not m or ":" in token:
+        raise HTTPException(422, "Give a token as it is written, without a :2 (⟦PERSON_3⟧).")
+    return engine.make_token(m.group(1) or m.group(3), int(m.group(2) or m.group(4)))
+
+
+@router.get("/{room_id}/alike")
+async def alike_tokens(room_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Tokens that may be one party — a typo, a first name alone, a changed
+    surname, a company's short name — with their real values, for the owner
+    to say. Pairs already answered aren't listed again."""
+    from captain_claw.flight_deck import rooms_alike as ra
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    vaults, row = await _room_vault(owner, room)
+    async with vaults.lock(row["id"]):
+        state = await vaults.load_state(row)
+    by_file = ra.tokens_by_file(await _texts(room_id, await rs.store().files(room_id)))
+    not_same = list((room.get("settings") or {}).get("not_same") or [])
+    suggestions = await asyncio.to_thread(ra.suggest, state, by_file, not_same)
+    merged = [{"token": e.token, "text": e.original, "into": e.same_as} for e in state.entities if e.same_as]
+    return {"suggestions": suggestions, "answered": len(not_same), "merged": merged}
+
+
+@router.post("/{room_id}/same")
+async def make_same(room_id: str, request: Request, body: dict[str, Any] = Body(...),
+                    user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """*other* is the same party as *keep*: in the vault, *other*'s values
+    become *keep*'s spellings, and every copy in the room — Office files, the
+    text Claude reads, the search index — gets *keep*'s number in its place.
+    A file whose format can't be rewritten in place runs again."""
+    from captain_claw.flight_deck import rooms_alike as ra
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    _not_running(room)
+    keep_token, other_token = _bare_token(body.get("keep")), _bare_token(body.get("other"))
+    if keep_token == other_token:
+        raise HTTPException(422, "Those are the same token.")
+    vaults, row = await _room_vault(owner, room)
+    async with vaults.lock(row["id"]):
+        state = await vaults.load_state(row)
+        keep, other = state.by_token.get(keep_token), state.by_token.get(other_token)
+        if keep is None or other is None:
+            raise HTTPException(404, "This room's vault doesn't have that token.")
+        keep = state.target(keep)
+        if other.same_as:
+            raise HTTPException(409, f"{other_token} is already one with {other.same_as}.")
+        try:
+            mapping = state.merge(keep, other)
+        except ValueError as exc:
+            raise HTTPException(422, f"These can't be one: {exc}.") from None
+        await vaults.save_run(row, state)
+    store = rs.store()
+    rewritten = requeued = 0
+    for f in await store.files(room_id):
+        if not f.get("clean_path"):
+            continue
+        clean = store.clean_file(room_id, f["id"], PurePosixPath(f["clean_path"]).suffix)
+        text_path = store.text_file(room_id, f["id"])
+        changed = False
+        if clean.exists():
+            blob = await asyncio.to_thread(clean.read_bytes)
+            new = await asyncio.to_thread(ra.rewrite_blob, f["clean_path"], blob, mapping)
+            if new is None:
+                await store.set_file(room_id, f["id"], state="new", released=False, error="")
+                requeued += 1
+                continue
+            if new != blob:
+                await asyncio.to_thread(clean.write_bytes, new)
+                changed = True
+        if text_path.exists():
+            text = await asyncio.to_thread(text_path.read_text, "utf-8")
+            new_text = ra.rewrite_text(text, mapping)
+            if new_text != text:
+                await asyncio.to_thread(text_path.write_text, new_text, "utf-8")
+                changed = True
+                if f["state"] == "done":
+                    await store.index_text(room_id, f["id"], rj.pages_of(new_text))
+        fields: dict[str, Any] = {}
+        clean_path = ra.rewrite_text(f["clean_path"], mapping)
+        if clean_path != f["clean_path"]:
+            fields["clean_path"] = clean_path  # its name in a folder; on disk it's kept by its id
+        leftovers = ra.rewrite_leftovers(f.get("leftovers") or {}, mapping)
+        if leftovers != (f.get("leftovers") or {}):
+            fields["leftovers"] = leftovers
+        if fields:
+            await store.set_file(room_id, f["id"], **fields)
+        rewritten += 1 if changed or fields else 0
+    fields = {}
+    roles = dict(room.get("roles") or {})
+    if other_token in roles:
+        role = roles.pop(other_token)
+        roles.setdefault(keep.token, role)
+        fields["roles"] = roles
+    settings = dict(room.get("settings") or {})
+    key = ra.pair_key(keep.token, other_token)
+    if key in (settings.get("not_same") or []):
+        settings["not_same"] = [k for k in settings["not_same"] if k != key]
+        fields["settings"] = settings
+    if fields:
+        await store.update(room_id, **fields)
+    return {"tokens": len(mapping), "rewritten": rewritten, "requeued": requeued,
+            "room": await _detail(await _room(owner, room_id))}
+
+
+@router.post("/{room_id}/not-same")
+async def not_same(room_id: str, request: Request, body: dict[str, Any] = Body(...),
+                   user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Two tokens that are two parties: the pair isn't suggested again."""
+    from captain_claw.flight_deck import rooms_alike as ra
+
+    owner = _owner(request, user)
+    room = await _room(owner, room_id)
+    key = ra.pair_key(_bare_token(body.get("a")), _bare_token(body.get("b")))
+    settings = dict(room.get("settings") or {})
+    answered = [k for k in settings.get("not_same") or [] if k != key]
+    if len(answered) >= MAX_NOT_SAME:
+        raise HTTPException(422, f"A room remembers at most {MAX_NOT_SAME} answers.")
+    settings["not_same"] = [*answered, key]
+    await rs.store().update(room_id, settings=settings)
+    return {"answered": len(settings["not_same"])}
+
+
 @router.delete("/{room_id}")
 async def delete_room(room_id: str, request: Request, vault: bool = Query(False),
                       user: dict = Depends(get_current_user)) -> dict[str, Any]:

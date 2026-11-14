@@ -168,6 +168,19 @@ def _fold_map(text: str) -> tuple[str, list[int]]:
     return "".join(out), where
 
 
+def _glued_ok(needle: str) -> bool:
+    """A value of two words or more whose first word is long enough to be
+    looked for glued to the word before it ("pristojbaivan horvat"), as
+    ledgers' descriptions write names."""
+    first, _sep, rest = needle.partition(" ")
+    return bool(rest) and len(first) >= engine.GLUE_MIN and first.isalpha()
+
+
+def _needle_re(needle: str) -> str:
+    left = "" if _glued_ok(needle) else r"(?<!\w)"
+    return rf"{left}{re.escape(needle)}(?!\w)"
+
+
 def find_leftovers(text: str, needle_list: list[tuple[str, Needle]]) -> list[dict[str, Any]]:
     """Where real values are still in *text*: one ``{token, text, count}`` per
     token and spelling, *text* as it is written. A token the check finds but
@@ -184,7 +197,7 @@ def find_leftovers(text: str, needle_list: list[tuple[str, Needle]]) -> list[dic
         if isinstance(needle, Loose):
             pattern, allowed = needle.pattern, needle.allowed
         else:
-            pattern, allowed = re.compile(rf"(?<!\w){re.escape(needle)}(?!\w)"), frozenset()
+            pattern, allowed = re.compile(_needle_re(needle)), frozenset()
         matches.extend((m.start(), m.end(), token) for m in pattern.finditer(hay)
                        if m.end() > m.start() and m.group(0) not in allowed)
     # Longest first, no overlaps — as the anonymizer picks: "softver d.o.o"
@@ -219,6 +232,8 @@ def leaks(text: str, needle_list: list[tuple[str, Needle]]) -> list[str]:
     a search — the check grows with the text, not with text × vault."""
     hay = _fold_loose(text)
     words = set(_WORD_RE.findall(hay))
+    # Word endings, for a name glued to the word before it ("pristojbaivan").
+    endings: set[str] | None = None
     hits: list[str] = []
     for token, needle in needle_list:
         if token in hits:
@@ -229,11 +244,18 @@ def leaks(text: str, needle_list: list[tuple[str, Needle]]) -> list[str]:
                 hits.append(token)
             continue
         own = _WORD_RE.findall(needle)
-        if own and not all(w in words for w in own):
+        if own and not all(w in words for w in own[1:]):
             continue
+        if own and own[0] not in words:
+            if not _glued_ok(needle):
+                continue
+            if endings is None:
+                endings = {w[-n:] for w in words for n in range(engine.GLUE_MIN, len(w) - 1)}
+            if own[0] not in endings:
+                continue
         if needle not in hay:
             continue
-        if re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", hay):
+        if re.search(_needle_re(needle), hay):
             hits.append(token)
     return hits
 

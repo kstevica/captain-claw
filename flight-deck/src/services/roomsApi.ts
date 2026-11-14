@@ -193,6 +193,19 @@ export interface Room extends RoomSummary {
 
 export interface AllowedSpelling { text: string; tokens: string[]; at: number }
 
+/** One side of a "maybe the same" pair: the token, its real value (owner only), how many files have it. */
+export interface AlikeSide { token: string; text: string; files: number }
+export interface AlikePair {
+  kind: 'PERSON' | 'ORG' | 'ADDRESS'
+  why: string
+  strength: number
+  key: string
+  a: AlikeSide
+  b: AlikeSide
+}
+/** A token made one with another: it is written as `into`'s spelling now. */
+export interface AlikeMerged { token: string; text: string; into: string }
+
 /** A real value the leak check found in a file, as it is written there. */
 export interface Leftover {
   token: string
@@ -347,6 +360,15 @@ export const roomsApi = {
     api<{ requeued: number; room: Room }>(`/fd/rooms/${enc(id)}/allowed`, json('POST', body)),
   unallow: (id: string, text: string) =>
     api<{ room: Room }>(`/fd/rooms/${enc(id)}/allowed/remove`, json('POST', { text })),
+  /** Tokens that may be one party (a typo, a first name alone, a changed surname, a company's short name). */
+  alike: (id: string) =>
+    api<{ suggestions: AlikePair[]; answered: number; merged: AlikeMerged[] }>(`/fd/rooms/${enc(id)}/alike`),
+  /** `other` is the same party as `keep`: it becomes keep's spelling in the vault and in every copy. */
+  same: (id: string, keep: string, other: string) =>
+    api<{ tokens: number; rewritten: number; requeued: number; room: Room }>(
+      `/fd/rooms/${enc(id)}/same`, json('POST', { keep, other })),
+  notSame: (id: string, a: string, b: string) =>
+    api<{ answered: number }>(`/fd/rooms/${enc(id)}/not-same`, json('POST', { a, b })),
   downloadClean: (id: string, f: RoomFile) =>
     download(`/fd/rooms/${enc(id)}/files/${enc(f.id)}/clean`, f.clean_path.split('/').pop() || 'file'),
   removeFile: (id: string, fileId: string) =>

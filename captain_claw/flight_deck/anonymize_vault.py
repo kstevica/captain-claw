@@ -317,7 +317,8 @@ class VaultStore:
                 continue  # an entry this key can't open is skipped, never guessed
             entities.append(Entity(r["token"], r["kind"], str(data.get("key") or ""),
                                    str(data.get("original") or ""), list(data.get("forms") or []),
-                                   spellings=[str(x) for x in data.get("spellings") or []]))
+                                   spellings=[str(x) for x in data.get("spellings") or []],
+                                   same_as=str(data.get("same_as") or "")))
         return VaultState(entities, json.loads(row["counters"] or "{}"))
 
     async def save_run(self, row: dict[str, Any], state: VaultState) -> int:
@@ -331,9 +332,10 @@ class VaultStore:
         if current + sum(1 for e in to_write if e.new) > MAX_ENTRIES_PER_VAULT:
             raise VaultError(f"a vault holds at most {MAX_ENTRIES_PER_VAULT} values — use another vault")
         for e in to_write:
-            payload = f.encrypt(json.dumps(
-                {"key": e.key, "original": e.original, "forms": e.forms, "spellings": e.spellings},
-                ensure_ascii=False).encode("utf-8")
+            record = {"key": e.key, "original": e.original, "forms": e.forms, "spellings": e.spellings}
+            if e.same_as:
+                record["same_as"] = e.same_as
+            payload = f.encrypt(json.dumps(record, ensure_ascii=False).encode("utf-8")
             ).decode("ascii")
             await db.execute(
                 """INSERT INTO entries (vault_id, token, kind, payload, created_at, updated_at)
@@ -365,7 +367,7 @@ class VaultStore:
         for e in state.entities:
             created, updated = times.get(e.token, (None, None))
             out.append({"token": e.token, "kind": e.kind, "original": e.original, "forms": e.forms,
-                        "spellings": e.spellings,
+                        "spellings": e.spellings, "same_as": e.same_as,
                         "created_at": created, "updated_at": updated,
                         **stats.get(e.token, {"sent": 0, "restored": 0, "last_sent_at": None,
                                               "last_restored_at": None})})
