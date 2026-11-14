@@ -688,6 +688,23 @@ async def taskboard_sync(user: dict = Depends(get_current_user)) -> dict:
             "sweep": taskboard_sources.sweep_state(uid)}
 
 
+@router.get("/people")
+async def taskboard_people(
+    q: str = "", sort: str = "count", limit: int = 100, offset: int = 0,
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """The People page: everyone on the caller's tasks but the deck's own
+    users (the caller and their colleagues), searched by name or address and
+    sorted by task count (``count``) or name (``name``), a page at a time."""
+    uid = _uid(user)
+    sort = sort if sort in ("count", "name") else "count"
+    res = await asyncio.to_thread(store().people, uid, q=q[:200], sort=sort, limit=limit, offset=offset,
+                                  leave_out=("fd_user:",))
+    return {"people": [{"id": v, "label": _facet_label("party", v, label), "count": n}
+                       for v, label, n in res["people"]],
+            "total": res["total"]}
+
+
 @router.get("/summary")
 async def taskboard_summary(user: dict = Depends(get_current_user)) -> dict:
     """The tile badge: how many tasks need the caller — leaving out those Jev

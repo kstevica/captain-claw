@@ -332,6 +332,25 @@ async def test_search_is_folded_and_facets_follow_the_other_filters(api):
     assert (await api.client.get("/fd/taskboard/tasks", params={"view": "later"})).status_code == 400
 
 
+async def test_people_searched_sorted_and_without_the_decks_own_users(api):
+    board, uid = api.env.board, api.env.alice
+    for key, kind, addr, display in (("a", "email", "ana@x.co", "Ana"), ("b", "email", "ana@x.co", "Ana"),
+                                     ("c", "email", "bo@y.org", "Bo"), ("d", "fd_user", uid, "Alice"),
+                                     ("e", "fd_user", api.env.bob, "Bob")):
+        board.ingest(uid, keys=[key], create={"title": key, "channel": "gmail"},
+                     parties=[{"role": "requester", "kind": kind, "address": addr, "display": display}],
+                     event={"source": "t", "source_ref": key})
+    out = await _get(api, "/fd/taskboard/people")
+    assert out == {"people": [{"id": "email:ana@x.co", "label": "Ana", "count": 2},
+                              {"id": "email:bo@y.org", "label": "Bo", "count": 1}], "total": 2}
+    by_name = await _get(api, "/fd/taskboard/people", sort="name", limit=1, offset=1)
+    assert by_name == {"people": [{"id": "email:bo@y.org", "label": "Bo", "count": 1}], "total": 2}
+    assert [p["label"] for p in (await _get(api, "/fd/taskboard/people", q="y.org"))["people"]] == ["Bo"]
+    assert (await _get(api, "/fd/taskboard/people", sort="weird"))["people"][0]["label"] == "Ana"
+    api.be(api.bob)
+    assert (await _get(api, "/fd/taskboard/people"))["total"] == 0
+
+
 async def test_the_query_the_dialog_sends(api):
     """Dates as whole epoch seconds under from/to, people by their facet id,
     a sort, the page the list asks for."""

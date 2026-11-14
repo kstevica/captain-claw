@@ -1028,16 +1028,46 @@ class TaskboardStore:
                     f"SELECT t.{col}{label}, COUNT(*) FROM tasks t WHERE {w} GROUP BY t.{col} "
                     "ORDER BY COUNT(*) DESC", a)]
             w, a = self._where(user_id, **common, skip="party")
-            # v2: a person the board knows is one value, under their name
-            # (``party:<id>``); an address nobody is known by stays itself.
-            facets["party"] = [(r[0], r[1], int(r[2])) for r in self._conn.execute(
-                f"SELECT {_PARTY_FACET} AS pid, COALESCE(NULLIF(MAX(pp.display_name), ''), "
-                "NULLIF(MAX(p.display), ''), MAX(p.address)), COUNT(DISTINCT t.id) FROM tasks t "
-                "JOIN task_parties p ON p.task_id = t.id AND p.user_id = t.user_id "
-                f"LEFT JOIN parties pp ON pp.id = p.party_id AND pp.user_id = p.user_id WHERE {w} "
-                "GROUP BY pid ORDER BY COUNT(DISTINCT t.id) DESC LIMIT 50", a)]
+            facets["party"] = self._party_rows(w, a, limit=50)
             counts = self._counts(user_id, **{**common, "view": "all"}, skip="view")
         return {"rows": [dict(r) for r in rows], "total": int(total), "facets": facets, "counts": counts}
+
+    def _party_rows(self, where: str, args: list, *, limit: int | None = None) -> list[tuple[str, str, int]]:
+        """The People values under *where*: (facet id, name, task count), most
+        tasks first. v2: a person the board knows is one value, under their
+        name (``party:<id>``); an address nobody is known by stays itself."""
+        rows = self._conn.execute(
+            f"SELECT {_PARTY_FACET} AS pid, COALESCE(NULLIF(MAX(pp.display_name), ''), "
+            "NULLIF(MAX(p.display), ''), MAX(p.address)), COUNT(DISTINCT t.id) FROM tasks t "
+            "JOIN task_parties p ON p.task_id = t.id AND p.user_id = t.user_id "
+            f"LEFT JOIN parties pp ON pp.id = p.party_id AND pp.user_id = p.user_id WHERE {where} "
+            "GROUP BY pid ORDER BY COUNT(DISTINCT t.id) DESC" + (" LIMIT ?" if limit else ""),
+            (*args, limit) if limit else args)
+        return [(str(r[0] or ""), str(r[1] or ""), int(r[2])) for r in rows]
+
+    def people(self, user_id: str, *, q: str = "", sort: str = "count", limit: int = 100, offset: int = 0,
+               leave_out: tuple[str, ...] = (), now: float | None = None) -> dict:
+        """Everyone on the user's tasks (view All) — the People facet without
+        its cap of 50 — searched by name or address (every word, folded as the
+        board's search is), sorted by task count or by name, one page at a
+        time. *leave_out*: facet-id prefixes not listed (``fd_user:``: the
+        user and their colleagues on the deck)."""
+        now = time.time() if now is None else now
+        common = dict(view="all", terms=[], filters={}, date_from=None, date_to=None, now=now, proposal_tasks=[])
+        with self._lock:
+            where, args = self._where(user_id, **common, skip="party")
+            rows = self._party_rows(where, args)
+        rows = [r for r in rows if not any(r[0].startswith(p) for p in leave_out)]
+        terms = fold_terms(q)
+        if terms:
+            rows = [r for r in rows if all(t in _folded(f"{r[1]} {r[0]}") for t in terms)]
+        if sort == "name":
+            rows.sort(key=lambda r: (_folded(r[1] or r[0]), -r[2]))
+        else:
+            rows.sort(key=lambda r: (-r[2], _folded(r[1] or r[0])))
+        limit = max(1, min(int(limit or 100), _PAGE_MAX))
+        offset = max(0, int(offset or 0))
+        return {"people": rows[offset:offset + limit], "total": len(rows)}
 
     def _counts(self, user_id: str, **common: Any) -> dict[str, int]:
         now, proposal_tasks = common["now"], common["proposal_tasks"]

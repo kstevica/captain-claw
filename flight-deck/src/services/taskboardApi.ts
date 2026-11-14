@@ -369,6 +369,9 @@ export interface TaskQuery {
 }
 
 const BASE = '/fd/taskboard'
+
+export type PeopleSort = 'count' | 'name'
+export interface PeopleQuery { q?: string; sort?: PeopleSort; limit?: number; offset?: number }
 const taskPath = (id: string, rest = '') => `${BASE}/tasks/${encodeURIComponent(id)}${rest}`
 
 /** A board task's own id (`tb_` and hex); anything with a colon is a key. */
@@ -470,6 +473,16 @@ export const taskboardApi = {
   /** Read every source again now, for this user. */
   sync: () => api<TaskboardSync>(`${BASE}/sync`, { method: 'POST' }),
   summary: () => api<{ needs_me: number }>(`${BASE}/summary`),
+  /** The People page: everyone on the user's tasks but the deck's own users,
+   *  searched by name or address, sorted by task count or name, a page at a time. */
+  people: (o: PeopleQuery = {}) => {
+    const p = new URLSearchParams()
+    if (o.q) p.set('q', o.q)
+    if (o.sort) p.set('sort', o.sort)
+    if (o.limit) p.set('limit', String(o.limit))
+    if (o.offset) p.set('offset', String(o.offset))
+    return api<{ people: Facet[]; total: number }>(`${BASE}/people?${p}`)
+  },
   tasks: (query: TaskQuery = {}) => api<TaskPage>(`${BASE}/tasks?${queryString(query)}`),
   task: (id: string) => api<TaskDetail>(taskPath(id)),
   /** A correction: applies at once and locks the field it touched. */
