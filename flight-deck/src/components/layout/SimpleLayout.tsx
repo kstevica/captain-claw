@@ -50,6 +50,7 @@ import {
   Waypoints,
   Target,
   LayoutGrid,
+  Network,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -88,6 +89,9 @@ import { useRoomsStore } from '../../stores/roomsStore'
 import { RoomsPage } from '../rooms/RoomsPage'
 import { useCaptainSwarmStore, useCanSwarm } from '../../stores/captainSwarmStore'
 import { CaptainSwarmPage } from '../../pages/CaptainSwarmPage'
+import { useTeamWorkStore } from '../../stores/teamWorkStore'
+import { BasnaPage } from '../../pages/BasnaPage'
+import { CouncilPage } from '../../pages/CouncilPage'
 import { SharedFolders } from '../vfs/SharedFolders'
 import { DialogFullscreen } from '../library/dialogFullscreen'
 import { isManagedAgent } from '../../utils/managedAgents'
@@ -446,6 +450,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const swarmOpen = useCaptainSwarmStore((s) => s.open)
   const closeSwarm = useCaptainSwarmStore((s) => s.close)
   const canSwarm = useCanSwarm()
+  // Vatra, Basna, Council: agents working as a team, opened from More.
+  const teamWork = useTeamWorkStore((s) => s.open)
+  const closeTeamWork = useTeamWorkStore((s) => s.close)
   const taskboardCount = useTaskboardStore((s) => s.needsMe)
   // Shared folders: the files the agents keep together (vfs:<folder>/…).
   const [foldersOpen, setFoldersOpen] = useState(false)
@@ -924,9 +931,10 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   }
   // What a phone's Back closes before it leaves a chat (or Flight Deck).
   const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen || toolsOpen
-    || anonOpen || roomsOpen || !!filesData
+    || anonOpen || roomsOpen || !!teamWork || !!filesData
   const closePhoneOverlays = () => {
     closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null); closeAnon(); closeRooms()
+    closeTeamWork()
   }
   // Drive and OneDrive folders want the user's Google or Microsoft account:
   // Connections, on that tab.
@@ -1177,6 +1185,16 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       {roomsOpen && (
         <KioskWideDialog label="Data rooms" phone={isMobile} onClose={closeRooms} widest>
           <RoomsPage phone={isMobile} onClose={closeRooms} />
+        </KioskWideDialog>
+      )}
+      {(teamWork === 'vatra' || teamWork === 'basna') && (
+        <KioskWideDialog label={teamWork === 'vatra' ? 'Vatra' : 'Basna'} phone={isMobile} onClose={closeTeamWork} roomy>
+          <BasnaPage key={teamWork} mode={teamWork} onClose={closeTeamWork} />
+        </KioskWideDialog>
+      )}
+      {teamWork === 'council' && (
+        <KioskWideDialog label="Council" phone={isMobile} onClose={closeTeamWork} roomy>
+          <CouncilPage onClose={closeTeamWork} />
         </KioskWideDialog>
       )}
       {swarmOpen && canSwarm && (
@@ -1694,8 +1712,8 @@ const TILE_COLS: Record<number, string> = {
 /** The agent column's row of tools, as tiles — an icon over its name:
  *  Scheduled tasks (how many are active, a pulse while one runs), the File
  *  library, the Data library, and More — a menu with the rest (the Taskboard,
- *  Crew, Swarm, shared folders, Anonymize, Data rooms). The Taskboard's count
- *  of what needs you rides on More. */
+ *  Crew, Swarm, Vatra, Basna, Council, shared folders, Anonymize, Data rooms).
+ *  The Taskboard's count of what needs you rides on More. */
 function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, scheduledRunning, onLibrary, onData, onFolders }: {
   onTaskboard?: () => void; taskboardCount: number
   onScheduled?: () => void; scheduledCount: number; scheduledRunning: boolean
@@ -1738,7 +1756,7 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
         className={toolTile}
         aria-haspopup="dialog"
         aria-label={needsYou > 0 ? `More tools — ${needsYou} task${needsYou === 1 ? '' : 's'} need${needsYou === 1 ? 's' : ''} you` : 'More tools'}
-        title={needsYou > 0 ? `More — Tasks (${needsYou} need${needsYou === 1 ? 's' : ''} you), Crew, Folders, Anonymize, Data rooms` : 'More — Tasks, Crew, Folders, Anonymize, Data rooms'}
+        title={`More — Tasks${needsYou > 0 ? ` (${needsYou} need${needsYou === 1 ? 's' : ''} you)` : ''}, Crew, Vatra, Basna, Council, Folders, Anonymize, Data rooms`}
       >
         <span className="relative">
           <LayoutGrid className="h-[18px] w-[18px]" />
@@ -1780,6 +1798,7 @@ function MoreToolsDialog({ taskboardCount, onTaskboard, onFolders, onPicked, onC
   const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
   const openAnonymize = useAnonymizeStore((s) => s.openAnonymize)
   const openRooms = useRoomsStore((s) => s.openRooms)
+  const openTeamWork = useTeamWorkStore((s) => s.openTeamWork)
   const pick = (open: () => void) => () => { onPicked(); open() }
 
   const sections: MenuSection[] = [
@@ -1793,6 +1812,14 @@ function MoreToolsDialog({ taskboardCount, onTaskboard, onFolders, onPicked, onC
         }] : []),
         ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: pick(openCrew), tone: 'teal' as const }] : []),
         ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: pick(openSwarm), tone: 'amber' as const }] : []),
+      ],
+    },
+    {
+      title: 'Agents as a team',
+      items: [
+        { icon: Users, label: 'Vatra', hint: 'A lead splits one job; the team builds one result', onSelect: pick(() => openTeamWork('vatra')), tone: 'violet' },
+        { icon: Network, label: 'Basna', hint: 'Several agents answer; the best of each merged into one', onSelect: pick(() => openTeamWork('basna')), tone: 'sky' },
+        { icon: MessagesSquare, label: 'Council', hint: 'Your agents discuss a topic in rounds, then sum it up', onSelect: pick(() => openTeamWork('council')), tone: 'amber' },
       ],
     },
     {

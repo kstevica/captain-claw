@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Users, Plus, ArrowLeft, MessageSquare, Lightbulb, ClipboardCheck, Target } from 'lucide-react'
+import { Users, Plus, ArrowLeft, MessageSquare, Lightbulb, ClipboardCheck, Target, X } from 'lucide-react'
 import { useCouncilStore, type CreateSessionConfig } from '../stores/councilStore'
 import { useOnboardingStore } from '../stores/onboardingStore'
 import { CouncilSetup } from '../components/council/CouncilSetup'
@@ -19,7 +19,8 @@ const SIDEBAR_MIN = 280
 const SIDEBAR_MAX_RATIO = 0.65
 const SIDEBAR_DEFAULT_RATIO = 0.5
 
-export function CouncilPage() {
+/** `onClose`: in a kiosk dialog, its Close. */
+export function CouncilPage({ onClose }: { onClose?: () => void } = {}) {
   const {
     sessions, activeSession, loading, speaking, roundRunning, generatingArtifact, activityLog,
     autoAdvanceCountdown,
@@ -142,6 +143,12 @@ export function CouncilPage() {
               className="ml-auto flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500"
             >
               <Plus className="h-3.5 w-3.5" /> New Session
+            </button>
+          )}
+          {onClose && (
+            <button onClick={onClose} aria-label="Close" title="Close"
+              className={`${pageState === 'list' ? '' : 'ml-auto '}rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100`}>
+              <X className="h-4 w-4" />
             </button>
           )}
         </div>
