@@ -2051,7 +2051,7 @@ function AgentsColumn({
       </div>
 
       {/* The team: the agents, the two ways to add to it, and the search */}
-      <div className="@container space-y-2 px-4 pb-2 pt-6">
+      <div className="@container space-y-2 px-4 pb-2 pt-3">
         <div className="flex items-center gap-2">
           <h2 className="fd-section-label">Team</h2>
           <span className="fd-count">{agents.length}</span>

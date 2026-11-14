@@ -311,7 +311,7 @@ html.light .bg-violet-500\/5 { background-color: rgba(139,92,246,0.06) !importan
     width: 100%;
     align-items: center;
     gap: 0.75rem;
-    min-height: 2.5rem;
+    min-height: 2rem;
     padding: 0 0.75rem;
     border-radius: var(--fd-radius-control);
     color: var(--fd-ink-soft);

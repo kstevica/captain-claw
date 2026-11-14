@@ -9,7 +9,7 @@ import type { NavEntry, NavTarget } from './navDestinations'
  *  <nav>, never list items — the agent list below owns the column's <li>s. */
 export function SimpleNav({ entries, current, rail = false }: { entries: NavEntry[]; current: NavTarget | null; rail?: boolean }) {
   return (
-    <nav aria-label="Main" className={rail ? 'flex flex-col items-center gap-1' : 'flex flex-col gap-0.5'}>
+    <nav aria-label="Main" className={rail ? 'flex flex-col items-center gap-1' : 'flex flex-col'}>
       {entries.map((e) => {
         const Icon = e.icon
         const count = e.count && e.count > 0 ? (e.count > 99 ? '99+' : String(e.count)) : ''
