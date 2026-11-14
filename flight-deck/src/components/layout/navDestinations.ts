@@ -1,16 +1,17 @@
 import type { ComponentType } from 'react'
-import { Activity, AlarmClock, Contact, Inbox, ListChecks, Sun } from 'lucide-react'
+import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Sun } from 'lucide-react'
 
 // ── Simple layout: the outcome nav's destinations ────────────────────
 //
 // What the person comes for, in plain words, above their team of agents:
-// Today (the home with the agents that are up), Inbox (the Line: what the
+// Today (the briefing: what waits for the person, today's work), Agents (the
+// agents that are up, as cards), Inbox (the Line: what the
 // deck and the agents said on their own), Tasks (the Taskboard), Customers
 // (the people on those tasks), Automations (Scheduled tasks) and Activity
 // (every tool the agents used). Each opens the same view as before; only
 // the way in changed. SimpleNav.tsx draws them.
 
-export type NavTarget = 'today' | 'inbox' | 'tasks' | 'customers' | 'automations' | 'activity'
+export type NavTarget = 'today' | 'agents' | 'inbox' | 'tasks' | 'customers' | 'automations' | 'activity'
 
 export interface NavEntry {
   id: NavTarget
@@ -26,9 +27,10 @@ export interface NavEntry {
   onSelect: () => void
 }
 
-/** The six destinations, in the order the nav shows them. */
+/** The seven destinations, in the order the nav shows them. */
 export function navEntries(o: {
   onToday: () => void
+  onAgents: () => void
   onInbox: () => void
   inboxUnread: number
   inboxWaiting: number
@@ -42,7 +44,8 @@ export function navEntries(o: {
 }): NavEntry[] {
   const inboxCount = o.inboxWaiting || o.inboxUnread
   return [
-    { id: 'today', label: 'Today', icon: Sun, hint: 'Your team at a glance — pick an agent to chat', onSelect: o.onToday },
+    { id: 'today', label: 'Today', icon: Sun, hint: 'What needs you, what is in progress, what got done', onSelect: o.onToday },
+    { id: 'agents', label: 'Agents', icon: Bot, hint: 'Your agents that are up — pick one to chat', onSelect: o.onAgents },
     {
       id: 'inbox', label: 'Inbox', icon: Inbox, onSelect: o.onInbox,
       hint: o.inboxWaiting ? `${o.inboxWaiting} waiting for you` : o.inboxUnread ? `${o.inboxUnread} new from your agents` : 'What your agents told you on their own',

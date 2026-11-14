@@ -101,7 +101,7 @@ function Happened({ lines, result, actions }: { lines: string[]; result: string;
 
 const linkCls = 'font-medium text-violet-600 transition-colors hover:text-violet-500 dark:text-violet-400 dark:hover:text-violet-300'
 
-export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, switching, onOpen, locked = false, onGuide, empty }: {
+export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, switching, onOpen, onGuide, empty }: {
   agents: A[]
   sessionInfo: Map<string, { busy: boolean; unread: boolean }>
   booting: Set<string>
@@ -417,9 +417,7 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
         <footer className="mt-14 flex flex-col items-center gap-2 text-center text-xs text-zinc-500">
           <p>
             {off > 0 && <>{off === 1 ? 'One more agent is off: switch it on' : `${off} more agents are off: switch them on`} from the list on the left. </>}
-            {locked
-              ? 'What they save for you lands in Library, Data and Folders, bottom left.'
-              : 'An agent’s files and data show up on the right once its chat is open.'}
+            What they save for you lands in Library, Data and Folders, bottom left.
           </p>
           {onGuide && (
             <button onClick={onGuide} className="flex items-center gap-1.5 font-medium transition-colors hover:text-violet-600 dark:hover:text-violet-400">

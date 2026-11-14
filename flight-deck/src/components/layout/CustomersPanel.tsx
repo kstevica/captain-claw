@@ -50,6 +50,12 @@ export function CustomersPanel({ onClose, onOpenTasks, onOpenTask }: {
     }
   }, [])
   useEffect(() => { void load() }, [load])
+  // Escape closes it, as the nav's other views close (the Line, Scheduled tasks).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
 
   const toggle = async (id: string) => {
     if (openId === id) { setOpenId(null); return }

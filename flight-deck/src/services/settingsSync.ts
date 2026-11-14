@@ -36,7 +36,6 @@ const MIGRATEABLE_KEYS = [
   'fd:director-open',
   'fd:layout-mode',
   'fd:simple-left-open',
-  'fd:simple-right-open',
   'fd:simple-queue-open',
   'fd:agent-presets',
   'fd:container-view',
