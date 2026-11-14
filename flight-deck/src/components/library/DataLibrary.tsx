@@ -17,6 +17,7 @@ import {
   Copy,
   Database,
   Download,
+  FolderSearch,
   Hash,
   Lightbulb,
   Link2,
@@ -48,7 +49,10 @@ import {
   type ExportFormat,
   type RowsPage,
 } from '../../services/dataLibraryApi'
-import { FacetGroup, FullscreenButton, Highlight, ScanStatus, libraryIconBtn as iconBtn } from './libraryParts'
+import { isFolderSourceId } from '../../services/fileLibraryApi'
+import {
+  FacetGroup, FullscreenButton, Highlight, ScanStatus, SourceFacetGroup, SourceName, libraryIconBtn as iconBtn,
+} from './libraryParts'
 
 // ── Data library ────────────────────────────────────────────────────
 //
@@ -59,6 +63,10 @@ import { FacetGroup, FullscreenButton, Highlight, ScanStatus, libraryIconBtn as 
 // the rows themselves — live, searchable, sortable, one record at a time if
 // you like, and changed by hand (a cell, a new row, a deleted one) — or each
 // column's profile.
+//
+// The person's own shared folders are here too: a folder whose agents keep
+// a datastore together (vfs:<folder>/.datastore) has its tables beside the
+// agents', read, changed and exported the same way.
 
 const PAGE = 60
 const ROWS_PAGE = 50
@@ -161,13 +169,15 @@ function KindIcon({ kind, className = 'h-3.5 w-3.5' }: { kind: ColumnKind | unde
   return <Icon className={`${className} shrink-0 text-zinc-500`} />
 }
 
-export function DataLibrary({ phone = false, initialAgent, onClose, onOpenAgent }: {
+export function DataLibrary({ phone = false, initialAgent, onClose, onOpenAgent, onShowInFolder }: {
   phone?: boolean
-  /** Open filtered to this agent's tables. */
+  /** Open filtered to this agent's tables — or a shared folder's (vfs:<folder>). */
   initialAgent?: string | null
   onClose: () => void
   /** Chat with the agent a table belongs to. */
   onOpenAgent?: (agentSlug: string) => void
+  /** Open a shared folder's table's folder, in Shared folders. */
+  onShowInFolder?: (folder: string) => void
 }) {
   const notify = useNotificationStore((s) => s.add)
   const [state, setState] = useState<LibraryState | null>(null)
@@ -287,6 +297,7 @@ export function DataLibrary({ phone = false, initialAgent, onClose, onOpenAgent 
   // Only one agent's tables (how an agent's menu opens it): an empty list
   // means that agent has no data yet, not that a search missed.
   const agentOnly = !!agent && !debounced && !category
+  const folderOnly = agentOnly && isFolderSourceId(agent)
   const clearFilters = () => { setQuery(''); setAgent(''); setCategory('') }
 
   if (opened) {
@@ -309,6 +320,7 @@ export function DataLibrary({ phone = false, initialAgent, onClose, onOpenAgent 
           try { setState(await dataLibraryApi.scan()) } catch { /* the rows reload all the same */ }
         }}
         onOpenAgent={onOpenAgent && opened.agent_running ? () => onOpenAgent(opened.agent_slug) : undefined}
+        onShowInFolder={onShowInFolder && opened.source === 'folder' && opened.folder ? () => onShowInFolder(opened.folder!) : undefined}
       />
     )
   }
@@ -320,7 +332,7 @@ export function DataLibrary({ phone = false, initialAgent, onClose, onOpenAgent 
       </span>
       <div className="min-w-0 flex-1">
         <h2 className="truncate text-base font-semibold text-zinc-100">Data library</h2>
-        {!phone && <p className="truncate text-xs text-zinc-500">Every table your agents keep — summarised, profiled and easy to read.</p>}
+        {!phone && <p className="truncate text-xs text-zinc-500">Every table your agents keep, on their own and in your shared folders — summarised and easy to read.</p>}
       </div>
       {!phone && <ScanStatus state={state} noun="table" tone="emerald" />}
       <button onClick={rescan} disabled={running} className={iconBtn} title="Look for new tables" aria-label="Look for new tables">
@@ -367,7 +379,7 @@ export function DataLibrary({ phone = false, initialAgent, onClose, onOpenAgent 
           labelOf={(id) => CATEGORY_LABEL[id] || id}
           dot={(id) => <span className={`h-2 w-2 shrink-0 rounded-full ${CATEGORY_DOT[id] || CATEGORY_DOT.other}`} />}
         />
-        <FacetGroup title="Agents" allLabel="All agents" facets={facets.agents} value={agent} onChange={setAgent} />
+        <SourceFacetGroup agents={facets.agents} folders={facets.folders} value={agent} onChange={setAgent} />
       </div>
     )
 
@@ -381,6 +393,7 @@ export function DataLibrary({ phone = false, initialAgent, onClose, onOpenAgent 
       error={error}
       filtered={filtered}
       agentOnly={agentOnly}
+      folderOnly={folderOnly}
       terms={terms}
       phone={phone}
       loadingMore={loadingMore}
@@ -462,10 +475,11 @@ function SearchBox({ value, onChange, placeholder, small = false }: {
 // ── The list of tables ──
 
 function TableList({
-  items, total, rowsTotal, state, loading, error, filtered, agentOnly, terms, phone, loadingMore, onOpen, onMore, onClear, onRetry,
+  items, total, rowsTotal, state, loading, error, filtered, agentOnly, folderOnly, terms, phone, loadingMore, onOpen, onMore, onClear, onRetry,
 }: {
   items: DataTable[]; total: number; rowsTotal: number; state: LibraryState | null; loading: boolean; error: string
-  filtered: boolean; agentOnly: boolean; terms: string[]; phone: boolean; loadingMore: boolean
+  /** Only one agent's or shared folder's tables (`folderOnly`: a folder's). */
+  filtered: boolean; agentOnly: boolean; folderOnly: boolean; terms: string[]; phone: boolean; loadingMore: boolean
   onOpen: (t: DataTable) => void; onMore: () => void; onClear: () => void; onRetry: () => void
 }) {
   if (loading && items.length === 0) {
@@ -489,20 +503,22 @@ function TableList({
         <h3 className="mt-4 text-base font-semibold text-zinc-100">
           {filtered && !agentOnly
             ? 'Nothing matches'
-            : scanning ? 'Gathering your tables…' : agentOnly ? 'No tables yet' : state?.agents === 0 ? 'No agents yet' : 'No tables yet'}
+            : scanning ? 'Gathering your tables…' : agentOnly ? 'No tables yet' : state?.agents === 0 && !state?.folders ? 'No agents yet' : 'No tables yet'}
         </h3>
         <p className="mt-1.5 max-w-sm text-sm leading-relaxed text-zinc-400">
           {filtered && !agentOnly
             ? 'Try other words, or clear the filters.'
             : scanning
               ? 'Your agents\' tables show up here as soon as they\'re found and read.'
-              : agentOnly
-                ? 'This agent hasn\'t kept any data yet. When it collects some — contacts, companies, prices, results — it shows up here, summarised.'
-                : 'When your agents collect data — contacts, companies, prices, results — it lands in their datastore and shows up here, summarised.'}
+              : folderOnly
+                ? 'This folder keeps no tables yet. When agents working in it collect data together, the tables show up here, summarised.'
+                : agentOnly
+                  ? 'This agent hasn\'t kept any data yet. When it collects some — contacts, companies, prices, results — it shows up here, summarised.'
+                  : 'When your agents collect data — contacts, companies, prices, results — it lands in their datastore and shows up here, summarised.'}
         </p>
         {filtered && (
           <button onClick={onClear} className="mt-4 text-sm font-medium text-emerald-700 hover:underline dark:text-emerald-400">
-            {agentOnly ? 'Show every agent\'s tables' : 'Clear search and filters'}
+            {folderOnly ? 'Show every table' : agentOnly ? 'Show every agent\'s tables' : 'Clear search and filters'}
           </button>
         )}
       </div>
@@ -552,7 +568,7 @@ function TableCard({ t, terms, onClick }: { t: DataTable; terms: string[]; onCli
             <Highlight text={t.title || humanize(t.table_name)} terms={terms} />
           </span>
           <span className="block truncate text-[11px] text-zinc-500">
-            <span className="font-mono"><Highlight text={t.table_name} terms={terms} /></span> · {t.agent_name}
+            <span className="font-mono"><Highlight text={t.table_name} terms={terms} /></span> · <SourceName name={t.agent_name} folder={t.source === 'folder'} />
           </span>
         </span>
       </span>
@@ -594,13 +610,15 @@ function TableCard({ t, terms, onClick }: { t: DataTable; terms: string[]; onCli
 
 type Tab = 'summary' | 'data' | 'columns'
 
-function TableView({ item, terms, phone, onBack, onClose, onChanged, onRescan, onOpenAgent }: {
+function TableView({ item, terms, phone, onBack, onClose, onChanged, onRescan, onOpenAgent, onShowInFolder }: {
   item: DataTable; terms: string[]; phone: boolean
   onBack: () => void; onClose: () => void
   onChanged: (fresh: DataTable) => void
   /** Have the library look for changed tables again. */
   onRescan: () => Promise<void>
   onOpenAgent?: () => void
+  /** A shared folder's table: open its folder in Shared folders. */
+  onShowInFolder?: () => void
 }) {
   const notify = useNotificationStore((s) => s.add)
   const [detail, setDetail] = useState<DataTable>(item)
@@ -670,6 +688,11 @@ function TableView({ item, terms, phone, onBack, onClose, onChanged, onRescan, o
           <MessageSquare className="h-4 w-4" />{phone ? 'Chat' : 'Agent chat'}
         </button>
       )}
+      {onShowInFolder && (
+        <button onClick={onShowInFolder} className={btn} title={`Open ${t.agent_name} in Shared folders`}>
+          <FolderSearch className="h-4 w-4" />{phone ? 'Folder' : 'Open folder'}
+        </button>
+      )}
     </>
   )
 
@@ -683,7 +706,7 @@ function TableView({ item, terms, phone, onBack, onClose, onChanged, onRescan, o
       </span>
       <div className="min-w-0 flex-1">
         <h2 className="truncate text-base font-semibold text-zinc-100">{t.title || humanize(t.table_name)}</h2>
-        <p className="truncate text-xs text-zinc-500"><span className="font-mono">{t.table_name}</span> · {t.agent_name}</p>
+        <p className="truncate text-xs text-zinc-500"><span className="font-mono">{t.table_name}</span> · <SourceName name={t.agent_name} folder={t.source === 'folder'} /></p>
       </div>
       {!phone && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
       <button onClick={refresh} disabled={refreshing} className={`${iconBtn} shrink-0`} title="Refresh — the table as it is now" aria-label="Refresh">
@@ -1680,7 +1703,7 @@ function RecordPanel({
       </dl>
       {!phone && (
         <div className="border-t border-zinc-800 px-4 py-2 text-[10px] leading-snug text-zinc-500">
-          Click a value to change it — changes go straight to the agent's datastore.
+          Click a value to change it — changes go straight to the datastore the agents use.
         </div>
       )}
     </div>

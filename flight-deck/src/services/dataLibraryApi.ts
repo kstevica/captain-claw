@@ -1,12 +1,12 @@
 /**
  * Data library — the kiosk's "Data": every datastore table the caller's
- * agents keep, profiled and summarised by Flight Deck
- * (`captain_claw/flight_deck/data_library.py`). The rows are read live from
- * the agent's datastore, so the table view is never stale.
+ * agents keep, and the ones their shared folders keep (vfs:<folder>/.datastore),
+ * profiled and summarised by Flight Deck (`captain_claw/flight_deck/data_library.py`).
+ * The rows are read live from the datastore, so the table view is never stale.
  */
 
 import { useAuthStore } from '../stores/authStore'
-import { api, type Facet, type LibraryState, type LibraryStatus } from './fileLibraryApi'
+import { api, type Facet, type LibrarySource, type LibraryState, type LibraryStatus } from './fileLibraryApi'
 
 export interface DataColumn { name: string; type: string }
 
@@ -33,9 +33,13 @@ export interface ColumnProfile {
 
 export interface DataTable {
   id: string
+  /** The agent's slug, or `vfs:<folder>` for a shared folder's table. */
   agent_slug: string
   agent_name: string
   agent_running: boolean
+  source?: LibrarySource
+  /** The shared folder whose datastore holds it. */
+  folder?: string
   table_name: string
   columns: DataColumn[]
   row_count: number
@@ -62,7 +66,7 @@ export interface DataPage {
   items: DataTable[]
   total: number
   rows_total: number
-  facets: { agents: Facet[]; categories: Facet[] }
+  facets: { agents: Facet[]; folders?: Facet[]; categories: Facet[] }
 }
 
 export type DataRow = Record<string, unknown> & { __rowid: number }

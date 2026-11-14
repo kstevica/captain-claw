@@ -17,6 +17,7 @@ Routes (prefix ``/fd/anonymize``):
 * ``GET  /vfs/job``     — the person's folder job (or ``{"running": false}``)
 * ``POST /vfs/job/cancel``
 * ``POST /library/{file_id}`` — a Library file; the copy lands beside it in the agent's workspace
+  (or the shared folder it is in)
 * ``POST /agent/vfs/folder``, ``GET /agent/vfs/job`` — the same folder job for an agent's tool,
   in its person's VFS and vault
 """
@@ -383,7 +384,7 @@ async def library_file(file_id: str, body: dict[str, Any] = Body(default={}),
     from captain_claw.flight_deck import file_library as fl
 
     caller = str(user["id"])
-    row, agents = fl._owned_row(file_id, user)
+    row, agents = await fl._owned_row(file_id, user)
     src = fl._resolve_path(row)
     if src is None:
         raise HTTPException(404, "file not found")
@@ -403,6 +404,7 @@ async def library_file(file_id: str, body: dict[str, Any] = Body(default={}),
     except Exception as exc:  # noqa: BLE001
         log.debug("Library not refreshed after anonymizing", error=type(exc).__name__)
     out.pop("preview", None)
-    out.update({"written": {"agent_slug": row["agent_slug"], "rel_path": rel, "filename": target.name},
+    out.update({"written": {"agent_slug": fl.public_id(row["agent_slug"], agents), "rel_path": rel,
+                            "filename": target.name},
                 "size": len(out_blob)})
     return out

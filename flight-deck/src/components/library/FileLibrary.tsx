@@ -12,6 +12,7 @@ import {
   FileSpreadsheet,
   FileText,
   Film,
+  FolderSearch,
   Globe,
   Image,
   LibraryBig,
@@ -49,12 +50,14 @@ import { isMemberCreated, type Creator } from '../../utils/sharedWorkspace'
 import { fmtRelative, fmtWhen } from '../../services/schedulerApi'
 import {
   fileLibraryApi,
+  isFolderSourceId,
   type LibraryItem,
   type LibraryPage,
   type LibrarySort,
   type LibraryState,
 } from '../../services/fileLibraryApi'
-import { FacetGroup, FullscreenButton, Highlight, ScanStatus, libraryIconBtn } from './libraryParts'
+import { vfsApi, type FolderRef } from '../../services/vfsApi'
+import { FacetGroup, FullscreenButton, Highlight, ScanStatus, SourceFacetGroup, SourceName, libraryIconBtn } from './libraryParts'
 import { FilePreview } from './FilePreview'
 import { isUntrustedFile } from '../../utils/untrustedContent'
 
@@ -65,8 +68,13 @@ import { isUntrustedFile } from '../../utils/untrustedContent'
 // and tags it (a picture is looked at, a recording or video transcribed).
 // Search finds a file by any of that or by its text, a picture's description
 // or what's said in a recording; filters narrow it to a category, an agent
-// or a kind of file. Opening the library
+// or a shared folder, or a kind of file. Opening the library
 // looks for new files in the background; the list fills in as they're read.
+//
+// The person's own shared folders (vfs:<folder>/) are here beside the
+// agents, read the same way. A folder's file is edited through the folder
+// (no agent stands behind it), and what only an agent does — present a page
+// as a deck, make a public link — isn't offered for it.
 
 const PAGE = 60
 
@@ -147,9 +155,15 @@ function toAgentFile(item: LibraryItem, creator?: Creator | null): AgentFile {
  *  'shared' file only when it says it's the viewer's own. */
 function toViewerFile(item: LibraryItem, creator: Creator | null | undefined): AgentFile {
   const file = toAgentFile(item, creator)
+  // The person's own shared folder opens as it does in Shared folders.
+  if (isFolderItem(item)) return file
   const risky = ['html', 'markdown'].includes(getFileTypeGroup(file))
   return creator === undefined && risky ? { ...file, source: 'shared' } : file
 }
+
+/** A file in one of the person's shared folders (vfs:<folder>/…). */
+const isFolderItem = (item: LibraryItem) => item.source === 'folder' && !!item.folder
+const folderRef = (item: LibraryItem): FolderRef => ({ project: item.folder || '', owner: '' })
 
 // Whether this browser can hand a file to the phone's share sheet.
 const canShareFiles = typeof navigator !== 'undefined' && typeof navigator.share === 'function'
@@ -239,7 +253,7 @@ function useFileCreators(items: LibraryItem[]): (item: LibraryItem) => Creator |
   return useCallback((item: LibraryItem) => lists[item.agent_slug]?.get(item.physical), [lists])
 }
 
-export function FileLibrary({ phone = false, initialAgent, initialFile, onClose, onOpenAgent, onOpenLive, liveReady }: {
+export function FileLibrary({ phone = false, initialAgent, initialFile, onClose, onOpenAgent, onOpenLive, liveReady, onShowInFolder }: {
   phone?: boolean
   /** Open filtered to this agent's files. */
   initialAgent?: string | null
@@ -257,6 +271,8 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
   /** Whether that agent can be opened live now — not while it is still
    *  starting up. Without it: while it runs. */
   liveReady?: (agentSlug: string) => boolean
+  /** Show a shared folder's file where it is, in Shared folders. */
+  onShowInFolder?: (folder: string, relPath: string) => void
 }) {
   const notify = useNotificationStore((s) => s.add)
   const [state, setState] = useState<LibraryState | null>(null)
@@ -274,8 +290,9 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<LibraryItem | null>(null)
   const [viewing, setViewing] = useState<LibraryItem | null>(null)
-  // Edit and Public link go through the file's agent, captured when tapped.
-  const [editing, setEditing] = useState<{ item: LibraryItem; agent: AgentEndpoint } | null>(null)
+  // Edit and Public link go through the file's agent, captured when tapped;
+  // a shared folder's file is edited through its folder (no agent).
+  const [editing, setEditing] = useState<{ item: LibraryItem; agent: AgentEndpoint | null } | null>(null)
   const [linking, setLinking] = useState<{ item: LibraryItem; agent: AgentEndpoint } | null>(null)
   const [sharing, setSharing] = useState<LibraryItem | null>(null)
   const [anonymizing, setAnonymizing] = useState<LibraryItem | null>(null)
@@ -422,6 +439,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
   // Only one agent's files (how an agent's menu opens it): an empty list
   // means that agent has no files yet, not that a search missed.
   const agentOnly = !!agent && !debounced && !category && !kind
+  const folderOnly = agentOnly && isFolderSourceId(agent)
   const clearFilters = () => { setQuery(''); setAgent(''); setCategory(''); setKind('') }
   // One agent's files, while it runs (and is up): the way to everything it keeps.
   const agentRunning = useProcessStore((s) => !!agent && s.processes.some((p) => p.slug === agent && p.status === 'running'))
@@ -437,7 +455,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
       </span>
       <div className="min-w-0 flex-1">
         <h2 className="truncate text-base font-semibold text-zinc-100">File library</h2>
-        {!phone && <p className="truncate text-xs text-zinc-500">Every file your agents made — summarised, sorted and searchable.</p>}
+        {!phone && <p className="truncate text-xs text-zinc-500">Every file your agents made, in their own files and your shared folders — summarised and searchable.</p>}
       </div>
       {!phone && <ScanStatus state={state} noun="file" />}
       <button onClick={rescan} disabled={running} className={iconBtn} title="Look for new files" aria-label="Look for new files">
@@ -504,6 +522,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
       error={error}
       filtered={filtered}
       agentOnly={agentOnly}
+      folderOnly={folderOnly}
       terms={terms}
       selectedId={selected?.id ?? null}
       loadingMore={loadingMore}
@@ -527,6 +546,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
       onClose={() => setSelected(null)}
       onOpen={() => openFile(selected)}
       onEdit={(a) => setEditing({ item: selected, agent: a })}
+      onShowInFolder={onShowInFolder && isFolderItem(selected) ? () => onShowInFolder(selected.folder!, selected.rel_path) : undefined}
       onDownload={() => download(selected)}
       onShare={() => setSharing(selected)}
       onPublicLink={(a) => setLinking({ item: selected, agent: a })}
@@ -551,12 +571,24 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
       onPrev={() => { if (viewIdx > 0) setViewing(viewable[viewIdx - 1]) }}
       onNext={() => { if (viewIdx >= 0 && viewIdx < viewable.length - 1) setViewing(viewable[viewIdx + 1]) }}
     />
-  ) : editing ? (
+  ) : editing?.agent ? (
     <FileViewer
       file={toViewerFile(editing.item, creatorOf(editing.item))}
       host={editing.agent.host}
       port={editing.agent.port}
       auth={editing.agent.auth}
+      startInEdit
+      onClose={closeEditor}
+    />
+  ) : editing ? (
+    // A shared folder's file: read and saved through its folder, as in Shared folders.
+    <FileViewer
+      file={toViewerFile(editing.item, undefined)}
+      urls={{
+        view: vfsApi.viewUrl(folderRef(editing.item), editing.item.rel_path, editing.item.modified),
+        download: vfsApi.downloadUrl(folderRef(editing.item), editing.item.rel_path),
+      }}
+      onSave={async (text) => { await vfsApi.write(folderRef(editing.item), editing.item.rel_path, text) }}
       startInEdit
       onClose={closeEditor}
     />
@@ -667,7 +699,7 @@ function Filters({ facets, agent, category, kind, onAgent, onCategory, onKind }:
         labelOf={(id) => CATEGORY_LABEL[id] || id}
         dot={(id) => <span className={`h-2 w-2 shrink-0 rounded-full ${CATEGORY_DOT[id] || CATEGORY_DOT.other}`} />}
       />
-      <FacetGroup title="Agents" allLabel="All agents" facets={facets.agents} value={agent} onChange={onAgent} />
+      <SourceFacetGroup agents={facets.agents} folders={facets.folders} value={agent} onChange={onAgent} />
       {facets.kinds.length > 1 && (
         <FacetGroup
           title="Type" allLabel="Any type" facets={facets.kinds} value={kind} onChange={onKind}
@@ -694,10 +726,11 @@ function LiveLink({ onClick }: { onClick: () => void }) {
 }
 
 function ResultList({
-  items, total, state, loading, error, filtered, agentOnly, terms, selectedId, loadingMore, creatorOf, onSelect, onMore, onClear, onRetry, onLive,
+  items, total, state, loading, error, filtered, agentOnly, folderOnly, terms, selectedId, loadingMore, creatorOf, onSelect, onMore, onClear, onRetry, onLive,
 }: {
   items: LibraryItem[]; total: number; state: LibraryState | null; loading: boolean; error: string
-  filtered: boolean; agentOnly: boolean; terms: string[]; selectedId: string | null; loadingMore: boolean
+  /** Only one agent's or shared folder's files (`folderOnly`: a folder's). */
+  filtered: boolean; agentOnly: boolean; folderOnly: boolean; terms: string[]; selectedId: string | null; loadingMore: boolean
   creatorOf: (i: LibraryItem) => Creator | null | undefined
   onSelect: (i: LibraryItem) => void; onMore: () => void; onClear: () => void; onRetry: () => void
   /** The agent filtered to, live (it runs, in the kiosk). */
@@ -724,24 +757,28 @@ function ResultList({
         <h3 className="mt-4 text-base font-semibold text-zinc-100">
           {filtered && !agentOnly
             ? 'Nothing matches'
-            : scanning ? 'Gathering your files…' : agentOnly ? 'No files yet' : state?.agents === 0 ? 'No agents yet' : 'No files yet'}
+            : scanning ? 'Gathering your files…' : agentOnly ? 'No files yet' : state?.agents === 0 && !state?.folders ? 'No agents yet' : 'No files yet'}
         </h3>
         <p className="mt-1.5 max-w-sm text-sm leading-relaxed text-zinc-400">
           {filtered && !agentOnly
             ? 'Try other words, or clear the filters.'
             : scanning
-              ? agentOnly
-                ? 'This agent\'s files show up here as soon as they\'re found and read.'
-                : 'Your agents\' files show up here as soon as they\'re found and read.'
-              : agentOnly
-                ? 'This agent hasn\'t saved any files yet. When it saves reports, notes, spreadsheets or anything else, each one shows up here with a short summary.'
-                : state?.agents === 0
-                  ? 'Create an agent and the reports, notes and data it makes will collect here.'
-                  : 'When your agents save reports, notes, spreadsheets or anything else, each one shows up here with a short summary.'}
+              ? folderOnly
+                ? 'This folder\'s files show up here as soon as they\'re found and read.'
+                : agentOnly
+                  ? 'This agent\'s files show up here as soon as they\'re found and read.'
+                  : 'Your agents\' files show up here as soon as they\'re found and read.'
+              : folderOnly
+                ? 'Nothing in this folder yet. When your agents save files into it, each one shows up here with a short summary.'
+                : agentOnly
+                  ? 'This agent hasn\'t saved any files yet. When it saves reports, notes, spreadsheets or anything else, each one shows up here with a short summary.'
+                  : state?.agents === 0 && !state?.folders
+                    ? 'Create an agent and the reports, notes and data it makes will collect here.'
+                    : 'When your agents save reports, notes, spreadsheets or anything else, each one shows up here with a short summary.'}
         </p>
         {filtered && (
           <button onClick={onClear} className="mt-4 text-sm font-medium text-violet-600 hover:underline dark:text-violet-400">
-            {agentOnly ? 'Show every agent\'s files' : 'Clear search and filters'}
+            {folderOnly ? 'Show every file' : agentOnly ? 'Show every agent\'s files' : 'Clear search and filters'}
           </button>
         )}
         {onLive && <div className="mt-3"><LiveLink onClick={onLive} /></div>}
@@ -815,7 +852,7 @@ function ResultRow({ item, creator, terms, active, onClick }: {
         </span>
         <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
           {item.title && item.title !== item.filename ? <><Highlight text={item.filename} terms={terms} /> · </> : null}
-          {item.agent_name} · {fmtRelative(item.modified)} · {formatSize(item.size)}
+          <SourceName name={item.agent_name} folder={isFolderItem(item)} /> · {fmtRelative(item.modified)} · {formatSize(item.size)}
         </span>
         {pending ? (
           <span className="mt-1 flex items-center gap-1.5 text-xs text-zinc-500">
@@ -852,29 +889,35 @@ function ResultRow({ item, creator, terms, active, onClick }: {
 // ── One file ──
 
 function FileDetail({
-  item, creator, terms, phone, viewerOpen, onClose, onOpen, onEdit, onDownload, onShare, onPublicLink, onResummarize, onAnonymize, onTag, onAgent, onOpenAgent,
+  item, creator, terms, phone, viewerOpen, onClose, onOpen, onEdit, onDownload, onShare, onPublicLink, onResummarize, onAnonymize, onTag, onAgent, onOpenAgent, onShowInFolder,
 }: {
   item: LibraryItem; creator: Creator | null | undefined; terms: string[]; phone: boolean
   /** A file is open in the viewer over the library (its preview pauses). */
   viewerOpen: boolean
-  onClose: () => void; onOpen: () => void; onEdit: (agent: AgentEndpoint) => void
+  /** Edit through the running agent — or, for a shared folder's file, through the folder (null). */
+  onClose: () => void; onOpen: () => void; onEdit: (agent: AgentEndpoint | null) => void
   onDownload: () => void; onShare: () => void; onPublicLink: (agent: AgentEndpoint) => void
   onResummarize: () => Promise<void>; onAnonymize: () => void; onTag: (t: string) => void; onAgent: () => void
   onOpenAgent?: () => void
+  /** A shared folder's file, shown where it is in Shared folders. */
+  onShowInFolder?: () => void
 }) {
   const notify = useNotificationStore((s) => s.add)
   const [busy, setBusy] = useState(false)
-  const agent = useRunningAgent(item.agent_slug)
-  const publicLinks = usePublicLinksEnabled()
+  // A shared folder's file has no agent behind it: edited through the folder,
+  // never presented or linked through an agent.
+  const inFolder = isFolderItem(item)
+  const agent = useRunningAgent(inFolder ? '' : item.agent_slug)
+  const publicLinks = usePublicLinksEnabled() && !inFolder
   const file = toAgentFile(item, creator)
   const canView = isViewable(file)
   // What the Files panel offers on a phone: no editing, no decks.
   const canEdit = !phone && isEditable(file)
   // A member's HTML never runs as a deck (Flight Deck's /deck/view refuses it too).
-  const canDeck = !phone && getFileTypeGroup(file) === 'html' && !isMemberCreated(creator)
+  const canDeck = !phone && !inFolder && getFileTypeGroup(file) === 'html' && !isMemberCreated(creator)
   const offTitle = `Start ${item.agent_name} first — this goes through the agent`
   // Said under the buttons too: a phone has no hover for their titles.
-  const viaAgent = [canEdit && 'edit', canDeck && 'present', publicLinks && 'make a public link']
+  const viaAgent = [canEdit && !inFolder && 'edit', canDeck && 'present', publicLinks && 'make a public link']
     .filter((a): a is string => !!a)
   const offNote = viaAgent.length > 1
     ? `${viaAgent.slice(0, -1).join(', ')} or ${viaAgent[viaAgent.length - 1]}`
@@ -890,12 +933,14 @@ function FileDetail({
   }
 
   const meta: [string, ReactNode][] = [
-    ['Agent', (
-      <button onClick={onAgent} className="truncate text-left text-violet-600 hover:underline dark:text-violet-400" title="Show only this agent's files">
+    [inFolder ? 'Folder' : 'Agent', (
+      <button onClick={onAgent} className="truncate text-left text-violet-600 hover:underline dark:text-violet-400"
+        title={inFolder ? 'Show only this folder\'s files' : 'Show only this agent\'s files'}>
         {item.agent_name}
       </button>
     )],
-    ['Location', <span className="break-all font-mono text-[11px]">{item.rel_path}</span>],
+    // A folder's file by the address its agents use (vfs:<folder>/<path>).
+    ['Location', <span className="break-all font-mono text-[11px]">{inFolder ? item.logical : item.rel_path}</span>],
     ['Size', formatSize(item.size)],
     ['Changed', fmtWhen(item.modified)],
   ]
@@ -1012,9 +1057,18 @@ function FileDetail({
           </button>
         )}
         <button onClick={onDownload} className={btn}><Download className="h-4 w-4" />Download</button>
-        {canEdit && (
+        {canEdit && (inFolder ? (
+          <button onClick={() => onEdit(null)} className={btn} title="Edit the file">
+            <Pencil className="h-4 w-4" />Edit
+          </button>
+        ) : (
           <button onClick={() => agent && onEdit(agent)} disabled={!agent} className={btn} title={agent ? 'Edit the file' : offTitle}>
             <Pencil className="h-4 w-4" />Edit
+          </button>
+        ))}
+        {onShowInFolder && (
+          <button onClick={onShowInFolder} className={btn} title="Show it where it is, in Shared folders — rename, move it along, share the folder">
+            <FolderSearch className="h-4 w-4" />Show in folder
           </button>
         )}
         {canDeck && (
@@ -1036,14 +1090,14 @@ function FileDetail({
           </button>
         )}
         {anonymizable(item.filename) && (
-          <button onClick={onAnonymize} className={btn} title="An anonymized copy beside it, in the agent's files">
+          <button onClick={onAnonymize} className={btn} title={inFolder ? 'An anonymized copy beside it, in its folder' : 'An anonymized copy beside it, in the agent\'s files'}>
             <ShieldCheck className="h-4 w-4" />Anonymize
           </button>
         )}
         <button onClick={redo} disabled={busy || item.status === 'pending'} className={btn} title="Read the file again and write a fresh summary">
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}Summarise again
         </button>
-        {offNote && !agent && (
+        {offNote && !agent && !inFolder && (
           <p className="col-span-2 text-center text-[11px] text-zinc-500">
             Start {item.agent_name} to {offNote} — that goes through the agent.
           </p>

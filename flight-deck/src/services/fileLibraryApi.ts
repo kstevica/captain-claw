@@ -1,10 +1,17 @@
 /**
  * File library — the kiosk's "Library": every file the caller's agents made,
  * summarised and sorted by Flight Deck (`captain_claw/flight_deck/file_library.py`).
- * A scan walks each agent's workspace, summarises new and changed files with
- * the owner's fast tier, and keeps the results searchable by name, title,
- * summary, tags and text.
+ * A scan walks each agent's workspace and each of the caller's own shared
+ * folders, summarises new and changed files with the owner's fast tier, and
+ * keeps the results searchable by name, title, summary, tags and text.
  */
+
+/** Where a library file or table lives: an agent, or a shared folder. */
+export type LibrarySource = 'agent' | 'folder'
+
+/** The library's id for a shared folder: `vfs:<folder>`, as agents name it. */
+export const folderSourceId = (folder: string) => `vfs:${folder}`
+export const isFolderSourceId = (id: string) => id.startsWith('vfs:')
 
 import { refreshAccessToken, useAuthStore } from '../stores/authStore'
 
@@ -12,14 +19,19 @@ export type LibraryStatus = 'pending' | 'done' | 'error' | 'skipped'
 
 export interface LibraryItem {
   id: string
+  /** The agent's slug, or `vfs:<folder>` for a shared folder's file. */
   agent_slug: string
+  /** The agent's name, or the folder's (a run's title for a run's folder). */
   agent_name: string
   agent_running: boolean
+  source?: LibrarySource
+  /** The shared folder it is in (vfs:<folder>/<rel_path>). */
+  folder?: string
   rel_path: string
   /** The file on disk, named as the agent's Files panel names it — what the
    *  agent's view, save, deck and public-link routes take. */
   physical: string
-  /** `workspace/<rel_path>`, the panel's name for it. */
+  /** `workspace/<rel_path>`, the panel's name for it (`vfs:<folder>/<rel_path>` in a shared folder). */
   logical: string
   filename: string
   extension: string
@@ -46,7 +58,7 @@ export interface Facet { id: string; label: string; count: number }
 export interface LibraryPage {
   items: LibraryItem[]
   total: number
-  facets: { agents: Facet[]; categories: Facet[]; kinds: Facet[] }
+  facets: { agents: Facet[]; folders?: Facet[]; categories: Facet[]; kinds: Facet[] }
 }
 
 export interface ScanJob {
@@ -65,6 +77,8 @@ export interface LibraryState {
   job: ScanJob
   counts: { total: number; done: number; pending: number; error: number; skipped: number }
   agents: number
+  /** The caller's own shared folders the library reads. */
+  folders?: number
 }
 
 export type LibrarySort = 'recent' | 'name' | 'size' | 'agent'
