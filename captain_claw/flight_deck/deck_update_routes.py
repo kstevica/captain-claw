@@ -4,7 +4,8 @@
 ``GET  /fd/system/update/notice`` anyone signed in: is an update coming, and how long until the restart
 ``GET  /fd/system/update``        where the deck is, what the last fetch brought, the update under way
 ``POST /fd/system/update/check``  ask the remote
-``POST /fd/system/update/start``  ``{target, wait}``: update to that commit
+``POST /fd/system/update/start``  ``{target, wait, countdown_s}``: update to that commit; ``countdown_s`` is how
+                                  long everyone gets before the restart (10, 120, 300 or 600; left out, the default)
 ``PUT  /fd/system/update/mode``   ``{mode}``: off · notify · install
 """
 
@@ -25,6 +26,8 @@ router = APIRouter(prefix="/fd/system/update", tags=["system"])
 class StartBody(BaseModel):
     target: str
     wait: bool = False
+    # One of deck_update.COUNTDOWN_CHOICES; None is FD_UPDATE_COUNTDOWN_S, as for old pages.
+    countdown_s: int | None = None
 
 
 class ModeBody(BaseModel):
@@ -33,7 +36,8 @@ class ModeBody(BaseModel):
 
 async def _status(*, fetch: bool = False) -> dict[str, Any]:
     return {**await deck_update.status(fetch=fetch), "mode": await deck_update.get_mode(get_db()),
-            # How long everyone's countdown runs (FD_UPDATE_COUNTDOWN_S): the page says it.
+            # How long everyone's countdown runs when nobody picks (FD_UPDATE_COUNTDOWN_S): the switch, an
+            # agent's ask. The page says it, and preselects it when it's one of the choices.
             "countdown_s": int(deck_update._countdown_s())}
 
 
@@ -55,8 +59,12 @@ async def update_check(_: dict = Depends(require_admin)) -> dict[str, Any]:
 @router.post("/start", status_code=202)
 async def update_start(body: StartBody, user: dict = Depends(require_admin)) -> dict[str, Any]:
     try:
+        deck_update.chosen_countdown(body.countdown_s)
+    except deck_update.RefusedError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    try:
         return await deck_update.start(by=user.get("email") or user.get("display_name") or "an admin", target=body.target,
-                                       wait=body.wait, user_id=user.get("id") or "")
+                                       wait=body.wait, user_id=user.get("id") or "", countdown_s=body.countdown_s)
     except deck_update.RefusedError as exc:
         raise HTTPException(409, str(exc)) from exc
 

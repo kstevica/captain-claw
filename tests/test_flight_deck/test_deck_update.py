@@ -1024,9 +1024,9 @@ async def test_waiting_for_turns_comes_after_the_countdown(world, steps, monkeyp
     order: list[str] = []
     real_count = deck_update._count_down
 
-    async def count():
+    async def count(seconds):
         order.append("countdown")
-        await real_count()
+        await real_count(seconds)
 
     async def turns():
         order.append("turns")
@@ -1036,6 +1036,80 @@ async def test_waiting_for_turns_comes_after_the_countdown(world, steps, monkeyp
     await deck_update.start(by="a", target=target, wait=True)
     await deck_update._task
     assert order == ["countdown", "turns"]
+
+
+def _sleeps(monkeypatch) -> list[tuple[float, dict]]:
+    """Every sleep the update takes, with what everyone was told just then; none of them waits."""
+    slept: list[tuple[float, dict]] = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(seconds):
+        slept.append((seconds, deck_update.notice()))
+        await real_sleep(0)
+
+    monkeypatch.setattr(deck_update.asyncio, "sleep", sleep)
+    return slept
+
+
+@pytest.mark.parametrize("seconds", [10, 120, 300, 600])
+async def test_the_admin_picks_how_long_everyone_gets(world, steps, monkeypatch, seconds):
+    monkeypatch.setenv("FD_UPDATE_COUNTDOWN_S", "120")
+    monkeypatch.setattr(deck_update, "_SOON_S", 20.0)
+    target = push(world)
+    await deck_update.status(fetch=True)
+    slept = _sleeps(monkeypatch)
+    job = await deck_update.start(by="a", target=target, countdown_s=seconds)
+    assert job["countdown_s"] == seconds and deck_update.read_state()["countdown_s"] == seconds
+    await deck_update._task
+    soon, countdown = slept[0], slept[1]
+    # "Soon" never outlasts the countdown that was picked: "restart now" is about 10 seconds, not 30.
+    assert soon[1]["level"] == "soon" and soon[0] <= min(20, seconds)
+    assert countdown[0] == seconds and countdown[1]["level"] == "restart"
+    assert seconds - 2 <= countdown[1]["seconds_left"] <= seconds
+    assert deck_update.read_state()["phase"] == "restarting"
+
+
+async def test_a_countdown_nobody_offered_is_refused_before_anything_starts(world, steps):
+    target = push(world)
+    await deck_update.status(fetch=True)
+    for seconds in (0, 5, 45, 119, 3600, -10, True):
+        with pytest.raises(deck_update.RefusedError, match="10 seconds, 2 minutes, 5 minutes or 10 minutes"):
+            await deck_update.start(by="a", target=target, countdown_s=seconds)
+    assert deck_update.read_state() == {"phase": "idle"} and steps == []
+    assert deck_update.chosen_countdown(300) == 300.0 and deck_update.chosen_countdown(10.0) == 10.0
+
+
+async def test_without_a_pick_it_is_the_decks_own_countdown(world, steps, monkeypatch):
+    """An agent's ask and the switch don't pick, and neither does a page from before there was a choice."""
+    monkeypatch.setenv("FD_UPDATE_COUNTDOWN_S", "90")
+    target = push(world)
+    await deck_update.status(fetch=True)
+    slept = _sleeps(monkeypatch)
+    job = await deck_update.start(by="a", target=target)
+    assert job["countdown_s"] == 90
+    await deck_update._task
+    assert slept[-1][0] == 90.0 and slept[-1][1]["level"] == "restart"
+    assert deck_update.chosen_countdown(None) == 90.0
+
+
+async def test_the_page_sends_the_pick_and_a_wrong_one_is_refused(world, steps, monkeypatch):
+    monkeypatch.setattr(deck_update_routes, "get_db", lambda: _FakeDb())
+    monkeypatch.setenv("FD_UPDATE_COUNTDOWN_S", "120")
+    target = push(world)
+    async with _routes({"id": "a", "role": "admin", "email": "a@x"}) as client:
+        assert (await client.post("/fd/system/update/check")).json()["countdown_s"] == 120
+        for wrong in (45, 0, 7200):
+            refused = await client.post("/fd/system/update/start", json={"target": target, "countdown_s": wrong})
+            assert refused.status_code == 400 and "10 seconds, 2 minutes" in refused.json()["detail"]
+        assert (await client.post("/fd/system/update/start", json={"target": target, "countdown_s": "soon"})).status_code == 422
+        assert not deck_update.in_progress() and steps == []
+        slept = _sleeps(monkeypatch)
+        started = await client.post("/fd/system/update/start", json={"target": target, "wait": False, "countdown_s": 300})
+        assert started.status_code == 202 and started.json()["countdown_s"] == 300
+        await deck_update._task
+        assert slept[-1][0] == 300
+        # Whoever opens the page while it runs sees what was picked.
+        assert (await client.get("/fd/system/update")).json()["job"]["countdown_s"] == 300
 
 
 def test_what_everyone_is_told_at_each_stage(world):

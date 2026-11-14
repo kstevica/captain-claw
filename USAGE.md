@@ -6759,7 +6759,7 @@ Flight Deck uses environment variables:
 | `FD_CREW_MAX_RUNNING` / `FD_CREW_MAX_TURN_HOURS` / `FD_CREW_STALL_MINUTES` | `8` / `6` / `15` | **NEW in 0.8.5.** Workers at once on this deck; the longest one turn may run; silence before you're told a worker seems stuck |
 | `FD_CREW_WORKING_SECONDS` / `FD_CREW_MODEL_SILENCE_SECONDS` / `FD_CREW_ERROR_WAIT_SECONDS` / `FD_CREW_RETRY_WAIT_SECONDS` | `60` / `300` / `300` / `20` | **NEW in 0.8.5.** How often the still-working line refreshes; how long a model server through the deck can say nothing; how long a CLI gets to show it's past a failed call; the first wait between tries |
 | `FD_CREW_CLAUDE_BIN`, `FD_CREW_CODEX_BIN`, `FD_CREW_OPENCODE_BIN`, `FD_CREW_CRUSH_BIN`, `FD_CREW_PI_BIN` | found on `PATH` | **NEW in 0.8.5.** Where a CLI is, if Flight Deck can't find it |
-| `FD_UPDATE_REPO` / `FD_UPDATE_POLL_S` / `FD_UPDATE_COUNTDOWN_S` / `FD_UPDATE_BOOT_TIMEOUT_S` | worked out / `900` / `120` / `300` | **NEW in 0.8.5.** [Updating the deck](#updating-the-deck--new-in-085): the checkout; how often it looks; how long everyone gets before the restart; how long the new version gets to come up |
+| `FD_UPDATE_REPO` / `FD_UPDATE_POLL_S` / `FD_UPDATE_COUNTDOWN_S` / `FD_UPDATE_BOOT_TIMEOUT_S` | worked out / `900` / `120` / `300` | **NEW in 0.8.5.** [Updating the deck](#updating-the-deck--new-in-085): the checkout; how often it looks; how long everyone gets before the restart when nobody picks; how long the new version gets to come up |
 | `FD_IMAP_SEND` | (unset) | **NEW in 0.9.0.** `off` stops all sending from [IMAP inboxes](#email-imap--new-in-090) on this deck; agents can still draft |
 | `FD_IMAP_REPEAT_CHECK_DAYS` | `14` | **NEW in 0.9.0.** An IMAP email already in Sent within this many days (or in Drafts) isn't drafted or sent again; `0` checks only Drafts |
 | `FD_AGENT_MAIL` | on | **NEW in 0.9.0.** `off` stops agents picking up email that names them ([agent email](#agents-as-colleagues-and-agent-email--new-in-090)) |
@@ -7049,7 +7049,7 @@ A deck running from a git checkout can update itself: **Console → Updates → 
 What happens, in order:
 
 1. **It tries the new version first.** The new commit is unpacked to a temp folder and started on a spare port, with an empty data folder and none of the deck's keys. Its page must have all its files, and its agents' code must import. If any of that fails, it stops here, and nothing has been touched.
-2. **It warns everyone, then counts down.** Everyone signed in gets a toast that an update is coming, as soon as the test start begins, for at least 20 seconds. Once it passes, they get a toast at the top right that they can't close, counting down 2 minutes, and nothing is stopped until it ends. There's no cancelling it from the page. People's pages keep working all through it, and when the deck is back they're offered a reload to get the new version.
+2. **It warns everyone, then counts down.** Everyone signed in gets a toast that an update is coming, as soon as the test start begins, for at least 20 seconds (less with **Restart now**). Once it passes, they get a toast at the top right that they can't close, counting down as long as you picked when you started it: **Restart now** (10 seconds), **In 2 minutes**, **In 5 minutes** or **In 10 minutes**. Nothing is stopped until it ends. There's no cancelling it from the page. People's pages keep working all through it, and when the deck is back they're offered a reload to get the new version.
 3. **It stops the agents**, because they read their code from the checkout. If some are mid-turn, you choose: wait for them after the countdown (up to 5 more minutes) or stop them when it ends. Crew's workers keep going.
 4. **It pulls.** New packages are installed before step 1, so you don't run `pip` yourself. After the pull, a venv holding a copy gets the new version installed, and an editable install gets `pip install -e` when `pyproject.toml` changed, so new commands appear. If that fails, the checkout goes back and the agents restart.
 5. **It restarts in place**: the same process, the same command line, the same terminal or tmux pane, and Ctrl-C still works. You don't retype anything, and it can't lose the environment you started it with. Agents come back as on any start, and the ones you stopped stay stopped.
@@ -7063,7 +7063,7 @@ It refuses before touching anything when the checkout has commits the branch doe
 
 **Letting it run by itself.** Under **Automatically**: **Off** (it looks only when you press Check now), **Tell me** (it looks every 15 minutes, and tells admins in the bell), or **Install by itself** (it starts when no agent is mid-turn, still gives everyone the countdown, waits for any turn begun during it, and doesn't retry a version that failed). With Install by itself, whatever is merged to the branch goes live once it passes step 1.
 
-**An agent can ask.** An admin's agent with Crew can run `crew action=update_deck`, which puts an Approve in the bell. The Approve covers that commit and no later one, waits for turns to finish, and the agent is called back when it's over. Only admins, and their agents, can get near this.
+**An agent can ask.** An admin's agent with Crew can run `crew action=update_deck`, which puts an Approve in the bell. The Approve covers that commit and no later one, waits for turns to finish, counts down for `FD_UPDATE_COUNTDOWN_S`, and the agent is called back when it's over. Only admins, and their agents, can get near this.
 
 **What it can't do.** A desktop build or a container has no checkout, so the page says to update it the way it was installed. A deck started some other way than the `flight-deck` command (say, by running uvicorn yourself) can't restart itself. It fetches with the git login of the computer it runs on, without a prompt, so a private repository needs a credential helper or an SSH key that doesn't ask. WhatsApp Web's service outlives a restart and stays on the old version until it's restarted. Test start or not, a version can still fail in ways only your real data shows after the deck is up: going back covers it not coming up, not a feature misbehaving later.
 
@@ -7071,7 +7071,7 @@ It refuses before touching anything when the checkout has commits the branch doe
 |---|---|
 | `FD_UPDATE_REPO` | The checkout, when the deck can't work it out. |
 | `FD_UPDATE_POLL_S` | How often **Tell me** and **Install by itself** look, in seconds (default 900). |
-| `FD_UPDATE_COUNTDOWN_S` | How long everyone gets before the restart, in seconds (default 120). |
+| `FD_UPDATE_COUNTDOWN_S` | How long everyone gets before the restart when nobody picks (Install by itself, an agent's Approve), in seconds (default 120). **Update now** asks. |
 | `FD_UPDATE_BOOT_TIMEOUT_S` | How long the new version gets to come up before it's taken back, in seconds (default 300). A process that ends is taken back at once. |
 
 ### Users, invitations and the waitlist
