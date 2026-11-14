@@ -341,6 +341,11 @@ def _slug_words(text: str) -> tuple[str, ...]:
     return tuple(_slug_fold(w) for w in _SLUG_WORD_RE.findall(text) if not w.startswith("%"))
 
 
+def _name_bag(stems: tuple[str, ...]) -> tuple[str, ...]:
+    """A full name's stems with the order taken out (one person, either way round)."""
+    return tuple(sorted(stems))
+
+
 def _person_view(e: Entity) -> _Person | None:
     if e.kind != "PERSON" or e.key.startswith(("~", "/")):  # "/…": a spelling in a link, not a name
         return None
@@ -359,7 +364,9 @@ class _Resolver:
         self._seen = 0
         self.by_last: dict[str, list[_Person]] = {}
         self.by_first: dict[str, list[_Person]] = {}
-        self.by_stems: dict[tuple[str, ...], list[_Person]] = {}
+        # A full name's stems in any order: "ŠIMUNIĆ DARKO" in a register and
+        # "Darko Šimunić" in a payroll are one person.
+        self.by_bag: dict[tuple[str, ...], list[_Person]] = {}
 
     def _refresh(self) -> None:
         # Entities are only ever appended (or their canonical form improved,
@@ -368,7 +375,7 @@ class _Resolver:
             p = _person_view(e)
             if p is None:
                 continue
-            self.by_stems.setdefault(p.stems, []).append(p)
+            self.by_bag.setdefault(_name_bag(p.stems), []).append(p)
             if len(p.words) > 1:
                 self.by_last.setdefault(p.stems[-1], []).append(p)
                 self.by_first.setdefault(p.stems[0], []).append(p)
@@ -409,21 +416,29 @@ class _Resolver:
             if len(by_first) == 1:
                 return by_first[0].entity
             return None
+        if len(full) == len(words):
+            # The same name words in any order, any case, with or without
+            # diacritics: the person the vault knew first by them (a vault
+            # that split one person before keeps its first token).
+            same = self.by_bag.get(_name_bag(tuple(stem_key(w) for w in full)))
+            return same[0].entity if same else exact
         if exact is not None:
             return exact
-        if len(full) == len(words):
-            same = self.by_stems.get(tuple(stem_key(w) for w in full))
-            return same[0].entity if same else None
-        # Initials: "I. Horvat" is Ivan Horvat when only one person fits.
+        # Initials: "I. Horvat" (or "Horvat I.") is Ivan Horvat when only one
+        # person fits — known either way round ("HORVAT IVAN" in a register).
         if not full:
             return None
-        fits = []
-        for p in self.by_last.get(stem_key(words[-1]), []) if not _is_initial(words[-1]) else []:
-            if len(p.words) != len(words):
-                continue
-            if all((pw[:1].casefold() == w[:1].casefold()) if _is_initial(w) else stem_key(w) == ps
-                   for w, pw, ps in zip(words, p.words, p.stems)):
-                fits.append(p)
+        cands: dict[int, _Person] = {}
+        for w in full:
+            for p in [*self.by_last.get(stem_key(w), []), *self.by_first.get(stem_key(w), [])]:
+                cands[id(p)] = p
+
+        def fits_in(order: list[tuple[str, str]]) -> bool:
+            return all((pw[:1].casefold() == w[:1].casefold()) if _is_initial(w) else stem_key(w) == ps
+                       for w, (pw, ps) in zip(words, order))
+
+        fits = [p for p in cands.values() if len(p.words) == len(words)
+                and (fits_in(list(zip(p.words, p.stems))) or fits_in(list(zip(p.words, p.stems))[::-1]))]
         return fits[0].entity if len(fits) == 1 else None
 
 
@@ -532,6 +547,17 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[..., li
         return last_names, first_names
 
     persons = [p for p in (_person_view(e) for e in state.entities) if p]
+    # One person known twice by the same words in another order (a vault from
+    # before they were one): the first is the one found, as the resolver picks.
+    first_by_bag: set[tuple[str, ...]] = set()
+    kept: list[_Person] = []
+    for p in persons:
+        bag = _name_bag(p.stems)
+        if len(p.words) > 1 and bag in first_by_bag:
+            continue
+        first_by_bag.add(bag)
+        kept.append(p)
+    persons = kept
     if not options.one_word_names:
         # Full names only: a first name or surname alone is the trusted model's
         # call — or the one person named in full in the same text (find()).
