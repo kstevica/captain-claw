@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
-  LayoutGrid, Users, ClipboardList, Boxes, MessageSquare, DollarSign, CheckCircle2, Circle,
+  Users, ClipboardList, Boxes, MessageSquare, DollarSign, CheckCircle2, Circle,
   ChevronRight, Send, Server, LayoutDashboard, UserPlus, Library, Gauge, MessagesSquare, Layers,
 } from 'lucide-react'
 import { useAuthStore, DEFAULT_INSTANCE_NAME } from '../../stores/authStore'
@@ -13,11 +13,12 @@ import { isAppShell } from '../../services/desktopShell'
 import {
   fetchAllUsers, fetchWaitlistPending, fetchOpenInvites, fetchUsageToday, fetchCosts, fetchProviderKeys,
 } from './consoleApi'
-import { Page, PageHeader, Card, StatTile, Button, Notice } from './parts'
+import { Page, Card, StatTile, Button, Notice } from './parts'
 import { fmtNumber } from './format'
 
-// Overview: how the deck is doing at a glance — people, what's waiting for
-// you, today's use and spend, the machine — and what's left to set up.
+// Overview: how the deck is doing, said first in plain words — "Everything's
+// running" or "2 things need you", with each thing and the way to it — then
+// people, today's use and spend, the machine, and what's left to set up.
 
 interface Facts {
   users?: number
@@ -128,88 +129,113 @@ export function OverviewPage() {
   const diskPct = host?.disk_total_gb && host.disk_free_gb !== null
     ? Math.round(((host.disk_total_gb - host.disk_free_gb) / host.disk_total_gb) * 100) : null
 
+  // What needs the admin, in plain words: the headline counts these.
+  const needs: Need[] = []
+  if (!models) {
+    needs.push({
+      key: 'models', icon: Layers, title: 'Create your models',
+      text: 'There\'s no tier set yet. Agents need one — a model for each kind of work — before they can do anything.',
+      action: { label: 'Create a tier set', icon: Gauge, onClick: () => go('models', { createSet: true }) },
+    })
+  }
+  if ((f.waitlist ?? 0) > 0) {
+    needs.push({
+      key: 'waitlist', icon: ClipboardList, title: 'People are waiting to join',
+      text: `${f.waitlist} ${f.waitlist === 1 ? 'person is' : 'people are'} waiting for approval on the waitlist`,
+      action: { label: 'Review', onClick: () => go('users', { usersTab: 'waitlist' }) },
+    })
+  }
+  if ((f.telegramRequests ?? 0) > 0) {
+    needs.push({
+      key: 'telegram', icon: Send, title: 'Telegram requests',
+      text: `${f.telegramRequests} ${f.telegramRequests === 1 ? 'person asked' : 'people asked'} to use the team's Telegram bot`,
+      action: { label: 'Review', onClick: () => go('connections', { connection: 'telegram' }) },
+    })
+  }
+  const tight = [memPct !== null && memPct >= 90 ? 'memory' : '', diskPct !== null && diskPct >= 90 ? 'disk space' : ''].filter(Boolean)
+  if (tight.length) {
+    needs.push({
+      key: 'machine', icon: Server, title: 'This machine is nearly full',
+      text: `It's running low on ${tight.join(' and ')} — see This machine below.`,
+    })
+  }
+  const agentsRunning = f.system?.available ? f.system.summary.agents : null
+  const checking = loading && needs.length === 0
+  const headline = checking ? 'Checking in…'
+    : needs.length === 0 ? "Everything's running"
+    : `${needs.length} thing${needs.length === 1 ? ' needs' : 's need'} you`
+  const firstName = user?.display_name ? user.display_name.split(' ')[0] : ''
+
   return (
     <Page>
-      <PageHeader
-        icon={LayoutGrid}
-        title={`${greeting()}${user?.display_name ? `, ${user.display_name.split(' ')[0]}` : ''}`}
-        description={<>Here's how <b className="font-medium text-zinc-300">{branding.name}</b> is doing.</>}
-        actions={isAppShell()
-          ? <Button icon={MessagesSquare} onClick={enterKioskView}>Switch to user view</Button>
-          : <Button icon={LayoutDashboard} onClick={() => leaveConsole('desktop')}>Open Flight Deck</Button>}
-      />
-
-      {!models && (
-        <div className="flex flex-col gap-4 rounded-2xl border border-violet-500/40 bg-violet-500/[0.07] p-5 wide:flex-row wide:items-center">
-          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-violet-500/15 text-violet-600 dark:text-violet-300">
-            <Layers className="h-5 w-5" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="text-[15px] font-semibold text-zinc-100">Start by creating your models</div>
-            <div className="mt-0.5 text-sm text-zinc-500">
-              There's no tier set yet. Agents need one — a model for each kind of work — before they can do anything.
-            </div>
-          </div>
-          <Button variant="primary" icon={Gauge} onClick={() => go('models', { createSet: true })}>Create a tier set</Button>
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <p className="text-sm text-zinc-500">
+            {greeting()}{firstName ? `, ${firstName}` : ''}. Here's how <b className="font-medium text-zinc-300">{branding.name}</b> is doing.
+          </p>
+          <h1 className="mt-1 text-3xl font-bold tracking-tight text-zinc-100 wide:text-4xl">{headline}</h1>
         </div>
-      )}
-
-      {((f.waitlist ?? 0) > 0 || (f.telegramRequests ?? 0) > 0) && (
-        <div className="space-y-2">
-          {(f.waitlist ?? 0) > 0 && (
-            <AttentionRow
-              icon={ClipboardList}
-              text={`${f.waitlist} ${f.waitlist === 1 ? 'person is' : 'people are'} waiting for approval on the waitlist`}
-              action="Review"
-              onClick={() => go('users', { usersTab: 'waitlist' })}
-            />
-          )}
-          {(f.telegramRequests ?? 0) > 0 && (
-            <AttentionRow
-              icon={Send}
-              text={`${f.telegramRequests} ${f.telegramRequests === 1 ? 'person asked' : 'people asked'} to use the team's Telegram bot`}
-              action="Review"
-              onClick={() => go('connections', { connection: 'telegram' })}
-            />
-          )}
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {isAppShell()
+            ? <Button icon={MessagesSquare} onClick={enterKioskView}>Switch to user view</Button>
+            : <Button icon={LayoutDashboard} onClick={() => leaveConsole('desktop')}>Open Flight Deck</Button>}
         </div>
-      )}
-
-      <div className={`grid grid-cols-2 gap-3 ${accounts ? 'lg:grid-cols-4' : 'lg:grid-cols-3'}`}>
-        {accounts && (
-          <StatTile
-            icon={Users} tone="violet" label="People" value={f.users ?? '—'} loading={loading && f.users === undefined}
-            sub={f.users !== undefined ? `${f.admins ?? 0} admin${f.admins === 1 ? '' : 's'}${f.invites ? ` · ${f.invites} invited` : ''}` : undefined}
-            onClick={() => go('users')}
-          />
-        )}
-        <StatTile
-          icon={Boxes} tone="emerald" label="Agents running"
-          value={f.system?.available ? f.system.summary.agents : '—'}
-          loading={loading && f.system === undefined}
-          sub={f.system?.available && (f.system.summary.stopped || f.system.summary.asleep)
-            ? [f.system.summary.asleep ? `${f.system.summary.asleep} asleep` : '', f.system.summary.stopped ? `${f.system.summary.stopped} stopped` : '']
-              .filter(Boolean).join(' · ')
-            : accounts ? 'across every user' : undefined}
-        />
-        <StatTile
-          icon={MessageSquare} tone="cyan" label="Messages today" value={f.messagesToday !== undefined ? fmtNumber(f.messagesToday) : '—'}
-          loading={loading && f.messagesToday === undefined}
-          sub={f.tokensToday !== undefined ? `${fmtNumber(f.tokensToday)} AI tokens` : undefined}
-          onClick={accounts ? () => go('usage') : undefined}
-        />
-        <StatTile
-          icon={DollarSign} tone="amber" label="Spend, 30 days" value={f.spend30 !== undefined ? `$${f.spend30.toFixed(2)}` : '—'}
-          loading={loading && f.spend30 === undefined}
-          sub="on models"
-          onClick={accounts ? () => go('usage') : undefined}
-        />
       </div>
+
+      <section aria-label="What needs you" className="rounded-3xl border border-zinc-800/70 bg-zinc-900/30">
+        {needs.length === 0 ? (
+          <div className="flex items-center gap-3 px-5 py-4">
+            <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${checking ? 'bg-zinc-600' : 'bg-emerald-500'}`} />
+            <p className="text-sm text-zinc-400">
+              {checking ? 'Looking at people, agents and the machine…'
+                : <>Nothing is waiting on you right now.{agentsRunning !== null ? ` ${agentsRunning} agent${agentsRunning === 1 ? ' is' : 's are'} running.` : ''}</>}
+            </p>
+          </div>
+        ) : (
+          <ul className="divide-y divide-zinc-800/70">
+            {needs.map((n) => <NeedRow key={n.key} need={n} />)}
+          </ul>
+        )}
+      </section>
+
+      <section aria-labelledby="fd-overview-glance" className="space-y-3">
+        <h2 id="fd-overview-glance" className="text-sm font-semibold text-zinc-400">At a glance</h2>
+        <div className={`grid grid-cols-2 gap-3 ${accounts ? 'lg:grid-cols-4' : 'lg:grid-cols-3'}`}>
+          {accounts && (
+            <StatTile
+              icon={Users} tone="violet" label="People" value={f.users ?? '—'} loading={loading && f.users === undefined}
+              sub={f.users !== undefined ? `${f.admins ?? 0} admin${f.admins === 1 ? '' : 's'}${f.invites ? ` · ${f.invites} invited` : ''}` : undefined}
+              onClick={() => go('users')}
+            />
+          )}
+          <StatTile
+            icon={Boxes} tone="emerald" label="Agents running"
+            value={f.system?.available ? f.system.summary.agents : '—'}
+            loading={loading && f.system === undefined}
+            sub={f.system?.available && (f.system.summary.stopped || f.system.summary.asleep)
+              ? [f.system.summary.asleep ? `${f.system.summary.asleep} asleep` : '', f.system.summary.stopped ? `${f.system.summary.stopped} stopped` : '']
+                .filter(Boolean).join(' · ')
+              : accounts ? 'across every user' : undefined}
+          />
+          <StatTile
+            icon={MessageSquare} tone="cyan" label="Messages today" value={f.messagesToday !== undefined ? fmtNumber(f.messagesToday) : '—'}
+            loading={loading && f.messagesToday === undefined}
+            sub={f.tokensToday !== undefined ? `${fmtNumber(f.tokensToday)} AI tokens` : undefined}
+            onClick={accounts ? () => go('usage') : undefined}
+          />
+          <StatTile
+            icon={DollarSign} tone="amber" label="Spend, 30 days" value={f.spend30 !== undefined ? `$${f.spend30.toFixed(2)}` : '—'}
+            loading={loading && f.spend30 === undefined}
+            sub="on models"
+            onClick={accounts ? () => go('usage') : undefined}
+          />
+        </div>
+      </section>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
         <Card
           className="lg:col-span-3"
-          title="Set up the deck"
+          title="Getting set up"
           hint={doneCount === steps.length ? `All done — the deck is ready${accounts ? ' for your team' : ''}.` : `${doneCount} of ${steps.length} done`}
           action={<div className="h-1.5 w-24 overflow-hidden rounded-full bg-zinc-800"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${(doneCount / steps.length) * 100}%` }} /></div>}
           bodyClassName="divide-y divide-zinc-800/70"
@@ -255,7 +281,7 @@ export function OverviewPage() {
             )}
           </Card>
 
-          <Card title="Quick actions" bodyClassName="grid grid-cols-1 gap-2 p-4">
+          <Card title="Shortcuts" bodyClassName="grid grid-cols-1 gap-2 p-4">
             {accounts && <QuickAction icon={UserPlus} label="Invite someone" onClick={() => go('users', { usersTab: 'invitations' })} />}
             <QuickAction icon={Library} label="New archetype" onClick={() => go('archetypes')} />
             <QuickAction icon={Gauge} label={accounts ? 'Change the team\'s models' : 'Change your models'} onClick={() => go('models')} />
@@ -270,15 +296,30 @@ export function OverviewPage() {
   )
 }
 
-function AttentionRow({ icon: Icon, text, action, onClick }: { icon: typeof Users; text: string; action: string; onClick: () => void }) {
+interface Need {
+  key: string
+  icon: typeof Users
+  title: string
+  text: string
+  action?: { label: string; icon?: typeof Users; onClick: () => void }
+}
+
+/** One thing that needs the admin: what it is, in plain words, and the way to it. */
+function NeedRow({ need: n }: { need: Need }) {
+  const Icon = n.icon
   return (
-    <div className="flex items-center gap-3 rounded-2xl border border-violet-500/30 bg-violet-500/[0.06] px-4 py-3">
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-violet-500/15 text-violet-600 dark:text-violet-300">
-        <Icon className="h-4 w-4" />
-      </span>
-      <span className="min-w-0 flex-1 text-sm text-zinc-200">{text}</span>
-      <Button variant="primary" onClick={onClick}>{action}</Button>
-    </div>
+    <li className="flex flex-col gap-3 px-5 py-4 wide:flex-row wide:items-center">
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-700 dark:text-amber-300">
+          <Icon className="h-4 w-4" />
+        </span>
+        <div className="min-w-0">
+          <div className="text-[15px] font-semibold text-zinc-100">{n.title}</div>
+          <div className="mt-0.5 text-sm text-zinc-500">{n.text}</div>
+        </div>
+      </div>
+      {n.action && <Button variant="primary" icon={n.action.icon} onClick={n.action.onClick} className="shrink-0 self-start wide:self-auto">{n.action.label}</Button>}
+    </li>
   )
 }
 
