@@ -46,6 +46,15 @@ export interface RoomJob {
   file_started_at?: number
   chunks_started_at?: number | null
   chunk_at?: number | null
+  /** The code pass (replacing names): round, which pass, n of N pieces of text. */
+  replace?: {
+    round: number
+    pass: '' | 'looking' | 'matching' | 'replacing' | 'checking'
+    done: number
+    of: number
+    unit: string
+    started_at: number
+  }
 }
 
 export interface RoomSummary {

@@ -329,6 +329,12 @@ function Health({ room }: { room: Room }) {
 const STEP_LABEL: Record<string, string> = {
   reading: 'Reading the file', model: 'Finding names', replacing: 'Replacing names',
 }
+// The code pass, round by round: look for names in every piece of text, match
+// what it found to the room's names, put the tokens in; a final check if names
+// kept turning up.
+const PASS_LABEL: Record<string, string> = {
+  looking: 'looking for names in', matching: 'matching', replacing: 'putting tokens into', checking: 'final check of',
+}
 
 /** Where a run stands: the phase, the file it's on (size, step, the trusted
  *  model's chunk n of N), and how long the file and the room still take. */
@@ -352,6 +358,7 @@ function RunStrip({ room, files }: { room: Room; files: RoomFile[] }) {
   const chunks = job.chunks || 0
   const filePct = job.step === 'model' && chunks ? ((job.chunk || 0) / chunks) * 100 : job.step === 'replacing' ? 100 : 0
   const since = job.file_started_at ? now - job.file_started_at : 0
+  const rp = job.replace
 
   return (
     <div className="space-y-1.5 border-b border-zinc-800 bg-violet-500/[0.04] px-4 py-2.5 text-xs">
@@ -388,9 +395,25 @@ function RunStrip({ room, files }: { room: Room; files: RoomFile[] }) {
                   </span>
                 </>
               )}
+              {job.step === 'replacing' && rp && (
+                <>
+                  {rp.pass ? (
+                    <>
+                      <span className="tabular-nums">
+                        round {rp.round > 3 ? 'final' : rp.round} · {PASS_LABEL[rp.pass] || rp.pass}{' '}
+                        {rp.done.toLocaleString()} of {rp.of.toLocaleString()} {rp.pass === 'matching' ? 'names found' : rp.unit}
+                      </span>
+                      <span className="h-1 w-24 overflow-hidden rounded-full bg-zinc-800">
+                        <span className="block h-full rounded-full bg-sky-500 transition-all duration-500"
+                          style={{ width: `${rp.of ? Math.min(100, (rp.done / rp.of) * 100) : 0}%` }} />
+                      </span>
+                    </>
+                  ) : rp.of > 0 && <span className="tabular-nums">{rp.of.toLocaleString()} {rp.unit}</span>}
+                </>
+              )}
               {eta.file !== null
-                ? <span>{duration(eta.file)} left on this file</span>
-                : job.step === 'model' && chunks > 0 && <span>estimating…</span>}
+                ? <span>{duration(eta.file)} left {job.step === 'replacing' ? 'in this pass' : 'on this file'}</span>
+                : (job.step === 'model' && chunks > 0) || (job.step === 'replacing' && rp?.pass) ? <span>estimating…</span> : null}
               {since >= 1 && <span className="tabular-nums text-zinc-500">· running {clock(since)}</span>}
             </>
           )}

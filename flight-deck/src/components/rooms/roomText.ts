@@ -46,16 +46,38 @@ export function clock(seconds: number): string {
 
 /** Time left for the current file and the whole run, from how fast it went so far
  *  (null where there isn't enough to go on yet). */
+const PASS_ORDER: Record<string, number> = { '': 0, looking: 0, matching: 1, replacing: 2, checking: 2.5 }
+
+/** How far the code pass is through its round, 0..1 (looking, matching, replacing). */
+export function replaceShare(r?: { pass: string; done: number; of: number } | null): number {
+  if (!r) return 0
+  const within = r.of ? Math.min(1, r.done / r.of) : 0
+  return Math.min(1, ((PASS_ORDER[r.pass] ?? 0) + within) / 3)
+}
+
+/** Time left in the code pass's current pass (null until there's enough to go on). */
+export function passEta(r: { done: number; of: number; started_at: number } | null | undefined, now: number): number | null {
+  if (!r || r.done <= 0 || now - r.started_at < 2) return null
+  return Math.max(0, ((r.of - r.done) * (now - r.started_at)) / r.done)
+}
+
 export function runEta(job: {
   step?: string; chunk?: number; chunks?: number; chunks_started_at?: number | null; started_at?: number
   bytes_total?: number; bytes_done?: number; current_size?: number
+  replace?: { pass: string; done: number; of: number; started_at: number }
 }, now: number): { file: number | null; run: number | null; fileShare: number } {
   const chunks = job.chunks || 0, chunk = job.chunk || 0
-  const fileShare = job.step === 'replacing' ? 0.95 : job.step === 'model' && chunks ? (chunk / chunks) * 0.9 + 0.05 : 0.02
+  // Rough shares of a file's time: reading a little, the trusted model (when it
+  // reads) most, then the code pass — which is most of it for a big workbook.
+  const fileShare = job.step === 'replacing'
+    ? 0.5 + 0.45 * replaceShare(job.replace)
+    : job.step === 'model' && chunks ? (chunk / chunks) * 0.45 + 0.05 : 0.02
   let file: number | null = null
   if (job.step === 'model' && chunk > 0 && job.chunks_started_at) {
     const per = (now - job.chunks_started_at) / chunk
     file = Math.max(0, (chunks - chunk) * per)
+  } else if (job.step === 'replacing') {
+    file = passEta(job.replace, now)
   }
   let run: number | null = null
   const total = job.bytes_total || 0

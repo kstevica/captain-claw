@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import re
+import threading
 import time
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
@@ -70,6 +71,30 @@ async def _progress(**event: Any) -> None:
         await hook(event)
     except Exception:  # noqa: BLE001 — showing progress never stops the work
         pass
+
+
+# What the engine's pieces of text are, by the document they came from.
+_UNITS = {"xlsx": "cells", "docx": "paragraphs", "pptx": "text boxes"}
+
+
+def _engine_progress(fmt: str) -> Callable[[dict[str, Any]], None]:
+    """A plain function the engine calls from its worker thread: it hands each
+    tick to the event loop, which reports it through PROGRESS."""
+    loop = asyncio.get_running_loop()
+    unit = _UNITS.get(fmt, "parts")
+    hook = PROGRESS.get()
+
+    def tick(event: dict[str, Any]) -> None:
+        async def send() -> None:
+            if hook is not None:
+                try:
+                    await hook({"step": "replacing", "unit": unit, **event})
+                except Exception:  # noqa: BLE001
+                    pass
+
+        loop.call_soon_threadsafe(lambda: loop.create_task(send()))
+
+    return tick
 
 router = APIRouter(prefix="/fd/anonymize", tags=["anonymize"])
 
@@ -386,7 +411,7 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
 
                     await usage_quota.record_tokens(get_db(), person, found.tokens)
 
-        await _progress(step="replacing")
+        await _progress(step="replacing", pieces=len(doc.segments), unit=_UNITS.get(doc.format, "parts"))
 
         def work(state: engine.VaultState) -> tuple[engine.RunResult, str]:
             result = engine.run(doc.segments, state, options)
@@ -395,14 +420,27 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
             name = engine.anonymize_filename(stem, state, options) if stem else ""
             return result, name
 
-        if vault_row is None:
-            result, out_name = await asyncio.to_thread(work, one_way_state if one_way_state is not None
-                                                       else engine.VaultState())
-        else:
-            async with store.lock(vault_row["id"]):
-                state = await store.load_state(vault_row)
-                result, out_name = await asyncio.to_thread(work, state)
-                await store.save_run(vault_row, state)
+        # The engine's own progress (round, pass, n of N), from its worker thread
+        # to whoever listens here — only when someone does.
+        engine_token = engine.PROGRESS.set(_engine_progress(doc.format) if PROGRESS.get() is not None else None)
+        # Cancelling this coroutine (a stopped room) stops the worker thread too.
+        stop_event = threading.Event()
+        cancel_token = engine.CANCEL.set(stop_event)
+        try:
+            if vault_row is None:
+                result, out_name = await asyncio.to_thread(work, one_way_state if one_way_state is not None
+                                                           else engine.VaultState())
+            else:
+                async with store.lock(vault_row["id"]):
+                    state = await store.load_state(vault_row)
+                    result, out_name = await asyncio.to_thread(work, state)
+                    await store.save_run(vault_row, state)
+        except asyncio.CancelledError:
+            stop_event.set()
+            raise
+        finally:
+            engine.CANCEL.reset(cancel_token)
+            engine.PROGRESS.reset(engine_token)
     except engine.VerifyFailed as exc:
         log.warning("Anonymization refused its own output", kinds=exc.kinds, actor=actor)
         raise HTTPException(status_code=422, detail=str(exc)) from None

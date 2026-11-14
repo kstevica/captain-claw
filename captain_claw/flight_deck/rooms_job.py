@@ -307,7 +307,7 @@ async def _run(room_id: str) -> None:
                           "finish them." if left else "Stopped by you.")
         log.info("Data room run stopped", room=room_id, files_left=left)
     for key in ("current", "step", "chunk", "chunks", "file_started_at", "chunks_started_at", "chunk_at",
-                "current_size", "file_index", "file_count"):
+                "current_size", "file_index", "file_count", "replace"):
         job.pop(key, None)
     job["phase"] = "done"
     job["finished_at"] = time.time()
@@ -324,6 +324,7 @@ async def _file_start(room_id: str, job: dict[str, Any], f: dict[str, Any]) -> N
     job.update({"current": f["id"], "current_size": int(f["size"] or 0), "step": "reading", "chunk": 0,
                 "chunks": 0, "file_started_at": now, "chunks_started_at": None, "chunk_at": None,
                 "file_index": job.get("done", 0) + job.get("failed", 0) + 1})
+    job.pop("replace", None)
     log.info("Data room file started", room=room_id, file=f["id"], size=int(f["size"] or 0),
              index=job["file_index"], of=job.get("total", 0))
     await _set_job(room_id, job)
@@ -333,6 +334,8 @@ def _file_progress(room_id: str, job: dict[str, Any], f: dict[str, Any]):
     """The hook anonymize_blob reports through: the step, and the trusted
     model's chunks (n of N), kept in the job for the page — and logged."""
     async def hook(event: dict[str, Any]) -> None:
+        if job.get("phase") != "anonymizing" or job.get("current") != f["id"]:
+            return  # a late tick from a file (or a run) that's over — a stopped run's thread, say
         step = str(event.get("step") or "")
         now = time.time()
         if step == "model":
@@ -342,10 +345,31 @@ def _file_progress(room_id: str, job: dict[str, Any], f: dict[str, Any]):
             job.update({"step": "model", "chunk": done, "chunks": total, "chunk_at": now})
             log.info("Data room file chunk", room=room_id, file=f["id"], chunk=done, chunks=total,
                      seconds=round(now - (job.get("chunks_started_at") or now), 1))
+        elif step == "replacing" and "pass" in event:
+            # The engine's own progress: round r, pass (looking / matching /
+            # replacing / checking), n of N pieces of text.
+            prev = job.get("replace") or {}
+            r, name = int(event.get("round") or 1), str(event.get("pass") or "")
+            done, of = int(event.get("done") or 0), int(event.get("of") or 0)
+            fresh = prev.get("round") != r or prev.get("pass") != name
+            started = now if fresh else prev.get("started_at", now)
+            if fresh and prev.get("pass"):
+                log.info("Data room file pass done", room=room_id, file=f["id"], round=prev.get("round"),
+                         stage=prev.get("pass"), of=prev.get("of"), seconds=round(now - prev.get("started_at", now), 1))
+            if fresh:
+                log.info("Data room file pass", room=room_id, file=f["id"], round=r, stage=name, of=of,
+                         unit=event.get("unit"))
+            job["step"] = "replacing"
+            job["replace"] = {"round": r, "pass": name, "done": done, "of": of, "unit": event.get("unit") or "parts",
+                              "started_at": started}
         elif step:
             if step != job.get("step"):
-                log.info("Data room file step", room=room_id, file=f["id"], step=step)
+                log.info("Data room file step", room=room_id, file=f["id"], step=step,
+                         **({"pieces": event["pieces"]} if "pieces" in event else {}))
             job["step"] = step
+            if step == "replacing":
+                job["replace"] = {"round": 1, "pass": "", "done": 0, "of": int(event.get("pieces") or 0),
+                                  "unit": event.get("unit") or "parts", "started_at": now}
         await _set_job(room_id, job)
     return hook
 
@@ -407,7 +431,7 @@ async def _work(room: dict[str, Any], job: dict[str, Any]) -> None:
                          seconds=round(time.time() - job.get("file_started_at", time.time()), 1),
                          chunks=job.get("chunks", 0), files_left=len(todo) - job["done"] - job["failed"])
     for key in ("current", "step", "chunk", "chunks", "file_started_at", "chunks_started_at", "chunk_at",
-                "current_size", "file_index"):
+                "current_size", "file_index", "replace"):
         job.pop(key, None)
     if room_id in _STOP:
         return
