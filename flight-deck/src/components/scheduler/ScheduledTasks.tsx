@@ -898,6 +898,8 @@ function agentRunAsTaskRun(job: AgentCronJob, r: AgentCronRun): TaskRun {
   const status = r.status === 'ok' ? 'ok'
     : r.status === 'running' || r.status === 'queued' ? 'running'
     : r.status === 'cancelled' ? 'skipped:cancelled'
+    : r.status === 'skipped' ? 'skipped:missed'
+    : r.status === 'no_action' ? 'error:no-action'
     : r.status === 'interrupted' ? 'error:interrupted'
     : `error:${r.error || r.status}`
   return {
@@ -918,6 +920,8 @@ function agentRunAsTaskRun(job: AgentCronJob, r: AgentCronRun): TaskRun {
 function explainAgentRun(status: string): string {
   if (status === 'error:interrupted') return "It didn't finish — the agent stopped during the run."
   if (status === 'skipped:cancelled') return 'Cancelled before it finished.'
+  if (status === 'skipped:missed') return 'Skipped: the agent was off at its time, so it waits for the next one.'
+  if (status === 'error:no-action') return 'It did nothing: the agent replied without using any tools, so nothing was checked, sent or saved.'
   return `The run failed: ${status.replace(/^error:/, '')}`
 }
 
@@ -1032,6 +1036,13 @@ function AgentJobDetail({ job, agentName, query, onDeleted, onChanged, onOpenCha
         <p className="mt-3 flex items-start gap-2 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           The last run failed: {job.last_error}
+        </p>
+      )}
+      {/* A manual pause keeps the last run's error, so only the automatic pause (cron_dispatch.note_run_outcome) explains itself here. */}
+      {(job.last_status === 'no_action' || (job.last_status === 'paused' && !job.enabled && job.last_error.startsWith('Paused after'))) && job.last_error && (
+        <p className="mt-3 flex items-start gap-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {job.last_status === 'no_action' ? `The last run did nothing: ${job.last_error}.` : job.last_error}
         </p>
       )}
 
