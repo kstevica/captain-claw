@@ -8,9 +8,9 @@ import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Store, Sun } fro
 // agents that are up, as cards), Inbox (the Line: what the
 // deck and the agents said on their own), Tasks (the Taskboard), People
 // (the people on those tasks), Automations (Scheduled tasks) and Activity
-// (every tool the agents used), then Store (the Agent store at /store,
-// for accounts that can reach it). Each opens the same view as before; only
-// the way in changed. SimpleNav.tsx draws them.
+// (every tool the agents used), then Store (the Agent store, the window New
+// agent opens, a kiosk account's too). Each opens the same view as before;
+// only the way in changed. SimpleNav.tsx draws them.
 
 export type NavTarget = 'today' | 'agents' | 'inbox' | 'tasks' | 'people' | 'automations' | 'activity' | 'store'
 
@@ -42,7 +42,7 @@ export function navEntries(o: {
   automationsCount: number
   automationsRunning: boolean
   onActivity: () => void
-  /** Left out where the Agent store can't be reached (a kiosk-locked account). */
+  /** Open the Agent store; the entry is left out without it. */
   onStore?: () => void
 }): NavEntry[] {
   const inboxCount = o.inboxWaiting || o.inboxUnread

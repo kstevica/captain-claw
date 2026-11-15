@@ -130,6 +130,7 @@ import { KioskAgentIdentityDialog } from './KioskAgentIdentityDialog'
 import { KioskAgentPictureDialog } from './KioskAgentPicture'
 import { AgentHome } from './AgentHome'
 import { AgentCards } from './AgentCards'
+import { AgentStoreDialog } from '../store/AgentStorePanel'
 import { AgentPicture } from '../agents/AgentPicture'
 import { useAgentAvatarStore } from '../../stores/agentAvatarStore'
 import { MenuSheet, type MenuSection } from './KioskMenuSheet'
@@ -307,6 +308,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [optionsAgent, setOptionsAgent] = useState<SimpleAgent | null>(null)
   // Kiosk "New agent" picker.
   const [archetypeOpen, setArchetypeOpen] = useState(false)
+  // The Agent store over the layout: where New agent starts (its Advanced is the picker).
+  const [storeOpen, setStoreOpen] = useState(false)
   const [forgeOpen, setForgeOpen] = useState(false)
   // Agent bundles: an agent's ⋯ → Back up / export, and New agent → From a file.
   const [backupFor, setBackupFor] = useState<{ slug: string; name: string } | null>(null)
@@ -1001,10 +1004,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     automationsCount: scheduledCount,
     automationsRunning: scheduledRunning,
     onActivity: goTo(() => openActivity()),
-    // The Agent store is a page of its own; a locked account never reaches it.
-    onStore: locked ? undefined : () => { window.location.assign('/store') },
+    // The Agent store, as the window New agent opens — a kiosk account's too.
+    onStore: () => setStoreOpen(true),
   })
-  const navCurrent: NavTarget | null = lineOpen ? 'inbox'
+  const navCurrent: NavTarget | null = storeOpen ? 'store'
+    : lineOpen ? 'inbox'
     : taskboardOpen ? 'tasks'
       : peopleOpen ? 'people'
         : scheduledOpen ? 'automations'
@@ -1049,17 +1053,16 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // A guide step's button: the guide gives way to that part of the kiosk.
   const guideAction = (action: OnboardingAction) => {
     setGuideOpen(false)
-    if (action === 'new-agent') setArchetypeOpen(true)
+    if (action === 'new-agent') setStoreOpen(true)
     else if (action === 'profile') setProfileOpen(true)
     else openConnections(action === 'connections-google' ? 'google' : action === 'connections-microsoft' ? 'microsoft' : 'telegram')
   }
 
-  // The full Spawner leaves the chat surface, which the kiosk lock can't — so
-  // there spawning means the archetype picker instead.
-  const goSpawn = () => {
-    if (locked) { setArchetypeOpen(true); return }
-    useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('spawner')
-  }
+  // New agent starts in the Agent store, for everyone in this layout: the
+  // ready-made agents, Featured first; its Advanced is the archetype picker
+  // (every agent with its details, From a file, Forge agents). The full
+  // layout keeps its Spawner.
+  const goSpawn = () => setStoreOpen(true)
 
   // Watch the booting agents until each one answers (or ~90s pass), then let
   // it be opened — and open the one that was promised.
@@ -1100,18 +1103,32 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [anyBooting])
 
+  // A new agent from the store or the picker: open it once it's up, or its setup now.
+  const agentCreated = (slug: string, setup?: SetupRequest) => {
+    startBoot(`proc-${slug}`, true)
+    if (setup) setSetupFor(setup)
+    else useNotificationStore.getState().add('info', 'Agent starting', `${slug} will open here as soon as it's up.`)
+  }
+
   const dialogs = (
     <>
+      {storeOpen && (
+        <AgentStoreDialog
+          onClose={() => setStoreOpen(false)}
+          onAdvanced={() => { setStoreOpen(false); setArchetypeOpen(true) }}
+          onAdded={(slug, setup) => { setStoreOpen(false); agentCreated(slug, setup) }}
+          onConnect={(service) => { setStoreOpen(false); openConnections(service) }}
+        />
+      )}
       {archetypeOpen && (
         <ArchetypeSpawnDialog
           takenSlugs={new Set(processes.map((p) => p.slug))}
           onClose={() => setArchetypeOpen(false)}
+          onBack={() => { setArchetypeOpen(false); setStoreOpen(true) }}
           onConnect={(service) => { setArchetypeOpen(false); openConnections(service) }}
           onSpawned={(slug, setup) => {
             setArchetypeOpen(false)
-            startBoot(`proc-${slug}`, true)
-            if (setup) setSetupFor(setup)
-            else useNotificationStore.getState().add('info', 'Agent starting', `${slug} will open here as soon as it's up.`)
+            agentCreated(slug, setup)
           }}
           onForge={() => { setArchetypeOpen(false); setForgeOpen(true) }}
           onImport={() => { setArchetypeOpen(false); setImportOpen('') }}
@@ -1456,6 +1473,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // No chat open: Today or the Agents cards, the same agents and the same empty card.
   const homeProps = {
     agents, sessionInfo, booting, switching, onOpen: handleOpen, locked,
+    onStore: goSpawn,
     onGuide: locked ? () => setGuideOpen(true) : undefined,
     empty: (
       <EmptyChat
@@ -1997,7 +2015,7 @@ function AgentsColumn({
               </Fragment>
             )
           })}
-          <button onClick={onSpawn} className={`${iconBtn} mt-1`} title={locked ? 'New agent from an archetype' : 'Spawn a new agent'}>
+          <button onClick={onSpawn} className={`${iconBtn} mt-1`} title="New agent">
             <Plus className="h-4 w-4" />
           </button>
         </div>
@@ -2117,7 +2135,7 @@ function AgentsColumn({
             <button
               onClick={onSpawn}
               aria-label="New agent"
-              title={locked ? 'New agent from an archetype' : 'Spawn a new agent'}
+              title="New agent"
               className="fd-btn-primary h-9 min-w-0 flex-1 px-3 text-xs"
             >
               <Plus className="h-4 w-4 shrink-0" />

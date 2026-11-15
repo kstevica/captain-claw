@@ -102,7 +102,7 @@ const SHOTS = {
   },
   newAgent: {
     dark: newAgentDark, light: newAgentLight, phoneDark: newAgentPhoneDark, phoneLight: newAgentPhoneLight,
-    alt: 'New agent: pick an archetype, name it, Create',
+    alt: 'New agent: the Agent store, Featured agents first, each with Add',
   },
   chat: {
     dark: chatDark, light: chatLight, phoneDark: chatPhoneDark, phoneLight: chatPhoneLight,
@@ -446,16 +446,16 @@ function buildSteps({ name, phone, authEnabled, sharingEnabled, info }: {
     nav: 'Create an agent',
     icon: Plus,
     title: 'Create your first agent',
-    lead: 'Agents start from archetypes: ready-made roles, like a researcher or a writer, that come with the right tools and model. There is nothing to configure.',
+    lead: 'Agents come ready-made: roles like a researcher or a writer, with the right tools and model. There is nothing to configure.',
     numbered: true,
     points: [
       phone
         ? <>Press <B>New agent</B> at the bottom of the screen.</>
         : <>Press <B>New agent</B> under “Agents” on the left.</>,
-      'Pick an archetype from the list. Search by role or by what it does.',
-      <>Give it a name and press <B>Create</B>. It starts in a few seconds, and its chat opens by itself.</>,
+      'The Agent store opens. Featured has the ones most people start with; search by role or by what it does for the rest.',
+      <>Press <B>Add</B>, give it a name and press <B>Add to my team</B>. It starts in a few seconds, and its chat opens by itself.</>,
     ],
-    note: <>The power button next to an agent turns it off when you don't need it, and back on later. Its conversations and files are kept.</>,
+    note: <><B>Advanced</B>, at the top of the store, shows every agent with its details, and makes one from a file or from what you describe. The power button next to an agent turns it off when you don't need it, and back on later; its conversations and files are kept.</>,
     shot: SHOTS.newAgent,
     actions: [{ label: 'Create an agent', action: 'new-agent' }],
   })

@@ -20,13 +20,18 @@ import { agentSlug, creatorOf, uniqueName, worksInMail } from './storeModel'
 // stored mirrored into the process store. "Set up its way of working next"
 // hands the new agent to the caller, which opens AgentSetupDialog on it.
 
-export function AddAgentDialog({ archetype: a, takenSlugs, onClose, onAdded }: {
+export function AddAgentDialog({ archetype: a, takenSlugs, onClose, onAdded, doneHere = true, onConnect }: {
   archetype: Archetype
   /** Slugs of the agents this person has — the default name avoids them. */
   takenSlugs: Set<string>
   onClose: () => void
   /** `setup`: they asked to set up its way of working next. */
   onAdded: (slug: string, name: string, setup?: SetupRequest) => void
+  /** Say "is joining your team" here once it's made (the store page); false:
+   *  the caller takes over at onAdded (the store window closes and opens it). */
+  doneHere?: boolean
+  /** Open Connections on that service (the store window): the mail note gets buttons. */
+  onConnect?: (service: 'google' | 'microsoft') => void
 }) {
   const [name, setName] = useState(() => uniqueName(a.role || a.id, takenSlugs))
   const [setupNext, setSetupNext] = useState(false)
@@ -83,7 +88,7 @@ export function AddAgentDialog({ archetype: a, takenSlugs, onClose, onAdded }: {
       if (stored) procs.setFleetInstructions(slug, stored)
       procs.fetchProcesses()
       onAdded(slug, finalName, setupNext ? { slug, name: finalName, role: a.role || a.id } : undefined)
-      if (setupNext) return
+      if (setupNext || !doneHere) return
       setAdded(finalName)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
@@ -131,13 +136,21 @@ export function AddAgentDialog({ archetype: a, takenSlugs, onClose, onAdded }: {
           <form className="space-y-3 px-6 pb-6" onSubmit={(e) => { e.preventDefault(); add() }}>
             {err && <ErrorNote>{err}</ErrorNote>}
             {needsMail && mail?.connected === false && (
-              <p role="note" className="flex items-start gap-2 rounded-xl border border-sky-500/30 bg-sky-500/5 px-3 py-2.5 text-xs leading-relaxed text-sky-800 dark:text-sky-200">
-                <Link2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span className="min-w-0">
-                  It works in your mail and calendar, and {mail.microsoft ? 'neither Google nor Microsoft is' : 'Google isn\'t'} connected
-                  yet. Connect {mail.microsoft ? 'one' : 'it'} under Connections in Flight Deck, or it can't read your inbox.
-                </span>
-              </p>
+              <div role="note" className="rounded-xl border border-sky-500/30 bg-sky-500/5 px-3 py-2.5 text-xs leading-relaxed text-sky-800 dark:text-sky-200">
+                <p className="flex items-start gap-2">
+                  <Link2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0">
+                    It works in your mail and calendar, and {mail.microsoft ? 'neither Google nor Microsoft is' : 'Google isn\'t'} connected
+                    yet. Connect {mail.microsoft ? 'one' : 'it'} {onConnect ? 'first' : 'under Connections in Flight Deck'}, or it can't read your inbox.
+                  </span>
+                </p>
+                {onConnect && (
+                  <div className="mt-2 flex flex-wrap gap-2 pl-5">
+                    <Button className="!px-2.5 !py-1 !text-xs" onClick={() => onConnect('google')}>Connect Google</Button>
+                    {mail.microsoft && <Button className="!px-2.5 !py-1 !text-xs" onClick={() => onConnect('microsoft')}>Connect Microsoft</Button>}
+                  </div>
+                )}
+              </div>
             )}
             <div>
               <label className={labelCls} htmlFor="store-agent-name">Its name on your team</label>

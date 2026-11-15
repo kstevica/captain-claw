@@ -71,20 +71,12 @@ async function passContext(browser, theme, phone) {
   return context
 }
 
-// The archetype picker with Deep Researcher picked (its name filled in, not
-// selected: a caret and a highlight read as noise in a picture).
-async function pickArchetype(page, theme) {
-  const spawn = page.locator('[role=dialog][aria-label="New agent from an archetype"]')
-  await spawn.locator('ul button').first().waitFor()
-  if (theme === 'dark') console.log('archetypes:', (await spawn.locator('ul button span.font-semibold').allTextContents()).join(' | '))
-  const pick = spawn.locator('ul button', { hasText: /research/i }).first()
-  const target = (await pick.count()) ? pick : spawn.locator('ul button').first()
-  await target.click()
-  // On a phone the detail has replaced the list by now.
-  if (await target.count()) await target.scrollIntoViewIfNeeded()
-  await spawn.locator('input[aria-label="Agent name"]').evaluate((el) => { el.setSelectionRange(0, 0); el.blur() })
-  await sleep(300)
-  return spawn
+// New agent's window: the Agent store, its Featured row loaded.
+async function openStore(page) {
+  const store = page.locator('[role=dialog][aria-label="Agent store"]')
+  await store.getByRole('heading', { name: 'Featured' }).waitFor()
+  await sleep(400)
+  return store
 }
 
 async function assets(browser) {
@@ -120,8 +112,8 @@ async function assets(browser) {
     await page.locator(CHAT_INPUT).fill('')
 
     // New agent: an archetype picked, its name filled in.
-    await page.locator('button[title="New agent from an archetype"]').first().click()
-    await shootDialog(page, await pickArchetype(page, theme), `new-agent-${theme}`)
+    await page.locator('button[title="New agent"]').first().click()
+    await shootDialog(page, await openStore(page), `new-agent-${theme}`)
     await page.keyboard.press('Escape')
 
     // Settings.
@@ -170,9 +162,9 @@ async function phoneAssets(browser, theme) {
   await shoot('overview')
 
   await page.getByRole('button', { name: 'New agent', exact: true }).click()
-  await pickArchetype(page, theme)
+  await openStore(page)
   await shoot('new-agent')
-  await page.locator('[role=dialog][aria-label="New agent from an archetype"]').getByRole('button', { name: 'Close' }).click()
+  await page.locator('[role=dialog][aria-label="Agent store"]').getByRole('button', { name: 'Close', exact: true }).click()
 
   await page.locator('button', { hasText: 'Research Assistant' }).first().click()
   await page.getByText('position against').waitFor()

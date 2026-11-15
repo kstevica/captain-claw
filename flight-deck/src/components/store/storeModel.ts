@@ -39,11 +39,6 @@ export function storeSections(list: Archetype[]): StoreSection[] {
   return sections
 }
 
-/** The Featured row: the first few archetypes, in the catalog's own order. */
-export function featured(list: Archetype[], count = 4): Archetype[] {
-  return list.slice(0, count)
-}
-
 /** Tools that work in someone's mail or calendar (as the New agent picker lists them). */
 const MAIL_TOOLS = new Set(['google_mail', 'google_calendar', 'microsoft_mail', 'microsoft_calendar'])
 

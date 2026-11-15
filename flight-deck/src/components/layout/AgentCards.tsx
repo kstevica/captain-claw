@@ -50,7 +50,7 @@ function statusOf(a: HomeAgent, info: { busy: boolean; unread: boolean } | undef
   return { label: 'Ready', tone: 'emerald', title: 'Running — ready to chat' }
 }
 
-export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, switching, onOpen, locked = false, onGuide, empty }: {
+export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, switching, onOpen, onGuide, empty, onStore }: {
   agents: A[]
   sessionInfo: Map<string, { busy: boolean; unread: boolean }>
   booting: Set<string>
@@ -61,6 +61,8 @@ export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, 
   onGuide?: () => void
   /** Shown instead when no agent is up. */
   empty: ReactNode
+  /** Open the Agent store over the layout (New agent's window). */
+  onStore?: () => void
 }) {
   const groups = useGroupStore((s) => s.groups)
   const avatars = useAgentAvatarStore((s) => s.avatars)
@@ -167,12 +169,12 @@ export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, 
               {counts}. Pick one to start a conversation.
             </p>
           </div>
-          {/* The store adds ready-made agents; a kiosk account has its own New agent. */}
-          {!locked && (
-            <a href="/store" className="flex shrink-0 items-center gap-1.5 rounded-full border border-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:border-violet-500/40 hover:text-violet-600 dark:hover:text-violet-400">
+          {/* The store adds ready-made agents: the same window New agent opens. */}
+          {onStore && (
+            <button onClick={onStore} className="flex shrink-0 items-center gap-1.5 rounded-full border border-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:border-violet-500/40 hover:text-violet-600 dark:hover:text-violet-400">
               <Store className="h-3.5 w-3.5" />
               Agent store
-            </a>
+            </button>
           )}
         </header>
 
