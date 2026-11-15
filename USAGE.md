@@ -2434,6 +2434,9 @@ tools:
     - shell
     - write
   plugin_dirs: []                 # additional skill tool directories
+  tool_search:                    # full mode only (eco and nano off)
+    enabled: true
+    budget_tokens: 16000          # tool definitions sent in full per call; 0 = off
   shell:
     timeout: 30                   # default timeout in seconds
     blocked:                      # always-blocked patterns
@@ -2511,6 +2514,13 @@ tools:
 ```
 
 **Always-on tools (0.8.1).** Some tools are added to every agent whatever its `enabled` list, archetype or spawn list says. Since 0.8.1 that includes the everyday working set — `shell`, `glob`, `web_fetch` (with `web_get` and `web_fetch_batch`), `web_search`, `pdf_extract`, `docx_extract`, `xlsx_extract`, `pptx_extract`, `insights`, `contacts`, `apis` and `todo` — and now `docx` (Word documents with tracked changes), `xlsx` (Excel workbooks with live formulas), `pptx` (PowerPoint decks that fit), `self_check` (connection tests and server status), `reasoning_effort` (how hard the agent thinks) and `activity` (its own tool calls, from Flight Deck's register), beside `read`, `write`, `edit`, `datastore`, `image_vision`, `video_vision`, `cv`, `sessions`, `history`, `vfs`, `typesense`, `intentions`, `whatsapp_send_file` and the rest. Before, most archetypes lacked some of them (24 of 31 had no `insights`, so "remember that…" had nowhere to go). Every archetype and the archetype grid now list them too. Account tools (`google_*`, `microsoft_*`, `jev`, `audio`, `telegram_inbox`, `whatsapp_web`) are always registered but stay hidden until their account or key is usable. `require_confirmation` and the shell policy still apply. The `stt` tool is gone; speech is the `audio` tool.
+
+**Tool search (full mode).** Every tool an agent can call used to go to the model with its full definition (description and parameters) on every call: about 39,000 tokens for a default agent, 42,000 under Flight Deck and 59,000 with every account connected. When an agent runs in full mode (eco and nano off) and its definitions come to more than `tools.tool_search.budget_tokens` (16,000 by default), only some go in full:
+
+- always: `shell`, `read`, `write`, `edit`, `glob`, `grep`, `web_fetch`, `web_search`, MCP tools, every tool used in the session and every tool the agent loaded;
+- then, while the budget lasts: the tools the session's first message points at (eco mode's keyword patterns), eco mode's core set (mail, calendar, memory, scheduling, Flight Deck and the like), then the rest, smallest first.
+
+The others are still named, each with a one-line summary, in the system prompt's tool list. In their place the model gets `search_tools`: it searches by a tool's name or by what needs doing ("pptx", "resize an image"), returns the full definitions of the matches and loads them for the rest of the session. A tool called by name without a search still runs; the choice is only about which definitions go out. With the default budget a default agent sends about 15,700 tokens of definitions instead of 38,700. The choice is made once per session and kept in the session, and it only grows: tool definitions sit at the front of every request, so a list that changed with each message would break the provider's prompt cache. Eco and nano mode keep their own narrower sets; `budget_tokens: 0` turns tool search off.
 
 ### skills
 

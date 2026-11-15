@@ -336,6 +336,9 @@ tools:
   - write
   plugin_dirs:
   - skills/tools
+  tool_search:
+    enabled: true
+    budget_tokens: 16000
   duplicate_call_max: 1
 skills:
   managed_dir: ~/.captain-claw/skills

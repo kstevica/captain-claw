@@ -2738,6 +2738,13 @@ class AgentOrchestrationMixin:
                         deferred=len(_deferred),
                         intent_matched=list(_intent_tools & {td["name"] for td in tool_defs}),
                     )
+            # ── Full mode: tool search past the definitions budget ──
+            # The same idea for strong models: past tools.tool_search.budget_tokens
+            # only some definitions go in full and `search_tools` loads the rest.
+            # The set is kept per session so the prompt cache holds.
+            if not _eco_active and not _force_script and not _nano_active and tool_defs:
+                from captain_claw import tool_search
+                tool_defs = tool_search.apply(self, tool_defs, effective_user_input or "")
             self._note_tool_schema_tokens(tool_defs)
             _offered_tools = frozenset(
                 str(td.get("name", "")).strip().lower() for td in (tool_defs or [])

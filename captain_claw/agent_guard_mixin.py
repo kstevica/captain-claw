@@ -766,6 +766,13 @@ class AgentGuardMixin:
         session_id_override: str | None = None,
     ):
         """Execute a tool after script/tool guard policy check."""
+        # Tool search (full mode past the definitions budget): `search_tools`
+        # only reads tool definitions, so it is answered here, not by the
+        # registry — unless a registered tool owns the name.
+        from captain_claw import tool_search
+
+        if name == tool_search.SEARCH_TOOLS_NAME and not self.tools.has_tool(name):
+            return tool_search.run(self, arguments)
         guard_payload = json.dumps(
             {
                 "tool_name": name,
