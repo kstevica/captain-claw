@@ -1,6 +1,7 @@
 """Session memory/compaction/runtime-flag helpers for Agent."""
 
 import copy
+import json
 import re
 import uuid
 from datetime import UTC, datetime
@@ -1448,6 +1449,12 @@ class AgentSessionMixin:
                 self._pending_reasoning_content = ""
             except Exception:
                 pass
+        # The response's Anthropic tool searches ride on the assistant message
+        # that stores it (stashed by _complete_with_guards, consumed here).
+        _server_blocks: list[dict[str, Any]] = []
+        if role == "assistant":
+            _server_blocks = list(getattr(self, "_pending_server_blocks", None) or [])
+            self._pending_server_blocks = []
         # Compute token count including tool_calls arguments — these
         # are sent to the LLM and must be budgeted accurately.
         _token_text = content
@@ -1456,6 +1463,8 @@ class AgentSessionMixin:
                 _args_str = (_tc.get("function") or {}).get("arguments", "")
                 if _args_str:
                     _token_text += _args_str
+        if _server_blocks:
+            _token_text += json.dumps(_server_blocks, separators=(",", ":"))
         # A thinking model's replayed reasoning, counted on its own.
         _reasoning_tokens = self._count_tokens(reasoning_content) if reasoning_content else 0
         _channel: str | None = None
@@ -1497,6 +1506,8 @@ class AgentSessionMixin:
             source_label=_source_label or None,
         )
         _added = self.session.messages[-1]
+        if _server_blocks:
+            _added["server_blocks"] = _server_blocks
         if tool_calls:
             _added["_tc_counted"] = True
         if _reasoning_tokens:

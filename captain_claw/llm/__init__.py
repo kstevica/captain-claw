@@ -68,6 +68,10 @@ class Message:
     # after the run of tool results, for a tool message — and never stored:
     # the session keeps only the content's path markers.
     images: list[Any] | None = None
+    # Anthropic tool search on an assistant message: each search's
+    # ``server_tool_use`` block and its ``tool_search_tool_result``, sent back
+    # unchanged in the message's content (llm/anthropic_tool_search.py).
+    server_blocks: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -93,6 +97,9 @@ class LLMResponse:
     # the orchestration layer can persist it onto the assistant
     # message and replay it on subsequent turns. See ``Message``.
     reasoning_content: str = ""
+    # Anthropic tool searches the model ran in this response (see
+    # ``Message.server_blocks``); its tool_calls hold only the client calls.
+    server_blocks: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -1454,13 +1461,19 @@ def _encoded_images_of(msg: Any) -> list[Any]:
     return [img for img in (_as_encoded(item) for item in raw or []) if img is not None]
 
 
-def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str, Any]]:
+def _convert_messages_for_openai_style(
+    messages: list[Message], *, server_blocks: bool = False,
+) -> list[dict[str, Any]]:
     """Convert messages to OpenAI-style payload.
 
     A message's ``images`` go as ``image_url`` parts (LiteLLM maps them for
     Anthropic and Gemini). A tool message can't carry image parts, so the
     pictures tool results return follow the run of tool messages as one user
     message.
+
+    With *server_blocks* (a request carrying Anthropic's tool search), an
+    assistant message's search blocks follow its text in a content list,
+    which LiteLLM passes to Anthropic unchanged; otherwise they are left out.
     """
     result: list[dict[str, Any]] = []
     tool_images: list[Any] = []
@@ -1558,6 +1571,14 @@ def _convert_messages_for_openai_style(messages: list[Message]) -> list[dict[str
                 _openai_image_part(img) for img in images]
         elif images and role == "tool":
             tool_images.extend(images)
+        if server_blocks and role == "assistant":
+            from captain_claw.llm import anthropic_tool_search
+
+            blocks = anthropic_tool_search.valid_blocks(
+                msg.get("server_blocks") if isinstance(msg, dict) else getattr(msg, "server_blocks", None))
+            if blocks:
+                entry["content"] = ([{"type": "text", "text": content}] if content else []) + [
+                    dict(b) for b in blocks]
         result.append(entry)
     _flush_tool_images()
     return result
@@ -1741,14 +1762,43 @@ def _convert_messages_for_ollama_picked(messages: list[Message]) -> list[dict[st
     return result
 
 
-def _convert_tools_for_openai_style(tools: list[ToolDefinition]) -> list[dict[str, Any]]:
-    """Convert tool schema to OpenAI function-tool format."""
+def _split_server_tool_calls(tool_calls: list[ToolCall]) -> tuple[list[ToolCall], list[dict[str, Any]]]:
+    """Anthropic tool searches (``srvtoolu_`` ids, which LiteLLM returns as
+    tool calls) out of *tool_calls*: Captain doesn't run them, it keeps them
+    with their results for the assistant message."""
+    if not any(str(tc.id).startswith("srvtoolu_") for tc in tool_calls):
+        return tool_calls, []
+    from captain_claw.llm import anthropic_tool_search
+
+    client, blocks = anthropic_tool_search.split_tool_calls(tool_calls)
+    if blocks:
+        log.info("Anthropic tool search ran", found=anthropic_tool_search.found_tools(blocks))
+    return client, blocks
+
+
+def _convert_tools_for_openai_style(
+    tools: list[ToolDefinition], *, native_search: bool = False,
+) -> list[dict[str, Any]]:
+    """Convert tool schema to OpenAI function-tool format.
+
+    With *native_search* (Anthropic), Anthropic's tool search definition goes
+    as it is and a deferred tool keeps ``defer_loading`` (LiteLLM forwards
+    both); otherwise the search definition is dropped and every tool goes in
+    full."""
+    from captain_claw.llm import anthropic_tool_search
+
     result: list[dict[str, Any]] = []
     for tool in tools:
+        if anthropic_tool_search.is_search_tool(tool):
+            if native_search:
+                result.append({"type": str(tool["type"]), "name": str(tool.get("name", ""))})
+            continue
+        defer = False
         if isinstance(tool, dict):
             name = tool.get("name")
             description = tool.get("description", "")
             parameters = tool.get("parameters", {})
+            defer = bool(tool.get("defer_loading"))
         else:
             name = getattr(tool, "name", None)
             description = getattr(tool, "description", "") or ""
@@ -1756,14 +1806,17 @@ def _convert_tools_for_openai_style(tools: list[ToolDefinition]) -> list[dict[st
 
         if not name:
             continue
-        result.append({
+        entry: dict[str, Any] = {
             "type": "function",
             "function": {
                 "name": str(name),
                 "description": str(description),
                 "parameters": parameters if isinstance(parameters, dict) else {},
             },
-        })
+        }
+        if defer and native_search:
+            entry["defer_loading"] = True
+        result.append(entry)
     return result
 
 
@@ -3660,6 +3713,19 @@ class LiteLLMProvider(LLMProvider):
         self._vertex_project = ""
         self._vertex_location = "us-central1"
 
+    def supports_native_tool_search(self) -> bool:
+        """Anthropic's own tool search: a Claude model that has it, on
+        Anthropic's API (not an Anthropic-style endpoint elsewhere), with the
+        LiteLLM hook in place (llm/anthropic_tool_search.py)."""
+        from captain_claw.llm import anthropic_tool_search
+
+        if self.provider != "anthropic":
+            return False
+        base = str(self.base_url or "").lower()
+        if base and "api.anthropic.com" not in base:
+            return False
+        return anthropic_tool_search.model_supported(self.model) and anthropic_tool_search.install()
+
     def _request_kwargs(
         self,
         messages: list[Message],
@@ -3673,9 +3739,16 @@ class LiteLLMProvider(LLMProvider):
             self.model,
             self.temperature if temperature is None else temperature,
         )
+        # Anthropic's own tool search rides in the tool list (tool_search.py
+        # puts it there for supported Claude models); its blocks from earlier
+        # responses go back only with it.
+        from captain_claw.llm import anthropic_tool_search
+
+        native_search = self.provider == "anthropic" and any(
+            anthropic_tool_search.is_search_tool(t) for t in (tools or []))
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": _convert_messages_for_openai_style(messages),
+            "messages": _convert_messages_for_openai_style(messages, server_blocks=native_search),
             "stream": stream,
             "timeout": self.request_timeout or 180,
         }
@@ -3693,7 +3766,7 @@ class LiteLLMProvider(LLMProvider):
         if resolved_temperature is not None:
             kwargs["temperature"] = resolved_temperature
         if tools:
-            kwargs["tools"] = _convert_tools_for_openai_style(tools)
+            kwargs["tools"] = _convert_tools_for_openai_style(tools, native_search=native_search)
 
         # One-shot tool_choice override (set by the orchestration loop
         # on stall retries to force tool use). Only honored when tools
@@ -4135,6 +4208,8 @@ class LiteLLMProvider(LLMProvider):
                     arguments=arguments,
                 ))
 
+            tool_calls, server_blocks = _split_server_tool_calls(tool_calls)
+
             usage = _extract_usage(_obj_get(response, "usage", None))
             if self.rate_limiter:
                 self.rate_limiter.record_actual(usage.get("total_tokens", 0), estimated)
@@ -4145,6 +4220,7 @@ class LiteLLMProvider(LLMProvider):
                 usage=usage,
                 finish_reason=finish_reason,
                 reasoning_content=str(reasoning_content or ""),
+                server_blocks=server_blocks,
             )
         except Exception as e:
             status_code = _obj_get(e, "status_code", None)
@@ -4382,6 +4458,7 @@ class LiteLLMProvider(LLMProvider):
             reasoning_collected = str(
                 _obj_get(choice, "reasoning_content", "") or ""
             )
+            tool_calls, server_blocks = _split_server_tool_calls(tool_calls)
             return LLMResponse(
                 content=str(content),
                 tool_calls=tool_calls,
@@ -4389,6 +4466,7 @@ class LiteLLMProvider(LLMProvider):
                 usage=usage,
                 finish_reason=finish_reason,
                 reasoning_content=reasoning_collected,
+                server_blocks=server_blocks,
             )
         except Exception as e:
             status_code = _obj_get(e, "status_code", None)

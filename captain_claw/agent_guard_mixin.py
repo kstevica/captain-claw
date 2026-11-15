@@ -632,6 +632,12 @@ class AgentGuardMixin:
             self._pending_reasoning_content = "" if is_reasoning_backfill_placeholder(_rc) else _rc
         except Exception:
             pass
+        # Anthropic tool searches from this response go back with the
+        # assistant message the same way (llm/anthropic_tool_search.py). A
+        # call without tools (a rewrite, a label) can't search, so it leaves
+        # the stash of the call before it alone.
+        if tools:
+            self._pending_server_blocks = list(getattr(response, "server_blocks", None) or [])
 
         allowed_output, output_error = await self._enforce_guard(
             guard_type="output",

@@ -4303,6 +4303,7 @@ class AgentContextMixin:
                 converted.pop("tool_name", None)
                 converted.pop("tool_calls", None)
                 converted.pop("reasoning_content", None)
+                converted.pop("server_blocks", None)
                 normalized.append(converted)
                 continue
 
@@ -4345,6 +4346,8 @@ class AgentContextMixin:
         merged.pop("system_hint", None)
         if extra.get("reasoning_content"):
             merged["reasoning_content"] = extra["reasoning_content"]
+        if extra.get("server_blocks"):
+            merged["server_blocks"] = list(base.get("server_blocks") or []) + list(extra["server_blocks"])
         for key in ("token_count", "_tc_counted", "_rc_counted", "reasoning_token_count"):
             merged.pop(key, None)
         return merged
@@ -4369,7 +4372,7 @@ class AgentContextMixin:
         converted = {
             key: value for key, value in msg.items()
             if key not in ("reasoning_content", "system_hint", "token_count", "_tc_counted",
-                           "_rc_counted", "reasoning_token_count")
+                           "_rc_counted", "reasoning_token_count", "server_blocks")
         }
         converted["role"] = "user"
         converted["content"] = f"{lead}\n{body.strip()}"
@@ -5075,8 +5078,10 @@ class AgentContextMixin:
 
         Counted once per distinct tool set (cached by signature): schemas ride
         on every call and are often the largest fixed part of the request.
+        A definition marked ``defer_loading`` (Anthropic's tool search) isn't
+        in the model's context until a search finds it, so it isn't counted.
         """
-        defs = list(tool_defs or [])
+        defs = [d for d in (tool_defs or []) if not (isinstance(d, dict) and d.get("defer_loading"))]
         try:
             wire = json.dumps(defs, sort_keys=True, separators=(",", ":"), default=str)
         except Exception:
@@ -5855,6 +5860,9 @@ class AgentContextMixin:
                     reasoning_content=msg.get("reasoning_content"),
                     cache_breakpoint=bool(msg.get("_cache_breakpoint")),
                     images=msg.get("_inline_images") or None,
+                    # Anthropic tool searches, sent back only with that
+                    # provider's search tool (llm/anthropic_tool_search.py).
+                    server_blocks=msg.get("server_blocks") or None,
                 )
             )
 
