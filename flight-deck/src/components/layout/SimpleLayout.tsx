@@ -2016,6 +2016,7 @@ function AgentsColumn({
             <Plus className="h-4 w-4" />
           </button>
         </div>
+        <div className="mx-4 border-t fd-divider" />
         <div className="flex flex-col items-center gap-0.5 py-2">
           {onLibrary && (
             <button onClick={onLibrary} title="File library" aria-label="File library" className="fd-nav-item fd-nav-rail">
@@ -2100,6 +2101,7 @@ function AgentsColumn({
       <div className="px-3">
         <SimpleNav entries={nav} current={navCurrent} />
       </div>
+      <div className="mx-4 mt-2 border-t fd-divider" />
 
       {/* The team: the agents, the two ways to add to it, and the search */}
       <div className="@container space-y-2 px-4 pb-2 pt-3">
@@ -2325,6 +2327,8 @@ function AgentsColumn({
         />
       </div>
 
+      {/* The tools apart from the team above them. */}
+      <div className="mx-4 mb-1 border-t fd-divider" />
       <ToolTiles onLibrary={onLibrary} onData={onData} onFolders={onFolders} />
 
       {/* Footer — the kiosk's is one Settings button (KioskSettingsDialog). */}
