@@ -6,7 +6,9 @@ the mutable state that used to live inside ``run_interactive()``.
 
 from __future__ import annotations
 
+import re
 import shlex
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +18,7 @@ from captain_claw.logging import get_logger
 from captain_claw.cron import (
     compute_next_run,
     now_utc,
+    parse_iso,
     parse_schedule_tokens,
     schedule_to_text,
     to_utc_iso,
@@ -133,18 +136,24 @@ def resolve_saved_file_for_kind(
 # Completion confirmation
 # ---------------------------------------------------------------------------
 
+NO_ACTION_TEXT = "it replied without using any tools, so nothing was checked, sent or saved"
+
+
 def format_cron_completion(
     job_id: str | None, description: str, output: str = "", ok: bool = True,
+    *, did_nothing: bool = False,
 ) -> str:
     """Build a user-facing cron completion confirmation.
 
     Always identifies the job and what it did — even when the task produced no
     text output (e.g. it only wrote a file) — so the user gets a clear "done"
     instead of silence. Any actual output is appended below the header line.
+    A run that *did_nothing* (see :func:`run_did_nothing`) says so instead of
+    "finished", so an announcement isn't read as work done.
     """
     short_id = (job_id or "")[:8]
-    head = "✅" if ok else "⚠️"
-    status = "finished" if ok else "failed"
+    head = "✅" if ok and not did_nothing else "⚠️"
+    status = "did nothing" if did_nothing else "finished" if ok else "failed"
     desc = " ".join((description or "").split())
     if len(desc) > 120:
         desc = desc[:117] + "…"
@@ -153,7 +162,33 @@ def format_cron_completion(
     if desc:
         line += f" — {desc}"
     body = (output or "").strip()
+    if did_nothing:
+        note = f"({NO_ACTION_TEXT[0].upper()}{NO_ACTION_TEXT[1:]}.)"
+        body = f"{body}\n\n{note}" if body else note
     return f"{line}\n\n{body}" if body else line
+
+
+# A task written as a list ("- check the inbox\n- reply to …"): every part
+# must end Done, Blocked or Skipped (wrap_cron_prompt), and the run's record
+# says how many did.
+_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+\S")
+_PART_LINE_RE = re.compile(
+    r"^\s*(?:[-*•]|\d{1,2}[.)])?\s*(?:[^\w\s]{1,3}\s*)?\**\s*(?:done|blocked|skipped)\b"
+    r"|[—–:-]\s*\**\s*(?:done|blocked|skipped)\b",
+    re.IGNORECASE,
+)
+
+
+def checklist_parts(task_text: str) -> int:
+    """How many list items *task_text* has; 0 when it isn't a list (fewer than 2)."""
+    n = sum(1 for line in (task_text or "").splitlines() if _LIST_ITEM_RE.match(line))
+    return n if n >= 2 else 0
+
+
+def parts_accounted(reply: str) -> int:
+    """Lines of *reply* that close a part: start with (or end a clause in)
+    Done, Blocked or Skipped."""
+    return sum(1 for line in (reply or "").splitlines() if _PART_LINE_RE.search(line))
 
 
 def wrap_cron_prompt(job_id: str | None, prompt_text: str) -> str:
@@ -161,17 +196,238 @@ def wrap_cron_prompt(job_id: str | None, prompt_text: str) -> str:
     moment has arrived — and should perform it directly, not re-schedule it or
     promise to do it later. Without this, a deferred prompt reads like a fresh
     request and the model replies "reminder set, I'll notify in N minutes",
-    which is nonsensical at fire time."""
+    which is nonsensical at fire time. A task written as a list also asks for
+    one closing line per part."""
     sid = (job_id or "")[:8]
+    parts = checklist_parts(prompt_text)
+    checklist = ""
+    if parts:
+        checklist = (
+            f"The task has {parts} parts. Work through every one. End your reply "
+            "with one line per part, in the task's order, that starts with Done, "
+            "Blocked or Skipped (these English words, whatever language you reply "
+            "in) and says what happened — for Blocked and Skipped, why.\n"
+        )
     return (
         f"[SCHEDULED TASK — cron job {sid} is firing NOW]\n"
         "The time you were waiting for has arrived. Carry out the task below at "
         "this moment and report the result directly to the user. Do NOT schedule "
         "it again, do NOT set another reminder, and do NOT say you will do it "
-        "later or in N minutes — now is the moment. Reply in the same language "
-        "as the task.\n\n"
+        "later or in N minutes — now is the moment. If the task needs your tools, "
+        "call them in this turn: a reply that only says you are doing it does "
+        "nothing. Reply in the same language as the task.\n"
+        f"{checklist}\n"
         f"Task:\n{prompt_text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Routine safety: limits on new jobs, bad runs, pausing, missed slots
+# ---------------------------------------------------------------------------
+
+# Kinds whose every run is a model turn (scripts and tools aren't).
+_MODEL_KINDS = frozenset({"prompt", "orchestrate"})
+_BAD_OUTCOMES = frozenset({"failed", "no_action"})
+
+
+def _cron_cfg() -> Any:
+    from captain_claw.config import get_config
+
+    return get_config().cron
+
+
+def interval_minutes(schedule: dict[str, Any]) -> int | None:
+    """Minutes between runs of an ``every …`` schedule; None for other kinds."""
+    if str(schedule.get("type", "")).strip().lower() != "interval":
+        return None
+    try:
+        interval = int(schedule.get("interval", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    unit = str(schedule.get("unit", "minutes")).lower()
+    return interval if unit.startswith("minute") else interval * 60
+
+
+async def check_new_cron_job(session_manager: Any, kind: str, schedule: dict[str, Any]) -> str:
+    """Why a new job can't be made, or "" when it can: a job that runs the
+    model repeats no more often than ``cron.min_interval_minutes``, and an
+    agent holds at most ``cron.max_active_jobs`` active jobs."""
+    cfg = _cron_cfg()
+    minutes = interval_minutes(schedule)
+    floor = int(cfg.min_interval_minutes)
+    if str(kind).strip().lower() in _MODEL_KINDS and minutes is not None and minutes < floor:
+        return (
+            f"A scheduled job that runs the model can't repeat more often than every "
+            f"{floor} minutes (asked for every {minutes}m). Use 'every {floor}m' or longer."
+        )
+    cap = int(cfg.max_active_jobs)
+    try:
+        active = await session_manager.list_cron_jobs(limit=cap + 1, active_only=True)
+    except Exception:
+        log.debug("cron job cap check skipped", exc_info=True)
+        return ""
+    if len(active) >= cap:
+        return (
+            f"This agent already has {len(active)} active scheduled jobs (the most it can "
+            f"have is {cap}). Pause or remove one first."
+        )
+    return ""
+
+
+def turn_tool_calls(agent: Any) -> int:
+    """Tool calls the agent made in its current turn (a refused call counts:
+    it was tried)."""
+    counts = getattr(agent, "_turn_tool_call_counts", None) or {}
+    try:
+        return int(sum(int(v) for v in counts.values()))
+    except Exception:
+        return len(counts)
+
+
+def run_did_nothing(reply: str, tool_calls: int) -> bool:
+    """A prompt run that used no tool and whose reply is empty, only announces
+    the work ("Running the reply-watch — checking the inbox now.") or narrates
+    lookups that never ran. A reply with no tool that just says something
+    ("Time to stretch!") is a run that did its job."""
+    if tool_calls > 0:
+        return False
+    text = (reply or "").strip()
+    if not text:
+        return True
+    try:
+        from captain_claw.agent_orchestration_mixin import _looks_like_stall
+
+        if _looks_like_stall(text):
+            return True
+    except Exception:
+        log.debug("stall check unavailable", exc_info=True)
+    try:
+        from captain_claw.fabrication_guard import narrated_lookups
+
+        if narrated_lookups(text):
+            return True
+    except Exception:
+        log.debug("narrated-lookup check unavailable", exc_info=True)
+    return False
+
+
+async def note_run_outcome(
+    ctx: RuntimeContext,
+    job_id: str | None,
+    outcome: str,
+    *,
+    detail: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Record how one run ended — ``ok``, ``failed`` or ``no_action`` — and
+    keep the job's count of bad runs in a row. At ``cron.pause_after_bad_runs``
+    the job is paused and its chat is told. Returns ``{"streak", "paused"}``."""
+    result: dict[str, Any] = {"streak": 0, "paused": False}
+    if not job_id:
+        return result
+    sm = ctx.agent.session_manager
+    try:
+        job = await sm.load_cron_job(job_id)
+    except Exception:
+        log.debug("cron outcome: job load failed", job_id=job_id, exc_info=True)
+        return result
+    if job is None:
+        return result
+    bad = outcome in _BAD_OUTCOMES
+    streak = int(getattr(job, "bad_streak", 0) or 0) + 1 if bad else 0
+    updates: dict[str, Any] = {"bad_streak": streak}
+    if outcome == "no_action":
+        updates["last_status"] = "no_action"
+        updates["last_error"] = detail or NO_ACTION_TEXT
+    elif outcome == "failed":
+        updates["last_status"] = "failed"
+        updates["last_error"] = detail
+    else:
+        updates["last_status"] = "ok"
+        updates["last_error"] = ""
+    limit = int(_cron_cfg().pause_after_bad_runs)
+    paused = bool(bad and limit and streak >= limit and job.enabled)
+    why = ""
+    if paused:
+        why = (
+            f"Paused after {streak} runs in a row that failed or did nothing. "
+            "Resume it once the cause is fixed."
+        )
+        updates.update(enabled=False, last_status="paused", last_error=why)
+    await sm.update_cron_job(job_id, **updates)
+    await cron_monitor_event(
+        ctx, "run_outcome", history_job_id=job_id,
+        job_id=job_id, outcome=outcome, bad_streak=streak, paused=paused,
+    )
+    if paused:
+        log.warning("cron job paused after bad runs", job_id=job_id, bad_streak=streak)
+        await cron_chat_event(ctx, job_id, "system", f"[CRON] job paused: {why}")
+        target = session_id or str(getattr(job, "session_id", "") or "")
+        if ctx.on_cron_output and target:
+            desc = _job_description(job)
+            short = job_id[:8]
+            try:
+                await ctx.on_cron_output(target, f"⏸ Cron {short} paused — {desc}\n\n{why}".strip())
+            except Exception:
+                log.debug("cron pause notice failed", exc_info=True)
+    result.update(streak=streak, paused=paused)
+    return result
+
+
+def _job_description(job: Any) -> str:
+    payload = getattr(job, "payload", None)
+    payload = payload if isinstance(payload, dict) else {}
+    text = str(payload.get("text") or payload.get("workflow") or payload.get("path") or "")
+    text = " ".join(text.split())
+    return text[:117] + "…" if len(text) > 120 else text
+
+
+def missed_slot(job: Any, now: datetime | None = None) -> str:
+    """Why a daily or weekly run is too late to run (the agent was off at its
+    time), or "". Late by more than ``cron.skip_missed_after_minutes`` → skip;
+    ``every …`` and one-shot jobs always run, late or not."""
+    schedule = getattr(job, "schedule", None) or {}
+    if str(schedule.get("type", "")).strip().lower() not in {"daily", "weekly"}:
+        return ""
+    grace = int(_cron_cfg().skip_missed_after_minutes)
+    if grace <= 0:
+        return ""
+    try:
+        due = parse_iso(str(getattr(job, "next_run_at", "") or ""))
+    except Exception:
+        return ""
+    late = (now or now_utc()) - due
+    if late <= timedelta(minutes=grace):
+        return ""
+    hours = late.total_seconds() / 3600
+    late_text = f"{hours:.0f}h" if hours >= 1.5 else f"{late.total_seconds() / 60:.0f} min"
+    return f"missed its {due:%Y-%m-%d %H:%M} UTC slot by {late_text}"
+
+
+async def skip_missed_run(ctx: RuntimeContext, job: Any, why: str) -> None:
+    """Move a late daily/weekly job on to its next slot without running it."""
+    job_id = str(getattr(job, "id", "")).strip()
+    schedule = getattr(job, "schedule", {}) or {}
+    next_run_at_iso = to_utc_iso(compute_next_run(schedule))
+    log.info("cron job skipped (missed slot)", job_id=job_id, why=why)
+    await cron_monitor_event(
+        ctx, "job_skipped", history_job_id=job_id,
+        job_id=job_id, reason=why, next_run_at=next_run_at_iso,
+    )
+    await cron_chat_event(ctx, job_id, "system", f"[CRON] job skipped: {why}")
+    await ctx.agent.session_manager.update_cron_job(
+        job_id, next_run_at=next_run_at_iso, last_status="skipped", last_error=why,
+    )
+    session_id = str(getattr(job, "session_id", "") or "")
+    if ctx.on_cron_output and session_id:
+        try:
+            await ctx.on_cron_output(
+                session_id,
+                f"⏭ Cron {job_id[:8]} skipped — {_job_description(job)}\n\n"
+                f"It {why}, so it waits for its next one: {next_run_at_iso[:16].replace('T', ' ')} UTC.",
+            )
+        except Exception:
+            log.debug("cron skip notice failed", exc_info=True)
 
 
 # Script / tool execution in session
@@ -468,13 +724,22 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
         return
     log.info("cron_job_execute_start", job_id=job_id, trigger=trigger)
 
+    if trigger == "scheduled":
+        why = missed_slot(job)
+        if why:
+            try:
+                await skip_missed_run(ctx, job, why)
+            except Exception:
+                log.exception("cron missed-slot skip failed", job_id=job_id)
+            return
+
     ctx.cron_running_job_ids.add(job_id)
     started_at_iso = to_utc_iso(now_utc())
     success = False
     queued_for_followup = False
     error_text = ""
+    kind = str(getattr(job, "kind", "prompt")).strip().lower()
     try:
-        kind = str(getattr(job, "kind", "prompt")).strip().lower()
         payload = getattr(job, "payload", {})
         session_id = str(getattr(job, "session_id", "")).strip()
         schedule = getattr(job, "schedule", {})
@@ -551,20 +816,28 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
             trigger=trigger, kind=kind, session_id=session_id,
         )
 
+        sm = ctx.agent.session_manager
+        # A prompt run's own turn records how it went (prompt_execution →
+        # note_run_outcome): "did nothing" is only known there. Scripts,
+        # tools and workflows ended well when they got here.
+        if kind != "prompt":
+            await note_run_outcome(ctx, job_id, "ok", session_id=session_id)
         # One-shot jobs auto-disable after a single run.
         is_once = str(schedule.get("type", "")).strip().lower() == "once"
         next_run_at_iso = to_utc_iso(compute_next_run(schedule))
         update_kwargs: dict[str, Any] = {
             "last_run_at": started_at_iso,
             "next_run_at": next_run_at_iso,
-            "last_status": "queued" if queued_for_followup else "ok",
-            "last_error": "",
         }
+        if queued_for_followup:
+            update_kwargs["last_status"] = "queued"
         if is_once:
             update_kwargs["enabled"] = False
-            update_kwargs["last_status"] = "completed"
+            current = await sm.load_cron_job(job_id)
+            if not (current and current.last_status in {"no_action", "failed", "paused"}):
+                update_kwargs["last_status"] = "completed"
             log.info("One-shot cron job completed, auto-disabled", job_id=job_id)
-        await ctx.agent.session_manager.update_cron_job(job_id, **update_kwargs)
+        await sm.update_cron_job(job_id, **update_kwargs)
     except Exception as e:
         error_text = str(e)
         log.error("cron_job_execute_failed", job_id=job_id, trigger=trigger, error=error_text)
@@ -585,9 +858,10 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
             job_id,
             last_run_at=started_at_iso,
             next_run_at=next_run_at_iso,
-            last_status="failed",
-            last_error=error_text,
         )
+        # A prompt turn that failed has already counted itself.
+        if not getattr(e, "_cron_outcome_noted", False):
+            await note_run_outcome(ctx, job_id, "failed", detail=error_text)
     finally:
         ctx.cron_running_job_ids.discard(job_id)
         if trigger == "manual" and not success:

@@ -199,7 +199,7 @@ export function BatchBar({ tasks, phone, keysRef, heldRef, onApply, onHandOver, 
             </button>
           )}
           {fit('got_it').length > 0 && (
-            <button onClick={() => void apply('got_it', 'ack_failed')} disabled={busy} className={btn} title="Seen: off Needs me">
+            <button onClick={() => void apply('got_it', 'ack_failed')} disabled={busy} className={btn} title="Seen: off Needs you">
               <Check className={icon} />{said('Got it', fit('got_it').length)}<KeyHint k={TASK_KEYS.gotIt} />
             </button>
           )}
@@ -242,7 +242,7 @@ export function BatchProgress({ batch, onStop, onOpen, onDismiss }: {
         {going ? <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-sky-600 dark:text-sky-400" />
           : <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-sky-600 dark:text-sky-400" />}
         <div className="min-w-0 flex-1 leading-relaxed">
-          <p className="text-zinc-200">{batchLine(batch)}{!going && ' Look them over in Needs me.'}</p>
+          <p className="text-zinc-200">{batchLine(batch)}{!going && ' Look them over in Needs you.'}</p>
           {batch.on && (
             <button onClick={() => onOpen(batch.on!.id)} className="block max-w-full truncate text-left text-sky-700 hover:underline dark:text-sky-400">
               On “{batch.on.title || 'Untitled task'}”

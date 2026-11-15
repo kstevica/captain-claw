@@ -116,6 +116,10 @@ def check_questions(raw: Any) -> list[dict[str, Any]]:
                 item["min"], item["max"] = low, high
             else:
                 item["kind"] = "choice"
+        elif q.get("secret"):
+            # A password or a code (request_secret): typed into a masked box,
+            # answered with a reference — the value stays in secrets_store.
+            item["kind"] = "secret"
         elif q.get("confirm"):
             item["kind"] = "confirm"
         else:
@@ -124,7 +128,7 @@ def check_questions(raw: Any) -> list[dict[str, Any]]:
             if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= MAX_LINES:
                 raise AskError(f"Question {i}: 'lines' is 1–{MAX_LINES}.")
             item["lines"] = lines
-        if q.get("default") is not None:
+        if q.get("default") is not None and item["kind"] != "secret":
             try:
                 item["default"] = _one_answer(item, q["default"])
             except AskError:
@@ -135,6 +139,12 @@ def check_questions(raw: Any) -> list[dict[str, Any]]:
 
 def _one_answer(q: dict[str, Any], value: Any) -> Any:
     kind = q["kind"]
+    if kind == "secret":
+        from captain_claw.flight_deck.secrets_store import MAX_LEN
+
+        if not isinstance(value, str) or not value or len(value) > MAX_LEN:
+            raise AskError(f"“{q['question']}” needs what you'd type, at most {MAX_LEN} characters.")
+        return value
     if kind == "text":
         if not isinstance(value, str) or len(value) > MAX_ANSWER:
             raise AskError(f"“{q['question']}” takes text of at most {MAX_ANSWER} characters.")
@@ -183,15 +193,23 @@ class Ask:
     questions: list[dict[str, Any]]
     created: float
     deadline: float           # time.time()
-    source: str = "tool"      # "tool" (a custom tool) or "agent" (ask_user)
+    source: str = "tool"      # "tool" (a custom tool), "agent" (ask_user) or "approval"
+    asker: str = ""           # the agent's slug, for a secret it may release later
     state: str = "open"       # open | answered | declined | expired | closed
     answers: dict[str, Any] = field(default_factory=dict)
     event: asyncio.Event = field(default_factory=asyncio.Event)
+    # The bell's line for it (title, body); default "<title> asks you something".
+    ring: tuple[str, str] | None = None
+    # An approval card's facts for the dialog (approvals.py): kind, what it does.
+    detail: dict[str, Any] = field(default_factory=dict)
 
     def view(self) -> dict[str, Any]:
-        return {"id": self.id, "source": self.source, "title": self.title, "owner_name": self.owner_name,
-                "agent_name": self.agent_name, "label": self.label, "questions": self.questions,
-                "created": self.created, "seconds_left": max(0, int(self.deadline - time.time()))}
+        out = {"id": self.id, "source": self.source, "title": self.title, "owner_name": self.owner_name,
+               "agent_name": self.agent_name, "label": self.label, "questions": self.questions,
+               "created": self.created, "seconds_left": max(0, int(self.deadline - time.time()))}
+        if self.detail:
+            out["detail"] = self.detail
+        return out
 
     def outcome(self) -> dict[str, Any]:
         if self.state == "answered":
@@ -276,10 +294,11 @@ async def wait_for_change(user_id: str, known: set[str], wait: float) -> list[di
 async def _ring(a: Ask) -> None:
     from captain_claw.flight_deck.auth import get_db
 
+    title, body = a.ring or (f"{a.title} asks you something",
+                             "Answer it in Flight Deck: the question is open there.")
     try:
         await get_db().add_notification(
-            a.user_id, BELL_REF, f"{a.title} asks you something"[:200],
-            "Answer it in Flight Deck: the question is open there.", ref_type=BELL_REF, ref_id=a.id)
+            a.user_id, BELL_REF, title[:200], body, ref_type=BELL_REF, ref_id=a.id)
     except Exception as exc:  # noqa: BLE001 — the dialog still shows it
         log.debug("Couldn't ring for a question", error=str(exc))
 
@@ -295,7 +314,9 @@ async def _settle(a: Ask) -> None:
 
 async def open_ask(user_id: str, *, title: str, questions: list[dict[str, Any]], wait_s: float,
                    source: str = "tool", call_id: str = "", owner_name: str = "", agent_name: str = "",
-                   label: str = "", ask_id: str = "") -> Ask:
+                   label: str = "", ask_id: str = "", asker: str = "",
+                   ring: tuple[str, str] | None = None,
+                   detail: dict[str, Any] | None = None) -> Ask:
     """Put *questions* to *user_id*: in their tabs and their bell. *ask_id* is
     the asker's own id for it (an agent's, so it can cancel it before it
     hears back); refused when that id was cancelled already."""
@@ -308,7 +329,8 @@ async def open_ask(user_id: str, *, title: str, questions: list[dict[str, Any]],
     wait_s = max(MIN_WAIT_S, min(float(wait_s or DEFAULT_WAIT_S), MAX_WAIT_S))
     a = Ask(id=ask_id or "xa_" + secrets.token_hex(8), user_id=user_id, call_id=call_id, title=title,
             owner_name=owner_name, agent_name=agent_name, label=label, questions=questions, created=time.time(),
-            deadline=time.time() + wait_s, source=source)
+            deadline=time.time() + wait_s, source=source, asker=asker, ring=ring,
+            detail=dict(detail or {}))
     _ASKS[a.id] = a
     _changed(user_id)
     await _ring(a)
@@ -383,7 +405,19 @@ def answer(ask_id: str, user_id: str, *, answers: Any = None, declined: bool = F
     if declined:
         a.state = "declined"
     else:
-        a.answers = check_answers(a.questions, answers)
+        checked = check_answers(a.questions, answers)
+        secret_qs = [q for q in a.questions if q["kind"] == "secret"]
+        if secret_qs and not a.asker:
+            raise AskError("Only an agent's question can take a secret.")
+        for q in secret_qs:
+            from captain_claw.flight_deck import secrets_store
+
+            value = checked[q["id"]]
+            if not isinstance(value, str) or not value:  # an optional one left empty
+                checked[q["id"]] = None
+                continue
+            checked[q["id"]] = {"secret_ref": secrets_store.keep(value, user_id, a.asker), "length": len(value)}
+        a.answers = checked
         a.state = "answered"
     a.event.set()
     _changed(user_id)

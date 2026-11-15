@@ -38,6 +38,7 @@ owner's turns only, read-only.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import os
@@ -59,6 +60,8 @@ log = get_logger(__name__)
 INGEST_PATH = "/fd/tool-audit/agent/calls"
 
 OUTCOMES = ("ok", "error", "blocked", "timeout", "aborted", "interrupted")
+# A line for the call being made now, when it ends with no reason of its own (note()).
+_NOTE: contextvars.ContextVar[str] = contextvars.ContextVar("tool_audit_note", default="")
 MASK = "[masked]"
 INTERRUPTED_REASON = "The agent stopped before this call finished"
 
@@ -545,12 +548,26 @@ def start(name: str, arguments: dict[str, Any] | None, *, session_id: str | None
         return None
 
 
+def note(text: str) -> contextvars.Token:
+    """A line for the next call's record when it ends with no reason of its
+    own (e.g. who approved it); reset with :func:`clear_note`."""
+    return _NOTE.set(str(text or ""))
+
+
+def clear_note(token: contextvars.Token) -> None:
+    try:
+        _NOTE.reset(token)
+    except Exception:  # noqa: BLE001 — another context's token: just clear it
+        _NOTE.set("")
+
+
 def finish(handle: Handle | None, outcome: str, reason: str = "", result: Any = None) -> None:
     """Record how a started call ended (an ok call's *result* gives its
     :func:`result_refs`). Never raises; a second finish is ignored."""
     if handle is None or handle.finished:
         return
     handle.finished = True
+    reason = reason or _NOTE.get()
     try:
         spool = _spool()
         if spool is None:

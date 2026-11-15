@@ -51,6 +51,7 @@ import {
   LayoutGrid,
   Network,
   Flame,
+  MonitorPlay,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -110,6 +111,7 @@ import { OnboardingDialog, type OnboardingTab } from './OnboardingDialog'
 import { ArchetypeSpawnDialog, type SetupRequest } from './ArchetypeSpawnDialog'
 import { AgentBackupDialog, AgentImportDialog } from './AgentBundleDialogs'
 import { AgentBackupsDialog } from './AgentBackupsDialog'
+import { BrowserLiveDialog } from '../agents/BrowserLiveDialog'
 import { ForgeAgentsDialog } from '../forge/ForgeAgentsDialog'
 import { KioskByokDialog } from './KioskByokDialog'
 import { useByokStore } from '../../stores/byokStore'
@@ -313,6 +315,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [forgeOpen, setForgeOpen] = useState(false)
   // Agent bundles: an agent's ⋯ → Back up / export, and New agent → From a file.
   const [backupFor, setBackupFor] = useState<{ slug: string; name: string } | null>(null)
+  // Its own browser: watch it, take control, hand back (BrowserLiveDialog).
+  const [browserFor, setBrowserFor] = useState<{ slug: string; name: string } | null>(null)
   // Open: '' for a new agent, or the slug of the agent a file goes into.
   const [importOpen, setImportOpen] = useState<string | null>(null)
   // Settings → Agent backups (schedule, backups kept, signed files).
@@ -860,6 +864,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         icon: ListChecks, label: 'Tasks', hint: 'What it was asked and sent, and what needs you', tone: 'teal', group: 'work',
         onSelect: () => openTaskboard(a.startKey),
       })
+      items.push({
+        icon: MonitorPlay, label: 'Its browser', tone: 'sky', group: 'work', disabled: !up,
+        hint: up ? 'Watch its browser; take control for a sign-in or a check' : 'Shows while it runs',
+        onSelect: () => setBrowserFor({ slug: a.startKey, name: a.name }),
+      })
     }
     if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
@@ -1145,6 +1154,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           }}
         />
       )}
+      {browserFor && <BrowserLiveDialog agent={browserFor} onClose={() => setBrowserFor(null)} />}
       {backupFor && (
         <AgentBackupDialog agent={backupFor} onClose={() => setBackupFor(null)}
           onBringIn={() => { setImportOpen(backupFor.slug); setBackupFor(null) }}
@@ -1249,7 +1259,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         </KioskWideDialog>
       )}
       {taskboardOpen && (
-        <KioskWideDialog label="Taskboard" phone={isMobile} onClose={closeTaskboard} widest>
+        <KioskWideDialog label="Tasks" phone={isMobile} onClose={closeTaskboard} widest>
           <TaskBoard
             phone={isMobile}
             initialAgent={taskboardAgent}
@@ -1581,7 +1591,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
     {
       title: 'Your agents at work',
       items: [
-        { icon: ListChecks, label: 'Tasks', hint: 'The Taskboard: asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
+        { icon: ListChecks, label: 'Tasks', hint: 'Asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
         ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: () => { onClose(); openCrew() }, tone: 'teal' as const }] : []),
         ...(toolsOn ? [{ icon: Wrench, label: 'Custom tools', hint: 'Programs your agents run, yours and ones offered to you', onSelect: () => { onClose(); openTools() }, tone: 'violet' as const }] : []),
         ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: () => { onClose(); openSwarm() }, tone: 'amber' as const }] : []),

@@ -348,10 +348,10 @@ async def _approve(user_id: str, admin: dict) -> None:
         await ts.send_text(link["tg_user_id"], (
             f"✅ Approved. What you send here now goes to your agent {name}."))
     await get_db().add_notification(
-        user_id, "telegram", "Telegram access approved",
+        user_id, "success", "Telegram access approved",
         body=(f"Your agent {name} now answers you on Telegram." if link.get("tg_user_id")
               else "Open Connections → Telegram and tap the link to finish connecting."),
-        ref_type="telegram_link", ref_id=user_id,
+        ref_type="telegram_access", ref_id=user_id,  # a result, not the request's needs-you ref
     )
 
 
@@ -369,9 +369,9 @@ async def admin_reject(user_id: str, admin: dict = Depends(require_admin)) -> di
     if link.get("tg_user_id"):
         await ts.send_text(link["tg_user_id"], "Your access to this bot was turned off by an admin.")
     await get_db().add_notification(
-        user_id, "telegram", "Telegram access not approved",
+        user_id, "info", "Telegram access not approved",
         body="An admin didn't approve your request for the team Telegram bot.",
-        ref_type="telegram_link", ref_id=user_id,
+        ref_type="telegram_access", ref_id=user_id,  # a result, not the request's needs-you ref
     )
     return await _admin_view()
 

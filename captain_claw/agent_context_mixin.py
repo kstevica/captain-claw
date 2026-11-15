@@ -3020,6 +3020,10 @@ class AgentContextMixin:
             # Flight Deck, answered before the turn goes on. Hidden without a deck.
             from captain_claw.tools.ask_user import AskUserTool
             self.tools.register(AskUserTool(), metadata={"requires_flight_deck": True})
+            # Ask the person for a password or a code — a masked box in their
+            # Flight Deck; the agent gets a reference its browser types in.
+            from captain_claw.tools.request_secret import RequestSecretTool
+            self.tools.register(RequestSecretTool(), metadata={"requires_flight_deck": True})
             # Colleagues — the owner's other agents, and handing them work on
             # the Taskboard. Under Flight Deck on the owner's own turns only,
             # the Line's gate (requires_line).

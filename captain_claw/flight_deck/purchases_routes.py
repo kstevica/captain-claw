@@ -709,6 +709,9 @@ async def owner_approve(purchase_id: str, user: dict = Depends(get_current_user)
     else:
         row = await protocol_checkout.approve(row, user["id"])
     await _event(row, actor, "approved", {})
+    from captain_claw.flight_deck import line
+
+    await line.settle(user["id"], "purchase", row["id"])
     return {"purchase": view(row)}
 
 
@@ -798,6 +801,9 @@ async def owner_deny(purchase_id: str, user: dict = Depends(get_current_user)):
     row = await store().update_purchase(row["id"], status="denied")
     await _wind_down(row)
     await _event(row, f"user:{user['id']}", "denied", {})
+    from captain_claw.flight_deck import line
+
+    await line.settle(user["id"], "purchase", row["id"])
     return {"purchase": view(row)}
 
 

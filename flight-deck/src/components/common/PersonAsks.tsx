@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { MessageCircleQuestion, Send, X, ShieldAlert } from 'lucide-react'
+import { MessageCircleQuestion, Send, X, ShieldAlert, ShieldCheck, Check, Eye, EyeOff, KeyRound } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { asksApi, type AskQuestion, type OpenAsk } from '../../services/asksApi'
 import { Dialog, Button, Notice, inputCls } from '../console/parts'
@@ -19,11 +19,12 @@ type Answer = string | string[] | boolean | null
 
 function startOf(q: AskQuestion): Answer {
   if (q.default !== undefined && q.default !== null) return q.default as Answer
-  return q.kind === 'multiple' ? [] : q.kind === 'text' ? '' : null
+  return q.kind === 'multiple' ? [] : q.kind === 'text' || q.kind === 'secret' ? '' : null
 }
 
 function missing(q: AskQuestion, v: Answer): string {
   if (q.kind === 'text') return !q.optional && !String(v ?? '').trim() ? 'needs an answer' : ''
+  if (q.kind === 'secret') return !q.optional && !String(v ?? '') ? 'needs an answer' : ''
   if (q.kind === 'multiple') {
     const n = Array.isArray(v) ? v.length : 0
     const low = q.min ?? (q.optional ? 0 : 1)
@@ -40,7 +41,9 @@ function QuestionField({ q, value, onChange }: { q: AskQuestion; value: Answer; 
     <fieldset className="space-y-2">
       <legend className="mb-1 block text-base font-medium leading-snug text-zinc-100">{label}</legend>
       {q.help && <p className="text-sm leading-relaxed text-zinc-500">{q.help}</p>}
-      {q.kind === 'text' ? (
+      {q.kind === 'secret' ? (
+        <SecretInput value={String(value ?? '')} onChange={onChange} />
+      ) : q.kind === 'text' ? (
         (q.lines ?? 1) > 1 ? (
           <textarea className={answerCls} rows={Math.max(3, q.lines ?? 3)} maxLength={4000} value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />
         ) : (
@@ -85,6 +88,24 @@ function QuestionField({ q, value, onChange }: { q: AskQuestion; value: Answer; 
   )
 }
 
+// A password or a code (request_secret): masked, never filled in by the
+// browser's password manager for the deck itself, shown only while held down.
+function SecretInput({ value, onChange }: { value: string; onChange: (v: Answer) => void }) {
+  const [shown, setShown] = useState(false)
+  return (
+    <div className="flex items-center gap-2">
+      <input className={answerCls} type={shown ? 'text' : 'password'} maxLength={500} autoComplete="one-time-code"
+        spellCheck={false} autoFocus value={value} onChange={(e) => onChange(e.target.value)} />
+      <button type="button" aria-label={shown ? 'Hide it' : 'Show it'} title="Hold to show"
+        onMouseDown={() => setShown(true)} onMouseUp={() => setShown(false)} onMouseLeave={() => setShown(false)}
+        onTouchStart={() => setShown(true)} onTouchEnd={() => setShown(false)}
+        className="rounded-lg border border-zinc-800 p-2.5 text-zinc-400 hover:text-zinc-200">
+        {shown ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
+  )
+}
+
 function AskDialog({ ask, onDone }: { ask: OpenAsk; onDone: () => void }) {
   const [values, setValues] = useState<Record<string, Answer>>(() =>
     Object.fromEntries(ask.questions.map((q) => [q.id, startOf(q)])))
@@ -125,10 +146,77 @@ function AskDialog({ ask, onDone }: { ask: OpenAsk; onDone: () => void }) {
         {ask.questions.map((q) => (
           <QuestionField key={q.id} q={q} value={values[q.id]} onChange={(v) => setValues((now) => ({ ...now, [q.id]: v }))} />
         ))}
-        <p className="flex items-start gap-1.5 text-xs leading-relaxed text-zinc-500">
-          <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          {ask.source === 'agent' ? 'Never type a password or key here.'
-            : "Never type a password or key here: a tool's secrets go in its Secrets, on the Custom tools page."}
+        {ask.questions.some((q) => q.kind === 'secret') ? (
+          <p className="flex items-start gap-1.5 text-xs leading-relaxed text-zinc-500">
+            <KeyRound className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            This goes straight into the page {ask.agent_name || 'your agent'} is filling in: the agent never sees it,
+            and it's forgotten after 10 minutes or 3 uses. Nothing keeps it.
+          </p>
+        ) : (
+          <p className="flex items-start gap-1.5 text-xs leading-relaxed text-zinc-500">
+            <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            {ask.source === 'agent' ? 'Never type a password or key here.'
+              : "Never type a password or key here: a tool's secrets go in its Secrets, on the Custom tools page."}
+          </p>
+        )}
+      </div>
+    </Dialog>
+  )
+}
+
+// An approval card: an agent wants to pay, send, post, share, delete or store a
+// password (approvals.py). One click answers it; the choices come from the
+// question, so "Ask every time" offers only Allow once and Don't allow.
+const DENY = "Don't allow"
+
+function ApprovalDialog({ ask, onDone }: { ask: OpenAsk; onDone: () => void }) {
+  const q = ask.questions[0]
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState('')
+  const [left, setLeft] = useState(ask.seconds_left)
+  useEffect(() => {
+    const timer = window.setInterval(() => setLeft((s) => Math.max(0, s - 1)), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const pick = async (choice: string) => {
+    setBusy(choice)
+    setError('')
+    try {
+      await asksApi.answer(ask.id, { answers: { [q.id]: choice } })
+      onDone()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed')
+      setBusy('')
+    }
+  }
+  const allows = (q.choices || []).filter((c) => c !== DENY)
+  const mins = Math.floor(left / 60)
+  const timeLeft = left <= 0 ? 'time is up' : mins >= 1 ? `${mins} min to decide` : `${left} s to decide`
+  return (
+    <Dialog title={q.question} icon={ShieldCheck} onClose={onDone} keepOpen closable={false} wide footer={<>
+      <Button variant="ghost" icon={X} busy={busy === DENY} disabled={!!busy} onClick={() => pick(DENY)}>{DENY}</Button>
+    </>}>
+      <div className="space-y-4">
+        <p className="text-sm leading-relaxed text-zinc-500">
+          {ask.agent_name || 'Your agent'} is waiting for you before it does this
+          {ask.detail?.kind_label ? <> ({ask.detail.kind_label.toLowerCase()})</> : null} · {timeLeft}.
+        </p>
+        {error && <Notice tone="red">{error}</Notice>}
+        {(ask.detail?.summary || q.help) && (
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 font-mono text-sm leading-relaxed text-zinc-200">
+            {ask.detail?.summary || q.help}
+          </pre>
+        )}
+        <div className="flex flex-col gap-2">
+          {allows.map((c, i) => (
+            <Button key={c} variant={i === 0 ? 'primary' : 'secondary'} icon={Check} busy={busy === c}
+              disabled={!!busy} onClick={() => pick(c)}>{c}</Button>
+          ))}
+        </div>
+        <p className="text-xs leading-relaxed text-zinc-500">
+          {allows.length > 1
+            ? '“Always allow here” lasts for this agent until you remove it in Profile. Not allowing it stops this step; the agent tells you what it was about to do.'
+            : 'This deck asks every time for this. Not allowing it stops this step; the agent tells you what it was about to do.'}
         </p>
       </div>
     </Dialog>
@@ -162,6 +250,9 @@ export function PersonAsks() {
   const done = useCallback((id: string) => setAsks((now) => now.filter((a) => a.id !== id)), [])
   const current = signedIn ? asks[0] : undefined
   if (!current) return null
+  if (current.source === 'approval' && current.questions.length === 1) {
+    return <ApprovalDialog key={current.id} ask={current} onDone={() => done(current.id)} />
+  }
   return (
     <AskDialog key={current.id} ask={current} onDone={() => done(current.id)} />
   )

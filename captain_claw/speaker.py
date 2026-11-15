@@ -93,8 +93,9 @@ SPEAKER_DATASTORE_TOOLS = frozenset({"datastore"})
 # Custom tools: a member lists, describes and runs THEIR OWN tools with their own
 # secrets and files (Flight Deck acts as the member through the turn's grant).
 SPEAKER_CUSTOM_TOOLS = frozenset({"custom_tools"})
-# ask_user: a member's question goes to the MEMBER (Flight Deck reads the turn's grant).
-SPEAKER_ASK_TOOLS = frozenset({"ask_user"})
+# ask_user / request_secret: a member's question (or the password box) goes to the
+# MEMBER (Flight Deck reads the turn's grant); a secret is theirs and this agent's only.
+SPEAKER_ASK_TOOLS = frozenset({"ask_user", "request_secret"})
 _CUSTOM_TOOLS_ACTIONS = frozenset({"list", "describe", "run"})
 # anonymize: the member's text and files into THEIR vaults (the tool sends the
 # turn's grant; Flight Deck files everything under the member). Results go to
@@ -1058,6 +1059,7 @@ SPEAKER_PATH_MAP: dict[str, tuple[PathRule, ...]] = {
     "custom_tools": (),
     # ask_user: no paths at all; the question goes to the member through Flight Deck.
     "ask_user": (),
+    "request_secret": (),
     # anonymize: the file it reads, and where an explicit result goes.
     "anonymize": (PathRule("/path", "read"), PathRule("/output_path", "write")),
 }

@@ -844,18 +844,33 @@ class AgentGuardMixin:
                     f"Nothing was sent: the privacy gate couldn't put the real values back into it ({_gate.why(exc)}). "
                     "Try again in a moment; if it keeps failing, tell the person."))
 
-        result = await self.tools.execute(
-            name=name,
-            arguments=arguments,
-            session_id=str(session_id_override or "").strip() or self._current_session_slug(),
-            session_policy=session_policy,
-            task_policy=task_policy,
-            abort_event=abort_event,
-            runtime_base_path=getattr(self, "workspace_base_path", None),
-            approval_callback=getattr(self, "approval_callback", None),
-            file_registry=getattr(self, "_file_registry", None),
-            stream_callback=getattr(self, "_tool_stream_callback", None),
-        )
+        # Approval cards (approvals_client): a call of a kind the deck asks
+        # about waits for the person's answer; the card shows what will
+        # really go out (after the privacy gate put the values back).
+        from captain_claw import approvals_client, tool_audit
+
+        verdict = await approvals_client.check(self, name, arguments, on_wait=self._gate_status)
+        if not verdict.allowed:
+            self._audit_refused_tool(name, arguments, verdict.note or "Approval: not allowed",
+                                     session_id_override)
+            return _ToolResult(success=False, error=verdict.error)
+        _note = tool_audit.note(verdict.note) if verdict.note else None
+        try:
+            result = await self.tools.execute(
+                name=name,
+                arguments=arguments,
+                session_id=str(session_id_override or "").strip() or self._current_session_slug(),
+                session_policy=session_policy,
+                task_policy=task_policy,
+                abort_event=abort_event,
+                runtime_base_path=getattr(self, "workspace_base_path", None),
+                approval_callback=getattr(self, "approval_callback", None),
+                file_registry=getattr(self, "_file_registry", None),
+                stream_callback=getattr(self, "_tool_stream_callback", None),
+            )
+        finally:
+            if _note is not None:
+                tool_audit.clear_note(_note)
         if gate is not None and (restored or gate.covers(name, arguments)):
             if (result.content or "").strip() or (result.error or "").strip():
                 self._gate_status(_gate.working(gate, f"what {name} returned"))

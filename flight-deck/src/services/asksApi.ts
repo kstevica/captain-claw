@@ -7,7 +7,9 @@ import { api } from './fileLibraryApi'
 export interface AskQuestion {
   id: string
   question: string
-  kind: 'text' | 'choice' | 'multiple' | 'confirm'
+  // "secret": a password or a code (request_secret), typed into a masked box;
+  // the agent gets a reference, never the value.
+  kind: 'text' | 'choice' | 'multiple' | 'confirm' | 'secret'
   help?: string
   optional: boolean
   choices?: string[]
@@ -19,8 +21,11 @@ export interface AskQuestion {
 
 export interface OpenAsk {
   id: string
-  // "tool": a custom tool running for the person asks; "agent": an agent asks (ask_user).
-  source: 'tool' | 'agent'
+  // "tool": a custom tool running for the person asks; "agent": an agent asks (ask_user);
+  // "approval": an agent asks before it pays, sends, posts, shares, deletes… (approvals.py).
+  source: 'tool' | 'agent' | 'approval'
+  /** An approval card's facts: its kind and what the call will do. */
+  detail?: { kind: string; kind_label: string; summary: string; mode: string }
   title: string
   owner_name: string
   agent_name: string

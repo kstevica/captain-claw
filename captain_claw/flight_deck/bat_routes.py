@@ -1563,7 +1563,7 @@ async def _notify_ask(ask: dict) -> None:
     try:
         from captain_claw.flight_deck.auth import get_db
         await get_db().add_notification(
-            owner, "bat_ask", "Bat needs you", question, "bat", ask.get("run_id", ""))
+            owner, "bat_ask", "Bat needs you", question, "bat_ask", ask.get("run_id", ""))
     except Exception as e:  # noqa: BLE001
         log.warning("bat ask bell failed", error=str(e))
     if ask.get("secret"):
@@ -1952,6 +1952,9 @@ async def answer_ask(ask_id: str, body: _AnswerReq, user: dict = Depends(get_cur
     res = await human_ask.answer(store, ask_id, body.text, via="ui")
     if not res.get("ok"):
         raise HTTPException(409, res.get("reason", "could not answer"))
+    from captain_claw.flight_deck import line
+
+    await line.settle(user["id"], "bat_ask", res.get("run_id") or ask.get("run_id", ""))
     try:
         await bat_loop.kick()  # resume the waiting run now
     except Exception:
@@ -1966,6 +1969,9 @@ async def cancel_run_ui(run_id: str, user: dict = Depends(get_current_user)):
     if not run or run["owner_id"] != user["id"]:
         raise HTTPException(404, "run not found")
     ok = await bat_loop.cancel_run(store, run_id)
+    from captain_claw.flight_deck import line
+
+    await line.settle(user["id"], "bat_ask", run_id)  # nothing waits on a stopped run
     return {"ok": ok}
 
 
@@ -1979,6 +1985,9 @@ async def approve_plan(run_id: str, body: _ApproveReq, user: dict = Depends(get_
     if not ask or ask["kind"] != "plan_approval":
         raise HTTPException(409, "no plan awaiting approval")
     await human_ask.answer(store, ask["id"], "approve" if body.approve else "cancel", via="ui")
+    from captain_claw.flight_deck import line
+
+    await line.settle(user["id"], "bat_ask", run_id)
     try:
         await bat_loop.kick()
     except Exception:
