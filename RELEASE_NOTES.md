@@ -4,7 +4,7 @@
 **Release date:** 2026-11-15
 
 Your private data can stay yours while a model does the work. **Anonymization** turns names, companies,
-addresses and numbers into tokens like ⟦PERSON_2⟧ before anything reaches a model, keeps the real values
+addresses and ID numbers into meaningless tokens before anything reaches a model, keeps the real values
 encrypted on your deck, and puts them back when the answer comes home. **Data rooms** do that to a whole
 virtual data room so Claude can read hundreds of deal files without ever learning who is in them, and
 send its memos and workbooks back for you to open with the real names. **Vatra, Basna and Council** move
