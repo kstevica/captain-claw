@@ -4,7 +4,6 @@ still runs when called by name. All tools and data here are made up."""
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import pytest
@@ -273,13 +272,13 @@ async def test_search_tools_unlocks_a_deferred_tool_which_then_runs(monkeypatch:
     assert "frobnicate" not in provider.tools_per_call[0]
     assert tool_search.SEARCH_TOOLS_NAME in provider.tools_per_call[0]
     assert "read" in provider.tools_per_call[0]
-    # search_tools returned the full definition…
+    # search_tools named what it loaded, without repeating the definition
+    # (it goes out in the tools, once)…
     found = _tool_result(provider, 1)
     assert "Loaded 1 tool" in found
-    payload = json.loads(found.splitlines()[1])
-    assert payload["name"] == "frobnicate"
-    assert payload["parameters"]["required"] == ["widget"]
-    # …and the next call carries it.
+    assert "- frobnicate: Frobnicates widgets in bulk." in found
+    assert "Long manual text" not in found and '"parameters"' not in found
+    # …and the next call carries the full definition.
     assert "frobnicate" in provider.tools_per_call[1]
     # The deferred tool ran through the registry.
     assert frob.calls == [{"widget": "w-17"}]
