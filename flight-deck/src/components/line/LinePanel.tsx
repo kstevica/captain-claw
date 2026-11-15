@@ -780,7 +780,7 @@ function ProposalCard({ item, proposal, onAnswered }: { item: LineItem; proposal
         </>
       ) : (
         <div className="text-xs text-amber-800 dark:text-amber-200">
-          {proposal?.taskboard ? 'A next step on the Taskboard — read and approve it on its task.'
+          {proposal?.taskboard ? 'A next step in Tasks — read and approve it on its task.'
             : 'Waiting for your answer — in the bell.'}
         </div>
       )}

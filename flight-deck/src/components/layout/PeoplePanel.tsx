@@ -239,7 +239,7 @@ export function PeoplePanel({ onClose, onOpenTasks, onOpenTask, covered = false 
         ) : failed ? (
           <Empty
             title="Couldn't reach your tasks just now"
-            text="People come from your Taskboard, and it didn't answer. Give it another try in a moment."
+            text="People come from your tasks, and Tasks didn't answer. Give it another try in a moment."
             action="Try again"
             onAction={() => void load()}
           />

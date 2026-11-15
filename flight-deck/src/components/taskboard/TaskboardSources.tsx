@@ -79,7 +79,7 @@ export function SourcesSheet({ status, phone, onClose, onChanged, onOpenConnecti
           </span>
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-base font-semibold text-zinc-100">Sources</h3>
-            <p className="truncate text-xs text-zinc-500">Where the Taskboard finds its tasks</p>
+            <p className="truncate text-xs text-zinc-500">Where Tasks finds its tasks</p>
           </div>
           <button onClick={onClose} className={libraryIconBtn} title="Close" aria-label="Close sources"><X className="h-4 w-4" /></button>
         </div>
@@ -273,7 +273,7 @@ function PassiveRow({ id, source, phone, onSaved, onOpenConnections }: {
           on={source.on}
           onChange={(on) => ask(on)}
           disabled={busy || disabled || asking !== null}
-          label={`Read ${info.short} for the Taskboard`}
+          label={`Read ${info.short} for Tasks`}
         />
       </div>
 
@@ -296,7 +296,7 @@ function PassiveRow({ id, source, phone, onSaved, onOpenConnections }: {
               onChange={(e) => setAgreed(e.target.checked)}
               className={`mt-0.5 shrink-0 accent-teal-600 ${phone ? 'h-5 w-5' : 'h-3.5 w-3.5'}`}
             />
-            I agree: Captain may read my {info.short} for the Taskboard.
+            I agree: Captain may read my {info.short} for Tasks.
           </label>
           <div className="mt-2 flex gap-2">
             <button onClick={() => setAsking(null)} disabled={busy} className={`${btn} border border-zinc-800 text-zinc-300 hover:bg-zinc-800/60`}>Cancel</button>

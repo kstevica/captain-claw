@@ -157,7 +157,7 @@ export function KioskAgentIdentityDialog({ slug, agentName, onClose }: {
                   <span className="block text-sm font-medium text-zinc-100">Pick up email meant for {agentName}</span>
                   <span className={hint}>
                     {watched
-                      ? `It starts on what comes to its own inbox and its addresses, and on mail in ${watched} that names it. Each one is a task on your Taskboard.`
+                      ? `It starts on what comes to its own inbox and its addresses, and on mail in ${watched} that names it. Each one becomes a task in Tasks.`
                       : 'Connect Gmail, Outlook or an IMAP inbox under Connections first.'}
                     {' '}Replies from its own inbox go out only if that inbox may send; replies in Gmail go as you choose below;
                     anywhere else they wait as drafts for you.
@@ -174,7 +174,7 @@ export function KioskAgentIdentityDialog({ slug, agentName, onClose }: {
             <section>
               <h3 className="flex items-center gap-1.5 text-sm font-semibold text-zinc-100"><AtSign className="h-4 w-4 text-sky-400" />Colleagues it may hand work to</h3>
               <p className={hint}>
-                A hand-over is a task of its own on your Taskboard. The colleague starts at once, never with more permission than {agentName} had,
+                A hand-over is a task of its own in Tasks. The colleague starts at once, never with more permission than {agentName} had,
                 and its answer comes back to {agentName}.
               </p>
               {others.length === 0 ? (
@@ -210,7 +210,7 @@ export function KioskAgentIdentityDialog({ slug, agentName, onClose }: {
       {view && (
         <div className="flex shrink-0 items-center justify-end gap-2 border-t border-zinc-800 px-5 py-3">
           <span className="mr-auto flex items-center gap-1.5 text-[11px] text-zinc-500">
-            <Inbox className="h-3.5 w-3.5" />Email it gets shows on your Taskboard.
+            <Inbox className="h-3.5 w-3.5" />Email it gets shows in Tasks.
           </span>
           <button onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">Close</button>
           <button
