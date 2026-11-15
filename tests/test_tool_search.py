@@ -43,6 +43,39 @@ def test_config_default_budget() -> None:
     assert get_config().tools.tool_search.budget_tokens >= 0
 
 
+def test_switch_file_beats_the_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Flight Deck's switch applies from the next message; without it the
+    config decides; the agent's own settings page clears it."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cc = tmp_path / ".captain-claw"
+    cc.mkdir()
+    cfg = get_config().tools.tool_search
+    assert tool_search.settings() == {"enabled": cfg.enabled and cfg.budget_tokens > 0,
+                                      "budget_tokens": cfg.budget_tokens or 16000}
+
+    (cc / tool_search.SWITCH_FILENAME).write_text(tool_search.render_switch(True, 8000))
+    assert tool_search.settings() == {"enabled": True, "budget_tokens": 8000}
+    assert tool_search.budget_tokens() == 8000
+
+    (cc / tool_search.SWITCH_FILENAME).write_text(tool_search.render_switch(False, 8000))
+    assert tool_search.budget_tokens() == 0
+
+    tool_search.clear()
+    assert not (cc / tool_search.SWITCH_FILENAME).exists()
+
+
+@pytest.mark.parametrize("text, expected", [
+    ('{"enabled": true, "budget_tokens": 24000}', {"enabled": True, "budget_tokens": 24000}),
+    ('{"enabled": true, "budget_tokens": 0}', {"enabled": False, "budget_tokens": 16000}),
+    ('{"enabled": "yes", "budget_tokens": 24000}', None),
+    ('{"enabled": true}', None),
+    ("on", None),
+    ("", None),
+])
+def test_parse_switch(text: str, expected) -> None:
+    assert tool_search.parse_switch(text) == expected
+
+
 def test_under_budget_sends_everything_unchanged() -> None:
     defs = [_defn("read"), _defn("frobnicate", size=50)]
     sent, deferred, state = tool_search.select(defs, _sizes(defs), budget=10_000, state=None, count=_count)

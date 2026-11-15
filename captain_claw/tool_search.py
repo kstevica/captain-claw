@@ -23,6 +23,11 @@ The selection is made once per session, kept in the session's metadata, and
 only grows (a search or a call adds a tool). Tool definitions sit at the front
 of every request, so a set that changed with each message would break the
 provider's prompt cache for the whole conversation.
+
+Flight Deck's agent settings write ``~/.captain-claw/tool_search.json``
+(``{"enabled": …, "budget_tokens": …}``), read on every call, so a change
+applies from the agent's next message without a restart. With no file the
+config's ``tools.tool_search`` decides.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from captain_claw.logging import get_logger
@@ -48,20 +54,75 @@ DEFAULT_LIMIT = 3
 MAX_LIMIT = 10
 
 
-# ── Config ──────────────────────────────────────────────────────────────
+# ── Settings: the switch file, else the config ──────────────────────────
+
+SWITCH_FILENAME = "tool_search.json"
 
 
-def budget_tokens() -> int:
-    """The budget, or 0 when tool search is off."""
+def _switch_path() -> Path:
+    return Path("~/.captain-claw").expanduser() / SWITCH_FILENAME
+
+
+def parse_switch(text: object) -> dict[str, Any] | None:
+    """``{"enabled": bool, "budget_tokens": int}`` from the switch file's
+    text; None when it isn't one."""
+    try:
+        data = json.loads(str(text or ""))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("enabled"), bool):
+        return None
+    try:
+        budget = int(data.get("budget_tokens"))
+    except (TypeError, ValueError):
+        return None
+    if budget <= 0:
+        return {"enabled": False, "budget_tokens": _default_budget()}
+    return {"enabled": data["enabled"], "budget_tokens": budget}
+
+
+def render_switch(enabled: bool, budget: int) -> str:
+    """What the switch file holds."""
+    return json.dumps({"enabled": bool(enabled), "budget_tokens": int(budget)})
+
+
+def _default_budget() -> int:
+    from captain_claw.config import ToolSearchConfig
+
+    return ToolSearchConfig().budget_tokens
+
+
+def settings() -> dict[str, Any]:
+    """``{"enabled", "budget_tokens"}`` for this agent right now."""
+    try:
+        switch = parse_switch(_switch_path().read_text(encoding="utf-8"))
+    except OSError:
+        switch = None
+    if switch is not None:
+        return switch
     try:
         from captain_claw.config import get_config
 
         cfg = get_config().tools.tool_search
+        budget = int(cfg.budget_tokens or 0)
+        return {"enabled": bool(cfg.enabled) and budget > 0, "budget_tokens": budget or _default_budget()}
     except Exception:
-        return 0
-    if not cfg.enabled:
-        return 0
-    return max(0, int(cfg.budget_tokens or 0))
+        return {"enabled": False, "budget_tokens": 0}
+
+
+def clear() -> None:
+    """Drop the switch file so the config decides again (the agent's own
+    settings page changed ``tools.tool_search``)."""
+    try:
+        _switch_path().unlink()
+    except OSError:
+        pass
+
+
+def budget_tokens() -> int:
+    """The budget, or 0 when tool search is off."""
+    s = settings()
+    return max(0, int(s["budget_tokens"])) if s["enabled"] else 0
 
 
 # ── Sizing ──────────────────────────────────────────────────────────────

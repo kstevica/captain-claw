@@ -2522,6 +2522,8 @@ tools:
 
 The others are still named, each with a one-line summary, in the system prompt's tool list. In their place the model gets `search_tools`: it searches by a tool's name or by what needs doing ("pptx", "resize an image"), returns the full definitions of the matches and loads them for the rest of the session. A tool called by name without a search still runs; the choice is only about which definitions go out. With the default budget a default agent sends about 15,700 tokens of definitions instead of 38,700. The choice is made once per session and kept in the session, and it only grows: tool definitions sit at the front of every request, so a list that changed with each message would break the provider's prompt cache. Eco and nano mode keep their own narrower sets; `budget_tokens: 0` turns tool search off.
 
+To change it without editing the config, open the agent's **Settings** in Flight Deck (kiosk: the agent's menu → Settings; full layout: Agent options → General) and use **Tool search**: an on/off switch and a limit of 8k, 16k, 24k or 32k tokens of tool descriptions per message. It is saved at once and applies from the agent's next message, with no restart. Flight Deck writes `~/.captain-claw/tool_search.json` for the agent and the same values into every copy of its config. When Eco mode is on, the setting shows a note that it applies once Eco mode is off. The agent's own Settings page has the same two fields under Tools → Tool Search, and saving there clears the Flight Deck switch so the config decides again.
+
 ### skills
 
 ```yaml

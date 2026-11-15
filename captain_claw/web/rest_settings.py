@@ -390,6 +390,20 @@ def _build_schema() -> list[dict[str, Any]]:
                     ],
                 },
                 {
+                    "id": "tools_search",
+                    "title": "Tool Search",
+                    "description": (
+                        "Full mode only (eco and nano off). Past this many tokens of tool "
+                        "definitions per message, rarely used tools are named in the prompt "
+                        "and loaded on demand through search_tools. Applies from the next message."
+                    ),
+                    "fields": [
+                        _field("tools.tool_search.enabled", "Tool search", type="toggle"),
+                        _field("tools.tool_search.budget_tokens", "Budget (tokens per message)",
+                               type="number", min=0, max=200000),
+                    ],
+                },
+                {
                     "id": "tools_read",
                     "title": "Read Tool",
                     "fields": [
@@ -1222,6 +1236,11 @@ async def put_settings(server: WebServer, request: web.Request) -> web.Response:
         from captain_claw import task_rephrase
 
         task_rephrase.clear()
+    # Tool search the same way (tool_search.py).
+    if any(k.startswith("tools.tool_search.") for k in changes):
+        from captain_claw import tool_search
+
+        tool_search.clear()
 
     # ── Hot-reload tools if the enabled list changed ──────
     if "tools.enabled" in changes and server.agent is not None:
