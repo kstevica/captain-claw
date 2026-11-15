@@ -158,7 +158,7 @@ function matchesQuery(a: Archetype, q: string): boolean {
 /** What a caller needs to open AgentSetupDialog on the new agent. */
 export interface SetupRequest { slug: string; name: string; role: string; readDocs?: string[] }
 
-export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, onImport, asUser, ownerLabel, onConnect }: {
+export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, onImport, asUser, ownerLabel, onConnect, onBack }: {
   /** Slugs of the agents this user can see — the default name avoids them. */
   takenSlugs: Set<string>
   onClose: () => void
@@ -176,6 +176,8 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
    *  works in mail or a calendar says so before it's created, not on its first
    *  turn ("Triage my inbox" → blocked, cohort001). */
   onConnect?: (service: 'google' | 'microsoft') => void
+  /** Opened from the Agent store's Advanced: the header's way back to it. */
+  onBack?: () => void
 }) {
   const [registry, setRegistry] = useState<ArchetypeRegistry | null>(null)
   const [loadErr, setLoadErr] = useState('')
@@ -367,6 +369,11 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
           <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 px-4 py-3 wide:px-5">
             {phoneDetail ? (
               <button onClick={() => setPicked(null)} disabled={busy} aria-label="Back to all archetypes" className="-ml-2 rounded-lg p-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50">
+                <ArrowLeft className="h-5 w-5" />
+              </button>
+            ) : onBack ? (
+              <button onClick={onBack} disabled={busy} aria-label="Back to the Agent store" title="Back to the Agent store"
+                className="-ml-2 rounded-lg p-2 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50">
                 <ArrowLeft className="h-5 w-5" />
               </button>
             ) : (

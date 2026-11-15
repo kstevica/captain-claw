@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
-import { ArrowLeft, Bot, Check, ChevronRight, Moon, Plus, RotateCw, Search, SearchX, Sun, X } from 'lucide-react'
+import { ArrowLeft, Bot, Check, ChevronRight, Moon, Plus, RotateCw, Search, SearchX, SlidersHorizontal, Sun, X } from 'lucide-react'
 import { AgentSetupDialog } from '../layout/AgentSetupDialog'
 import type { SetupRequest } from '../layout/ArchetypeSpawnDialog'
 import { archetypeLook, rememberTeamLooks } from '../layout/archetypeLook'
@@ -9,7 +10,8 @@ import type { Archetype } from '../../services/tierConfig'
 import { useProcessStore } from '../../stores/processStore'
 import { useThemeStore } from '../../stores/themeStore'
 import { AddAgentDialog } from './AddAgentDialog'
-import { creatorOf, featured, matchesSearch, storeSections, type StoreSection } from './storeModel'
+import { featured } from './storeFeatured'
+import { creatorOf, matchesSearch, storeSections, type StoreSection } from './storeModel'
 
 // ── Agent store ──────────────────────────────────────────────────────
 //
@@ -30,7 +32,39 @@ import { creatorOf, featured, matchesSearch, storeSections, type StoreSection } 
 /** Rows a category shows under "All" before its "See all". */
 const SECTION_PREVIEW = 6
 
-export function AgentStorePanel() {
+/** The store as a window over the layout (SimpleLayout's New agent, the nav's
+ *  Store): no way back to Flight Deck or theme switch of its own, an Advanced
+ *  button for the full New agent picker, and Add hands the new agent to the
+ *  caller, which opens its chat once it's up (or its setup). */
+export interface StoreWindow {
+  onClose: () => void
+  /** The New agent picker: every agent with its details, From a file, Forge agents. */
+  onAdvanced: () => void
+  /** Created; `setup`: they asked to set up its way of working next. */
+  onAdded: (slug: string, setup?: SetupRequest) => void
+  /** Open Connections on that service (an agent that works in mail, none connected). */
+  onConnect?: (service: 'google' | 'microsoft') => void
+}
+
+/** The store over the layout, sized like the New agent picker (whole screen on a phone). */
+export function AgentStoreDialog(props: StoreWindow) {
+  return createPortal(
+    <div className="fd-fade fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 backdrop-blur-[2px] wide:items-center wide:p-4" onClick={props.onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Agent store"
+        className="fd-sheet fd-card-wide flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 shadow-2xl wide:h-[min(92vh,62rem)] wide:max-w-6xl wide:rounded-2xl wide:border wide:border-zinc-800"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <AgentStorePanel inWindow={props} />
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+export function AgentStorePanel({ inWindow }: { inWindow?: StoreWindow } = {}) {
   const [catalog, setCatalog] = useState<Archetype[] | null>(null)
   const [loadErr, setLoadErr] = useState('')
   const [query, setQuery] = useState('')
@@ -78,7 +112,16 @@ export function AgentStorePanel() {
     topRef.current?.scrollIntoView({ block: 'start' })
   }
 
-  const onAdded = (archetypeId: string, setup?: SetupRequest) => {
+  useEffect(() => {
+    if (!inWindow) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !adding) inWindow.onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [inWindow, adding])
+
+  const onAdded = (archetypeId: string, slug: string, setup?: SetupRequest) => {
+    // In a window the caller takes over: it closes the store and opens the agent.
+    if (inWindow) { inWindow.onAdded(slug, setup); return }
     setAdded((prev) => new Set(prev).add(archetypeId))
     if (setup) {
       setAdding(null)
@@ -87,20 +130,37 @@ export function AgentStorePanel() {
   }
 
   return (
-    <div className="h-full min-h-screen overflow-y-auto bg-zinc-950 text-zinc-100">
+    <div className={inWindow
+      ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain bg-zinc-950 text-zinc-100'
+      : 'h-full min-h-screen overflow-y-auto bg-zinc-950 text-zinc-100'}>
       <div className="mx-auto w-full max-w-5xl px-4 pb-16 pt-4 wide:px-8">
-        {/* Top bar: the way back, and the theme — this page has no sidebar of its own. */}
-        <div className="flex items-center justify-between">
-          <a href="/" className="-ml-2 inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-900 hover:text-zinc-200">
-            <ArrowLeft className="h-4 w-4" /> Flight Deck
-          </a>
-          <button onClick={toggleTheme} aria-label={theme === 'dark' ? 'Light theme' : 'Dark theme'} title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
-            className="rounded-full p-2 text-zinc-500 transition-colors hover:bg-zinc-900 hover:text-zinc-200">
-            {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </button>
-        </div>
+        {inWindow ? (
+          // Over the layout: the full picker one click away, and Close.
+          <div className="flex items-center justify-end gap-1">
+            <button onClick={inWindow.onAdvanced}
+              title="Every agent with its details — or make one from a file, or by saying what you need"
+              className="inline-flex items-center gap-1.5 rounded-full border border-zinc-800 px-3.5 py-1.5 text-sm font-medium text-zinc-400 transition-colors hover:border-zinc-700 hover:bg-zinc-900 hover:text-zinc-200">
+              <SlidersHorizontal className="h-4 w-4" /> Advanced
+            </button>
+            <button onClick={inWindow.onClose} aria-label="Close" title="Close"
+              className="-mr-2 rounded-full p-2 text-zinc-500 transition-colors hover:bg-zinc-900 hover:text-zinc-200">
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+        ) : (
+          // The page: the way back, and the theme — it has no sidebar of its own.
+          <div className="flex items-center justify-between">
+            <a href="/" className="-ml-2 inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-900 hover:text-zinc-200">
+              <ArrowLeft className="h-4 w-4" /> Flight Deck
+            </a>
+            <button onClick={toggleTheme} aria-label={theme === 'dark' ? 'Light theme' : 'Dark theme'} title={theme === 'dark' ? 'Light theme' : 'Dark theme'}
+              className="rounded-full p-2 text-zinc-500 transition-colors hover:bg-zinc-900 hover:text-zinc-200">
+              {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
+          </div>
+        )}
 
-        <header ref={topRef} className="scroll-mt-4 pt-8 wide:pt-12">
+        <header ref={topRef} className={`scroll-mt-4 ${inWindow ? 'pt-2 wide:pt-4' : 'pt-8 wide:pt-12'}`}>
           <h1 className="text-4xl font-bold tracking-tight text-zinc-100 wide:text-5xl">Agent store</h1>
           <p className="mt-2 max-w-xl text-base text-zinc-500">
             Ready-made agents for the work your business does. Add one and it joins your team.
@@ -188,7 +248,9 @@ export function AgentStorePanel() {
           archetype={adding}
           takenSlugs={takenSlugs}
           onClose={() => setAdding(null)}
-          onAdded={(_slug, _name, setup) => onAdded(adding.id, setup)}
+          onAdded={(slug, _name, setup) => onAdded(adding.id, slug, setup)}
+          doneHere={!inWindow}
+          onConnect={inWindow?.onConnect}
         />
       )}
       {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
