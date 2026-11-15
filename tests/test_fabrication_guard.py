@@ -1000,6 +1000,71 @@ def test_pasted_content_never_hides_a_search_or_a_look_at_a_store(reply: str) ->
     assert fg.narrated_lookups(reply, pasted=True)
 
 
+# A progress clause after a dash, and vouching for this turn's tool work: long
+# no-tool replies from scheduled mail runs that opened this way and went on to
+# report mail and lead changes that no tool had returned (synthetic versions).
+_REPORT = ("One genuinely new message: Dario Lund replied at 02:16 UTC, pushing back that the "
+           "platform is his own build. That's an objection, not a no.")
+_DASH_NARRATED = [
+    ("New mail detected in the inbox — pulling the messages first.\n\n" + _REPORT,
+     "pulling the messages first."),
+    ("Running the batch job — but first checking the live table and Sent folder, since a "
+     "batch may have gone out.\n\nNo new mail; the queue holds 12 eligible leads.",
+     "checking the live table and Sent folder, since a batch may have gone out."),
+    ("Sending the batch now — pulling the live queue and the Sent folder first. Queue "
+     "confirmed: 12 eligible, none sent today.",
+     "pulling the live queue and the Sent folder first."),
+    ("Got it — searching the inbox now.\n\nAna replied Monday asking for Friday 10:00.",
+     "searching the inbox now."),
+    ("You're right — running it now.\n\nReply-watch at 15:00 — verified with live tool calls "
+     "this turn:\n\n**Inbox (live):** no new mail. Same five messages, all handled.",
+     "verified with live tool calls this turn:"),
+    ("Reply-watch at 15:04 — one real reply found and handled, everything below from this "
+     "turn's tool results:\n\n**Mira Vale replied today 10:33** — interested.",
+     "this turn's tool results:"),
+    ("Website update checked — both pages fetched this turn. The new feature is data rooms.",
+     "fetched this turn."),
+]
+_DASH_NOT_NARRATED = [
+    # Nothing after the announcement: the stall gate's (it forces the tool call).
+    "Running the reply-watch — checking the live inbox now.",
+    "Sending the batch now — pulling the live queue, the inbox, and the Sent folder first.",
+    "Running the reply-watch — checking the live inbox now.\n\nBack shortly.",
+    # Plans, routines, conditions, later runs: no "now / first", or not a look now.
+    "Step 1 — pulling the leads from the table first, step 2 — drafting the emails.\n\nThat "
+    "is the whole job; it runs at 10:30 every day.",
+    "Reply-watch — checking the inbox every 3h for replies and logging them to the table.",
+    "No new mail — checking again in 3 hours. The five inbox messages are all handled already.",
+    "Tomorrow's run — pulling the leads first, then drafting. It sends at 10:30 once you "
+    "confirm.",
+    "If Ana replies — checking the thread first is the safe move before any follow-up goes out.",
+    "The job does three things — checking the inbox, classifying replies, and updating the "
+    "leads table.",
+    # A lead-in to an answer, the user's own text.
+    "Q3 — looking at the numbers, revenue grew 12% and margin held at 18% across the quarter.",
+    "Your plan works — checking the draft you pasted now, the opening is too long and the ask "
+    "is buried.",
+    # Saying no tool ran is the truth, not a claim.
+    "I made no tool calls this turn, so I can't confirm the inbox state — say the word and "
+    "I'll check.",
+    "No tool call ran this turn — the batch status above is from yesterday's run report.",
+]
+
+
+@pytest.mark.parametrize("reply, line", _DASH_NARRATED)
+def test_dash_led_narration_and_tool_turn_claims_are_found(reply: str, line: str) -> None:
+    assert line in fg.narrated_lookups(reply)
+    verdict = _judge(reply, _facts("run the reply-watch", no_tool_call=True, tools=_TOOLS))
+    assert fg.NARRATED_LOOKUP in verdict.kinds
+    # A turn that made its tool calls is not judged for them.
+    assert not _judge(reply, _facts("run the reply-watch", tools=_TOOLS)).narrated
+
+
+@pytest.mark.parametrize("reply", _DASH_NOT_NARRATED)
+def test_dash_led_plans_routines_and_bare_announcements_are_not_narrated(reply: str) -> None:
+    assert fg.narrated_lookups(reply) == ()
+
+
 def test_the_production_turns_are_caught_with_pasted_content_too() -> None:
     for _request, raw in _PRODUCTION_TURNS:
         shipped = fg.strip_forged_lane_notes(raw, _PASTED)

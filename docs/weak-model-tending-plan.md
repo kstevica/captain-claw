@@ -113,6 +113,13 @@ work set for later ("checking again in 3 hours"), hand-backs and questions stay 
 Dials: the verb list `_STALL_GERUND` and `_STALL_ANNOUNCE_MAX_LEN`. Tests:
 `tests/test_agent/test_gerund_stall.py`.
 
+The same opening on a long reply ("New mail in the inbox — pulling the messages first." and
+then 1.7k chars of report no tool returned) is a made-up report, not a stall. The stall gate
+never judges a reply over 200 chars, so `fabrication_guard.narrated_lookups` counts a
+progress clause after a dash when it says "now / first" and the reply goes on after it, and
+it also counts vouching for "this turn's tool calls / results" in a turn that made none. A bare
+announcement with nothing after it stays with the stall gate, which forces the tool call.
+
 ---
 
 ## Phase 1 — one capability signal

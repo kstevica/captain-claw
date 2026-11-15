@@ -1333,6 +1333,24 @@ _PROGRESS_RE = re.compile(
     + _PROGRESS_ANALYSIS + r"|" + _LET_ME + r")\b"
 )
 _STRONG_RE = re.compile(r"(?i)^(?:" + _PROGRESS_STRONG + r")\b")
+# A progress clause after a dash, inside a sentence: "New mail detected in the
+# inbox — pulling the messages first.", "Running the batch job — but first
+# checking the live table". It counts only when the look is said to happen
+# now ("now", "first", "right away" at its end, or "first / now" before the
+# verb): "Reply-watch — checking the inbox every 3h" is a routine and "Step
+# 1 — pulling the leads" a plan.
+_DASH = r"[ \t]+[—–-]{1,2}[ \t]+"
+_DASH_PROGRESS_RE = re.compile(
+    r"(?i)" + _DASH + r"(?P<soon>(?:(?:but|and)\s+)?(?:first|now)\s+)?\**(?P<verb>"
+    + _PROGRESS_STRONG + r"|" + _PROGRESS_ACTION + r"|" + _PROGRESS_ANALYSIS + r")\b"
+)
+_DASH_SPLIT_RE = re.compile(_DASH)
+_DASH_SOON_END_RE = re.compile(
+    r"(?i)\b(?:now|first|right\s+away|right\s+now|immediately|straight\s+away)\W*$")
+# Before the dash: a plan, a condition or a later run, not a look now.
+_DASH_PLAN_RE = re.compile(
+    r"(?i)\b(?:tomorrow|tonight|later|next\s+(?:run|time|week|pass|step)|plan|step\s*\d+"
+    r"|will|would|could|should|if|once|when|ako|kad|sutra|kasnije)\b")
 # "Looking for steak, Rovinj isn't the place" leads into an answer as well.
 _ANALYSIS_RE = re.compile(r"(?i)^(?:" + _PROGRESS_ANALYSIS + r"|looking\s+for)\b")
 _LET_ME_RE = re.compile(r"(?i)^(?:let\s+me|daj|samo)\b")
@@ -1447,6 +1465,17 @@ _CLAIM_BARE_RE = re.compile(
 )
 _CLAIM_VERIFIED_DASH_RE = re.compile(
     r"(?m)" + _LOOKUP_START + r"(?P<verb>(?i:verified|provjereno))\**\s*[—–-]")
+# The reply vouches for this turn's tool work: "verified with live tool calls
+# this turn", "everything below from this turn's tool results", "fetched this
+# turn". Only judged in a turn that made no tool call.
+_CLAIM_TOOL_TURN_RE = re.compile(
+    r"(?i)\b(?P<verb>(?:verified|checked|confirmed|pulled|fetched|read|queried|looked\s+up)"
+    r"\s+(?:with|via|through|using|from|in)\s+(?:(?:the|my|live|real|actual)\s+)*tool\s+"
+    r"(?:calls?|results?)"
+    r"|(?:(?:live|real|actual)\s+)?tool\s+(?:calls?|results?)\s+(?:(?:made|run|from)\s+)?this\s+turn"
+    r"|this\s+turn'?s\s+(?:(?:live|real|actual)\s+)?tool\s+(?:calls?|results?)"
+    r"|(?:fetched|checked|pulled|read|verified|queried)\s+(?:live\s+)?this\s+turn)\b"
+)
 _CLAIM_RESULT_RE = re.compile(
     r"(?i)\b(?P<verb>(?P<scope>sent-mail\s+|sent\s+mail\s+|inbox\s+|calendar\s+|drive\s+|gmail\s+"
     r"|mail\s+|drafts?\s+)?(?:search(?:es)?|check|look-?up|query))\b"
@@ -1518,8 +1547,12 @@ def _denies_lookup(text: str) -> bool:
 def narrated_lookups(reply: str, pasted: bool = False) -> tuple[str, ...]:
     """The lookups *reply* narrates as done or under way, for a turn that made
     no tool call: progress lines ("Searching for the thread…", "Provjeravam
-    inbox."), "Let me find X." followed by what it "found", and past-tense
-    claims ("I checked drafts", "Opened the event (…)", "Provjerio sam mail").
+    inbox."), "Let me find X." followed by what it "found", a "now / first"
+    progress clause after a dash followed by what it "found" ("New mail in the
+    inbox — pulling the messages first.\n\nOne new message: …"), past-tense
+    claims ("I checked drafts", "Opened the event (…)", "Provjerio sam mail"),
+    and vouching for this turn's tool work ("verified with live tool calls this
+    turn").
 
     Not counted: offers ("I can check…", "Want me to look?"), plans ("I'll
     check"), negations ("I haven't checked"), quotes of other people's words,
@@ -1558,6 +1591,32 @@ def narrated_lookups(reply: str, pasted: bool = False) -> tuple[str, ...]:
             if _ANALYSIS_RE.match(sentence) and _LEAD_IN_RE.search(sentence):
                 continue
         hits.append(sentence.strip()[:80])
+    for match in _DASH_PROGRESS_RE.finditer(text):
+        verb_start = match.start("verb")
+        line_head = _line_start(text, match.start())
+        if not line_head.strip() or line_head.lstrip().startswith("#"):
+            continue  # a bullet (the progress loop's) or a heading
+        before, sentence = _sentence_at(text, verb_start)
+        clause = _DASH_SPLIT_RE.split(sentence, maxsplit=1)[0].strip()
+        if (sentence.rstrip().endswith("?") or len(clause) > 220
+                or not (match.group("soon") or _DASH_SOON_END_RE.search(clause))
+                or _DASH_PLAN_RE.search(before)):
+            continue
+        if _PROGRESS_NOT_RE.match(clause) or _GERUND_SUBJECT_RE.match(clause):
+            continue
+        if _IN_CONTEXT_RE.search(clause) or _ROUTINE_RE.search(before + sentence) or (
+                pasted and _READ_VERB_RE.match(clause) and _about_pasted(clause)):
+            continue
+        if not _STRONG_RE.match(clause) and not _LOOKUP_TARGET_RE.search(clause):
+            continue
+        if _ANALYSIS_RE.match(clause) and _LEAD_IN_RE.search(clause):
+            continue
+        # A reply that is nothing but the announcement ("Running the
+        # reply-watch — checking the live inbox now.") is the stall gate's,
+        # which forces the tool call; narration is followed by what it "found".
+        if len(text[verb_start + len(sentence):].strip()) < 40:
+            continue
+        hits.append(clause[:80])
     for pattern in (_CLAIM_I_RE, _CLAIM_BARE_RE, _CLAIM_HR_RE):
         for match in pattern.finditer(text):
             if _line_start(text, match.start("verb")).lstrip().startswith("#"):
@@ -1570,12 +1629,15 @@ def narrated_lookups(reply: str, pasted: bool = False) -> tuple[str, ...]:
                     or _IN_CONTEXT_RE.search(whole) or (pasted and _about_pasted(whole))):
                 continue
             hits.append(sentence.strip()[:80])
-    for pattern in (_CLAIM_VERIFIED_DASH_RE, _CLAIM_RESULT_RE):
+    for pattern in (_CLAIM_VERIFIED_DASH_RE, _CLAIM_RESULT_RE, _CLAIM_TOOL_TURN_RE):
         for match in pattern.finditer(text):
             before, sentence = _sentence_at(text, match.start("verb"))
             whole = before + sentence
-            if (_LOOKUP_GUARD_RE.search(before) or _LOOKUP_EARLIER_RE.search(whole)
-                    or _IN_CONTEXT_RE.search(whole)):
+            if _LOOKUP_GUARD_RE.search(before) or _LOOKUP_EARLIER_RE.search(whole):
+                continue
+            # "everything below from this turn's tool results": "below" is the
+            # reply's own text, not something the user put in the chat.
+            if pattern is not _CLAIM_TOOL_TURN_RE and _IN_CONTEXT_RE.search(whole):
                 continue
             if pattern is _CLAIM_RESULT_RE and not match.group("scope") and not (
                     _LOOKUP_TARGET_RE.search(re.sub(r"(?i)\bsearch(?:es)?\b", " ", whole))):

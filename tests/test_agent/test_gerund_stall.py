@@ -292,3 +292,70 @@ async def test_a_cron_turn_with_a_short_real_answer_is_not_retried(_no_worker_en
     assert result == answer
     assert provider.tool_choice_seen == [None]
     assert _stall_correctives(agent) == []
+
+
+# ── which check takes a dash-led narration ──────────────────────────
+#
+# A reply that is nothing but the announcement goes to the stall gate, which
+# forces the tool call. One that goes on to report what the look "found" —
+# or vouches for "this turn's tool calls" — is a made-up report: the
+# narrated-lookup check rejects it and asks for a true reply.
+
+_LOOKUP_LEAD = "Your reply describes lookups"
+
+
+def _lookup_correctives(agent: Agent) -> list[str]:
+    return [m["content"] for m in agent.session.messages
+            if m["role"] == "user" and m.get("origin") == "corrective"
+            and m.get("origin_detail") == "narrated_lookup"]
+
+
+@pytest.mark.parametrize("made_up", [
+    "New mail detected in the inbox — pulling the messages first.\n\nOne genuinely new message: "
+    "Dario Lund replied at 02:16 UTC, pushing back that the platform is his own build. That's an "
+    "objection, not a no, so his lead moves to engaged. Nothing else is new; the other four "
+    "messages are the ones already handled.",
+    "Checked first, as asked.\n\nReply-watch at 15:00 — verified with live tool calls this turn:"
+    "\n\n**Inbox (live):** no new mail. The same five messages, all already handled. No lead "
+    "replied, no drafts created, no lead rows changed since the last check this morning.",
+])
+@pytest.mark.asyncio
+async def test_a_long_made_up_cron_report_gets_the_lookup_corrective(_no_worker_env, made_up):
+    assert len(made_up) > 200   # the stall gate never judges these
+    agent, provider, table = _agent([
+        LLMResponse(content=made_up),
+        LLMResponse(content="", tool_calls=[
+            ToolCall(id="c1", name="datastore", arguments={"action": "query"})]),
+        LLMResponse(content="Reply-watch: no new mail since the last check; leads unchanged."),
+    ])
+
+    with mail_authority.bound(mail_authority.automated("cron", _TASK, "intent")):
+        result = await agent.complete(wrap_cron_prompt("024f96c6-job", _TASK), turn_origin="cron")
+
+    assert result.startswith("Reply-watch: no new mail")
+    assert table.calls == 1
+    lookups = _lookup_correctives(agent)
+    assert len(lookups) == 1 and lookups[0].startswith(_LOOKUP_LEAD)
+    assert _stall_correctives(agent) == []
+    # The lookup corrective asks for a true reply; it forces no tool.
+    assert provider.tool_choice_seen == [None, None, None]
+    assert _rejected(agent) == [made_up]
+
+
+@pytest.mark.asyncio
+async def test_a_bare_dash_led_announcement_goes_to_the_stall_gate(_no_worker_env):
+    stall = "Running the reply-watch — checking the live inbox now."
+    agent, provider, table = _agent([
+        LLMResponse(content=stall),
+        LLMResponse(content="", tool_calls=[
+            ToolCall(id="c1", name="datastore", arguments={"action": "query"})]),
+        LLMResponse(content="Reply-watch: no new mail since the last check."),
+    ])
+
+    with mail_authority.bound(mail_authority.automated("cron", _TASK, "intent")):
+        result = await agent.complete(wrap_cron_prompt("024f96c6-job", _TASK), turn_origin="cron")
+
+    assert result == "Reply-watch: no new mail since the last check."
+    assert _lookup_correctives(agent) == []
+    assert len(_stall_correctives(agent)) == 1
+    assert provider.tool_choice_seen == [None, "required", None]
