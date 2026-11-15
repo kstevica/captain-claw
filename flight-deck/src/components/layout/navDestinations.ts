@@ -1,5 +1,5 @@
 import type { ComponentType } from 'react'
-import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Store, Sun } from 'lucide-react'
+import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Sun } from 'lucide-react'
 
 // ── Simple layout: the outcome nav's destinations ────────────────────
 //
@@ -8,11 +8,11 @@ import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Store, Sun } fro
 // agents that are up, as cards), Inbox (the Line: what the
 // deck and the agents said on their own), Tasks (the Taskboard), People
 // (the people on those tasks), Automations (Scheduled tasks) and Activity
-// (every tool the agents used), then Store (the Agent store, the window New
-// agent opens, a kiosk account's too). Each opens the same view as before;
-// only the way in changed. SimpleNav.tsx draws them.
+// (every tool the agents used). Each opens the same view as before; only
+// the way in changed. SimpleNav.tsx draws them. The Agent store has no entry:
+// New agent opens it.
 
-export type NavTarget = 'today' | 'agents' | 'inbox' | 'tasks' | 'people' | 'automations' | 'activity' | 'store'
+export type NavTarget = 'today' | 'agents' | 'inbox' | 'tasks' | 'people' | 'automations' | 'activity'
 
 export interface NavEntry {
   id: NavTarget
@@ -42,8 +42,6 @@ export function navEntries(o: {
   automationsCount: number
   automationsRunning: boolean
   onActivity: () => void
-  /** Open the Agent store; the entry is left out without it. */
-  onStore?: () => void
 }): NavEntry[] {
   const inboxCount = o.inboxWaiting || o.inboxUnread
   return [
@@ -66,6 +64,5 @@ export function navEntries(o: {
       count: o.automationsCount, dot: o.automationsRunning,
     },
     { id: 'activity', label: 'Activity', icon: Activity, hint: 'Every tool your agents used, and how it went', onSelect: o.onActivity },
-    ...(o.onStore ? [{ id: 'store' as const, label: 'Store', icon: Store, hint: 'Ready-made agents to add to your team', onSelect: o.onStore }] : []),
   ]
 }

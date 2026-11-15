@@ -1004,11 +1004,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     automationsCount: scheduledCount,
     automationsRunning: scheduledRunning,
     onActivity: goTo(() => openActivity()),
-    // The Agent store, as the window New agent opens — a kiosk account's too.
-    onStore: () => setStoreOpen(true),
   })
-  const navCurrent: NavTarget | null = storeOpen ? 'store'
-    : lineOpen ? 'inbox'
+  const navCurrent: NavTarget | null = lineOpen ? 'inbox'
     : taskboardOpen ? 'tasks'
       : peopleOpen ? 'people'
         : scheduledOpen ? 'automations'
