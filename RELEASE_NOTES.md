@@ -1,226 +1,284 @@
-# Captain Claw v0.9.0 Release Notes
+# Captain Claw v0.9.1 Release Notes
 
-**Release title:** Shipyard
-**Release date:** 2026-11-09
+**Release title:** Strongroom
+**Release date:** 2026-11-15
 
-Your agents can now get tools built for them. Describe a tool, and Crew's coding agents write it, test it
-and publish it to Flight Deck, which runs it for your agents in a sandbox on Linux. Agents also fit in one
-`.captain` file now, so you can back them up, move them to another deck or hand a trained one to a client
-and update it later. They hand each other work, answer email meant for them, read any IMAP inbox, learn
-from your corrections once you approve, share one external memory, and know the goals their work is for.
+Your private data can stay yours while a model does the work. **Anonymization** turns names, companies,
+addresses and ID numbers into meaningless tokens before anything reaches a model, keeps the real values
+encrypted on your deck, and puts them back when the answer comes home. **Data rooms** do that to a whole
+virtual data room so Claude can read hundreds of deal files without ever learning who is in them, and
+send its memos and workbooks back for you to open with the real names. **Vatra, Basna and Council** move
+into the kiosk, the kiosk gets a new home page, and agents can work in your own Chrome.
 
-52 pull requests, #436 to #487. **Restart Flight Deck, then every agent, and hard-refresh the browsers.**
-Two new things are on by default (lesson proposals, and agents picking up email that names them); see
-[Upgrading](#upgrading).
+88 pull requests, #489 to #576. **Restart Flight Deck, then every agent, hard-refresh the browsers, and
+reload Captain for Chrome (now 0.3.0).** The kiosk looks different, task rephrasing is now off by default,
+and agents call themselves Captain; see [Upgrading](#upgrading).
+
+Step-by-step guides for the three headline features:
+**[Anonymization](https://github.com/kstevica/captain-claw/blob/main/docs/guide/anonymization.md)** ·
+**[Data rooms](https://github.com/kstevica/captain-claw/blob/main/docs/guide/data-rooms.md)** ·
+**[Vatra, Basna and Council](https://github.com/kstevica/captain-claw/blob/main/docs/guide/vatra-basna-council.md)**
 
 ## New
 
-- **Custom tools: Python tools of your own, built by Crew and run by Flight Deck.** Off by default: an
-  admin turns them on in **Admin console → Settings → Custom tools**. Then **Custom tools** is under
-  **Multi-Agent** in the full layout and in the kiosk's **Settings** menu, with **Mine**, **Shared with me**,
-  **Everybody** and, for admins, **Approvals**.
-  - **Making one** (for people approved for Crew): **New tool**, then **Name**, **Title** and **What it
-    should do**, then **Check it**. Your own model returns a fuller spec, with a reason for each change and
-    an **Already there?** warning when agents can already do it. Keep **Checked** or **Yours**, pick a coding
-    agent and **Build it**. The worker writes the tool, its tests and its examples in the tool's own git
-    repository. When you approve the merge, Flight Deck publishes it in the background, and it goes live
-    only if the tests and every example pass; otherwise the old version stays live. The last three versions
-    can be made live again.
-  - **Agents use them** through the new `custom_tools` tool (`list`, `describe`, `run`, `build`,
-    `improve`, `propose`). Flight Deck runs every call, never the agent: one process per call, JSON in and
-    out, as the person whose turn it is, with that person's own secrets (**Your secrets for it**) and files,
-    and nothing else from the deck. Calls get 60 seconds (300 at most) and 1 GB of memory by default, and
-    land in the agent's tool-call register.
-  - **Agents suggest tools.** After a long turn of repeated, mechanical work, an agent's own model may draft
-    one. It waits in **Your agents suggest** on your page, and nothing is built until you click **Build
-    it**.
-  - **Offer a tool** to **People…** or to **Everybody on this deck** (which waits for an admin's approval
-    unless that is turned off). An offer runs for nobody until they click **Add**, which is their consent
-    to what the tool says it needs. Others can run it with their own secrets, but never change it or see
-    its code, versions or logs. When a new version asks for more, everyone who added it gets a bell.
-  - **A tool can ask for more**: the agent that ran it uses its own tools for it (declared in `tool.json`
-    with a reason each; sending mail or messages only when the tool's owner runs it; never code, money or
-    changes to the agent), it runs your other custom tools (3 levels deep at most), and it asks the person
-    running it a question in Flight Deck. **Try it** has **Run as** for tools that call an agent.
-  - **The sandbox.** On Linux 5.13 or later, each run is held in a Landlock sandbox: it reads only its own
-    version and the system folders, writes only to the call's folder, has no TCP unless `tool.json` says
-    `"network": true`, and can't signal anything outside. **macOS, Windows and the stock Raspberry Pi 5
-    kernel have no Landlock**, so tools there run as Flight Deck's own user and reach what it can; the
-    admin card says which kind of host you have. **Run tools only in the sandbox** stops every tool on a
-    host without one. Installing a tool's own packages at publish time runs outside the sandbox.
-  - Details and what's still open: [docs/guide/flight-deck.md#custom-tools](https://github.com/kstevica/captain-claw/blob/main/docs/guide/flight-deck.md#custom-tools).
-- **`ask_user`: an agent asks you, in Flight Deck.** One question (text, one choice, several, yes/no) or a
-  short form of up to 10, shown as a dialog in every Flight Deck tab of the person the turn is for, owner
-  or member. The bell says *‹agent› asks you something*. The turn waits 10 minutes by default (up to an
-  hour); **Send** or **Don't answer**, and either way the agent says what it assumed. Automatic turns
-  (schedules, flows, other agents, Autonomous Work, the Taskboard, the API, agent links, exams) have nobody
-  to ask, and turns from Telegram, WhatsApp, glasses, devices or public links ask in their reply instead. Custom tools ask through the same dialog.
-- **Agents in one file: export, import, packages and backups.** Any process agent you own fits in one
-  `.captain` file. In the kiosk: the agent's **⋯ → Back up / export**, and **New agent → From a file**.
-  - **What goes in**: **Template** (who it is and what it was taught), **Trained** (and what it learned
-    since, without conversations and files) or **Full backup** (everything). Before a Template or Trained
-    file leaves, you look over what it learned: insights usually about you or your clients start unticked,
-    and **People it knows** is a separate tick.
-  - **Never in the file**: its `.env`, keys and tokens, connections, logs and your own profile. Connections
-    travel by name, and the import lists what to set up again. A Full backup can carry its keys **sealed
-    with a passphrase** that Flight Deck doesn't keep.
-  - **Bringing one in** shows what the file holds, who made it, and whether it is **Signed by this deck**,
-    by a deck you trust, or unsigned, before anything is made. Make a new agent on **Its own model** or
-    **One of your models**, or pour the file into an existing agent: **Add to what it has** or **Replace
-    it**. A backup is taken first, kept a week, with **Undo**. Scheduled tasks arrive switched off.
-  - **Packages and updates**: name a Template or Trained export under **Updates later** and each export
-    becomes its next version. Bringing in a newer one offers **Update to version N**, which swaps the old
-    version's items and keeps what the agent learned or what was changed there.
-  - **Scheduled backups**: kiosk **Settings → Agent backups**, daily or weekly, keeping 1–60 per agent,
-    with an optional copy into your files, and **Restore it** on any of them.
-  - **Signed files**: every deck signs its bundles; a changed file is refused. Admins list **Decks this one
-    trusts** under **Admin console → Settings → Agent files** and can take only signed files.
-- **Agents as colleagues.** An agent hands a piece of work to another of your agents with the new
-  `colleagues` tool (`list`, `hand_over`, `handed`) and carries on with the answer. Each hand-over is its
-  own Taskboard task under **Between your agents**, and the answer goes back to the agent that asked, in
-  the same task. Authority never grows along the way: the turn's mail permissions travel with it, read by
-  code. At most 4 agents in a chain and 60 hand-overs per owner a day.
-- **Agents with their own address.** **⋯ → Identity & email** gives an agent a **Role**, **What it
-  does**, **Its own inbox**, **Addresses that land in your inbox** (`you+researcher@gmail.com`), **Names it
-  answers to** and **Colleagues it may hand work to**. Every 60 seconds Flight Deck reads your Gmail,
-  Outlook and IMAP inboxes, and mail sent to an agent's address, naming it in the subject, or greeting it
-  ("Hi Rita,") becomes its task under **Email for an agent**. Automatic, bulk, list and no-reply mail is
-  skipped. Those turns write drafts only, unless you allow more.
-- **Gmail replies sent, when you say so.** **Replies in your Gmail** per agent: **Drafts** (the default),
-  **Send to you** (when the email came from you) or **Send to anyone** (when Gmail verified the sender).
-  Only that one reply to that sender, with no cc or bcc, through your Google email-sending switch,
-  allowlist and daily limit. Outlook replies stay drafts.
-- **Any mailbox, with IMAP.** **Connections → Email (IMAP)** connects up to 20 IMAP/SMTP inboxes per
-  person: a company mail server, Fastmail, iCloud, Yahoo, Zoho, GMX, Gmail with an app password, or Proton
-  Mail through Bridge. Type the address and the server settings fill in. The new `imap_mail` tool lists,
-  searches, reads, drafts, files and sends; it never deletes. The password is sealed and the mail work
-  happens inside Flight Deck, so it never reaches an agent. **Sending is off** until you tick *Let my
-  agents send email from this inbox*, with **Only to these recipients** and a **Daily limit**. The
-  connection test takes seconds, and when a host blocks port 465 it offers **Use port 587 (STARTTLS)**.
-  Needs sign-in on, or the desktop app.
-- **Lessons from your corrections, approved by you.** When you correct an agent or state a standing rule
-  ("too long", "always CC Marko"), it drafts one lesson. **Lessons to approve** (a badge beside the bell,
-  and a card in each kiosk agent's ⋯ menu) shows it as a **Rule**, **Ask first** or **Fact**, with your
-  words it came from: **Approve**, **Edit** or **Dismiss**. Nothing is taught without your yes, and **Just
-  learned** keeps an **Undo**. Only your own turns are read, and only messages that read like a correction
-  cost a model call.
-- **External memory, one per person.** **Connections → External memory** links **Membase** or
-  **Hindsight** (MIT, self-hosted with one Docker command, or Hindsight Cloud) to all of a person's agents,
-  through the new `external_memory` tool, with the provider's own actions and rules. **Copied in on its
-  own** mirrors new insights, intentions and lessons (reflections and intuitions if you tick them) through
-  an outbox that waits out a refused key or a full quota. An admin can connect one Hindsight server for
-  the whole deck, with a bank per person. Agents use it through the tool; it isn't recalled into the
-  context by itself yet.
-- **Course: the goals your agents' work is for.** **Workspace → Course** in the full layout, **Settings →
-  You → Course** in the kiosk. Goals for **The deck** (set by an admin), **You** and **Your agents**, each
-  **Strategic**, **Long-term**, **Medium-term** or **Short-term**, in a tree. Every agent working for you
-  gets the live goals in its prompt and uses them to decide what matters next; a goal is never permission
-  to do anything. Agents (with the new `course` tool) and Flight Deck suggest goals, which wait on your Line
-  for **Accept**, **Edit on Course** or **Decline**. Work can be marked **Serves a goal**, the Taskboard
-  sorts by **Serves your course**, and goals nothing has moved show as **Off course**.
-- **`image_manipulation`: pictures changed without scripts.** Resize, crop, rotate, combine, overlay,
-  watermark, annotate, animate, split and convert (png, jpg, webp, gif, bmp, tiff, ico, avif, pdf), about
-  45 operations, in-process with no model or network. Inputs are never changed, phone photos open upright,
-  and text has č, ć, đ, š and ž. Always on.
-- **Admin console → Activity.** Who is using the deck, who has gone quiet, who never started, and whether
-  you've written to them: a bar per day for what each person typed on any channel (their agents' own work
-  never counts), **Write** from your own Gmail or Outlook, and **Mark as written** for a call or a chat in
-  person. With Gmail read access it shows your mail with each person too, as dates and subjects kept 10
-  minutes in memory.
-- That makes **79 built-in tools** per agent (78 in the desktop app): `custom_tools`, `ask_user`,
-  `colleagues`, `imap_mail`, `external_memory`, `course` and `image_manipulation` are new.
+### Anonymization: private data out, the real names back for you
 
-## Better
+Captain takes names, companies, addresses, emails, phone numbers, IBANs, OIB/JMBG/MB and other ID
+numbers, and dates of birth out of a text, a file, a whole folder or a web page. Each becomes a token like
+⟦PERSON_1⟧, and the same party keeps one number (⟦ORG_1:2⟧ is another spelling of ⟦ORG_1⟧, so a link
+still opens when it's put back). The real values stay on your deck, encrypted, in a vault per case that
+only you can open. Dates, amounts, titles and cities stay, so the text reads and adds up.
 
-- **Learning that doesn't harden failures.** Insights, reflections and playbooks no longer keep "tool X
-  doesn't work" (they keep the fix instead), failures caused by setup or cured by a retry, guesses about
-  your traits, or a one-off request as a standing preference.
-- **Scheduled tasks on an agent that's off.** A task starts an agent its owner switched off about five
-  minutes before the run, then switches it off again when nothing else needs it. It used to fail with
-  "agent not running".
-- **The kiosk's agent menu** is a wide card in four labelled rows: **At work**, **What it knows**, **Who it
-  is** and **Its place**.
-- **Admin fixes found while planning the admin tutorial**: a deck without sign-in (the desktop app's)
-  applies its console Settings; **Make it a company archetype**; Plan limits shows only the limits the
-  deck enforces, and limit messages say to ask the admin; an empty deck asks for **Create the admin
-  account**; waitlist approvals can go into kiosk mode; **Recent activity** reads as sentences with
-  people's names, and **Reset today** is recorded; **Ask for feedback** greets people by first name.
-- **Generate a group** streams its model calls, so writing archetype instructions no longer dies after a
-  minute on some networks.
-- **The kiosk tutorial matches the kiosk** (**New agent**, **Create**, retaken screenshots), message
-  actions show on touch screens, files in your own message show as chips, and Escape closes the Line, the
-  bell, Custom tools and the Share dialog.
+- **Who looks.** Code always does: labels, legal forms, checksums, known names, links and file names.
+  An admin can add a **trusted model** (local, or a cloud one the admin vouches for) that catches bare
+  names, a small company's products and descriptions that point to one person, and an optional local
+  **name pack**. The model only finds; it never rewrites your text. Up to three rounds check the result,
+  and anything still found means no result, not a leaky one.
+- **Files.** Word, Excel and PowerPoint are anonymized inside the file (text, tables, cells, sheet names,
+  comments, authors) and come back as the same kind of file; PDF and HTML come back as Markdown. A file or
+  a whole folder in your shared folders or the File library gets an anonymized copy beside it.
+- **Keep nothing** keeps no vault, and **Make them coarser** turns a date of birth into a year, an address
+  into a city, and ages and amounts into ranges.
+- **The privacy gate** makes it automatic for your agents. What they read reaches their model as tokens,
+  from the sources you pick (mail, chats, calendar, contacts, files, data, memory) or from **the whole
+  chat**, while your own chat shows the real names (**Real names** under a reply). Mail and WhatsApp
+  messages an agent sends get the real values back just before they leave. Off until each person turns it
+  on; by default only for agents on a model that isn't trusted.
+- **Agents** get the `anonymize` tool. It reads a file or page itself, so the original never reaches the
+  agent's model, and its **restore** writes a file for you that the model never sees.
+- **Captain for Chrome 0.3.0**: **Anonymize this page** (or the selection), or right-click → **Anonymize
+  with Captain**, then **Copy**, **Save in Flight Deck**, and later **Put the real names back**.
+- **Vaults** show every value with its spellings and a **history** of each token: what found it, which
+  model it went out to, and when it came back. **Reset** empties a vault and keeps its numbers.
 
-## Fixed
+**How to start:**
 
-- **A chat message whose connection dies before the agent takes it** is held and sent again when the chat
-  reconnects, never twice.
-- **An uploaded document is read under its own name**, not a `tmp….docx` one: way-of-working uploads,
-  knowledge, profile documents and research, the queue planner, Drive and OneDrive folders, and
-  `google_drive`.
-- **Auto-save follows only this message's own words** and never overwrites an existing file.
-- **A Gmail draft in Trash** no longer blocks a new reply. **Connections → Google → Granted access** names
-  **Email address** and **Basic profile** instead of raw scopes.
-- **The onboarding exam**: skill cards and exam writing may use 10k output tokens (reasoning models ran
-  out at 4k); `1,850` and `1850` are the same figure; the grader's *why* stays in the question's language;
-  figures the question itself gives, and a deadline counted from today, are no longer flagged as made up;
-  exam situations keep the documents' own rates and limits.
-- The desktop app's **About** shows the build year and the project's addresses (new installers only).
+1. Admins (optional, for the best recall): **Admin console → Settings → Anonymization**: pick a
+   **Provider** and **Model** (a local Ollama model is trusted as it is), **Save**, then **Check on
+   samples** to see what code alone missed and what the model caught.
+2. Open **Anonymize**: kiosk **Settings → What they keep → Anonymize** (or **More → Anonymize**); full
+   layout **Files → Anonymize**.
+3. Pick **Text** or **File**, choose **In a vault**, name the **Vault** (one per case, e.g. `Velora`), and
+   click **Anonymize**. Check the result, then **Copy** or **Download**.
+4. To put the names back: **Put back**, pick the vault, paste the text or drop the file, **Put back**.
+5. For your agents: **Privacy gate**, switch **On**, pick **What it covers** and the sources, **Save**,
+   and start a new conversation.
+
+Step by step, with every option, the environment variables and what the gate doesn't cover:
+[docs/guide/anonymization.md](https://github.com/kstevica/captain-claw/blob/main/docs/guide/anonymization.md).
+
+### Data rooms: a deal's files for Claude, without the names
+
+A data room takes a virtual data room (a ZIP or a folder of hundreds of files) and anonymizes all of it
+into one vault. Claude reads the anonymized copies through its own connector, **Captain Data Rooms**: the
+story, the context and every number, but no names. One token is one party in every file of the room
+(⟦PERSON_1:2⟧ is another spelling of ⟦PERSON_1⟧, so a payroll lines up with a register). Claude sends its
+answers, memos, workbooks and decks back through the same connector, and Flight Deck puts the real names
+back, for you alone, on the deck.
+
+- **It reads** Word, Excel (shown as sheets), PowerPoint, PDF, text, and scans and pictures through OCR;
+  pictures inside Office files are replaced. After the run, a **sweep** goes over every file again with all
+  the names it learned, and a **leak check** blocks any file that still holds a real one. **Not a name
+  here** keeps a word the check flagged, and **Check again** re-checks.
+- **You review before Claude sees anything**: the original beside what Claude reads, **Roles** (Target,
+  Buyer, CFO…), **Same party?** for two tokens that look like one party (with code's score, a slider and
+  answer-all), a description of each file (one line, a paragraph, a summary, keywords, topics), and then
+  **Release**.
+- **15 tools for Claude**: `room_list`, `room_overview`, `room_list_files`, `room_find_files`,
+  `room_file_summaries`, `room_search`, `room_read`, `room_get_file`, the `room_deliver*` tools for text,
+  documents, workbooks and decks, `room_get_delivery` and `room_tasks`. The server tells Claude to keep
+  every token and to match parties on the number.
+- **Results come home**: deliveries land under **From Claude**, restored for the room's owner only, to read
+  (**Real names** / **As Claude wrote it**) or download as Word, Excel, PowerPoint or text; Croatian names
+  get their case endings back. **Tasks for Claude** queue your own requests, anonymized first. **Download
+  for Claude** builds a ZIP for a Claude Project when the deck has no public address.
+
+**How to start:**
+
+1. Kiosk: **Settings → Data rooms** (or **More → Data rooms**); full layout: **Files → Data rooms**.
+2. Fill in **Codename (Claude sees this)** and **Your name for it (only you see this)**, then **Create data
+   room**.
+3. **Add files**: drop a ZIP (25 MB by default, `FD_ROOMS_MAX_ZIP_MB`; add several for a bigger VDR) and
+   click **Add the ZIP**, or **Read the folder** from **A folder in Files** (admins: any folder **On the
+   deck's machine**).
+4. **Names to hide**: add the names you already know (the target, the buyer, a project name), then **Save**.
+5. **Run**, and watch the progress (phases, sizes, time left; **Stop** stops at once).
+6. Review: blocked files and leftovers, **Roles**, **Same party?**, the file descriptions.
+7. **Release N**.
+8. On the **Claude's access** card, **Copy** the connector address (`https://<your deck>/fd/mcp-rooms`).
+9. In Claude: **Settings → Connectors → Add custom connector**, paste it, sign in with your deck email and
+   password, tick the rooms, **Allow**.
+
+**What it needs:** a trusted model for the best recall (see Anonymization), OCR for scans, and for the
+connector a public HTTPS address (`FD_PUBLIC_URL`) with a stable `FD_JWT_SECRET`. The address must let
+Claude's `Claude-User` requests through: Cloudflare's AI-bot blocking and quick tunnels refuse them after
+sign-in.
+
+Step by step, with every screen, Claude's tools, the rules it's given and what can still slip:
+[docs/guide/data-rooms.md](https://github.com/kstevica/captain-claw/blob/main/docs/guide/data-rooms.md).
+
+### Vatra, Basna and Council in the kiosk
+
+Three ways to put several agents on one job, now in the kiosk for everyone signed in, in the kiosk's
+look and at phone width. To **build one thing**, use Vatra; to **find the best answer**, Basna; to **talk
+it through**, Council. Basna and Vatra are separate pages now, each showing only its own runs, and the
+full layout has its own **Vatra** entry under **Multi-Agent**.
+
+**Where:** click **More** under your agents (on a phone, the **More** tile; also in **Settings**), then
+under **Agents as a team** pick **Vatra**, **Basna** or **Council**. Each opens in a wide dialog with
+**Fullscreen**.
+
+**Vatra** (a team builds one result on a shared board):
+
+1. Pick a project, or **New project** (name, the theme every run gets, optional instructions).
+2. In **Runs**, click **New** and write the job in **Task / intent**. **Attach** adds files. The **Setup**
+   chip holds **Effort** (Standard, Deep, Plan), **Quality** and **Tuning** (Max agents, Grouped phases,
+   Shared datastore); or use the **Wizard**.
+3. **Plan team**: the Lead splits the job into parts, one owner each. Edit, move or remove parts.
+4. **Run team**, then read the **Group 0 — coordination plan** (each agent's mandate, what it produces and
+   consumes) and click **Execute**.
+5. The report, every agent's part and the files are on the run.
+
+**Basna** (several agents answer blind, merged by reliability):
+
+1. Pick a project, click **New** and write the question in **Task / intent**.
+2. **Route** picks the agents; **Run ensemble** runs them.
+3. The merged answer is on the **Truth** tab.
+
+**Council** (agents discuss in rounds, then sum up and vote):
+
+1. **New session** (the first time, **Start your first session**), then **Topic / Task**.
+2. **Auto-assemble** (2–6 panelists) or **Pick agents** (at least 2), then **Start Council**.
+3. After the rounds, **Synthesize**, then **Export .md**.
+
+Step by step, with every option and what to do when a run stalls:
+[docs/guide/vatra-basna-council.md](https://github.com/kstevica/captain-claw/blob/main/docs/guide/vatra-basna-council.md).
+
+### A new home in the kiosk
+
+- **Today** is the home when no chat is open: a greeting, **Waiting for you** (tasks that are your move,
+  proposals and open questions, each with its own answer buttons), **Today’s priorities** and **Handled
+  automatically**, each with **See what happened**.
+- **The nav** above the agent list reads **Today · Agents · Inbox · Tasks · People · Automations ·
+  Activity**. **Inbox** is the Line, **Tasks** the Taskboard (with the count of what needs you),
+  **Automations** opens **Scheduled tasks**.
+- **Agents** shows one card per agent: its picture, its live state (Ready, Working, New reply, Asleep,
+  Starting), **Chat** or **Wake and chat**, grouped and ordered like the agent list.
+- **New agent opens the Agent store**, for kiosk and simple-layout users alike. **Featured** shows four
+  ready agents; **Add** puts one on your team (**Add and set up** when **Set up its way of working next** is
+  on). **Advanced**, top right, opens the old picker with **From a file** and **Forge agents**.
+- **No right column.** An agent's files and tables open from **⋯ → Files & data**.
+- **Below the agent list:** **Library · Data · Folders · More**. **More** holds Crew and Captain Swarm (where
+  allowed), Vatra, Basna and Council, and Anonymize and Data rooms.
+- **Chat reads lighter.** Steps fold into one line ("‹Agent› worked through 6 steps", **See what
+  happened**), the busy line says what the agent is doing, approvals ask "Good to go?" with **Approve** /
+  **Dismiss**, the final answer has no bubble, and the latest narration stays in view.
+- **Agent pictures.** **⋯ → Picture**: one of 30 icons, **Upload a picture**, or **Initials**. Each member
+  of a shared agent picks their own.
+- **People** lists everyone on your Taskboard tasks: search by name or email (accents ignored), sort by
+  **Most tasks** or **Name A–Z**, filter **Pending** (**All · 1 · 2–5 · 6–9 · 10+**), rows like "8 tasks · 3
+  pending · 5 done". A task opened from People comes back to People, and a Taskboard opened on one task
+  shows only it, with **Show all tasks**.
+- **The console** opens on what needs you ("2 things need you"), with a grouped menu.
+
+### Agents in your own Chrome
+
+- **An agent works in your signed-in Chrome** (`browser` with `target="chrome"`), in a tab group named
+  after it, with **Stop** in the Captain for Chrome panel. Off until you turn on **Agents can use this
+  browser** in the panel; only the agent's owner, never on a shared agent's member turns, never on Flight
+  Deck's own pages, `chrome://` or `file://`.
+- **30 new browser actions**: tabs, refs from `read_page`, `find`, `page_text`, `page_files`, `form_input`,
+  hover, drag, `upload_file`, `javascript`, `console`, `network_requests`, `download` and `save_page`.
+  They work in the agent's own headless browser too.
+- **A site that blocks the agent** (both the browser and `web_fetch`) makes it ask you once, in Flight
+  Deck, to use your Chrome, or suggest installing Captain for Chrome.
+- **Chrome extensions in the agent's browser**: `extension_install` from the Web Store, a folder, a `.zip`
+  or `.crx` (you approve each one by default; `tools.browser.extension_policy`), and
+  `extension_id="captain"` installs Captain for Chrome from your deck. An agent can pair Captain for
+  Chrome in its **own** browser on the server after you say yes; **Connections → Browser** lists it with
+  **Disconnect**.
+- **Forms fixed**: punctuation types correctly, `type` replaces a field's text (`append: true` adds),
+  fields in another site's frame are reachable, and errors after a submit come back. When the run ends,
+  the tab you were on comes back to the front.
+
+### Agents and models
+
+- **`model_switch`**: "use a smarter model for this" works from any channel. An agent switches among its
+  own provider's models (same key, same endpoint): the catalog's **Smartest** and **Fastest and cheapest**
+  for OpenAI, Anthropic, Gemini, Grok and DeepSeek, or the models an admin lists under **Console → Models →
+  Models agents can switch to** for a custom endpoint. The kiosk's chat box has a model picker beside the
+  effort picker. Switching on its own needs **Pick a smarter or cheaper model on its own** (off by default).
+- **External memory**: **Qdrant** and **ArcadeDB** join Membase and Hindsight, with vectors made on the
+  deck by default (nothing leaves it). Agents read from memory before every reply, by each memory's
+  **Reading priority** (**First — my main memory**, **Alongside**, **Only when needed**). Each person can
+  connect up to five memories of their own, beside the admin's shared one.
+- **`web_search`** returns 10 results by default and up to 50, each with a `Source:` line, and
+  `enrich=true` adds the matching passages from the top pages.
+- **Task rephrase is off by default.** Turn it back on per agent: kiosk **Agent settings → Model & thinking
+  → Rewrite requests**.
+- **Crew workers run on the agent's own model and key** by default, even over a saved CLI login
+  (`runs_on=cli` uses the CLI's login).
+- **81 built-in tools** (80 in the desktop app): new `anonymize` and `model_switch`.
+
+### Files, data and schedules
+
+- **Data library tables can be edited by hand** in the kiosk: double-click a cell, **Add row**, delete
+  from the row panel. An edit the agent beat you to is refused and the row reloads.
+- **Shared folders in the File and Data libraries**: the filter is **Agents & folders**, and a shared folder
+  gets **In the library** and **Tables**.
+- **Agents' own cron jobs in Scheduled tasks**: **Set up by agents (N)**, with pause, resume, **Run now**
+  (which starts an off agent and turns it off again), delete and history.
+- **Updates: the admin picks when the deck restarts**: **Console → Updates → Update now** asks **When
+  should it restart?** (**Restart now**, **In 2 minutes**, **In 5 minutes**, **In 10 minutes**).
+
+### Captain, not Captain Claw
+
+Everything the deck says is "Captain" now: prompts, guards, channel help, email footers, the CLI, MCP
+names, the HUD and the desktop app. An agent on the untouched default personality calls itself Captain;
+one you renamed keeps its name. New WhatsApp links show as "Captain".
+
+### Fixes
+
+- A guard's rewrite request is the system's, not you pushing back, so the agent no longer opens with
+  "You're right…" and no lesson comes out of it.
+- A chat message is offered as a lesson once (**Save as a lesson?** → **Saved as a lesson**).
+- A fleet sign-in always gets a fleet token.
+- Custom tools: the update bell and the missing-secret error read right.
 
 ## Upgrading
 
-1. **The desktop app**: **Check for Updates…** (it also offers 0.9.0 within a minute of starting). New
-   installers are on this release, needed only for a fresh install or the new About panel:
-   `Captain-0.9.0-arm64.dmg` (Apple silicon), `Captain-0.9.0-x64.dmg` (Intel) and
-   `Captain-Setup-0.9.0-x64.exe` (Windows). They aren't signed, so macOS asks first (System Settings →
-   Privacy & Security → **Open Anyway**), and so does Windows (**More info → Run anyway**).
-2. **Each Flight Deck**: **Console → Updates**, or pull and reinstall by hand. `jsonschema` is now a
-   declared dependency (it used to come only through LiteLLM), so `pip install -e .` (or `uv sync`) in the
-   deck's environment. Then **restart Flight Deck, then every agent**: agents need the restart for the
-   seven new tools, the Course prompt and the lesson proposals. Hard-refresh every browser.
-3. **Look at what's on by default**:
-   - **Lesson proposals**: a small model call on turns that read like a correction, 12 a day at most.
-     `lesson_proposals.enabled: false` in an agent's `config.yaml` turns them off.
-   - **Agents pick up email that names them**, from the first new mail after the upgrade (older mail is
-     only a baseline). Switch **Pick up email meant for ‹agent›** off per agent, or set
-     `FD_AGENT_MAIL=off` for the deck. Give agents with common-word names a specific name to answer to.
-   - **A deck without sign-in now applies its console Settings** (branding, deck name, Docker) that it
-     used to ignore, and **deleting a user now stops and removes their agents**, folders and chats.
-4. **Custom tools** stay off until an admin turns them on. They need `git` on the host (`uv` is optional).
-   On a Linux host, `python3 tests/test_flight_deck/test_xtool_sandbox.py` says whether the kernel has
-   Landlock.
-5. **Back up the new data**: `external_tools/`, `agent-bundles/` and `course.db` in the deck's data
-   folder, and `bundle_signing_key` in its home (losing it gives the deck a new fingerprint).
-
-New environment variables: `FD_IMAP_SEND=off` (no IMAP sending on this deck),
-`FD_IMAP_REPEAT_CHECK_DAYS` (14), `FD_AGENT_MAIL=off`, `FD_MEMBASE_BASE_URL`, `FD_HINDSIGHT_BASE_URL`,
-`FD_AGENT_BUNDLE_MAX_MB` (2048) and `FD_COURSE_REVIEW_TICK_S` (1800). New agent config sections:
-`lesson_proposals` and `tool_proposals`.
-
-Devices need nothing: firmware stays **0.20.4** / PaperColor B **1.0.31**. BotPort hubs need nothing:
-0.9.0 keeps protocol 2. Captain for Chrome and Captain for Mac need nothing from this release.
-
-## Known limits
-
-- Custom tools, `ask_user`, lesson proposals, tool proposals and agent email were tested with stand-in
-  models and stubbed mailboxes; IMAP was tested live against GreenMail and Dovecot, Hindsight against a
-  self-hosted 1.2.0, Membase and Hindsight Cloud not at all.
-- Export and import are in the kiosk only; Docker agents can't be exported yet.
-- Copies of scheduled backups in your files aren't pruned.
+1. **Update the code** (`git pull` + `pip install -e .`, or **Console → Updates**; installed desktop apps
+   update themselves), **restart Flight Deck, then every agent**, and **hard-refresh** every browser tab. No
+   new Python dependencies. The update *into* 0.9.1 still uses the old countdown; the restart-time choice
+   applies from the next one.
+2. **Reload Captain for Chrome** (0.1.0 → 0.3.0) in `chrome://extensions`, or download it again from
+   **Connections → Browser**. It asks for new permissions (`debugger`, `tabGroups`, `alarms`); Chrome shows
+   its "is debugging this browser" bar while an agent works there.
+3. **The kiosk looks different**: Today is the home, the agent cards moved to **Agents**, Line is **Inbox**,
+   Taskboard is **Tasks**, Scheduled is **Automations**, the right column is gone (**⋯ → Files & data**),
+   and **New agent** opens the Agent store. Tell your team before they log in.
+4. **Task rephrase is off by default** from the agent's next restart, unless its config sets
+   `scale.task_rephrase_enabled`. Turn it on per agent with **Rewrite requests**.
+5. **Agents call themselves Captain** if they still run the untouched default personality.
+6. **Crew workers bill to the agent's model and key**, even where a CLI login was saved.
+7. **External memory** costs a little more while one is connected: one recall per reply, and insights taken
+   every 5 messages instead of 20. An old single connection moves over on first read; someone who had
+   their own starts with the deck's shared memory **off**. `PUT /fd/external-memory/priority` and
+   `/mirror` are gone.
+8. **`web_search`** results are bigger in context (10 by default, `max_results: 5` in old configs is
+   ignored).
+9. **Anonymization and data rooms are opt-in.** Nothing is anonymized until an admin sets a trusted model
+   or a person runs it; the privacy gate is off until each person turns it on. A data room needs a public
+   HTTPS address for Claude to connect (and no Cloudflare AI-bot blocking in front of it).
 
 ## Pull requests
 
-#436 Desktop About: build year and addresses · #437 Admin console: Activity · #438 Email (IMAP): several
-inboxes per user · #439 IMAP: fast test, 587 fallback · #440 Learning prompts keep failures and guesses out
-· #441 Agents propose lessons from your corrections · #442 Kiosk: Lessons to approve · #443 Agents as
-colleagues: hand-overs, identity, email by name · #444 Send the Gmail reply · #445 External memory
-(Membase) · #446 External memory: Hindsight, one server for the deck · #447 A chat message isn't lost when
-its socket dies · #448 A task starts its agent when it's off · #449 `image_manipulation` · #450–#456 Custom
-tools, phases 0–6 · #457 New tool with a spec check · #458–#461 Custom tools 7a–7d: uses, nested tools, Run
-as, questions · #462 `ask_user` · #463 Recorded answers checked like real ones · #464 Questions at chat size
-· #465 Questions name the agent; no Later · #466–#470 Agent export 1/5–5/5 · #471 Skill cards and exams may
-write 10k tokens · #472 Agent menu in rows · #473 Kiosk tutorial matches the kiosk · #474 Auto-save follows
-this message only · #475 Attachments as chips, Escape closes · #476 #477 Documents read under their own name
-· #478 #479 Exam figures and language · #480 Small UI fixes from filming · #481 Builder told the publish
-limits · #482 Google scope labels, Trash drafts · #483 Course · #484 Eleven admin fixes · #485 Generate a
-group streams · #486 Recent activity in plain words · #487 Feedback greets by first name
+- **Anonymization**: #511, #512, #514–#520, #522–#538, #547, #550, #551, #554, #555, #556
+- **Data rooms**: #539–#545, #548, #549, #552, #553, #556, #557, #558
+- **Kiosk, home and navigation**: #500, #503, #504, #506, #559, #560, #562, #564, #566–#571, #573–#576
+- **Captain for Chrome and the agent's browser**: #494–#499, #507–#509
+- **Agents, models, memory**: #491, #492, #493, #502, #510, #513, #521, #572
+- **Files, schedules, updates**: #501, #505, #561, #563
+- **Rename, docs, fixes**: #489, #490, #546, #565
+
+Full list: [github.com/kstevica/captain-claw/pulls?q=is:merged](https://github.com/kstevica/captain-claw/pulls?q=is%3Apr+is%3Amerged+merged%3A2026-11-09..2026-11-15)

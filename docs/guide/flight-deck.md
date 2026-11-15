@@ -25,10 +25,12 @@ One agent isn't always the answer — and one orchestration strategy never is. C
 | **🔀 Basna** — N agents answer the same question *blind*, merged by reliability into one high-confidence result | **🤝 Vatra** — a team collaborates on a shared blackboard, each owning sections, improving over review rounds |
 | [![Basna](../screenshots/basna.png)](../screenshots/basna.png) | [![Vatra](../screenshots/vatra.png)](../screenshots/vatra.png) |
 
+**Step by step:** [Vatra, Basna and Council](vatra-basna-council.md), from picking the right one to reading the result. Since 0.9.1 all three are in the kiosk too, under **More → Agents as a team** (and in **Settings**), and Basna and Vatra are separate pages: the full layout has a **Vatra** entry of its own under **Multi-Agent**.
+
 The fifth mode is **💻 Code** (below) — a plan-gated, independently-reviewed engineering pipeline. The sixth is **Flight Deck** itself — spawn, monitor, and coordinate the whole crew from one dashboard. The seventh, new in 0.8.0, is **🦇 Bat** — the stubborn finisher: checkpointed steps with retries, survives restarts, and stops only when an independent, fail-closed judge says the task is done.
 
 - **Agent Forge** — Describe a business goal in plain text. An LLM designs a specialized team with roles, tools, operating procedures, and a lead coordinator. Review, customize, and spawn the entire team in one click. Since 0.8.5 the kiosk's **[Forge agents](#forge-agents)** goes further, to a standing team with its schedules and its software.
-- **Agent Council** — Structured multi-agent deliberation. Run brainstorms, debates, reviews, or planning sessions with 2-N agents. Each agent self-scores suitability, chooses actions (answer, challenge, refine, broaden), and responds in moderated rounds. A moderator synthesizes conclusions; all agents vote. Export as markdown minutes.
+- **Agent Council** — Structured multi-agent deliberation. Run brainstorms, debates, reviews, or planning sessions with 2–6 agents it assembles, or the ones you pick. Each agent self-scores suitability, chooses actions (answer, challenge, refine, broaden), and responds in moderated rounds. A moderator synthesizes conclusions; all agents vote. Export as markdown minutes.
 - **Basna** — A network-source ensemble. Describe a task and a router picks the smallest set of specialist archetypes, spawns them fresh, runs them blind and in parallel, and merges their answers weighted by each archetype's learned reliability (synthesizing only on disagreement). Attach files/images, edit each agent before the run, watch a live progress log, and download generated files. Reliability is learned per-archetype so routing improves over time.
 - **Vatra** — A collaborative team on a shared blackboard: a lead splits the work, each agent owns sections, reads what the others wrote, and improves it over review rounds; a reporter assembles the deliverable. Since 0.8.0 workers run until they're done, under an in-turn context governor, reading a rule-built run map.
 - **Code** — An agentic coding studio. A router sizes each request; big jobs run plan → your approval → build → three independent reviewers → triage → capped fix loop, each phase a git commit with diff timeline and rollback. Agents query a persistent Code Map instead of re-reading the tree; runs work on VFS folders or your own linked local repos, with per-turn token costs in chat and full process export.
@@ -161,7 +163,11 @@ Flows are written as code or in a visual Builder, compiled from plain English, s
   <img src="../screenshots/kiosk-chat.webp" width="49%" alt="The kiosk chat: an agent greets you by name with its skill cards"> <img src="../screenshots/kiosk-share-dialog.webp" width="49%" alt="The Share on network dialog, saying plainly what other decks can and can't do with an agent">
 </p>
 
-The chat-first view your team's non-admins live in is a complete place to work:
+The chat-first view your team's non-admins live in is a complete place to work.
+
+**Since 0.9.1** it opens on **Today** when no chat is open: a greeting, **Waiting for you** (tasks that are your move, proposals and open questions, each with its own answer buttons), **Today’s priorities** and **Handled automatically**. The nav above the agent list reads **Today · Agents · Inbox · Tasks · People · Automations · Activity**: **Agents** is one card per agent with its picture and live state, **Inbox** is the [Line](#the-line), **Tasks** the [Taskboard](#the-taskboard), **People** everyone on your tasks (search, sort, a **Pending** filter), **Automations** the scheduled tasks. **New agent** opens the **Agent store** (**Featured**, **Add**, and **Advanced** for the old picker with **From a file** and **Forge agents**). There is no right column any more: an agent's files and tables open from **⋯ → Files & data**. Under the agent list, **Library · Data · Folders · More**; **More** holds Crew and Captain Swarm (where allowed), **Vatra**, **Basna** and **Council**, **[Anonymize](anonymization.md)** and **[Data rooms](data-rooms.md)**. An agent gets a picture with **⋯ → Picture**, and the chat box has a model picker beside the effort picker.
+
+Besides that:
 
 - a **getting-started guide** and one-click **"What can I do?" skill cards**;
 - a **File library** and a **Data library** that summarise everything the agents keep;

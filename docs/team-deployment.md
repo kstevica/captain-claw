@@ -303,6 +303,38 @@ Connections panel).
 - **Course**: deck goals are set by admins and read by everyone, including members of shared agents.
   Their horizons, caps and suggestion limits are on **Console → Settings → Course**.
 
+## What 0.9.1 changes for a team deck
+
+- **Anonymization** works for everyone with code alone. For bare names, an admin sets a **trusted model**
+  in **Admin console → Settings → Anonymization**: a local Ollama or LiteRT model, or a server on your
+  network, is trusted as it is; a cloud provider only when the admin ticks that they trust it with raw
+  documents (zero retention, a DPA). Its calls count against the allowance of the person whose text it
+  read. The optional **Name recognition** pack needs `transformers` and `torch` where Flight Deck runs.
+  Vaults live in `anonymize.db` in the FD data dir, each with its own key sealed by the deck's data key;
+  back it up with the deck. Each person's **privacy gate** is off until they turn it on. Step by step:
+  [docs/guide/anonymization.md](guide/anonymization.md).
+- **Data rooms** need the same trusted model for good recall, and the **Captain Data Rooms** connector
+  (`https://YOUR-FD-HOST/fd/mcp-rooms`) needs what inbound MCP needs above: HTTPS, `FD_PUBLIC_URL` and a
+  stable `FD_JWT_SECRET`. It is a separate sign-in with its own consent screen (which rooms), and the sign-in
+  takes an email and password, so a person who signs in with Google only needs a password set to connect
+  Claude. **Cloudflare's AI-bot blocking refuses Claude's calls** (user agent `Claude-User`) after sign-in;
+  turn it off for the deck's host or skip it for those paths. Restored results are readable only by the
+  room's owner, on the deck. ZIPs are capped at 25 MB (`FD_ROOMS_MAX_ZIP_MB`); only admins can read a
+  folder **On the deck's machine**. Step by step: [docs/guide/data-rooms.md](guide/data-rooms.md).
+- **Vatra, Basna and Council** are in the kiosk for everyone signed in (**More → Agents as a team**). They
+  spawn agents on each person's model tiers, or the team's published ones, so they cost more than one chat.
+- **The kiosk changed shape**: Today is the home, the nav is new (Inbox = the Line, Tasks = the Taskboard,
+  Automations = Scheduled tasks), the right column is gone, and **New agent** opens the Agent store. Tell
+  your team before they log in.
+- **Agents in a person's own Chrome** are opt-in in Captain for Chrome (**Agents can use this browser**),
+  owner's turns only, never a member's. Chrome extensions in an agent's headless browser need the person's
+  approval by default (`tools.browser.extension_policy: ask`) and are refused for user-tier agents on
+  multi-user decks.
+- **Model switching** for custom endpoints: list the models agents may switch to under **Console → Models
+  → Models agents can switch to**. Members of shared agents and people on their own keys can't switch.
+- **Updates**: **Console → Updates → Update now** asks when to restart (now, in 2, 5 or 10 minutes), from
+  the next update after 0.9.1.
+
 ## Known follow-ups (not blockers)
 
 - Flows and scheduler jobs are authenticated but **not yet per-user isolated**

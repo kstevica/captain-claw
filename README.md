@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENCE)
-[![Version](https://img.shields.io/badge/version-0.9.0-purple)](release-notes/RELEASE_NOTES_0.9.0.md)
+[![Version](https://img.shields.io/badge/version-0.9.1-purple)](release-notes/RELEASE_NOTES_0.9.1.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](docs/guide/getting-started.md)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](docs/guide/agents.md#multi-model-support)
 
@@ -12,13 +12,13 @@
   <a href="docs/guide/whats-new.md#whats-new-in-082"><img src="docs/screenshots/hero-0.8.2.webp" width="100%" alt="Captain Claw 0.8.2: the BotPort hub's live network map, the kiosk's Share on network dialog on a phone, a StopWatch speaking an answer and a PaperColor e-paper dashboard"></a>
 </p>
 
-> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**. Since **0.8.4** you can **teach an agent your work and test it**, and see every task on one **Taskboard**. Since **0.8.5** your agents run **Claude Code, Codex, OpenCode, Crush and Pi as their crew**, and you can **say what you need and get a whole team**, with its schedules and its software. Since **0.8.6** everything they do on their own is on **one Line**, **Captain Swarm** makes them measurably better at your real work, and **Captain** for your desktop is a 75 MB download that updates itself. Since **0.8.8** they see what you see: **Captain for Chrome** sends the page you're on, and **Captain for Mac** sends what's on your screen from any app.
+> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**. Since **0.8.4** you can **teach an agent your work and test it**, and see every task on one **Taskboard**. Since **0.8.5** your agents run **Claude Code, Codex, OpenCode, Crush and Pi as their crew**, and you can **say what you need and get a whole team**, with its schedules and its software. Since **0.8.6** everything they do on their own is on **one Line**, **Captain Swarm** makes them measurably better at your real work, and **Captain** for your desktop is a 75 MB download that updates itself. Since **0.8.8** they see what you see: **Captain for Chrome** sends the page you're on, and **Captain for Mac** sends what's on your screen from any app. Since **0.9.1** your private data stays yours: **anonymization** turns names, companies and numbers into tokens before a model sees them and puts them back when the answer comes home, and **data rooms** let Claude read a whole deal's files without learning who is in them.
 
 **[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://cohort001.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[▶️ YouTube](https://www.youtube.com/@captain--ai-agents)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)** · **[🧭 Guides](docs/guide/README.md)** · **[📝 What's new](docs/guide/whats-new.md)**
 
-**New in 0.9.0 — Shipyard:** tools of your own, built by Crew and run by Flight Deck in a sandbox; agents in one `.captain` file to back up, move or hand on; agents that hand each other work, answer email meant for them, read any IMAP inbox, learn from corrections you approve and know the goals their work is for. **[Release notes](release-notes/RELEASE_NOTES_0.9.0.md)** · **0.8.11 — Hold:** a message written while the agent is busy waits and goes when it's free. **[Release notes](release-notes/RELEASE_NOTES_0.8.11.md)** · **0.8.10 — Provisions:** pick a provider, paste its key, and every model tier is set; scans read by a local OCR engine with no model; a working turn no longer stops at 40 steps. **[Release notes](release-notes/RELEASE_NOTES_0.8.10.md)** · **0.8.8 — Spyglass:** Captain for Chrome sends the page you're on to one of your agents, Captain for Mac sends what's on your screen from any app (hold fn, or click), and a round of fixes from watching real users. **[Release notes](release-notes/RELEASE_NOTES_0.8.8.md)** · **0.8.9** makes agents work in the Windows desktop app, and a downloaded Mac app no longer "damaged": **[notes](release-notes/RELEASE_NOTES_0.8.9.md)** · Earlier: **[0.8.7](release-notes/RELEASE_NOTES_0.8.7.md)** · **[0.8.6 — Ship's Log](release-notes/RELEASE_NOTES_0.8.6.md)**
+**New in 0.9.1 — Strongroom:** anonymization with an encrypted vault per case and a privacy gate for your agents; data rooms that give Claude a deal's files without the names and bring its results back restored; Vatra, Basna and Council in the kiosk; a new kiosk home; agents in your own Chrome. **[Release notes](release-notes/RELEASE_NOTES_0.9.1.md)** · **0.9.0 — Shipyard:** tools of your own, built by Crew and run by Flight Deck in a sandbox; agents in one `.captain` file to back up, move or hand on; agents that hand each other work, answer email meant for them, read any IMAP inbox, learn from corrections you approve and know the goals their work is for. **[Release notes](release-notes/RELEASE_NOTES_0.9.0.md)** · **0.8.11 — Hold:** a message written while the agent is busy waits and goes when it's free. **[Release notes](release-notes/RELEASE_NOTES_0.8.11.md)** · **0.8.10 — Provisions:** pick a provider, paste its key, and every model tier is set; scans read by a local OCR engine with no model; a working turn no longer stops at 40 steps. **[Release notes](release-notes/RELEASE_NOTES_0.8.10.md)** · **0.8.8 — Spyglass:** Captain for Chrome sends the page you're on to one of your agents, Captain for Mac sends what's on your screen from any app (hold fn, or click), and a round of fixes from watching real users. **[Release notes](release-notes/RELEASE_NOTES_0.8.8.md)** · **0.8.9** makes agents work in the Windows desktop app, and a downloaded Mac app no longer "damaged": **[notes](release-notes/RELEASE_NOTES_0.8.9.md)** · Earlier: **[0.8.7](release-notes/RELEASE_NOTES_0.8.7.md)** · **[0.8.6 — Ship's Log](release-notes/RELEASE_NOTES_0.8.6.md)**
 
-<p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>Captain for Chrome and for Mac</strong> &nbsp;·&nbsp; <strong>custom tools Crew builds for your agents</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>79 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>131 ready-made archetypes</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>Claude Code, Codex, OpenCode, Crush and Pi as your crew</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
+<p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>Captain for Chrome and for Mac</strong> &nbsp;·&nbsp; <strong>custom tools Crew builds for your agents</strong> &nbsp;·&nbsp; <strong>anonymization and data rooms for Claude</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>81 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>131 ready-made archetypes</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>Claude Code, Codex, OpenCode, Crush and Pi as your crew</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
 
 ## Why Captain Claw
 
@@ -32,6 +32,7 @@
 - **📡 Wherever you are.** Web, WhatsApp (the Cloud API, or your own number), Telegram, a HUD for Meta Ray-Ban Display, push-to-talk devices from M5Stack and Waveshare, and Claude itself over MCP, all one conversation.
 - **🧬 Memory that keeps thinking.** Six memory layers shared across sessions and agents, and dream cycles that surface connections you didn't ask for.
 - **🛡️ Agents you can check on.** Every task lands on a **Taskboard** that checks an agent really did what it was handed, every tool call lands in a tamper-evident register you and your admins can read, guards run before, during and after every action, and a fabrication guard catches a claimed send or calendar change no tool made.
+- **🕶️ Private data stays private.** Names, companies, addresses and ID numbers become tokens before a model reads them, with the real values in an encrypted vault on your deck, and come back when the answer does. Give Claude a whole data room this way, or put a privacy gate in front of every agent on a cloud model.
 - **🔓 Yours, end to end.** Self-hosted, MIT, bring your own keys or run 100% local with Ollama. No lock-in.
 
 ## Quick start
@@ -43,7 +44,36 @@ flight-deck          # the multi-agent dashboard: http://localhost:25080
 
 First run starts onboarding. For a single agent in the terminal or the browser, Docker, a deck for your team or a voice device, see **[Getting started](docs/guide/getting-started.md)**.
 
-## ⚓ New in 0.9.0 — shipyard
+## 🔐 New in 0.9.1 — strongroom
+
+**Anonymization.** Names, companies, addresses, emails, phones, IBANs and ID numbers become tokens like `⟦PERSON_1⟧` before anything reaches a model, and the real values stay encrypted on your deck, in a vault per case only you can open. Code always looks; your admin's **trusted model** (a local one, or a cloud one they vouch for) catches the bare names. Word, Excel and PowerPoint stay Word, Excel and PowerPoint, and **Put back** restores whatever comes home.
+
+1. *(Admin, optional)* **Admin console → Settings → Anonymization**: a **Provider** and **Model**, **Save**, **Check on samples**.
+2. Open **Anonymize** (kiosk: **Settings → What they keep**; full layout: **Files**).
+3. **Text** or **File**, **In a vault**, name the **Vault**, **Anonymize**. **Put back** reverses it.
+4. For your agents: **Privacy gate → On**, pick the sources or **The whole chat**, **Save**. Their model reads tokens, your chat shows **Real names**, and mail they send goes out with the real values.
+
+Also: a file or folder anonymized where it is, the `anonymize` tool for agents, **Anonymize this page** in Captain for Chrome, and a history of every token. **→ [Anonymization guide](docs/guide/anonymization.md)**
+
+**Data rooms.** A deal's virtual data room, a ZIP or a folder of hundreds of files, anonymized into one vault so Claude reads the story and every number but no names. One token is one party in every file. You review before anything is released, and Claude's memos, workbooks and decks come back through the same connector, restored for you alone on the deck.
+
+1. **Data rooms** (kiosk: **Settings** or **More**; full layout: **Files**), a **Codename (Claude sees this)**, **Create data room**.
+2. **Add files** (a ZIP, or a folder) and **Names to hide** you already know, then **Run**.
+3. Review leftovers, **Roles** and **Same party?**, then **Release**.
+4. **Copy** the address on **Claude's access**, and in Claude **Settings → Connectors → Add custom connector**; sign in and tick the room.
+5. Ask Claude. Its results land under **From Claude** with the real names.
+
+**→ [Data rooms guide](docs/guide/data-rooms.md)**
+
+**Vatra, Basna and Council, in the kiosk.** **More → Agents as a team**: **Vatra** for a team that builds one result on a shared board (**New** → **Task / intent** → **Plan team** → **Run team** → **Execute**), **Basna** for several agents answering blind, merged by reliability (**New** → **Route** → **Run ensemble** → **Truth**), **Council** for a discussion in rounds with a summary and a vote (**New session** → **Start Council** → **Synthesize**). **→ [Vatra, Basna and Council guide](docs/guide/vatra-basna-council.md)**
+
+- **A new kiosk home**: **Today** with what's waiting for you, a nav of **Today · Agents · Inbox · Tasks · People · Automations · Activity**, agent cards with pictures, **People** you work with, and **New agent** opening the **Agent store**.
+- **Agents in your own Chrome**, signed in, when you switch on **Agents can use this browser** in Captain for Chrome; 30 new page actions there and in the agent's own browser.
+- **And:** `model_switch` and a model picker in the chat box, Qdrant and ArcadeDB memory, `web_search` up to 50 enriched results, Data library tables you edit by hand, and 81 built-in tools.
+
+**→ [Release notes](release-notes/RELEASE_NOTES_0.9.1.md)**
+
+## ⚓ Shipyard `since 0.9.0`
 
 **Custom tools.** Describe a tool in your own words, let your model check the spec, and Crew's coding agents write it, its tests and its examples. When you approve the merge, Flight Deck publishes it, and it goes live only if everything passes. Your agents call it with `custom_tools`; Flight Deck runs every call as the person, with their own secrets and files, held in a Landlock sandbox on Linux 5.13+. Offer a tool to people or to the whole deck, and it runs for nobody until they **Add** it. A tool can use the agent's own tools, run your other tools and ask you a question, and agents suggest the tools they'd need.
 
@@ -249,7 +279,10 @@ Video guides on the **[Captain YouTube channel](https://www.youtube.com/@captain
 | **[BotPort, MCP and agent links](docs/guide/botport-and-mcp.md)** | Flight Decks that work together, Flight Deck as an MCP server for Claude, MCP servers for your agents, connecting your own systems |
 | **[Devices and channels](docs/guide/devices-and-channels.md)** | StopWatch, PaperColor, StickS3 and Waveshare, the smart-glasses HUD, WhatsApp (and your own WhatsApp), Telegram, notifications, agents in your inbox |
 | **[Memory and cognition](docs/guide/memory.md)** | Six memory layers, the context engine, dreaming, the Brain Graph |
-| **[Inside an agent](docs/guide/agents.md)** | Every supported model, the 79 built-in tools, safety guards, the agent web UI |
+| **[Anonymization](docs/guide/anonymization.md)** | Names, companies, addresses and numbers out before a model sees them, back when the answer comes home: the trusted model, the Anonymize page, files and folders, the privacy gate for your agents, Captain for Chrome, vaults and their history |
+| **[Data rooms](docs/guide/data-rooms.md)** | A deal's data room anonymized into one vault for Claude: adding files, the run, review and **Same party?**, release, the Captain Data Rooms connector, results restored on the deck |
+| **[Vatra, Basna and Council](docs/guide/vatra-basna-council.md)** | Your agents as a team, step by step: which one to pick, starting a run in the kiosk or the full layout, reading the result, continuing and stopping |
+| **[Inside an agent](docs/guide/agents.md)** | Every supported model, the 81 built-in tools, safety guards, the agent web UI |
 | **[Architecture](docs/guide/architecture.md)** | Where each component lives in the code |
 | **[What's new](docs/guide/whats-new.md)** | Every release, newest first |
 

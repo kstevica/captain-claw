@@ -7,7 +7,7 @@ import { RESET_TEXT } from './anonFormat'
 // The privacy gate: what their agents' models read is anonymized first — when
 // that model isn't trusted (or always). Either the sources the person picks
 // (mail, chats, files…), or the whole chat: their messages, every tool result,
-// the notes and the system prompt. Mail and messages the agents send get the
+// the notes (not the system prompt). Mail and messages the agents send get the
 // real values back just before they leave; with the whole chat, the person's
 // own chat shows them too.
 
@@ -78,7 +78,7 @@ export function GatePanel() {
             <Switch on={gate.enabled} label="Privacy gate on" onChange={(v) => set({ enabled: v })} />
           </SettingRow>
           <SettingRow title="What it covers" hint={chat(gate)
-            ? 'Everything the model reads: your messages, what every tool returns, the notes and the system prompt.'
+            ? 'Everything the model reads from you: your messages, what every tool returns and the notes. Not the agent\'s own instructions.'
             : 'Only what the sources you pick below give your agents.'}>
             <Segmented label="What it covers" value={gate.coverage || 'sources'} onChange={(v) => set({ coverage: v })}
               options={[{ value: 'sources', label: 'Sources I pick' }, { value: 'chat', label: 'The whole chat' }]} />

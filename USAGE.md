@@ -25,6 +25,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Orchestrator Commands](#orchestrator-commands)
   - [Admin Commands](#admin-commands)
 - [Tools Reference](#tools-reference)
+  - [anonymize](#anonymize--new-in-091)
+  - [model_switch](#model_switch--new-in-091)
   - [image_manipulation](#image_manipulation--new-in-090)
   - [custom_tools](#custom_tools--new-in-090)
   - [ask_user](#ask_user--new-in-090)
@@ -132,6 +134,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Your own AI keys](#your-own-ai-keys--new-in-084)
   - [Profile](#profile--new-in-084)
   - [Desktop app mode](#desktop-app-mode--new-in-081)
+- [Anonymization — NEW in 0.9.1](#anonymization--new-in-091)
+- [Data Rooms — NEW in 0.9.1](#data-rooms--new-in-091)
 - [Deck Administration — NEW in 0.8.1](#deck-administration--new-in-081)
   - [Admin console](#admin-console)
   - [Admin console → Activity](#admin-console--activity--new-in-090)
@@ -1546,6 +1550,39 @@ HTML in, the page and a PNG of it out, for charts, diagrams and dashboards inste
 | `output_path` | string | no | An `.html` path (default `saved/showcase/<session>/`); the PNG goes next to it |
 
 The PNG reaches the chat, Telegram, WhatsApp and the Files menu, and goes into a `.docx` or `.md` as `![caption](path)`. Script errors, failed loads, empty canvases and a blank picture come back for the agent to fix. The page never touches the host: it's served from an address that doesn't exist, every request goes through the public-only client, and WebSockets are closed.
+
+### anonymize — NEW in 0.9.1
+
+Takes private data out of a file, a folder in the shared folders, a web page or text: people's names, companies, dates of birth, IBANs, card numbers, emails, phones, street addresses, OIB/JMBG/MB/passport/tax numbers, IPs, profile links and plates. Each becomes a token like `⟦PERSON_1⟧` or `⟦IBAN_2⟧` (`⟦ORG_7:2⟧` is another spelling of `⟦ORG_7⟧`); the same party gets the same token in every document of the same vault. The real values stay encrypted in Flight Deck, in the person's vault, and the agent never sees them. Always registered; offered to the model when a message asks to anonymize, redact or remove personal data. Needs a Flight Deck. Step by step: [docs/guide/anonymization.md](docs/guide/anonymization.md).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `anonymize`, `restore` (put the real values back into a file for the person) or `vaults` (names and counts only) |
+| `path` | string | one of three | A file (txt, md, csv, tsv, json, jsonl, html, docx, xlsx, pptx, pdf), read by the tool and never shown to the model. A VFS folder (`vfs:<project>/<folder>/`) gets an anonymized copy of every file in a new folder beside it. Office files keep their format; PDF and HTML come back as Markdown |
+| `url` | string | one of three | A page to fetch and anonymize |
+| `text` | string | one of three | Inline text the model has already seen (prefer `path` / `url`) |
+| `vault` | string | no | The case it belongs to; default this conversation's. `restore` needs the vault it was anonymized into |
+| `mode` | string | no | `reversible` (default, keeps the vault) or `one_way` (keeps nothing) |
+| `generalize` | boolean | no | `one_way` only: coarser values instead of tokens (date of birth → year, address → city, ages and amounts → ranges) |
+| `keep` | array | no | Values never to replace (your own company, public figures) |
+| `extra` | array | no | Terms always to replace: `{"text": "Project Falcon", "kind": "PROJECT"}` (kind defaults to PERSON) |
+| `lane` | string | no | `deterministic` (code), `llm` (the deck's trusted model) or `both`; left out, both when the deck has a trusted model |
+| `output_path` | string | no | Where the result goes (default `saved/anonymized/…` or `saved/restored/…`) |
+
+`restore` writes a file for the person and never returns its contents to the model; it is refused on automated turns. A shared agent's member anonymizes into their own vaults, never the owner's. The agent-side routes are `/fd/anonymize/agent/*` (`run`, `restore`, `file`, `file/restore`, `status`, `gate`, `vaults`).
+
+### model_switch — NEW in 0.9.1
+
+Reads or changes the model the agent runs on, among its own provider's models (same key, same endpoint). Always on; works from every channel, so "use a smarter model for this" on WhatsApp or a device switches too.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `get` (the models it can switch to, what each is for and costs, and the one running now) or `set` |
+| `model` | string | set | A model id or name from `get`, part of one (`opus`, `flash`), `default`, `smartest` or `cheapest` |
+| `scope` | string | no | `setting` (this conversation from now on, like the chat box's picker; the default when the user asks) or `turn` (the rest of this turn; the default on its own) |
+| `reason` | string | set | `user_asked` or `own`. `own` only when the owner turned on **Pick a smarter or cheaper model on its own** (kiosk **Agent settings**, or Agent options) |
+
+The choices are the catalog's models for OpenAI, Anthropic, Gemini, Grok and DeepSeek, or the ones an admin lists for a custom endpoint under **Console → Models → Models agents can switch to**. A conversation's pick survives a restart, `/clear` and `/new`. Refused for a shared agent's members and for visitors on their own keys. The kiosk's chat box has the same picker beside the effort picker.
 
 ### image_manipulation — NEW in 0.9.0
 
@@ -6045,7 +6082,7 @@ Basna (sidebar: **Basna**) is a **network-source ensemble** — a one-shot, sele
 
 **How it works:**
 
-1. Open **Basna**; describe the task (optionally **attach files** or paste images), pick the **Router tier** (default Reasoning) and **Max agents**.
+1. Open **Basna** (full layout: **Multi-Agent → Basna**; kiosk since 0.9.1: **More → Agents as a team → Basna**), pick a project or **New project**, click **New** and describe the task in **Task / intent** (optionally **attach files** or paste images). **Router tier** (default Reasoning) and **Max agents** are under **Setup → Tuning**.
 2. **Route** — a router classifies the task (domain / difficulty / converge|diverge) and selects the minimal archetype subset, scaled to difficulty. Each pick shows its tier, resolved model, rationale, and prior reliability weight.
 3. Optionally **edit any agent** before running — tier (a picker that resets the model fields), provider, model, API key, base URL, in/out context, cognitive mode, fleet instructions (system prompt), extra task instructions, role. Per-agent overrides take precedence over the Library tier.
 4. **Run ensemble** — the chosen archetypes spawn fresh, run **blind and in parallel** (attached files are copied into each agent's workspace), then are torn down. A **live progress log** streams every stage (route → spawn → dispatch → merge → learn) with each agent's tool calls, **narration**, and LLM usage; the log and per-agent activity are exportable and persisted.
@@ -6064,13 +6101,13 @@ Endpoints under `/fd/basna`: `route`, `execute`, session CRUD, `sessions/{id}/ru
 
 ### Vatra — the collaborative ensemble (NEW in 0.6.3)
 
-Vatra is the **collaborative sibling of Basna**, surfaced as a **compose mode on the Basna page** — a toggle between **Basna** (*independent ensemble — agents answer blind, merged by reliability*) and **Vatra** (*collaborative team — a Lead splits the work, a reporter assembles it*). The choice is remembered per browser; Vatra sessions are badged **vatra** in the run list.
+Vatra is the **collaborative sibling of Basna**. Since 0.9.1 it is a **page of its own**: **Multi-Agent → Vatra** in the full layout, **More → Agents as a team → Vatra** in the kiosk. Basna and Vatra share projects, but each page shows only its own runs. (From 0.6.3 to 0.9.0 it was a compose mode on the Basna page.)
 
 Where Basna spawns agents that each answer the *whole* task blind and then **merges** their uncorrelated outputs, Vatra runs a **team that divides the work** and collaborates as it goes:
 
 **How it works:**
 
-1. Open **Basna**, switch the compose mode to **Vatra**, and describe the task (optionally **pre-pick the archetypes** the Lead must use as owners, attach files, pick tiers / max agents).
+1. Open **Vatra**, pick a project or **New project**, click **New** and describe the task in **Task / intent** (optionally **Select team** to pre-pick the archetypes the Lead must use as owners, attach files, and set tiers / max agents under **Setup**).
 2. **Plan team** — a **Lead** decomposes the task into the smallest set of **complementary, owner-assigned subtasks**, each with a title, an owner archetype, a brief, and `depends_on` links, plus a **shared context** contract every piece must honor. The decomposition persists as a prepared session and renders in the **team plan** panel for review before anything spawns. (A fixed team is guaranteed a piece each — if the Lead misses one, a task-derived subtask is added for it.)
 3. **Run** — each subtask owner spawns fresh and works **in parallel**, but collaborates through a **shared blackboard**. An optional **intro (prep) round** lets each specialist post groundwork (facts, sources, an outline) before writing its full piece, so the team starts from shared footing.
 4. **Delegation by asking** — an owner that needs something from a teammate posts an **ask** to the board; a background **coordinator** spawns a short-lived helper to answer it. Termination is guaranteed: a per-run **ask ceiling (12)**, an **ask depth cap (2)** so an answer that itself asks can't cascade forever, and at most **3 concurrent helpers**. The live **blackboard panel** shows asks and the shared board in real time, with a **per-agent Skip** button to drop a stuck specialist's turn.
@@ -6314,8 +6351,8 @@ Agent Council is a multi-agent deliberation system where connected agents discus
 
 **How it works:**
 
-1. Navigate to **Council** in the sidebar
-2. Set a topic, select session type, verbosity level, and max rounds
+1. Navigate to **Council** in the sidebar (kiosk since 0.9.1: **More → Agents as a team → Council**), then **New session**
+2. Set a **Topic / Task**, select session type, verbosity level, and max rounds
 3. Choose the panel — **Auto-assemble** (default, NEW in 0.6.3) to have Council spawn a task-modeled team for you, or **Pick agents** to choose from your already-running agents (if Old Man is included, moderator mode activates automatically)
 4. Choose the first speaker (or random) — Pick-agents mode only
 5. Click **Start Council**
@@ -6355,7 +6392,7 @@ Agents receive context from prior rounds when speaking. A configurable memory se
 
 | Feature | Description |
 |---|---|
-| Verbosity control | Message (5 sentences), Short (3 paragraphs), Medium (5 paragraphs), Long (10 paragraphs) |
+| Verbosity control | Thought (1–2 sentences), Message (5 sentences), Short (3 paragraphs), Medium (5 paragraphs), Long (10 paragraphs) |
 | Real-time activity log | Timestamped log showing tool usage, speaking status, connections, and system events |
 | Tool activity | Shows last 3 tools used by each agent while speaking |
 | Resizable layout | 50/50 split between discussion and sidebar, drag to resize |
@@ -6791,7 +6828,7 @@ On macOS, Docker's `--network host` mode is silently ignored. Flight Deck automa
 
 ## Kiosk (Simple Layout)
 
-The **simple layout** is Flight Deck's chat-first layout: agents on the left, the chat in the middle. **Kiosk mode** locks a user into it — for people who only chat with their agents, and for shared-account machines. This section describes the kiosk as a locked user sees it. Admins and unlocked users get the same simple layout plus the active agent's files and datastore in a right-hand column, and switch to the full layout with **Cmd/Ctrl+\\** (see [The simple layout and kiosk mode](#the-simple-layout-and-kiosk-mode--new-in-080)).
+The **simple layout** is Flight Deck's chat-first layout: agents on the left, the chat in the middle. **Kiosk mode** locks a user into it — for people who only chat with their agents, and for shared-account machines. This section describes the kiosk as a locked user sees it. Admins and unlocked users get the same simple layout (since 0.9.1 without the right-hand column: the active agent's files and datastore open from **⋯ → Files & data**), and switch to the full layout with **Cmd/Ctrl+\\** (see [The simple layout and kiosk mode](#the-simple-layout-and-kiosk-mode--new-in-080)).
 
 ### Who gets kiosk mode
 
@@ -6804,6 +6841,18 @@ An admin decides in **Admin → Settings → Kiosk mode** (or the [Admin console
 **New users start in kiosk mode** pre-ticks the mark for accounts created from then on (Add user or self sign-up). `captain-claw-fd --simple-chat` (or `FD_SIMPLE_CHAT=1`) only sets the starting value (Everyone) until an admin picks a mode. The server resolves the lock per user and returns it with the user on sign-in, token refresh, `/me`, registration and device pairing; a signed-in user picks up a change on the next token refresh (within about 15 minutes) or a reload. Admins are never locked. A deck without sign-in goes by the deck-wide flag.
 
 Locked users have no full layout and no agent options beyond what this section describes. They create agents from archetypes (models and keys come from their own tier set or the team default), manage their own connections, edit their profile, and sign out cleanly (per-browser queues and plans are purged). It is a UI lock, not an API boundary. A kiosk deck needs a published team tier set (or users with tier sets of their own) and enough agent slots.
+
+### Today, the nav and the Agent store — NEW in 0.9.1
+
+- **Today** is the home when no chat is open: a greeting, **Waiting for you** (Taskboard tasks that are your move, proposals and open questions, each with its own answer buttons), **Today’s priorities** and **Handled automatically**, each with **See what happened**.
+- **The nav** above the agent list: **Today · Agents · Inbox · Tasks · People · Automations · Activity**. **Inbox** is the Line, **Tasks** the Taskboard (with the count of what needs you), **Automations** the **Scheduled tasks** window. On a phone the tiles leave out Today and Agents.
+- **Agents**: one card per agent that is up, with its picture, its live state (Ready, Working, New reply, Asleep, Starting), **Chat** or **Wake and chat**, and **Pinned**, **Shared with you** or **On this computer**, grouped and ordered like the agent list, plus an **Agent store** button.
+- **People**: everyone on your own Taskboard tasks (the deck's users left out). Search by name or email (every word must match, accents ignored), sort **Most tasks** or **Name A–Z**, filter **Pending** (**All · 1 · 2–5 · 6–9 · 10+**). A row reads "8 tasks · 3 pending · 5 done"; opening a person lists their pending tasks under a filter, else their latest five. A task opened from People opens over it and comes back to it; a Taskboard opened on one task shows "**Showing one task:**" and **Show all tasks**.
+- **New agent opens the Agent store** in a window over the layout. **Featured** shows four ready agents; **Add** opens **Add to my team** (or **Add and set up** when **Set up its way of working next** is on). **Advanced**, top right, opens the old picker with **From a file** and **Forge agents**.
+- **Under the agent list**: **Library · Data · Folders · More**. **More** has *Your agents at work* (Crew and Captain Swarm, where allowed), *Agents as a team* (**Vatra**, **Basna**, **Council**; see [docs/guide/vatra-basna-council.md](docs/guide/vatra-basna-council.md)) and *What they keep* (**Anonymize**, **Data rooms**). **Settings** has the same sections.
+- **Agent pictures**: **⋯ → Picture** — one of 30 icons, **Upload a picture** (PNG, JPEG or WebP up to 256 KB, cut to about 192 px), or **Initials**. Each member of a shared agent picks their own.
+- **The chat**: steps fold into one line ("‹Agent› worked through N steps", **See what happened**), approvals ask "Good to go?" with **Approve** / **Dismiss**, the final answer has no bubble, and the chat box has a model picker beside the effort picker ([model_switch](#model_switch--new-in-091)).
+- **Data library tables** can be edited by hand: double-click a cell, **Add row**, delete from the row panel (owner only). The File and Data libraries list your own shared folders too (**Agents & folders**).
 
 ### Agent groups — NEW in 0.8.5
 
@@ -7007,6 +7056,73 @@ The desktop app (`desktop/`, Electron; `build-desktop.sh` builds it) runs its ow
 Only a deck with sign-in off, `FD_DESKTOP=1` (the app sets it) and a loopback bind opens these routes; every other deck without sign-in still refuses Google and Microsoft. Tokens are kept for the local user, not in the deployment-wide keys.
 
 ---
+
+## Anonymization — NEW in 0.9.1
+
+Private data out of a text, a file, a folder or a web page, into tokens like `⟦PERSON_1⟧` (`⟦ORG_1:2⟧` is another spelling of `⟦ORG_1⟧`), with the real values in an encrypted vault per case on Flight Deck. **The step-by-step guide is [docs/guide/anonymization.md](docs/guide/anonymization.md)**; this is the reference.
+
+- **Where:** **Anonymize** — kiosk **Settings → What they keep → Anonymize** or **More → Anonymize**; full layout **Files → Anonymize**. Tabs **Anonymize**, **Put back**, **Vaults**, **Privacy gate**. Files and folders in **Shared folders** and the **File library** have their own **Anonymize**. Admins: **Admin console → Settings → Anonymization** (the trusted model, **Check on samples**) and **Name recognition** (an optional local name pack; needs `transformers` and `torch`).
+- **Lanes:** code (patterns, checksums, labels, legal forms, the vault's known values, link and file-name spellings) always; the admin's trusted model (`Code + trusted model`, the default when there is one) for bare names and descriptions. The model only finds spans; one engine replaces and re-checks up to three rounds, and fails closed.
+- **Modes:** **In a vault** (reversible) or **Keep nothing** (one way), with **Make them coarser** (date of birth → year, address → city, ages and amounts → ranges).
+- **Files:** `.docx`, `.xlsx`, `.pptx` are edited inside the file and keep their format; text, CSV and JSON stay as they are; PDF and HTML come back as Markdown; pictures aren't changed. Up to 25 MB a file.
+- **Privacy gate:** per person, off by default. **What it covers**: **Sources I pick** (Mail, Chats, Calendar, Contacts, Files with optional folders, Data tables, Memory) or **The whole chat** (your messages, every tool result, memory and recall notes; not the system prompt). **For which agents**: **On an untrusted model** (default) or **Every agent**. Vault **Chat**; **Reset the chat vault**. Mail and WhatsApp sends get the real values back before they leave.
+- **Agents:** the [`anonymize`](#anonymize--new-in-091) tool. **Captain for Chrome** 0.3.0: **Anonymize this page** / right-click **Anonymize with Captain**, vault = the site's host name.
+- **Storage:** `anonymize.db` in the FD data dir; each vault's key sealed with the deck's data key; values, spellings, history and vault names encrypted. Sends and returns in the token history are kept 180 days (the line that added a token always stays).
+
+| Variable | Default | What it does |
+|---|---|---|
+| `FD_ANONYMIZE_PROVIDER` | none | The trusted model's provider (the same list as the card). Needs `FD_ANONYMIZE_MODEL` too. |
+| `FD_ANONYMIZE_MODEL` | none | The trusted model |
+| `FD_ANONYMIZE_BASE_URL` | the provider's usual | Its address |
+| `FD_ANONYMIZE_API_KEY` | none | Its key |
+| `FD_ANONYMIZE_ATTESTED` | off | `1`, `true` or `yes`: you vouch for a model that isn't local |
+| `FD_ANONYMIZE_ON_FAILURE` | `refuse` | `refuse`, or `deterministic` (code only, marked) |
+| `FD_ANONYMIZE_MODEL_TIMEOUT` | `600` | Seconds for one call to the trusted model |
+| `FD_ANONYMIZE_MODEL_MAX_TOKENS` | `32000` | The trusted model's answer limit |
+| `FD_ANONYMIZE_MODEL_NUM_CTX` | the smallest of 8K, 16K or 32K the call fits | Ollama only: the context the model is loaded with (2048 or more) |
+| `FD_ANONYMIZE_MODEL_THINK` | `off` | The trusted model's thinking: `off`, `low`, `medium`, `high`, `on`, or `model` (the model's own setting) |
+| `CLAW_ANONYMIZE_GATE_TIMEOUT` | `1800` | Read by agents, not by Flight Deck: seconds one privacy-gate check may take |
+
+## Data Rooms — NEW in 0.9.1
+
+A virtual data room (a ZIP or a folder) anonymized into one vault, checked, reviewed and released to Claude through its own MCP connector, **Captain Data Rooms** (`https://<deck>/fd/mcp-rooms`, OAuth sign-in with a consent screen that picks rooms). Claude's results come back through the same connector and are restored on the deck for the room's owner only. **The step-by-step guide is [docs/guide/data-rooms.md](docs/guide/data-rooms.md)**; this is the reference.
+
+- **Where:** **Data rooms** — kiosk **Settings → What they keep** or **More**; full layout **Files → Data rooms**. A room's rail: **Files**, **Add files**, **Names to hide**, **Roles**, **Same party?**; **From Claude**, **Tasks for Claude**, **Claude's activity**, **Download for Claude**. The bar: **Run** / **Run new files** / **Check again**, **Release N**, delete, fullscreen.
+- **Input:** ZIPs (25 MB by default, 3,000 entries, 500 MB unpacked, one level of nested ZIPs) or a folder (**A folder in Files**, or for admins **On the deck's machine**; up to 3,000 files). Every file up to 25 MB. Word, Excel, PowerPoint anonymized inside the file (pictures replaced by a "picture removed" box, their OCR text kept); PDF text layers kept and scans OCR'd; pictures OCR'd; old formats (`.doc`, `.xls`, `.ppt`, `.msg` …) listed as **Can't be read**.
+- **The run:** **Anonymizing files** → **Naming folders** → **Final sweep** (up to 3 rounds with every name the room knows) → **Checking for leftovers** (blocks a file that still holds a real value). **Stop** stops at once; a run resumes after a deck restart. **Not a name here** keeps a flagged word; **Check again** re-checks done files.
+- **Review:** the file viewer (real names ↔ as Claude reads it; workbooks as sheets), **Roles**, **Same party?** (code's score, a slider, **Same for all N** / **Not the same for all N**), file descriptions (one line, paragraph, summary, keywords, topics), **Release N**.
+- **Results:** **From Claude** (read **Real names** / **As Claude wrote it**, download Word, Excel, PowerPoint or text; Croatian case endings fixed by the trusted model), **Tasks for Claude** (your own words, anonymized first), **Download for Claude** (a ZIP with `FILES.md` for a Claude Project).
+
+| Setting | Default | What it does |
+|---|---|---|
+| `FD_PUBLIC_URL` | none | The deck's public HTTPS address. The connector address and the sign-in addresses Claude is given are built from it. Without it, a proxy's `X-Forwarded-Proto` and `X-Forwarded-Host` are used, else the address the request came to. |
+| `FD_JWT_SECRET` | none | A stable secret. The connector's sign-in tokens are signed with it. |
+| `FD_ALLOWED_HOSTS` | none | Only when people reach the deck by another name than `FD_PUBLIC_URL`'s host. |
+| `FD_ROOMS_MAX_ZIP_MB` | `25` | The biggest ZIP you can add to a room. |
+| `FD_ROOMS_DESCRIBE_CHARS` | `16000` | How much of one file the trusted model reads to describe it. |
+| `FD_DATA_DIR` | the deck's data folder | Where `rooms.db` and each room's files (`rooms/<id>/`) live. |
+| `FD_DATA_KEY_FILE` | `<FD home>/data_key` | The deck's data key. Rooms can't be made without it. |
+| `FD_ANONYMIZE_*` | none | A trusted model from the environment. See the [Anonymization guide](docs/guide/anonymization.md). |
+
+**Claude's tools** (the connector serves only these, and only the released, clean files of the rooms the sign-in allowed):
+
+| Tool | What it does |
+|---|---|
+| `room_list` | The rooms this connector may read: id, codename, files released, tasks waiting. Claude calls it first. |
+| `room_overview` | One room: each token's role, its folders, file kinds, size and main topics. |
+| `room_list_files` | The released files (of one folder, if asked): path, kind, characters, pages and a one-line description. |
+| `room_find_files` | The files about something, best first: ranked by their descriptions, keywords and topics, then by their text. Tokens work. |
+| `room_file_summaries` | A paragraph, a summary, keywords and topics for up to 20 files. |
+| `room_read` | One file, page by page (about 50,000 characters a page). Word, Excel, PowerPoint and PDF come as markdown. |
+| `room_search` | Passages that match, with the file and the page to read. Words, numbers and tokens work. |
+| `room_get_file` | A released file itself (the anonymized copy, up to 10 MB), for Claude to open with code. |
+| `room_deliver` | A result as markdown in tokens. About 20,000 characters a call; longer goes in parts. |
+| `room_deliver_document` | A Word document, built on the deck from markdown. |
+| `room_deliver_workbook` | An Excel workbook, built on the deck from sheets, rows, formulas, formats and charts. |
+| `room_deliver_deck` | A PowerPoint deck, built on the deck from slides with titles, bullets, tables, charts and notes. |
+| `room_deliver_file` | A file Claude made itself (Word, Excel, PowerPoint, markdown, text, CSV or JSON), as base64. |
+| `room_tasks` | The tasks you left in a room, in tokens. |
+| `room_get_delivery` | One of Claude's earlier deliveries, in tokens, page by page: the context a task refers to. |
 
 ## Deck Administration — NEW in 0.8.1
 

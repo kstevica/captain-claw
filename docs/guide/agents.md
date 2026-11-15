@@ -18,9 +18,18 @@ Mix providers freely — each session independently selects its model.
 | LiteRT (on-device) | `.litertlm` Gemma models running locally via an isolated subprocess worker |
 | OpenRouter | 200+ models via meta-router |
 
-## 79 built-in tools
+## 81 built-in tools
 
 Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), Microsoft 365 (Outlook mail, Calendar, OneDrive), Jev calibrated judgments (TypeSafe AI), Soniox speech in and out (`audio`), public file links, topic switching by asking (`sessions`), a read-only Telegram inbox, the StopWatch's background picture, bill payments (opt-in), WhatsApp file delivery, intentions (proactive future actions), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), Basna (read and start multi-agent ensemble runs), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
+
+New in 0.9.1:
+
+| Tool | What it does |
+|---|---|
+| `anonymize` | Takes private data out of a file, a folder in your shared folders, a web page or text: names, companies, addresses, emails, phones, IBANs, ID numbers and more become tokens like `⟦PERSON_1⟧`, and the real values stay encrypted in a vault on Flight Deck. The tool reads `path` and `url` itself, so the original never reaches the agent's model; `restore` writes a file for the person and is never shown to the model (refused on automated turns). See the [Anonymization guide](anonymization.md). |
+| `model_switch` | Reads or changes the model the agent runs on, among its own provider's models (same key, same endpoint): `get` lists them with what each is for and costs, `set` switches this conversation (`scope: setting`) or only the rest of the turn (`turn`). Works from every channel; on its own initiative only when its owner allows it. |
+
+That makes **81 built-in tools** per agent (80 in the desktop app, which has no Captain Swarm).
 
 New in 0.9.0:
 
@@ -34,7 +43,7 @@ New in 0.9.0:
 | `course` | The goals the agent's work is for (the deck's, its owner's and its own): `view`, `link` work to a goal, `report` progress, `propose` a goal or a change, which waits for the owner on their Line. It never marks a goal done. Owner's turns only. |
 | `image_manipulation` | Resizes, crops, rotates, combines, overlays, watermarks, annotates, animates, splits and converts pictures (png, jpg, webp, gif, bmp, tiff, ico, avif, pdf) in-process, with about 45 operations and no model or network. Inputs are never changed. Always on. |
 
-That makes **79 built-in tools** per agent (78 in the desktop app, which has no Captain Swarm).
+That made **79 built-in tools** per agent (78 in the desktop app).
 
 New in 0.8.10:
 
