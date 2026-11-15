@@ -418,13 +418,17 @@ async def _execute_and_judge(
             # Also send the nudge to the owner's own channels — the ones they
             # switched on (the agent turn already surfaces it in web chat).
             if output:
+                from captain_claw.flight_deck.line import agent_name
                 from captain_claw.flight_deck.owner_notify import notify_owner, nudge_texts, task_of
                 name = str(agent.get("name") or agent.get("slug") or "").strip()
                 # With the link to its task on the Taskboard, when it is about one
                 # (off this loop: the board's lock can be held for a while).
                 said, bell_body = nudge_texts(await asyncio.to_thread(task_of, action), output)
+                # ``source``: this agent's chat has the nudge already (its turn) —
+                # when it is the user's Line agent, the Line doesn't post it there again.
                 await notify_owner(user_id, "nudge", said, cfg=cfg, action_id=str(aid), device_text=output,
-                                   bell=("autonomy_nudge", f"Nudge from {name}" if name else "Nudge", bell_body))
+                                   bell=("autonomy_nudge", f"Nudge from {name}" if name else "Nudge", bell_body),
+                                   source=agent_name(str(agent.get("slug") or "")))
             # If this nudge was reminding about a tracked follow-up, re-arm it
             # (escalate: sooner each time) — or retire it after enough nudges.
             fu_id = str((action.get("payload") or {}).get("follow_up_id") or "")

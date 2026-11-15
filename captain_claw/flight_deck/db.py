@@ -5142,14 +5142,15 @@ class FlightDeckDB:
 
     async def add_notification(
         self, user_id: str, type: str, title: str, body: str = "",
-        ref_type: str = "", ref_id: str = "",
+        ref_type: str = "", ref_id: str = "", *, source: str = "",
     ) -> str:
-        """Insert one notification for `user_id`; returns its id."""
+        """Insert one notification for `user_id`; returns its id. `source`: the
+        agent it came from, by name — the Line doesn't hand it back to that agent."""
         from captain_claw.flight_deck.line import classify
 
         assert self._db is not None
         kind, needs_you, trust = classify(type, ref_type)
-        nid = await self.add_line_item(user_id, kind, type, title, body, needs_you=needs_you,
+        nid = await self.add_line_item(user_id, kind, type, title, body, source=source, needs_you=needs_you,
                                        ref_type=ref_type, ref_id=ref_id, trust=trust)
         await self._db.execute(
             "INSERT INTO notifications (id, user_id, type, title, body,"
