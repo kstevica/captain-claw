@@ -379,6 +379,18 @@ export const setAgentModelSwitch = (kind: 'process' | 'docker', id: string, enab
     body: JSON.stringify({ enabled }),
   })
 
+/** Eco mode: compact instructions and a small set of tools. `locked` says why
+ *  it stays on whatever the switch says ("nano", "config"; "" when the switch
+ *  decides). Applies from its next message. */
+export const getAgentEcoMode = (kind: 'process' | 'docker', id: string) =>
+  fdFetch<{ enabled: boolean; locked?: string }>(`/agent-eco-mode/${kind}/${id}`)
+
+export const setAgentEcoMode = (kind: 'process' | 'docker', id: string, enabled: boolean) =>
+  fdFetch<{ ok: boolean; enabled: boolean }>(`/agent-eco-mode/${kind}/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  })
+
 /** Tool search (captain_claw/tool_search.py): past budget_tokens of tool
  *  descriptions per message, rarely used tools load on demand. Full mode only —
  *  `eco` says eco mode is on, which keeps its own smaller set. Applies from
