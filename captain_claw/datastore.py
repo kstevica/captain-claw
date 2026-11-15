@@ -274,6 +274,9 @@ class TableInfo:
     updated_at: str = ""
     created_by: str = ""          # PR C: "" = the agent's owner, else a member's FD id
     created_by_name: str = ""     # name snapshot of that member
+    # The table's UNIQUE key (the upsert conflict target), [] when it has none.
+    # Shown to the model so it reaches for upsert instead of insert-then-retry.
+    unique: list[str] = field(default_factory=list)
 
 
 # ── DatastoreManager ─────────────────────────────────────────────────
@@ -799,6 +802,7 @@ class DatastoreManager:
                 name=name, columns=columns, row_count=row_count,
                 created_at=created_at, updated_at=updated_at,
                 created_by=created_by or "", created_by_name=created_by_name or "",
+                unique=await self._unique_columns_safe(internal),
             ))
         return tables
 
@@ -818,7 +822,50 @@ class DatastoreManager:
             updated_at=meta[1] if meta else "",
             created_by=(meta[2] or "") if meta else "",
             created_by_name=(meta[3] or "") if meta else "",
+            unique=await self._unique_columns_safe(internal),
         )
+
+    async def unique_key(self, table_name: str) -> list[str]:
+        """The table's UNIQUE key columns ([] when it has none)."""
+        _safe, internal = await self._resolve_table(table_name)
+        return await self._unique_columns(internal)
+
+    async def existing_keys(
+        self, table_name: str, key_columns: list[str], keys: list[tuple],
+    ) -> set[tuple]:
+        """Which of *keys* (tuples over *key_columns*) already have a row."""
+        _safe, internal = await self._resolve_table(table_name)
+        assert self._db is not None
+        cols = [self._safe_name(k) for k in key_columns]
+        match = " AND ".join(f'"{c}" IS ?' for c in cols)
+        found: set[tuple] = set()
+        for key in dict.fromkeys(keys):
+            if any(v is None for v in key):
+                continue  # NULL never collides with a UNIQUE key
+            async with self._db.execute(
+                f'SELECT 1 FROM "{internal}" WHERE {match} LIMIT 1', list(key),
+            ) as cur:
+                if await cur.fetchone():
+                    found.add(key)
+        return found
+
+    async def rows_with_values(
+        self, table_name: str, values: dict[str, Any], limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Up to *limit* rows (``_id`` + every column) whose columns equal *values*."""
+        safe, internal = await self._resolve_table(table_name)
+        assert self._db is not None
+        cols = [c.name for c in await self._table_columns(safe)]
+        if not values:
+            return []
+        match = " AND ".join(f'"{self._safe_name(k)}" IS ?' for k in values)
+        select = ", ".join(['"_id"', *(f'"{c}"' for c in cols)])
+        async with self._db.execute(
+            f'SELECT {select} FROM "{internal}" WHERE {match} LIMIT {int(limit)}',
+            list(values.values()),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(zip(["_id", *cols], r)) for r in rows]
 
     async def create_table(
         self, name: str, columns: list[dict[str, str]],
@@ -1746,21 +1793,75 @@ class DatastoreManager:
                 return cols
         return []
 
+    async def _unique_columns_safe(self, internal: str) -> list[str]:
+        """:meth:`_unique_columns` for listings — a broken table lists without one."""
+        try:
+            return await self._unique_columns(internal)
+        except Exception:
+            return []
+
     async def upsert_rows(
         self, table_name: str, rows: list[dict[str, Any]],
         key_columns: list[str] | None = None,
+        report: dict[str, Any] | None = None,
     ) -> int:
-        """Insert rows, but UPDATE an existing row on the table's UNIQUE key instead
-        of duplicating it (idempotent — a resumed run re-running the same items just
-        refreshes them). Needs a unique key: create the table with unique=[...], or
-        pass key_columns. Returns the number of rows written."""
+        """Insert rows, but UPDATE an existing row on its key instead of
+        duplicating it (idempotent — a resumed run re-running the same items just
+        refreshes them). The key is the table's UNIQUE key; a table without one
+        matches on *key_columns*. Returns the number of rows written; *report*,
+        when given, is filled with ``keys``, ``inserted``, ``updated``,
+        ``unchanged`` and ``note`` (a line about a key that was corrected)."""
         actor = current_actor()
         async with self._writing():
-            return await self._upsert_rows(actor, table_name, rows, key_columns)
+            return await self._upsert_rows(actor, table_name, rows, key_columns, report)
+
+    async def _upsert_keys(
+        self, safe: str, internal: str, col_names: set[str],
+        key_columns: list[str] | None, rows: list[Any],
+    ) -> tuple[list[str], bool, str | None]:
+        """``(keys, on_conflict, note)`` for an upsert.
+
+        A table with a UNIQUE key always matches on it — it is the only
+        conflict target SQLite accepts, and naming a different `key` used to
+        die on "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE
+        constraint", which a model then answered with more guesses. A table
+        without one matches on the `key` the call names (``on_conflict`` False:
+        look the row up, then UPDATE or INSERT)."""
+        unique = await self._unique_columns(internal)
+        asked = [self._safe_name(str(k)) for k in (key_columns or []) if str(k).strip()]
+        unknown = [k for k in asked if k not in col_names]
+        if unique:
+            if not asked or set(asked) == set(unique):
+                return unique, True, None
+            have_unique = all(
+                isinstance(r, dict) and all(
+                    {self._safe_name(str(k)): v for k, v in r.items()}.get(u) is not None
+                    for u in unique)
+                for r in rows)
+            if not have_unique:
+                raise ValueError(
+                    f"`key` {asked} is not the unique key of '{safe}' — upsert matches "
+                    f"rows on its unique key ({', '.join(unique)}), and not every row "
+                    f"carries it. Send {', '.join(unique)} in every row and drop `key`.")
+            return unique, True, (
+                f"(`key` {', '.join(asked)} is not this table's unique key; matched rows "
+                f"on the unique key **{', '.join(unique)}** instead. Omit `key` next time.)")
+        if unknown:
+            raise ValueError(
+                f"`key` names {', '.join(unknown)}, which "
+                f"{'is not a column' if len(unknown) == 1 else 'are not columns'} of "
+                f"'{safe}'. Columns: {', '.join(sorted(col_names))}.")
+        if not asked:
+            example = next(iter(sorted(col_names)), "col")
+            raise ValueError(
+                f"'{safe}' has no unique key, so upsert can't tell which rows already "
+                f"exist. Re-send the same call with `key` naming the column(s) that "
+                f"identify a row, e.g. \"key\": \"{example}\".")
+        return asked, False, None
 
     async def _upsert_rows(
         self, actor: DatastoreActor, table_name: str, rows: list[dict[str, Any]],
-        key_columns: list[str] | None,
+        key_columns: list[str] | None, report: dict[str, Any] | None = None,
     ) -> int:
         safe, internal = await self._resolve_table(table_name)
         assert self._db is not None
@@ -1772,14 +1873,8 @@ class DatastoreManager:
         columns = await self._table_columns(safe)
         col_names = {c.name for c in columns}
 
-        keys = [self._safe_name(k) for k in (key_columns or [])]
-        keys = [k for k in keys if k in col_names]
-        if not keys:
-            keys = await self._unique_columns(internal)
-        if not keys:
-            raise ValueError(
-                "upsert needs a unique key — create the table with a unique key "
-                "(create_table with unique=[\"<col>\"]) or pass key_columns.")
+        keys, on_conflict, key_note = await self._upsert_keys(
+            safe, internal, col_names, key_columns, rows)
 
         stamp = await self._ensure_system_columns(internal, actor)
         # Worst-case (all inserts) row-limit guard.
@@ -1793,6 +1888,7 @@ class DatastoreManager:
         # Validate every row first; a member's call is refused as a whole when
         # any row would overwrite a row someone else added (J3).
         prepared: list[dict[str, Any]] = []
+        keyless: list[int] = []
         for i, row in enumerate(rows):
             if not isinstance(row, dict):
                 raise ValueError(
@@ -1801,12 +1897,22 @@ class DatastoreManager:
             filtered = {self._safe_name(k): v for k, v in row.items() if self._safe_name(k) in col_names}
             if not filtered:
                 continue
-            for k in keys:
-                if k not in filtered:
-                    raise ValueError(f"upsert row {i} is missing key column '{k}'")
+            if any(filtered.get(k) is None for k in keys):
+                keyless.append(i)
+                continue
             prepared.append(filtered)
+        if keyless:
+            # Name every row at once — one retry, not one per row. A row with
+            # no key can never be matched again, so a re-run would duplicate it.
+            shown = ", ".join(str(i) for i in keyless[:15]) + (" …" if len(keyless) > 15 else "")
+            key_txt = ", ".join(keys)
+            raise ValueError(
+                f"{len(keyless)} of {len(rows)} row(s) have no value for {key_txt} — "
+                f"the key upsert matches rows on (row index {shown}, counting from 0). "
+                f"Nothing was written. Give those rows a {key_txt}, or send them in a "
+                f"separate call with action=insert and upsert the rest.")
+        match = " AND ".join(f'"{k}" = ?' for k in keys)
         if actor.kind == "member":
-            match = " AND ".join(f'"{k}" = ?' for k in keys)
             for filtered in prepared:
                 async with self._db.execute(
                     f'SELECT "_created_by" FROM "{internal}" WHERE {match}',
@@ -1818,17 +1924,21 @@ class DatastoreManager:
 
         left = await self._member_bytes_left(actor)
         defaults = await self._default_bytes(internal) if left is not None else {}
-        written = 0
+        written = inserted = updated = unchanged = 0
         for filtered in prepared:
             col_list = list(filtered.keys())
             values = list(filtered.values())
             conflict = ", ".join(f'"{k}"' for k in keys)
             update_cols = [c for c in col_list if c not in keys]
+            key_vals = [filtered[k] for k in keys]
+            async with self._db.execute(
+                f'SELECT COUNT(*) FROM "{internal}" WHERE {match}', key_vals,
+            ) as cur:
+                exists = ((await cur.fetchone()) or [0])[0] > 0
             if left is not None:
                 # An insert stores the row; an update of the member's own
                 # row stores the difference in its updated columns.
                 grow = self._member_row_bytes(values)
-                match = " AND ".join(f'"{k}" = ?' for k in keys)
                 n, old = await self._stored_bytes(
                     internal, update_cols, f"WHERE {match}", [filtered[k] for k in keys])
                 if n:
@@ -1838,11 +1948,37 @@ class DatastoreManager:
                 left -= grow
                 if left < 0:
                     raise MemberDeniedError(DS_MEMBER_STORAGE_LIMIT)
+            if exists:
+                if update_cols:
+                    updated += 1
+                else:
+                    unchanged += 1
+            else:
+                inserted += 1
+            if not on_conflict and exists:
+                # No UNIQUE index to conflict on: update the matching row(s) in
+                # place. User columns only: the row keeps its creator.
+                if update_cols:
+                    set_clause = ", ".join(f'"{c}" = ?' for c in update_cols)
+                    params = [filtered[c] for c in update_cols] + key_vals
+                    scope = ""
+                    if actor.kind == "member":
+                        scope = ' AND "_created_by" = ?'
+                        params.append(actor.user_id)
+                    await self._db.execute(
+                        f'UPDATE "{internal}" SET {set_clause} WHERE {match}{scope}', params)
+                written += 1
+                continue
             if stamp:
                 col_list += list(SYSTEM_COLUMNS)
                 values += [actor.user_id, actor.name]
             placeholders = ", ".join("?" for _ in col_list)
             col_clause = ", ".join(f'"{c}"' for c in col_list)
+            if not on_conflict:
+                await self._db.execute(
+                    f'INSERT INTO "{internal}" ({col_clause}) VALUES ({placeholders})', values)
+                written += 1
+                continue
             if update_cols:
                 # User columns only: a conflicting row keeps its creator.
                 set_clause = ", ".join(f'"{c}" = excluded."{c}"' for c in update_cols)
@@ -1863,6 +1999,9 @@ class DatastoreManager:
                 "UPDATE _ds_tables SET updated_at = ? WHERE name = ?",
                 (self._now(), safe))
             await self._db.commit()
+        if report is not None:
+            report.update(keys=keys, inserted=inserted, updated=updated,
+                          unchanged=unchanged, note=key_note)
         return written
 
     async def update_rows(
@@ -2504,14 +2643,28 @@ class DatastoreManager:
             raise ValueError("CSV has no headers")
 
         headers = self._dedup_headers([self._safe_name(h) for h in reader.fieldnames])
-        if budget is None:
-            all_rows = list(reader)
-        else:
-            all_rows = []
-            for row in reader:
-                all_rows.append(row)
-                if len(all_rows) > budget:
-                    raise MemberDeniedError(DS_MEMBER_ROW_LIMIT)
+        all_rows = []
+        ragged: list[tuple[int, int]] = []   # (line, field count) of over-long rows
+        for row in reader:
+            if None in row:
+                # More fields than the header — almost always a comma inside an
+                # unquoted value. DictReader files the extras under the key
+                # None, which used to crash the import with "'NoneType' object
+                # has no attribute 'strip'" and nothing to go on.
+                extra = row.get(None) or []
+                ragged.append((reader.line_num, len(reader.fieldnames) + len(extra)))
+            all_rows.append(row)
+            if budget is not None and len(all_rows) > budget:
+                raise MemberDeniedError(DS_MEMBER_ROW_LIMIT)
+        if ragged:
+            where = ", ".join(f"line {ln} ({n} fields)" for ln, n in ragged[:10])
+            more = f" and {len(ragged) - 10} more" if len(ragged) > 10 else ""
+            raise ValueError(
+                f"{file_path.name}: the header has {len(reader.fieldnames)} columns but "
+                f"{len(ragged)} row(s) have more fields — {where}{more}. Usually a value "
+                "contains a comma and isn't wrapped in double quotes. Quote those values "
+                '(e.g. "Zagreb, Croatia") or fix those lines, then import again. '
+                "Nothing was imported.")
         await self._member_import_bytes(
             actor, headers, ([v for k, v in r.items() if k is not None] for r in all_rows))
 

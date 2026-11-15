@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from captain_claw import speaker as _speaker
 from captain_claw.config import get_config
 from captain_claw.datastore import (
     DS_PROJECT_MEMBER,
+    DatastoreManager,
     MemberDeniedError,
     ProtectedError,
     get_datastore_manager,
@@ -213,10 +215,309 @@ def _normalize_arg_aliases(action: str, kwargs: dict[str, Any]) -> str | None:
         kwargs["set_values"] = sv[0]
         renamed.append("unwrapped `set_values` from a single-item array")
 
+    # `value` is update_column's parameter; on `update` a model that sends an
+    # object there means set_values (one observed call: "'set_values' is
+    # required" with the values sitting under `value`).
+    if action == "update" and kwargs.get("set_values") in (None, ""):
+        val = kwargs.get("value")
+        if isinstance(val, str) and val.strip().startswith("{"):
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, TypeError):
+                val = None
+        if isinstance(val, dict) and val:
+            kwargs["set_values"] = val
+            kwargs.pop("value", None)
+            renamed.append("`value` → `set_values`")
+
+    # A row id sent as its own argument instead of inside `where`. On update
+    # this is the dangerous slip: `{"_id": 9, "set_values": {...}}` has no
+    # filter at all, so it reaches EVERY row (one observed call was stopped
+    # only by the unique key on the column it was also changing).
+    if action in ("update", "delete", "query") and kwargs.get("where") in (None, "", {}):
+        for k in ("_id", "id"):
+            if kwargs.get(k) not in (None, ""):
+                kwargs["where"] = {k: kwargs.pop(k)}
+                renamed.append(f"top-level `{k}` → `where`")
+                break
+
     if not renamed:
         return None
     return ("(Adjusted arguments: " + "; ".join(renamed)
             + ". Use the documented parameter names next time.)")
+
+
+# ── action aliases ───────────────────────────────────────────────────
+#
+# "Unknown action: sql_query" cost one agent a turn after it had already
+# recovered from a missing `table`. These are the names a model reaches for;
+# each maps to exactly one action, so the rename is never a guess.
+_ACTION_ALIASES: dict[str, str] = {
+    "sql_query": "sql", "raw_sql": "sql", "select_sql": "sql", "run_sql": "sql",
+    "select": "query", "find": "query", "search": "query", "get": "query",
+    "read": "query", "query_table": "query", "select_rows": "query",
+    "insert_rows": "insert", "insert_row": "insert", "add_rows": "insert", "add_row": "insert",
+    "upsert_rows": "upsert", "upsert_row": "upsert", "insert_or_update": "upsert",
+    "merge": "upsert",
+    "update_rows": "update", "update_row": "update",
+    "delete_rows": "delete", "delete_row": "delete", "remove_rows": "delete",
+    "list": "list_tables", "tables": "list_tables", "show_tables": "list_tables",
+    "describe_table": "describe", "schema": "describe",
+    "create": "create_table",
+    "import": "import_file", "import_csv": "import_file", "import_xlsx": "import_file",
+    "export_table": "export",
+}
+
+
+def _normalize_action(action: str) -> tuple[str, str | None]:
+    raw = str(action or "").strip()
+    low = raw.lower()
+    if low in _ACTION_ALIASES:
+        canon = _ACTION_ALIASES[low]
+        return canon, f'(Used action="{canon}" for "{raw}".)'
+    return low, None
+
+
+# ── `id` → `_id` ─────────────────────────────────────────────────────
+#
+# Every table's row id is `_id`. Models write `id` — "Unknown column: id" and
+# "no such column: id" were two of one agent's six datastore failures, each a
+# wasted turn. When the table has no column called `id`, `id` can only mean
+# `_id`, so map it.
+
+def _map_id(name: Any) -> Any:
+    if not isinstance(name, str):
+        return name
+    s = name.strip()
+    if s.lower() == "id":
+        return "_id"
+    if s.lower() == "-id":
+        return "-_id"
+    return name
+
+
+def _apply_id_alias(kwargs: dict[str, Any]) -> bool:
+    """Rewrite `id` to `_id` in columns / where / order_by. True if anything moved."""
+    moved = False
+    cols = kwargs.get("columns")
+    if cols is not None and not isinstance(cols, list):
+        try:
+            cols = _parse_columns(cols)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            cols = None
+    if isinstance(cols, list):
+        mapped = [_map_id(c) for c in cols]
+        if mapped != cols:
+            kwargs["columns"] = mapped
+            moved = True
+    where = kwargs.get("where")
+    if isinstance(where, dict):
+        key = next((k for k in where if isinstance(k, str) and k.lower() == "id"), None)
+        if key is not None and "_id" not in where:
+            kwargs["where"] = {("_id" if k == key else k): v for k, v in where.items()}
+            moved = True
+    order = kwargs.get("order_by")
+    if order:
+        parts = order if isinstance(order, list) else str(order).split(",")
+        mapped = [_map_id(str(p).strip()) for p in parts if str(p).strip()]
+        if mapped != [str(p).strip() for p in parts if str(p).strip()]:
+            kwargs["order_by"] = mapped
+            moved = True
+    return moved
+
+
+_SQL_STRING_RE = re.compile(r"('(?:[^']|'')*')")
+
+
+def _sql_sub(sql: str, pattern: str, repl: str) -> str:
+    """re.sub on the SQL code only — never inside a '...' literal."""
+    parts = _SQL_STRING_RE.split(sql)
+    parts[::2] = [re.sub(pattern, repl, code, flags=re.IGNORECASE) for code in parts[::2]]
+    return "".join(parts)
+
+
+_COLUMN_TYPES = ("text", "integer", "real", "boolean", "date", "datetime", "json")
+
+
+def _columns_from_names(columns: list[Any]) -> tuple[list[Any], str | None]:
+    """Turn bare column names ("title", "price real", "id:integer") into
+    {"name", "type"} objects; objects pass through untouched."""
+    if not any(isinstance(c, str) for c in columns):
+        return columns, None
+    out: list[Any] = []
+    for c in columns:
+        if not isinstance(c, str):
+            out.append(c)
+            continue
+        parts = [p for p in re.split(r"[\s:]+", c.strip()) if p]
+        if len(parts) == 2 and parts[1].lower() in _COLUMN_TYPES:
+            out.append({"name": parts[0], "type": parts[1].lower()})
+        else:
+            out.append({"name": c.strip(), "type": "text"})
+    return out, ("(Read plain column names as columns — untyped ones are text. Send "
+                 '[{"name": "col", "type": "integer"}] to choose types.)')
+
+
+def _unique_note(info: Any) -> str:
+    """` · unique key: email (upsert by it)` for a listing line, "" without one."""
+    unique = list(getattr(info, "unique", []) or [])
+    if not unique:
+        return ""
+    return f" · unique key: {', '.join(unique)} (upsert adds or updates by it)"
+
+
+def _columns_hint(info: Any) -> str:
+    cols = ", ".join(["_id", *(c.name for c in info.columns)])
+    return f"Columns of {info.name}: {cols} (the row id is `_id`)."
+
+
+# ── unique-key clashes ───────────────────────────────────────────────
+
+def _safe_row(row: Any) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    return {DatastoreManager._safe_name(str(k)): v for k, v in row.items()}
+
+
+async def _unknown_columns_note(dm: Any, table: str, rows: list[Any]) -> str | None:
+    """Columns in *rows* that the table doesn't have. They are dropped on
+    write — say so, rather than let "Inserted 5 row(s)" read as all of it."""
+    try:
+        info = await dm.describe_table(table)
+    except Exception:
+        return None
+    known = {c.name for c in info.columns}
+    extra: dict[str, None] = {}
+    for r in rows:
+        if isinstance(r, dict):
+            for k in r:
+                if DatastoreManager._safe_name(str(k)) not in known:
+                    extra[str(k)] = None
+    if not extra:
+        return None
+    names = ", ".join(f"`{k}`" for k in list(extra)[:10])
+    return (f"(Not stored — {info.name} has no column {names}. Add it with "
+            "action=add_column first if it matters.)")
+
+
+async def _unique_clashes(
+    dm: Any, table: str, unique: list[str], rows: list[Any],
+) -> list[tuple[int, tuple, str]]:
+    """``(row index, key, "exists" | "repeat")`` for each row that would break
+    the unique key: its key is already in the table, or an earlier row of the
+    same call has it."""
+    keyed: list[tuple | None] = []
+    for r in rows:
+        sr = _safe_row(r)
+        key = tuple(sr.get(u) for u in unique)
+        keyed.append(None if not sr or any(v is None for v in key) else key)
+    existing = await dm.existing_keys(table, unique, [k for k in keyed if k is not None])
+    seen: set[tuple] = set()
+    clash: list[tuple[int, tuple, str]] = []
+    for i, k in enumerate(keyed):
+        if k is None:
+            continue
+        if k in existing:
+            clash.append((i, k, "exists"))
+        elif k in seen:
+            clash.append((i, k, "repeat"))
+        seen.add(k)
+    return clash
+
+
+def _key_text(unique: list[str], key: tuple) -> str:
+    vals = [json.dumps(v, ensure_ascii=False, default=str) for v in key]
+    if len(unique) == 1:
+        return vals[0]
+    return "(" + ", ".join(f"{c}={v}" for c, v in zip(unique, vals)) + ")"
+
+
+def _clash_list(unique: list[str], clash: list[tuple[int, tuple, str]], limit: int = 10) -> str:
+    items = [f"{_key_text(unique, k)} (row {i}{', repeated in this call' if why == 'repeat' else ''})"
+             for i, k, why in clash[:limit]]
+    more = f" … and {len(clash) - limit} more" if len(clash) > limit else ""
+    return ", ".join(items) + more
+
+
+def _insert_clash_error(table: str, unique: list[str], clash: list[tuple[int, tuple, str]],
+                        total: int) -> str:
+    key = ", ".join(unique)
+    fresh = total - len(clash)
+    return (
+        f"Nothing was inserted: {len(clash)} of {total} row(s) clash with the unique key "
+        f"**{key}** of **{table}** — {key} {_clash_list(unique, clash)} (rows counted from 0). "
+        f"Re-send the SAME call with one change: "
+        f'"on_conflict": "skip" inserts the other {fresh} and leaves the existing rows as they '
+        f'are; "action": "upsert" inserts the new ones and overwrites the existing rows with '
+        f"these values.")
+
+
+_UNIQUE_FAIL_RE = re.compile(r"UNIQUE constraint failed: (.+)$")
+
+
+def _row_label(row: dict[str, Any]) -> str:
+    """`_id 12 (org: Acme, name: Ivan)` — enough to recognise a row."""
+    bits: list[str] = []
+    for k, v in row.items():
+        if k == "_id" or v in (None, ""):
+            continue
+        s = str(v)
+        bits.append(f"{k}: {s if len(s) <= 40 else s[:37] + '…'}")
+        if len(bits) == 3:
+            break
+    return f"_id {row.get('_id')}" + (f" ({', '.join(bits)})" if bits else "")
+
+
+async def _integrity_error(
+    dm: Any, table: str, exc: Exception, set_values: dict[str, Any] | None,
+) -> str:
+    """SQLite's "UNIQUE constraint failed: ds_t.col", said in terms of rows."""
+    m = _UNIQUE_FAIL_RE.search(str(exc))
+    if not m:
+        return str(exc)
+    cols = [p.strip().split(".", 1)[-1] for p in m.group(1).split(",")]
+    key = ", ".join(cols)
+    sv = _safe_row(set_values) if set_values else {}
+    if sv and all(c in sv for c in cols):
+        holders = []
+        if _speaker.current() is None:
+            # The owner may see the row that holds the value; a member may
+            # not (it can be someone else's row).
+            try:
+                holders = await dm.rows_with_values(table, {c: sv[c] for c in cols}, limit=2)
+            except Exception:
+                pass
+        value = _key_text(cols, tuple(sv[c] for c in cols))
+        if _speaker.current() is not None:
+            return (f"Nothing was changed: another row already has {key} = {value}, and "
+                    f"{key} is the unique key of **{table}**. Drop {key} from set_values "
+                    "to change this row's other fields.")
+        if holders:
+            return (
+                f"Nothing was changed: {key} = {value} already belongs to row "
+                f"{_row_label(holders[0])} in **{table}**, and {key} is the table's unique "
+                f"key, so two rows can't share it. If that row is the one you mean, update it "
+                f'instead ("where": {{"_id": {holders[0].get("_id")}}}); to change only the '
+                f"other fields of this row, drop {key} from set_values.")
+        return (
+            f"Nothing was changed: this update would give more than one row {key} = {value}, "
+            f"and {key} is the unique key of **{table}**. Narrow `where` to one row, or drop "
+            f"{key} from set_values.")
+    return (f"Nothing was written: it would repeat a value of **{key}**, the unique key of "
+            f"**{table}**. Use action=upsert to update the existing row instead, or "
+            f'"on_conflict": "skip" on insert to leave it alone.')
+
+
+async def _sql_columns_hint(dm: Any, sql: str) -> str:
+    """The columns of every table the SQL names — what a "no such column" needs."""
+    try:
+        tables = await dm.list_tables()
+    except Exception:
+        return "The row id column is `_id`."
+    named = [t for t in tables if re.search(rf"\b{re.escape(t.name)}\b", sql, re.IGNORECASE)]
+    if not named:
+        return "The row id column is `_id`."
+    return " ".join(_columns_hint(t) for t in named[:4])
 
 
 # ── `table` pre-flight ───────────────────────────────────────────────
@@ -512,9 +813,13 @@ class DatastoreTool(Tool):
         "Create tables, insert/upsert/update/delete rows, query with filters, "
         "run raw SELECT queries, import/export CSV or XLSX files, and "
         "manage data protection rules. "
+        "Every row has an automatic id column named `_id`. "
         "Use `upsert` (with a table created with a `unique` key) for idempotent "
         "writes — re-running the same item updates its row instead of duplicating it, "
-        "which is what makes resumable/continued runs safe. "
+        "which is what makes resumable/continued runs safe. To add rows that may "
+        "already be there, use `upsert` (new rows added, existing ones updated) or "
+        '`insert` with "on_conflict": "skip" (existing ones left alone) — never '
+        "query first to find the new ones. "
         "Actions: list_tables, describe, create_table, drop_table, rename_table, "
         "add_column, rename_column, drop_column, change_column_type, "
         "insert, upsert, update, update_column, delete, query, sql, import_file, export, "
@@ -571,8 +876,19 @@ class DatastoreTool(Tool):
             "key": {
                 "type": "string",
                 "description": (
-                    "For upsert: the unique column(s) to match on. JSON array or "
-                    "comma-separated. Optional if the table was created with a `unique` key."
+                    "For upsert: the column(s) that identify a row. JSON array or "
+                    "comma-separated. Omit it when the table has a unique key — upsert "
+                    "always matches on that. Needed only for a table without one."
+                ),
+            },
+            "on_conflict": {
+                "type": "string",
+                "enum": ["error", "skip", "update"],
+                "description": (
+                    "For insert into a table with a unique key, when some rows may "
+                    'already exist: "skip" inserts only the new rows and leaves existing '
+                    'ones untouched; "update" overwrites them (same as action=upsert). '
+                    'Default "error": nothing is inserted and the clashing rows are named.'
                 ),
             },
             "column": {
@@ -617,7 +933,8 @@ class DatastoreTool(Tool):
                     '{"id": [{"op": ">=", "value": 370}, {"op": "<=", "value": 379}]}. '
                     'Never two "id" keys in one object (JSON keeps only the last, so the '
                     'other bound is silently lost). A list of plain values means IN: '
-                    '{"id": [1, 2, 3]}.'
+                    '{"id": [1, 2, 3]}. One row by its id: {"_id": 9}. update and delete '
+                    'REQUIRE `where`; to touch every row send {"_all": true}.'
                 ),
             },
             "order_by": {
@@ -671,6 +988,7 @@ class DatastoreTool(Tool):
     }
 
     async def execute(self, action: str, **kwargs: Any) -> ToolResult:
+        action, action_note = _normalize_action(action)
         session_id = str(kwargs.get("_session_id", "") or "").strip() or None
         # `project` targets ANOTHER run's datastore, READ-ONLY (reference / prior-
         # knowledge folders). Omitted → this run's own shared store.
@@ -719,12 +1037,32 @@ class DatastoreTool(Tool):
 
         # Recover or explain a missing `table` before the action handlers see
         # it (see _INFERABLE_TABLE_ACTIONS above). Mutates kwargs["table"].
+        # action=query carrying SQL: `query` reads `table`/`where`/`columns`
+        # and used to drop the SQL without a word — the WHERE in it vanished
+        # and the whole table came back (seen three times on one deck).
+        route_note = None
+        if (action == "query" and kwargs.get("sql_query")
+                and not kwargs.get("where") and not kwargs.get("columns")):
+            action = "sql"
+            route_note = '(Ran this as action="sql" — `query` takes `where`/`columns`, not SQL.)'
+
         table_note, table_error = await self._preflight_table(dm, action, kwargs, session_id)
         if table_error is not None:
             log.warning("Datastore tool result", action=action, success=False,
                         error=table_error.error)
             return table_error
-        notes = [n for n in (alias_note, where_note, table_note) if n]
+
+        id_note = None
+        if action in ("query", "update", "delete", "export") and kwargs.get("table"):
+            try:
+                info = await dm.describe_table(kwargs["table"])
+            except Exception:
+                info = None  # the handler reports a missing table
+            if info is not None and not any(c.name == "id" for c in info.columns) \
+                    and _apply_id_alias(kwargs):
+                id_note = "(Used `_id` for `id` — every table's row id column is `_id`.)"
+        notes = [n for n in (action_note, alias_note, where_note, route_note,
+                             table_note, id_note) if n]
 
         try:
             if action == "list_tables":
@@ -785,7 +1123,16 @@ class DatastoreTool(Tool):
             )
         except Exception as e:
             log.error("Datastore tool error", action=action, error=str(e))
-            result = ToolResult(success=False, error=str(e))
+            msg = str(e)
+            if msg.startswith("Unknown column") and kwargs.get("table"):
+                # Name the columns that DO exist — the retry is then one call.
+                try:
+                    msg = f"{msg}. {_columns_hint(await dm.describe_table(kwargs['table']))}"
+                except Exception:
+                    pass
+            elif isinstance(e, sqlite3.IntegrityError) and kwargs.get("table"):
+                msg = await _integrity_error(dm, str(kwargs["table"]), e, None)
+            result = ToolResult(success=False, error=msg)
         if member and not result.success and result.error:
             # Never a host path in a member's error (G-C4).
             result.error = _member_safe_text(result.error)
@@ -871,7 +1218,7 @@ class DatastoreTool(Tool):
         for t in tables:
             cols = ", ".join(f"{c.name} ({c.col_type})" for c in t.columns)
             lines.append(f"- **{t.name}** ({t.row_count} rows): {cols}"
-                         + DatastoreTool._table_creator_note(t))
+                         + _unique_note(t) + DatastoreTool._table_creator_note(t))
         return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod
@@ -895,8 +1242,15 @@ class DatastoreTool(Tool):
             lines.append("Created by: you" if created_by == p.speaker_id
                          else f"Created by: {name}")
         lines.append("\nColumns:")
+        lines.append("  - _id (integer, the row id — set automatically)")
         for c in info.columns:
             lines.append(f"  - {c.name} ({c.col_type})")
+        unique = list(getattr(info, "unique", []) or [])
+        if unique:
+            lines.append(
+                f"\nUnique key: {', '.join(unique)} — no two rows share it. To add rows that "
+                "may already exist, use action=upsert (adds new, updates existing) or insert "
+                'with "on_conflict": "skip" (adds new, leaves existing alone).')
         return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod
@@ -906,17 +1260,23 @@ class DatastoreTool(Tool):
             return ToolResult(success=False, error="'table' is required for create_table.")
         if not columns_raw:
             return ToolResult(success=False, error="'columns' is required for create_table.")
-        columns = _parse_json_str(columns_raw, "columns")
+        if isinstance(columns_raw, str) and not columns_raw.strip().startswith("["):
+            columns = [c.strip() for c in columns_raw.split(",") if c.strip()]
+        else:
+            columns = _parse_json_str(columns_raw, "columns")
         if not isinstance(columns, list):
             return ToolResult(success=False, error="'columns' must be a JSON array.")
+        # Plain names — ["id", "name"] or "title text" — are what a model
+        # writes when it isn't thinking about types. Take them as columns.
+        columns, typed_note = _columns_from_names(columns)
         unique = _parse_columns(unique_raw)
         info = await dm.create_table(table, columns, unique=unique)
         col_names = ", ".join(c.name for c in info.columns)
         uniq_note = f" · unique key: {', '.join(unique)}" if unique else ""
-        return ToolResult(
-            success=True,
-            content=f"Created table **{info.name}** with columns: {col_names}{uniq_note}",
-        )
+        content = f"Created table **{info.name}** with columns: {col_names}{uniq_note}"
+        if typed_note:
+            content = f"{typed_note}\n{content}"
+        return ToolResult(success=True, content=content)
 
     @staticmethod
     async def _upsert(dm: Any, kwargs: dict[str, Any]) -> ToolResult:
@@ -934,8 +1294,24 @@ class DatastoreTool(Tool):
         if not isinstance(rows, list):
             return ToolResult(success=False, error="'rows' must be a JSON array of objects.")
         key_columns = _parse_columns(kwargs.get("key"))
-        count = await dm.upsert_rows(table, rows, key_columns=key_columns)
-        return ToolResult(success=True, content=f"Upserted {count} row(s) into **{table}** (insert-or-update on the unique key).")
+        unknown = await _unknown_columns_note(dm, table, rows)
+        report: dict[str, Any] = {}
+        count = await dm.upsert_rows(table, rows, key_columns=key_columns, report=report)
+        keys = ", ".join(report.get("keys") or []) or "its key"
+        # Say what happened, so the model doesn't spend a query checking.
+        parts = []
+        if report.get("inserted"):
+            parts.append(f"{report['inserted']} inserted")
+        if report.get("updated"):
+            parts.append(f"{report['updated']} updated")
+        if report.get("unchanged"):
+            parts.append(f"{report['unchanged']} already there (nothing to change)")
+        detail = f": {', '.join(parts)}" if parts else ""
+        content = f"Upserted {count} row(s) into **{table}** on **{keys}**{detail}."
+        lead = [n for n in (report.get("note"), unknown) if n]
+        if lead:
+            content = "\n".join([*lead, content])
+        return ToolResult(success=True, content=content)
 
     @staticmethod
     async def _drop_table(dm: Any, table: str | None) -> ToolResult:
@@ -1022,8 +1398,48 @@ class DatastoreTool(Tool):
         rows = _parse_json_str(rows_raw, "rows")
         if not isinstance(rows, list):
             return ToolResult(success=False, error="'rows' must be a JSON array of objects.")
-        count = await dm.insert_rows(table, rows)
-        return ToolResult(success=True, content=f"Inserted {count} row(s) into **{table}**.")
+
+        on_conflict = str(kwargs.get("on_conflict") or "").strip().lower()
+        if on_conflict in ("update", "upsert", "replace", "overwrite"):
+            kwargs["rows"] = rows
+            res = await DatastoreTool._upsert(dm, kwargs)
+            if res.success:
+                res.content = f'(on_conflict="update": ran as an upsert.)\n{res.content}'
+            return res
+        if on_conflict not in ("", "error", "fail", "skip", "ignore"):
+            return ToolResult(success=False, error=(
+                f'on_conflict must be "skip" (leave existing rows alone), "update" '
+                f'(overwrite them — same as action=upsert) or "error", got "{on_conflict}".'))
+
+        unknown = await _unknown_columns_note(dm, table, rows)
+        # A table with a unique key: find the rows that already exist BEFORE
+        # writing. The old answer was SQLite's bare "UNIQUE constraint failed:
+        # ds_leads.email" with nothing inserted — the model then queried the
+        # table to work out which rows clashed and re-sent the rest, two or
+        # three calls for what one sentence can say.
+        skipped_note = None
+        unique = await dm.unique_key(table)
+        if unique:
+            clash = await _unique_clashes(dm, table, unique, rows)
+            if clash:
+                if on_conflict in ("skip", "ignore"):
+                    drop = {i for i, _k, _why in clash}
+                    rows = [r for i, r in enumerate(rows) if i not in drop]
+                    skipped_note = (f"Skipped {len(clash)} row(s) whose {', '.join(unique)} is "
+                                    f"already in the table: {_clash_list(unique, clash)}.")
+                else:
+                    return ToolResult(success=False, error=_insert_clash_error(
+                        table, unique, clash, len(rows)))
+        try:
+            count = await dm.insert_rows(table, rows) if rows else 0
+        except sqlite3.IntegrityError as e:
+            return ToolResult(success=False, error=await _integrity_error(dm, table, e, None))
+        content = f"Inserted {count} row(s) into **{table}**."
+        if skipped_note:
+            content += " " + skipped_note
+        if unknown:
+            content = f"{unknown}\n{content}"
+        return ToolResult(success=True, content=content)
 
     @staticmethod
     async def _update(dm: Any, kwargs: dict[str, Any]) -> ToolResult:
@@ -1036,10 +1452,25 @@ class DatastoreTool(Tool):
             return ToolResult(success=False, error=_missing_payload_error(
                 "update", "set_values", kwargs,
                 '{"action": "update", "table": "%s", "set_values": {"col": "value"}, '
-                '"where": {"id": 1}}' % (table or "your_table")))
+                '"where": {"_id": 1}}' % (table or "your_table")))
         set_values = _parse_json_str(set_raw, "set_values")
         where = _parse_json_str(where_raw, "where") if where_raw else None
-        count = await dm.update_rows(table, set_values, where)
+        if not where:
+            # `delete` has always demanded a filter; `update` used to change
+            # every row when the filter went missing (a stray top-level `_id`
+            # is the usual way it goes missing). Same rule now: say so.
+            info = await dm.describe_table(table)
+            if info.row_count > 1:
+                return ToolResult(success=False, error=(
+                    f"Nothing was changed: an update with no `where` would change ALL "
+                    f"{info.row_count} rows of **{info.name}**. To change one row, add "
+                    f'`where`, e.g. "where": {{"_id": 9}}. To really change every row, '
+                    f're-send with "where": {{"_all": true}}.'))
+        try:
+            count = await dm.update_rows(table, set_values, where)
+        except sqlite3.IntegrityError as e:
+            return ToolResult(success=False, error=await _integrity_error(
+                dm, table, e, set_values if isinstance(set_values, dict) else None))
         return ToolResult(success=True, content=f"Updated {count} row(s) in **{table}**.")
 
     @staticmethod
@@ -1123,8 +1554,34 @@ class DatastoreTool(Tool):
         # the structured call that would have worked.
         if not re.match(r"^\s*SELECT\b", str(sql_query), re.IGNORECASE):
             return ToolResult(success=False, error=_sql_write_error(str(sql_query)))
-        result = await dm.raw_select(sql_query)
+        sql_query = str(sql_query)
+        fixes: list[str] = []
+        # Postgres habits SQLite doesn't have. LIKE is already case-insensitive
+        # (for ASCII), so ILIKE → LIKE keeps the meaning.
+        fixed = _sql_sub(sql_query, r"\bILIKE\b", "LIKE")
+        if fixed != sql_query:
+            sql_query = fixed
+            fixes.append("`ILIKE` → `LIKE` (SQLite's LIKE ignores case)")
+        try:
+            result = await dm.raw_select(sql_query)
+        except Exception as e:
+            msg = str(e)
+            # `id` where the row id is `_id`: only retried when SQLite itself
+            # says no `id` exists, so nothing that worked can change meaning.
+            if re.search(r"no such column: (\w+\.)?id$", msg, re.IGNORECASE):
+                retry = _sql_sub(sql_query, r"\bid\b", "_id")
+                try:
+                    result = await dm.raw_select(retry)
+                except Exception:
+                    raise ValueError(f"{msg}. {await _sql_columns_hint(dm, sql_query)}") from e
+                fixes.append("`id` → `_id` (the row id column)")
+            elif "no such column" in msg.lower():
+                raise ValueError(f"{msg}. {await _sql_columns_hint(dm, sql_query)}") from e
+            else:
+                raise
         content = _format_table(result["columns"], result["rows"], result.get("total"))
+        if fixes:
+            content = f"(Adjusted the SQL: {'; '.join(fixes)}.)\n{content}"
         if _speaker.current() is not None:
             content = COMMONS_DATA_NOTE + "\n" + content
         elif result["rows"]:
