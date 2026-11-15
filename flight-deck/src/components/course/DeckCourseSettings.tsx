@@ -89,11 +89,13 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
   }
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 space-y-4">
-      <div className="flex items-start gap-2">
-        <SlidersHorizontal className="mt-0.5 h-4 w-4 shrink-0 text-violet-400" />
+    <div className="fd-card space-y-4 p-4 wide:p-5">
+      <div className="flex items-start gap-3">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[0.7rem] bg-[var(--fd-accent-soft)] text-[var(--fd-accent-text)]">
+          <SlidersHorizontal className="h-4 w-4" />
+        </span>
         <div>
-          <h3 className="text-sm font-semibold text-zinc-200">Course: horizons, limits, suggestions and checks</h3>
+          <h3 className="text-sm font-semibold text-zinc-100">Course: horizons, limits, suggestions and checks</h3>
           <p className="text-xs text-zinc-500 mt-0.5">
             Which horizons each level uses, and how many active goals a horizon may hold at each level.
             Clearing a row switches goals off at that level.
@@ -141,7 +143,7 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
                         aria-label={`Most active ${HORIZON_LABELS[h].toLowerCase()} goals`}
                         value={draft.caps[h]}
                         onChange={(e) => setCap(h, Number(e.target.value))}
-                        className="w-14 rounded-md border border-zinc-800 bg-zinc-950 px-1.5 py-1 text-center text-zinc-200 focus:border-violet-500 focus:outline-none"
+                        className="w-14 rounded-lg border border-zinc-800 bg-zinc-950 px-1.5 py-1 text-center text-zinc-200 focus:border-violet-500 focus:outline-none"
                       />
                     </td>
                   ))}
@@ -164,14 +166,14 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
                   Each agent, at most
                   <input type="number" min={weekRange[0]} max={weekRange[1]} value={draft.proposals.agent_per_week}
                     onChange={(e) => setProposals({ agent_per_week: Number(e.target.value) })}
-                    className="w-14 rounded-md border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-center text-zinc-200" />
+                    className="w-14 rounded-lg border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-center text-zinc-200" />
                   a week
                 </label>
                 <label className="flex items-center gap-1.5">
                   Flight Deck, at most
                   <input type="number" min={weekRange[0]} max={weekRange[1]} value={draft.proposals.deck_per_week}
                     onChange={(e) => setProposals({ deck_per_week: Number(e.target.value) })}
-                    className="w-14 rounded-md border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-center text-zinc-200" />
+                    className="w-14 rounded-lg border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-center text-zinc-200" />
                   a week for each person
                 </label>
               </div>
@@ -201,7 +203,7 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
             <button
               onClick={save}
               disabled={saving || !dirty || badCap || badWeek}
-              className="rounded-md bg-violet-600 px-3 py-1.5 text-xs text-white hover:bg-violet-500 disabled:opacity-50"
+              className="fd-btn-primary h-9 px-4 text-sm disabled:pointer-events-none disabled:opacity-50"
             >
               {saving ? 'Saving…' : 'Save'}
             </button>
@@ -209,7 +211,7 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
               <button
                 onClick={() => { setDraft(saved); setError(null) }}
                 disabled={saving}
-                className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800"
+                className="fd-btn-quiet h-9 px-4 text-sm"
               >
                 Revert
               </button>
@@ -221,10 +223,10 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
       ) : null}
 
       {notice && (
-        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">{notice}</div>
+        <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/[0.07] px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">{notice}</div>
       )}
       {error && (
-        <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">{error}</div>
+        <div className="rounded-xl border border-red-500/25 bg-red-500/[0.07] px-3 py-2 text-xs text-red-700 dark:text-red-300">{error}</div>
       )}
     </div>
   )

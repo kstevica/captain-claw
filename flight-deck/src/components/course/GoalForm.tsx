@@ -14,6 +14,8 @@ import {
 } from '../../services/course'
 
 const SCOPE_TAG: Record<Scope, string> = { instance: 'Deck', user: 'You', agent: 'This agent' }
+const SAVE_KEYS = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ Enter' : 'Ctrl + Enter'
+const SCOPE_FOR: Record<Scope, string> = { instance: 'for the whole deck', user: 'for you', agent: 'for this agent' }
 
 // The form for a new goal, or an edit of one. `allowed` is the horizons the
 // admin lets this scope use; an existing goal keeps its own even when it was
@@ -58,20 +60,41 @@ export function GoalForm({
       ? cur.parent_id : '',
   }))
 
-  const input = 'w-full rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500 focus:outline-none'
-  const label = 'mb-1 flex items-baseline justify-between text-[11px] font-medium uppercase tracking-wider text-zinc-500'
-  const counter = (n: number, cap: number) => (
-    <span className={`normal-case tracking-normal ${n > cap ? 'text-red-500' : 'text-zinc-600'}`}>{n}/{cap}</span>
-  )
+  const input = 'w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 transition-colors focus:border-violet-500/60 focus:outline-none focus:ring-2 focus:ring-violet-500/15'
+  const label = 'mb-1.5 flex items-baseline justify-between gap-2 text-xs font-medium text-zinc-400'
+  // The count shows once it matters: near the limit, or past it.
+  const counter = (n: number, cap: number) => (n >= cap * 0.8
+    ? <span className={`tabular-nums ${n > cap ? 'text-red-500' : 'text-zinc-500'}`}>{n}/{cap}</span>
+    : null)
+  const submit = () => { if (!missing && !tooLong && !badTarget && !saving) onSave(d) }
 
   return (
     <form
-      className="space-y-3 rounded-lg border border-violet-500/30 bg-zinc-900/60 p-3"
-      onSubmit={(e) => { e.preventDefault(); if (!missing && !tooLong && !badTarget) onSave(d) }}
+      className="space-y-4 rounded-[var(--fd-radius-card)] border border-violet-500/30 bg-[var(--fd-surface)] p-4 shadow-[0_0_0_4px_rgba(139,92,246,0.06)] wide:p-5"
+      onSubmit={(e) => { e.preventDefault(); submit() }}
+      onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit() } }}
     >
+      <div className="flex items-baseline gap-2">
+        <span className="text-sm font-semibold text-zinc-100">
+          {submitLabel ? 'Edit, then accept' : selfId ? 'Edit goal' : 'New goal'}
+        </span>
+        <span className="text-xs text-zinc-500">{SCOPE_FOR[scope]}</span>
+      </div>
+
+      <label className="block">
+        <span className={label}><span>Goal</span>{counter(len(d.title), caps.title)}</span>
+        <input
+          className={`${input} h-11 text-[15px] font-medium`}
+          value={d.title}
+          autoFocus
+          onChange={(e) => setD({ ...d, title: e.target.value })}
+          placeholder={strategic ? 'e.g. Be the bookkeeping partner small firms trust most' : 'e.g. Launch EU pricing'}
+        />
+      </label>
+
       <div>
         <div className={label}>Horizon</div>
-        <div className="flex flex-wrap gap-1" role="radiogroup" aria-label="Horizon">
+        <div className="inline-flex max-w-full flex-wrap rounded-full border border-[var(--fd-line)] p-0.5" role="radiogroup" aria-label="Horizon">
           {horizons.map((h) => (
             <button
               key={h}
@@ -80,34 +103,23 @@ export function GoalForm({
               aria-checked={d.horizon === h}
               onClick={() => setHorizon(h)}
               disabled={!allowed.includes(h) && h !== d.horizon}
-              className={`rounded-md border px-2.5 py-1 text-xs ${d.horizon === h
-                ? 'border-violet-500 bg-violet-600/20 text-violet-300'
-                : 'border-zinc-800 text-zinc-400 hover:bg-zinc-800'}`}
+              className={`h-8 rounded-full px-3 text-xs font-medium transition-colors disabled:opacity-40 ${d.horizon === h
+                ? 'bg-[var(--fd-accent-soft)] text-[var(--fd-accent-text)]'
+                : 'text-zinc-500 hover:text-zinc-200'}`}
             >
               {HORIZON_LABELS[h]}
             </button>
           ))}
         </div>
-        <p className="mt-1 text-[11px] text-zinc-500">
+        <p className="mt-1.5 text-xs text-zinc-500">
           {HORIZON_HINTS[d.horizon]}
           {!allowed.includes(d.horizon) && ' This level no longer uses it: move the goal to another horizon.'}
         </p>
       </div>
 
       <label className="block">
-        <span className={label}>Goal {counter(len(d.title), caps.title)}</span>
-        <input
-          className={input}
-          value={d.title}
-          autoFocus
-          onChange={(e) => setD({ ...d, title: e.target.value })}
-          placeholder={strategic ? 'e.g. Be the bookkeeping partner small firms trust most' : 'e.g. Launch EU pricing'}
-        />
-      </label>
-
-      <label className="block">
         <span className={label}>
-          How you’ll know it’s done{strategic ? ' (optional)' : ''} {counter(len(d.success), caps.success)}
+          <span>How you’ll know it’s done{strategic ? ' (optional)' : ''}</span>{counter(len(d.success), caps.success)}
         </span>
         <textarea
           className={input}
@@ -119,7 +131,7 @@ export function GoalForm({
       </label>
 
       <label className="block">
-        <span className={label}>Why it matters (optional) {counter(len(d.detail), caps.detail)}</span>
+        <span className={label}><span>Why it matters (optional)</span>{counter(len(d.detail), caps.detail)}</span>
         <textarea
           className={input}
           rows={2}
@@ -161,7 +173,7 @@ export function GoalForm({
             </>
           )}
         </div>
-        <p className="mt-1 text-[11px] text-zinc-500">
+        <p className="mt-1.5 text-xs text-zinc-500">
           {d.metric_kind === 'manual' ? 'You enter the current value on the goal; it fills the progress bar toward the target.'
             : d.metric_kind === 'taskboard_done' ? 'Counts the tasks in Tasks tied to this goal and done since it went on your course.'
               : d.metric_kind === 'link_count' ? 'Counts the work linked to this goal: tasks, plans, Autonomous Work, scheduled tasks.'
@@ -205,19 +217,19 @@ export function GoalForm({
       </div>
 
       {error && (
-        <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">{error}</div>
+        <div className="rounded-xl border border-red-500/25 bg-red-500/[0.07] px-3 py-2 text-xs text-red-700 dark:text-red-300">{error}</div>
       )}
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--fd-line)] pt-4">
+        <span className="mr-auto hidden text-[11px] text-zinc-500 [@media(pointer:fine)]:inline">{SAVE_KEYS} to save</span>
+        <button type="button" onClick={onCancel} disabled={saving} className="fd-btn-quiet h-9 px-4 text-sm disabled:opacity-50">
+          Cancel
+        </button>
         <button
           type="submit"
           disabled={saving || missing || tooLong || badTarget}
-          className="rounded-md bg-violet-600 px-3 py-1.5 text-xs text-white hover:bg-violet-500 disabled:opacity-50"
+          className="fd-btn-primary h-9 px-4 text-sm disabled:pointer-events-none disabled:opacity-50"
         >
           {saving ? 'Saving…' : submitLabel ?? (selfId ? 'Save goal' : 'Add goal')}
-        </button>
-        <button type="button" onClick={onCancel} disabled={saving}
-          className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800">
-          Cancel
         </button>
       </div>
     </form>

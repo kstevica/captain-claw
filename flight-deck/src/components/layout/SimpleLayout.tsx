@@ -1413,9 +1413,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       {locked && connectionsOpen && <KioskConnectionsDialog initialTab={connectionsTab} onClose={() => setConnectionsOpen(false)} />}
       {locked && profileOpen && <KioskProfileDialog onClose={() => setProfileOpen(false)} />}
       {locked && courseOpen && (
-        <KioskDialog label="Course" widest onClose={() => setCourseOpen(false)}>
-          <CoursePage kiosk />
-        </KioskDialog>
+        <KioskWideDialog label="Course" phone={isMobile} widest onClose={() => setCourseOpen(false)}>
+          <CoursePage kiosk onClose={() => setCourseOpen(false)} />
+        </KioskWideDialog>
       )}
       {peopleOpen && (
         <KioskWideDialog label="People" phone={isMobile} onClose={() => setPeopleOpen(false)}>
