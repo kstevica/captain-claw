@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { MessageCircleQuestion, Send, X, ShieldAlert } from 'lucide-react'
+import { MessageCircleQuestion, Send, X, ShieldAlert, ShieldCheck, Check } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { asksApi, type AskQuestion, type OpenAsk } from '../../services/asksApi'
 import { Dialog, Button, Notice, inputCls } from '../console/parts'
@@ -135,6 +135,65 @@ function AskDialog({ ask, onDone }: { ask: OpenAsk; onDone: () => void }) {
   )
 }
 
+// An approval card: an agent wants to pay, send, post, share, delete or store a
+// password (approvals.py). One click answers it; the choices come from the
+// question, so "Ask every time" offers only Allow once and Don't allow.
+const DENY = "Don't allow"
+
+function ApprovalDialog({ ask, onDone }: { ask: OpenAsk; onDone: () => void }) {
+  const q = ask.questions[0]
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState('')
+  const [left, setLeft] = useState(ask.seconds_left)
+  useEffect(() => {
+    const timer = window.setInterval(() => setLeft((s) => Math.max(0, s - 1)), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const pick = async (choice: string) => {
+    setBusy(choice)
+    setError('')
+    try {
+      await asksApi.answer(ask.id, { answers: { [q.id]: choice } })
+      onDone()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed')
+      setBusy('')
+    }
+  }
+  const allows = (q.choices || []).filter((c) => c !== DENY)
+  const mins = Math.floor(left / 60)
+  const timeLeft = left <= 0 ? 'time is up' : mins >= 1 ? `${mins} min to decide` : `${left} s to decide`
+  return (
+    <Dialog title={q.question} icon={ShieldCheck} onClose={onDone} keepOpen closable={false} wide footer={<>
+      <Button variant="ghost" icon={X} busy={busy === DENY} disabled={!!busy} onClick={() => pick(DENY)}>{DENY}</Button>
+    </>}>
+      <div className="space-y-4">
+        <p className="text-sm leading-relaxed text-zinc-500">
+          {ask.agent_name || 'Your agent'} is waiting for you before it does this
+          {ask.detail?.kind_label ? <> ({ask.detail.kind_label.toLowerCase()})</> : null} · {timeLeft}.
+        </p>
+        {error && <Notice tone="red">{error}</Notice>}
+        {(ask.detail?.summary || q.help) && (
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-xl border border-zinc-800 bg-zinc-950/60 px-4 py-3 font-mono text-sm leading-relaxed text-zinc-200">
+            {ask.detail?.summary || q.help}
+          </pre>
+        )}
+        <div className="flex flex-col gap-2">
+          {allows.map((c, i) => (
+            <Button key={c} variant={i === 0 ? 'primary' : 'secondary'} icon={Check} busy={busy === c}
+              disabled={!!busy} onClick={() => pick(c)}>{c}</Button>
+          ))}
+        </div>
+        <p className="text-xs leading-relaxed text-zinc-500">
+          {allows.length > 1
+            ? '“Always allow here” lasts for this agent until you remove it in Profile. Not allowing it stops this step; the agent tells you what it was about to do.'
+            : 'This deck asks every time for this. Not allowing it stops this step; the agent tells you what it was about to do.'}
+        </p>
+      </div>
+    </Dialog>
+  )
+}
+
 export function PersonAsks() {
   const signedIn = useAuthStore((s) => s.authEnabled === false || !!s.user)
   const [asks, setAsks] = useState<OpenAsk[]>([])
@@ -162,6 +221,9 @@ export function PersonAsks() {
   const done = useCallback((id: string) => setAsks((now) => now.filter((a) => a.id !== id)), [])
   const current = signedIn ? asks[0] : undefined
   if (!current) return null
+  if (current.source === 'approval' && current.questions.length === 1) {
+    return <ApprovalDialog key={current.id} ask={current} onDone={() => done(current.id)} />
+  }
   return (
     <AskDialog key={current.id} ask={current} onDone={() => done(current.id)} />
   )
