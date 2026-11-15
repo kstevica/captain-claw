@@ -98,6 +98,7 @@ KIND_LABELS: dict[str, str] = {
     "line": "your Line",
     "colleague": "a colleague (another of your owner's agents) on your owner's Taskboard",
     "inbox": "an email that came to you",
+    "custom_tool": "a custom tool",
     "unknown": "an automation",
 }
 
