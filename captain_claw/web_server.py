@@ -1557,6 +1557,36 @@ class WebServer:
             self._last_active_at = time.time()
         return web.json_response({"busy": busy, "last_active_at": self._last_active_at})
 
+    # ── Its browser: watch, take control, hand back (tools/browser_live.py) ──
+
+    async def _browser_live(self, request: web.Request) -> web.Response:
+        from captain_claw.tools import browser_live
+
+        return web.json_response(await browser_live.frame(), headers={"Cache-Control": "no-store"})
+
+    async def _browser_control(self, request: web.Request) -> web.Response:
+        from captain_claw.tools import browser_live
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if body.get("take"):
+            return web.json_response(browser_live.take(str(body.get("by") or "")))
+        return web.json_response(await browser_live.give_back())
+
+    async def _browser_input(self, request: web.Request) -> web.Response:
+        from captain_claw.tools import browser_live
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+        out = await browser_live.person_input(
+            str(body.get("kind") or ""), x=body.get("x"), y=body.get("y"), text=str(body.get("text") or ""),
+            key=str(body.get("key") or ""), dy=float(body.get("dy") or 0))
+        return web.json_response(out, status=200 if out.get("ok") else 409)
+
     async def get_config_summary(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_config import get_config_summary
         return await get_config_summary(self, request)
@@ -3288,6 +3318,9 @@ class WebServer:
         app.router.add_delete("/api/instructions/{name}", self.revert_instruction)
         app.router.add_get("/api/config", self.get_config_summary)
         app.router.add_get("/api/activity", self._get_activity)
+        app.router.add_get("/api/browser/live", self._browser_live)
+        app.router.add_post("/api/browser/control", self._browser_control)
+        app.router.add_post("/api/browser/input", self._browser_input)
         app.router.add_get("/api/settings/schema", self._get_settings_schema)
         app.router.add_get("/api/settings", self._get_settings_values)
         app.router.add_put("/api/settings", self._put_settings)

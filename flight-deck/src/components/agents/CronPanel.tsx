@@ -242,7 +242,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
                     <p className="whitespace-pre-wrap break-words text-sm text-zinc-200">{taskDesc(job)}</p>
                     {job.last_status && (
                       <div className="mt-1 text-[11px] text-zinc-500">
-                        last: {job.last_status}
+                        last: {job.last_status === 'no_action' ? 'did nothing' : job.last_status}
                         {job.last_run_at ? ` (${relTime(job.last_run_at)})` : ''}
                         {job.last_error ? <span className="text-red-600 dark:text-red-400/80"> — {job.last_error}</span> : null}
                       </div>

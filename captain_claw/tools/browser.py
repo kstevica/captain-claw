@@ -42,6 +42,38 @@ log = get_logger(__name__)
 # call _register_default_tools and replace the global registry entry).
 _BROWSER_SESSIONS: dict[str, BrowserSession] = {}
 _WORKFLOW_RECORDERS: dict[str, WorkflowRecorder] = {}
+
+
+# Secrets the person typed (request_secret), per browser session, while they
+# live: every result of the session is scrubbed of them (a page, a captured
+# request or a script may show one again after it was typed).
+_SECRET_ACTIONS = frozenset({"type", "form_input"})
+_SESSION_SECRETS: dict[str, list[tuple[str, float]]] = {}
+
+
+def _remember_session_secret(session_key: str, value: str) -> None:
+    from captain_claw.flight_deck.secrets_store import TTL_S
+
+    now = time.time()
+    kept = [(v, t) for v, t in _SESSION_SECRETS.get(session_key, []) if t > now and v != value]
+    _SESSION_SECRETS[session_key] = [*kept, (value, now + TTL_S)][-20:]
+
+
+def _scrub_session_secrets(session_key: str, result: Any) -> Any:
+    kept = _SESSION_SECRETS.get(session_key)
+    if not kept:
+        return result
+    from captain_claw import secrets_client
+
+    now = time.time()
+    live = [(v, t) for v, t in kept if t > now]
+    if live:
+        _SESSION_SECRETS[session_key] = live
+    else:
+        _SESSION_SECRETS.pop(session_key, None)
+    for value, _t in live:
+        result = secrets_client.scrub(result, value)
+    return result
 # Which browser each session works in: "headless" or "chrome" (the person's
 # own, through Captain for Chrome — browser_chrome.py).
 _TARGETS: dict[str, str] = {}
@@ -248,6 +280,13 @@ class BrowserTool(Tool):
             "value": {
                 "type": "string",
                 "description": "form_input: the value — text, an option's label or value, 'true'/'false' for a checkbox.",
+            },
+            "secret_ref": {
+                "type": "string",
+                "description": (
+                    "type / form_input: a password or code the person gave with request_secret (sec_…), typed "
+                    "instead of text. You never see it."
+                ),
             },
             "filter": {
                 "type": "string",
@@ -556,6 +595,42 @@ class BrowserTool(Tool):
     # -- execute (dispatch) ---------------------------------------------------
 
     async def execute(self, action: str, **kwargs: Any) -> ToolResult:
+        """Run an action; a ``secret_ref`` (request_secret) is typed for the
+        model without its value ever reaching it (see :func:`_with_secret`)."""
+        ref = kwargs.pop("secret_ref", None)
+        session_key = self._session_key(kwargs)
+        if ref:
+            result = await self._with_secret(str(action or "").strip().lower(), str(ref), session_key, kwargs)
+        else:
+            result = await self._execute(action, **kwargs)
+        return _scrub_session_secrets(session_key, result)
+
+    async def _with_secret(self, action: str, ref: str, session_key: str, kwargs: dict[str, Any]) -> ToolResult:
+        """Type a secret the person gave (request_secret): its value is fetched
+        from Flight Deck right here — after the registry logged the call, which
+        only holds the reference — typed, and scrubbed from what comes back,
+        then from every later result of this session while it lives (a page
+        or a captured request may show it again)."""
+        from captain_claw import secrets_client
+
+        if action not in _SECRET_ACTIONS:
+            return ToolResult(success=False, error="secret_ref works with type and form_input only.")
+        recorder = _WORKFLOW_RECORDERS.get(session_key)
+        if recorder is not None and recorder.is_recording:
+            return ToolResult(success=False, error=(
+                "A workflow recording is on, and it would keep the secret: stop it (workflow_record_stop) first."))
+        try:
+            value = await secrets_client.release(ref)
+        except secrets_client.SecretError as exc:
+            return ToolResult(success=False, error=str(exc))
+        _remember_session_secret(session_key, value)
+        result = await self._execute(action, **{**kwargs, "text": value, "value": value})
+        result = secrets_client.scrub(result, value)
+        if result.success:
+            result.content = (result.content or "").rstrip() + "\n(It typed the secret the person gave; it isn't shown.)"
+        return result
+
+    async def _execute(self, action: str, **kwargs: Any) -> ToolResult:
         """Dispatch to the appropriate action handler."""
         log.info("Browser tool called", action=action, kwargs_keys=list(kwargs.keys()))
 
@@ -627,10 +702,21 @@ class BrowserTool(Tool):
             log.error("Unknown browser action", action=action)
             return ToolResult(success=False, error=f"Unknown browser action: {action}")
 
+        # The person may be watching this browser, or have taken control of it
+        # (browser_live): the agent's action waits while they have it.
+        from captain_claw.tools import browser_live
+
+        browser_live.note_session(self._session_key(kwargs))
+        held = await browser_live.wait_while_held()
+        if held:
+            return ToolResult(success=False, error=held)
         try:
             self._sync_extensions(kwargs)
             handler = getattr(self, handler_name)
             result = await handler(**kwargs)
+            note = browser_live.pop_note()
+            if note:
+                result.content = f"{note}\n\n{result.content or ''}".rstrip()
             log.info(
                 "Browser action completed",
                 action=action,

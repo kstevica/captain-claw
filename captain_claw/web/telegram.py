@@ -1088,6 +1088,11 @@ async def _tg_handle_cron_command(
             schedule, kind, payload = parse_cron_add_args(subargs)
         except ValueError as e:
             return str(e)
+        from captain_claw.cron_dispatch import check_new_cron_job
+
+        refusal = await check_new_cron_job(sm, kind, schedule)
+        if refusal:
+            return refusal
         next_run_at_iso = to_utc_iso(compute_next_run(schedule))
         job = await sm.create_cron_job(
             kind=kind, payload=payload, schedule=schedule,

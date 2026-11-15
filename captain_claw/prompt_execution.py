@@ -288,6 +288,8 @@ async def run_prompt_in_active_session(
 
         started = time.perf_counter()
         assistant_text = ""
+        # A cron run's outcome is recorded once (cron_dispatch.note_run_outcome).
+        outcome_noted = False
         # No WhatsApp chat for this turn (CLI, remote platforms, cron): the
         # end-of-turn file delivery runs only on web/channel turns.
         from captain_claw.tools.whatsapp_send_file import reset_turn as _reset_wa_turn
@@ -339,8 +341,18 @@ async def run_prompt_in_active_session(
                 ui.print_blank_line()
 
             if cron_job_id:
+                from captain_claw.cron_dispatch import (
+                    NO_ACTION_TEXT,
+                    checklist_parts,
+                    note_run_outcome,
+                    parts_accounted,
+                    run_did_nothing,
+                    turn_tool_calls,
+                )
                 from captain_claw.session_export import truncate_history_text
 
+                tool_calls = turn_tool_calls(agent)
+                did_nothing = run_did_nothing(assistant_text, tool_calls)
                 await cron_chat_event(
                     ctx, cron_job_id, "assistant", assistant_text,
                     trigger=cron_trigger or "", source=cron_source or "",
@@ -350,7 +362,23 @@ async def run_prompt_in_active_session(
                     history_job_id=cron_job_id,
                     trigger=cron_trigger or "", source=cron_source or "",
                     output=truncate_history_text(assistant_text),
+                    tool_calls=tool_calls,
                 )
+                if did_nothing:
+                    log.warning("cron run did nothing", job_id=cron_job_id)
+                    await cron_chat_event(
+                        ctx, cron_job_id, "system", f"[CRON] run did nothing: {NO_ACTION_TEXT}",
+                        trigger=cron_trigger or "", source=cron_source or "",
+                    )
+                parts = checklist_parts(prompt_text)
+                if parts:
+                    done_parts = min(parts, parts_accounted(assistant_text))
+                    if done_parts < parts:
+                        await cron_chat_event(
+                            ctx, cron_job_id, "system",
+                            f"[CRON] checklist: {done_parts} of {parts} parts accounted for",
+                            trigger=cron_trigger or "", source=cron_source or "",
+                        )
                 # Always confirm completion back to the request's origin —
                 # with the job id + task, even when the run produced no text.
                 if ctx.on_cron_output and agent.session:
@@ -358,10 +386,16 @@ async def run_prompt_in_active_session(
                         from captain_claw.cron_dispatch import format_cron_completion
                         msg = format_cron_completion(
                             cron_job_id, prompt_text or "", assistant_text.strip(), ok=True,
+                            did_nothing=did_nothing,
                         )
                         await ctx.on_cron_output(agent.session.id, msg)
                     except Exception:
                         log.debug("on_cron_output callback failed", exc_info=True)
+                outcome_noted = True
+                await note_run_outcome(
+                    ctx, cron_job_id, "no_action" if did_nothing else "ok",
+                    session_id=agent.session.id if agent.session else "",
+                )
             if on_assistant_text:
                 outbound_text = assistant_text.strip()
                 if not outbound_text and agent.session:
@@ -418,6 +452,19 @@ async def run_prompt_in_active_session(
                     ctx, cron_job_id, "system", f"[CRON] prompt failed: {e}",
                     trigger=cron_trigger or "", source=cron_source or "",
                 )
+                if not outcome_noted:
+                    outcome_noted = True
+                    try:
+                        from captain_claw.cron_dispatch import note_run_outcome
+
+                        await note_run_outcome(ctx, cron_job_id, "failed", detail=str(e))
+                    except Exception:
+                        log.debug("cron outcome record failed", exc_info=True)
+                # execute_cron_job must not count it a second time.
+                try:
+                    e._cron_outcome_noted = True  # type: ignore[attr-defined]
+                except Exception:
+                    pass
             ui.print_error(str(e))
             log.error("Error in agent", error=str(e))
             if on_assistant_text:

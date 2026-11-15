@@ -456,6 +456,24 @@ async def my_export(f: dict = Depends(_common), format: str = "csv",
     return await _export({**f, **scope}, uid, full, format)
 
 
+async def _one(call_id: int, scope: dict[str, Any], viewer: str, full: bool) -> dict[str, Any]:
+    """One call the viewer may see, shaped as in the list; 404 otherwise."""
+    rows = await store().list({**scope, "before_id": call_id + 1}, limit=1)
+    if not rows or int(rows[0]["id"]) != call_id:
+        raise HTTPException(404, "No such call in your register.")
+    return _shape(rows[0], viewer, full, await _names({rows[0]["owner_id"]}))
+
+
+@router.get("/fd/tool-audit/calls/{call_id}/why")
+async def my_why(call_id: int, user: dict = Depends(get_current_user)) -> dict:
+    """"Why did this happen?": the deck's deciders re-run on the call's recorded
+    facts (why.py), one verdict per layer, no model call."""
+    from captain_claw.flight_deck import why
+
+    scope, uid, full = _scope(user)
+    return await why.explain(get_db(), await _one(call_id, scope, uid, full))
+
+
 # Admins: every user's calls.
 
 @router.get("/fd/admin/tool-audit/calls")
@@ -483,6 +501,13 @@ async def admin_export(f: dict = Depends(_common), user_id: str = "", format: st
                        admin: dict = Depends(require_admin)) -> StreamingResponse:
     await store().add_event("exported", str(admin["id"]), {"format": format, "user": user_id})
     return await _export({**f, "user": user_id.strip()}, str(admin["id"]), True, format)
+
+
+@router.get("/fd/admin/tool-audit/calls/{call_id}/why")
+async def admin_why(call_id: int, admin: dict = Depends(require_admin)) -> dict:
+    from captain_claw.flight_deck import why
+
+    return await why.explain(get_db(), await _one(call_id, {}, str(admin["id"]), True))
 
 
 @router.get("/fd/admin/tool-audit/verify")
