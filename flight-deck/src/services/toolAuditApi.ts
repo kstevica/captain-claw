@@ -128,7 +128,25 @@ function dispositionName(header: string | null): string {
   return (header && /filename\s*=\s*"?([^";]+)"?/i.exec(header)?.[1]?.trim()) || ''
 }
 
+/** "Why did this happen?" for one call (captain_claw/flight_deck/why.py): the
+ *  deck's deciders re-run on its recorded facts, one verdict per layer. */
+export interface WhyLayer {
+  layer: 'what' | 'who' | 'approval' | 'guard' | 'outcome'
+  title: string
+  then: string
+  today: string
+  changed: boolean
+}
+
+export interface WhyAnswer {
+  id: number
+  summary: string
+  layers: WhyLayer[]
+  changed: boolean
+}
+
 export const toolAuditApi = {
+  why: (scope: AuditScope, id: number) => api<WhyAnswer>(`${base(scope)}/calls/${id}/why`),
   calls: (scope: AuditScope, query: CallQuery & { before_id?: number; limit?: number } = {}) =>
     api<CallsPage>(`${base(scope)}/calls?${qs(query)}`),
   facets: (scope: AuditScope, opts: { since?: number; user_id?: string } = {}) =>
