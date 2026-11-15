@@ -89,6 +89,7 @@ import { SendContextModal } from './SendContextModal'
 import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
 import { PaymentCard } from '../payments/PaymentCard'
+import { TaskCard, batRunOf } from './TaskCard'
 import { PurchaseCard } from '../payments/PurchaseCard'
 import { anonymizeApi } from '../../services/anonymizeApi'
 import { paymentIntentOf, purchaseIntentOf } from '../../services/payments'
@@ -1035,12 +1036,14 @@ function ChatContent({
         {groups.map((grp, gi) => {
           // The live group is the last one (a payment card, or a question
           // the agent waits on, after it doesn't count).
-          const live = session.busy && groups.slice(gi + 1).every((g) => g.kind === 'payment' || g.kind === 'purchase'
+          const live = session.busy && groups.slice(gi + 1).every((g) => g.kind === 'payment' || g.kind === 'purchase' || g.kind === 'task'
             || (g.kind === 'single' && !!g.items[0].approval_request_id && !g.items[0].approval_resolved))
           return grp.kind === 'payment' ? (
             <PaymentCard key={`pay-${grp.paymentId}`} id={grp.paymentId!} compact />
           ) : grp.kind === 'purchase' ? (
             <PurchaseCard key={`pur-${grp.paymentId}`} id={grp.paymentId!} compact />
+          ) : grp.kind === 'task' ? (
+            <TaskCard key={`task-${grp.paymentId}`} id={grp.paymentId!} />
           ) : grp.kind === 'activity' ? (
             <ActivityGroup
               key={`act-${grp.items[0].id}`}
@@ -2849,7 +2852,7 @@ function isActivityMessage(m: ChatMessage): boolean {
   return m.role === 'tool' || (m.role === 'system' && !!m.narration)
 }
 
-type ChatGroup = { kind: 'activity' | 'single' | 'payment' | 'purchase'; items: ChatMessage[]; paymentId?: string }
+type ChatGroup = { kind: 'activity' | 'single' | 'payment' | 'purchase' | 'task'; items: ChatMessage[]; paymentId?: string }
 
 function groupActivity(msgs: ChatMessage[]): ChatGroup[] {
   const groups: ChatGroup[] = []
@@ -2870,6 +2873,12 @@ function groupActivity(msgs: ChatMessage[]): ChatGroup[] {
       if (purId && !seenPayments.has(purId)) {
         seenPayments.add(purId)
         groups.push({ kind: 'purchase', items: [m], paymentId: purId })
+      }
+      // Bigger work it started (a Bat run): a live task card (TaskCard).
+      const runId = m.role === 'tool' ? batRunOf(m.tool_name, m.tool_output || m.content) : null
+      if (runId && !seenPayments.has(`bat:${runId}`)) {
+        seenPayments.add(`bat:${runId}`)
+        groups.push({ kind: 'task', items: [m], paymentId: runId })
       }
     } else {
       groups.push({ kind: 'single', items: [m] })

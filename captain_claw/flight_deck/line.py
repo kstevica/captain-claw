@@ -74,8 +74,10 @@ KIND_LABELS: dict[str, str] = {
     "talk": "Asked",
 }
 
-# A bell type → (kind, needs the user). A type not listed needs the user (it
-# was in the bell before the Line; keep showing it there).
+# A bell type → (kind, needs the user). "Needs you" means blocked on the user:
+# a question, an approval, a decision, a failure only they can settle. What
+# the deck or an agent just reports (done, ready, updated, flagged) doesn't,
+# and neither does a type not listed here.
 _TYPES: dict[str, tuple[str, bool]] = {
     "autonomy_proposal": ("proposal", True),
     "autonomy_nudge": ("nudge", False),
@@ -89,7 +91,16 @@ _TYPES: dict[str, tuple[str, bool]] = {
     # A Crew task waits for a decision, an approval, or is stuck or failed.
     "crew_task": ("run", True),
     "fleet": ("fleet", False),
-    "deck_update": ("deck", True),
+    # A Captain Swarm run waits for the owner's Go.
+    "captain_swarm": ("ask", True),
+    # A custom tool's news (offered, updated): its approvals wait by ref (below).
+    "custom_tool": ("deck", False),
+    # A data room's result arrived (rooms_inbox): a report.
+    "data_room_delivery": ("result", False),
+    # The deck's own notices (browser health): to fix when convenient.
+    "system": ("deck", False),
+    # An update is ready to install: the admin's choice, nothing waits on it.
+    "deck_update": ("deck", False),
     # What an agent did on its own, heard by the deck: done, or failed.
     "scheduled_task": ("result", False),
     "scheduled_task_error": ("result", True),
@@ -119,7 +130,8 @@ _TYPES: dict[str, tuple[str, bool]] = {
     # Course: an agent or the deck suggests a goal; or one an agent added itself.
     "course_proposal": ("proposal", True),
     "course_auto_added": ("agent", False),
-    # Course: two goals likely pull against each other (the deck only flags it).
+    # Course: two goals likely pull against each other — a decision, answered
+    # on the Course page (course_conflicts resolves it).
     "course_conflict": ("deck", True),
     "whatsapp_web": ("deck", True),
     "info": ("deck", False),
@@ -129,12 +141,17 @@ _TYPES: dict[str, tuple[str, bool]] = {
 }
 # What a bell item is about can say more than its type: these wait for the
 # user whatever the type (a member's suggested lesson is an "info").
-_NEEDS_YOU_REFS = frozenset({"agent_lessons", "purchase", "telegram_link"})
+_NEEDS_YOU_REFS = frozenset({"agent_lessons", "purchase", "telegram_link", "custom_tool_approval",
+                             "custom_tool_proposal"})
 # Generic types that are about an agent.
 _AGENT_REFS = frozenset({"agent_lessons", "agent_exam", "agent_setup", "agent_forge", "profile"})
-# Items answered somewhere else, not by being read.
+# Items that need you and are answered somewhere else, not by being read: they
+# leave Needs you when answered (each feature resolves its own). Reading one
+# that needs you otherwise answers it (db._read_set). The client keeps the
+# same list (services/line.ts ANSWERED_ELSEWHERE; a test holds them equal).
 ANSWERED_REFS = frozenset({"autonomy_action", "person_ask", "course_review", "course_goal",
-                           "course_conflict"})
+                           "course_conflict", "bat_ask", "captain_swarm_run", "purchase",
+                           "custom_tool_proposal"})
 # Whose words an item's text is: the deck's own, an agent's, or someone
 # else's (an email, a WhatsApp chat) — what a reader may trust of it.
 _TRUST: dict[str, str] = {
@@ -149,9 +166,23 @@ _TRUST: dict[str, str] = {
 }
 
 
+async def settle(user_id: str, ref_type: str, ref_id: str) -> int:
+    """The thing an item that needs the user is about was answered (approved,
+    denied, said Go, cancelled): it leaves Needs you. Never raises."""
+    if not user_id or not ref_type or not ref_id:
+        return 0
+    try:
+        from captain_claw.flight_deck.auth import get_db
+
+        return await get_db().resolve_line_items(user_id, ref_type, [ref_id])
+    except Exception:  # noqa: BLE001 — the answer stands; the item clears on its own later
+        _log.debug("line: %s not settled", ref_type, exc_info=True)
+        return 0
+
+
 def classify(bell_type: str, ref_type: str = "") -> tuple[str, bool, str]:
     """A bell item's (kind, needs the user, trust)."""
-    kind, needs_you = _TYPES.get(bell_type, ("deck", True))
+    kind, needs_you = _TYPES.get(bell_type, ("deck", False))
     if ref_type in _AGENT_REFS and kind == "deck":
         kind = "agent"
     return kind, needs_you or ref_type in _NEEDS_YOU_REFS, _TRUST.get(bell_type, "deck")

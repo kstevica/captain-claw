@@ -4992,7 +4992,7 @@ class FlightDeckDB:
         """Every unread item of one thread read (and answered, as reading one is)."""
         assert self._db is not None
         cur = await self._db.execute(
-            f"UPDATE line_items SET {self._READ_SET} WHERE user_id = :uid AND read_at = ''"
+            f"UPDATE line_items SET {self._read_set()} WHERE user_id = :uid AND read_at = ''"
             " AND (thread_id = :tid OR id = :tid)",
             {"now": _utcnow(), "uid": user_id, "tid": thread_id})
         await self._db.execute(
@@ -5076,19 +5076,24 @@ class FlightDeckDB:
 
     # Reading an item that needs the user answers it, unless its answer is
     # given elsewhere (line.ANSWERED_REFS: a proposal, on the ledger; a
-    # question, in its dialog; a Course review or proposal, on the Course page).
-    _READ_SET = (
-        "read_at = CASE WHEN read_at = '' THEN :now ELSE read_at END,"
-        " resolved_at = CASE WHEN needs_you = 1 AND resolved_at = ''"
-        " AND ref_type NOT IN ('autonomy_action', 'person_ask', 'course_review', 'course_goal',"
-        " 'course_conflict')"
-        " THEN :now ELSE resolved_at END"
-    )
+    # question, in its dialog; a Course review or proposal, on the Course page;
+    # a Bat question, a Swarm's Go, a purchase — each where it's answered).
+    @staticmethod
+    def _read_set() -> str:
+        from captain_claw.flight_deck.line import ANSWERED_REFS
+
+        refs = ", ".join(f"'{r}'" for r in sorted(ANSWERED_REFS) if r.replace("_", "").isalnum())
+        return (
+            "read_at = CASE WHEN read_at = '' THEN :now ELSE read_at END,"
+            " resolved_at = CASE WHEN needs_you = 1 AND resolved_at = ''"
+            f" AND ref_type NOT IN ({refs})"
+            " THEN :now ELSE resolved_at END"
+        )
 
     async def mark_line_item_read(self, item_id: str, user_id: str) -> bool:
         assert self._db is not None
         cur = await self._db.execute(
-            f"UPDATE line_items SET {self._READ_SET} WHERE id = :id AND user_id = :uid",
+            f"UPDATE line_items SET {self._read_set()} WHERE id = :id AND user_id = :uid",
             {"now": _utcnow(), "id": item_id, "uid": user_id})
         await self._db.execute(
             "UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?", (item_id, user_id))
@@ -5097,7 +5102,7 @@ class FlightDeckDB:
 
     async def mark_all_line_items_read(self, user_id: str, needs_you: bool | None = None) -> int:
         assert self._db is not None
-        q = f"UPDATE line_items SET {self._READ_SET} WHERE user_id = :uid AND read_at = ''"
+        q = f"UPDATE line_items SET {self._read_set()} WHERE user_id = :uid AND read_at = ''"
         params: dict = {"now": _utcnow(), "uid": user_id}
         if needs_you is not None:
             q += " AND needs_you = :needs"
