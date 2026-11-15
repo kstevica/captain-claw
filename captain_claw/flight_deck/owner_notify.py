@@ -143,12 +143,13 @@ def _device_key(user_id: str, device_id: str) -> str:
 
 async def notify_owner(
     user_id: str, kind: str, text: str, *, device_text: str = "", cfg: dict[str, Any] | None = None,
-    bell: tuple[str, str, str] | None = None, action_id: str = "",
+    bell: tuple[str, str, str] | None = None, action_id: str = "", source: str = "",
 ) -> dict[str, Any]:
     """Send ``text`` to each channel ``user_id`` switched on. ``kind`` ("nudge",
     "proposal", "test") names the log lines; ``device_text`` is the devices'
     line (default: the text's first); ``bell`` = (type, title, body) goes to
-    the bell first, about ``action_id``. Returns what each channel did, None
+    the bell first, about ``action_id``, from agent ``source`` (by name: the
+    Line doesn't hand it back to that agent). Returns what each channel did, None
     where it is off: WhatsApp ``[sent, total]``, Telegram ``True/False``,
     devices how many beeped, the bell ``True/False``. Never raises."""
     out: dict[str, Any] = {"whatsapp": None, "telegram": None, "devices": None, "bell": None}
@@ -161,7 +162,7 @@ async def notify_owner(
 
         token = line.phones_done.set(True)
         try:
-            out["bell"] = await _to_bell(user_id, *bell, action_id=action_id)
+            out["bell"] = await _to_bell(user_id, *bell, action_id=action_id, source=source)
         finally:
             line.phones_done.reset(token)
     try:
@@ -227,14 +228,15 @@ async def notify_owner(
     return out
 
 
-async def _to_bell(user_id: str, bell_type: str, title: str, body: str, *, action_id: str = "") -> bool:
+async def _to_bell(user_id: str, bell_type: str, title: str, body: str, *, action_id: str = "",
+                   source: str = "") -> bool:
     """One bell notification for the user (``local`` with sign-in off)."""
     try:
         from captain_claw.flight_deck.auth import get_db
 
         await get_db().add_notification(
             _norm_user(user_id), bell_type, title.strip()[:200], body.strip()[:2000],
-            ref_type=_BELL_REFS.get(bell_type, "") if action_id else "", ref_id=action_id,
+            ref_type=_BELL_REFS.get(bell_type, "") if action_id else "", ref_id=action_id, source=source,
         )
         return True
     except Exception as exc:  # noqa: BLE001

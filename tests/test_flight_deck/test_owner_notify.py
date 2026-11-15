@@ -74,9 +74,9 @@ def channels(monkeypatch):
     monkeypatch.setattr(whatsapp_bridge, "push_to_waid", fake_push)
     monkeypatch.setattr(fd_scheduler, "_deliver_telegram_owner", fake_telegram)
     class _DB:
-        async def add_notification(self, user_id, type, title, body="", ref_type="", ref_id=""):
+        async def add_notification(self, user_id, type, title, body="", ref_type="", ref_id="", *, source=""):
             out["bell"].append({"user": user_id, "type": type, "title": title, "body": body,
-                                "ref_type": ref_type, "ref_id": ref_id})
+                                "ref_type": ref_type, "ref_id": ref_id, "source": source})
             return "n1"
 
     from captain_claw.flight_deck import auth
@@ -120,7 +120,7 @@ def test_a_nudge_reaches_every_channel_switched_on(store, channels, monkeypatch)
                                        "text": "Your 3pm call is in an hour."}
     assert channels["bell"] == [{"user": ALICE, "type": "autonomy_nudge", "title": "Nudge from a",
                                  "body": "Your 3pm call is in an hour.",
-                                 "ref_type": "autonomy_nudge", "ref_id": done["id"]}]
+                                 "ref_type": "autonomy_nudge", "ref_id": done["id"], "source": "a"}]
     events_ = [r["event"] for r in store.list_log(ALICE)]
     assert {"nudge → whatsapp", "nudge → telegram", "nudge → devices"} <= set(events_)
 
@@ -169,7 +169,7 @@ def test_a_proposal_says_how_many_wait(store, channels, monkeypatch):
                                        "text": "Waiting for your approval: Summarise the Q3 deck"}
     assert channels["bell"] == [{"user": ALICE, "type": "autonomy_proposal", "title": "Waiting for your approval",
                                  "body": "Summarise the Q3 deck\nYou asked for it before the board call.",
-                                 "ref_type": "autonomy_action", "ref_id": row["id"]}]
+                                 "ref_type": "autonomy_action", "ref_id": row["id"], "source": ""}]
 
 
 @pytest.fixture
@@ -359,7 +359,7 @@ def test_the_bell_fills_in_waiting_proposals_it_lacks(store, monkeypatch):
     rows: list[dict] = []
 
     class _DB:
-        async def add_notification(self, user_id, type, title, body="", ref_type="", ref_id=""):
+        async def add_notification(self, user_id, type, title, body="", ref_type="", ref_id="", *, source=""):
             rows.append({"user": user_id, "type": type, "ref_type": ref_type, "ref_id": ref_id, "body": body})
             return "n"
 

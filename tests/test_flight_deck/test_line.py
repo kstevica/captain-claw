@@ -549,6 +549,23 @@ async def test_a_nudge_rings_each_phone_once(db, channels, monkeypatch):
     assert channels["agent"] == [("mira", "Nudge from Ana", True)]
 
 
+async def test_a_nudge_from_the_line_agent_isnt_posted_to_its_chat_again(db, channels, monkeypatch):
+    """The nudge ran as a turn on that agent — its chat has it already."""
+    from captain_claw.flight_deck import device_bridge, owner_notify
+
+    async def no_devices(user_id, count, text="", beep=False):
+        return []
+
+    monkeypatch.setattr(device_bridge, "push_waiting", no_devices)
+    _set(ALICE, line_agent="mira", quiet_hours_start=0, quiet_hours_end=0)
+    await owner_notify.notify_owner(ALICE, "nudge", "Call moved to 4pm.", source="Mira",
+                                    bell=("autonomy_nudge", "Nudge from Mira", "Call moved to 4pm."))
+    await _fanned()
+    assert channels["agent"] == [] and channels["whatsapp"] == ["Call moved to 4pm."]
+    item = (await db.list_line_items(ALICE))[0]
+    assert item["title"] == "Nudge from Mira" and item["source"] == "Mira"
+
+
 async def test_fan_out_is_off_until_the_deck_turns_it_on(db, channels, monkeypatch):
     monkeypatch.setattr(line, "_fan_out_on", False)
     await line.post(ALICE, "payment", "Approve a purchase", needs_you=True)
