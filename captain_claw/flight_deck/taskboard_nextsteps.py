@@ -753,7 +753,7 @@ def parse_draft(text: str) -> dict:
     raise ValueError("the model did not answer with a message")
 
 
-async def draft(view: dict, plan: dict, move: str, uid: str) -> dict:
+async def draft(view: dict, plan: dict, move: str, uid: str, *, defer: bool = False) -> dict:
     """The wording of a next step on the task's agent's own model (triage's
     reader and caller: the agent's REST, its config while it sleeps, the
     board user's tier behind it), counted as one of the day's extractions
@@ -770,7 +770,7 @@ async def draft(view: dict, plan: dict, move: str, uid: str) -> dict:
         raise ValueError("No model is set up to write it.")
     nonce = new_nonce()
     text, _model = await taskboard_triage.complete(
-        reader, _DRAFT_SYSTEM.format(nonce=nonce), draft_prompt(view, plan, move, nonce), uid)
+        reader, _DRAFT_SYSTEM.format(nonce=nonce), draft_prompt(view, plan, move, nonce), uid, defer=defer)
     got = parse_draft(text)
     if nonce in got["text"] or nonce in got["subject"]:
         raise ValueError("the model echoed the data markers")
@@ -816,7 +816,9 @@ async def propose(uid: str, task_id: str, move: str, p: float, *, notify: bool,
             return None, ("No verified email address is on it." if move == "draft_email" or str(
                 view["task"].get("channel") or "") in _EMAIL_CHANNELS else "Nobody on it can be reached from here.")
         try:
-            got = await draft(view, plan, move, uid)
+            # A proposal the board makes on its own (notify) waits out the
+            # agent's run; one the user asked for doesn't.
+            got = await draft(view, plan, move, uid, defer=notify)
         except ValueError as exc:
             return None, f"The wording couldn't be written: {exc}"
         except asyncio.CancelledError:

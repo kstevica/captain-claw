@@ -296,7 +296,7 @@ async def test_extract_keeps_only_a_goal_it_was_shown(store, monkeypatch):
     async def reader(task, user_id):
         return {"model": "m"}
 
-    async def complete(reader_, system, prompt, user_id):
+    async def complete(reader_, system, prompt, user_id, defer=False):
         seen["prompt"] = prompt
         return seen["answer"], "m"
 

@@ -1549,13 +1549,17 @@ class WebServer:
     async def _get_activity(self, request: web.Request) -> web.Response:
         """Whether this agent is at work now, and when it last was. Flight
         Deck asks before it puts an idle agent to sleep (agent_idle.py)."""
-        busy = bool(self._busy) or (self._active_task is not None and not self._active_task.done())
-        if not busy:
-            lanes = [*self._lane_agents.values(), *self._speaker_agents.values()]
-            busy = any(getattr(a, "_lane_busy", False) or getattr(a, "_public_busy", False) for a in lanes)
+        busy = self._at_work()
         if busy:
             self._last_active_at = time.time()
         return web.json_response({"busy": busy, "last_active_at": self._last_active_at})
+
+    def _at_work(self) -> bool:
+        """A turn is running: the main chat, a task, a side lane or a member's."""
+        if bool(self._busy) or (self._active_task is not None and not self._active_task.done()):
+            return True
+        lanes = [*self._lane_agents.values(), *self._speaker_agents.values()]
+        return any(getattr(a, "_lane_busy", False) or getattr(a, "_public_busy", False) for a in lanes)
 
     # ── Its browser: watch, take control, hand back (tools/browser_live.py) ──
 
@@ -3208,6 +3212,11 @@ class WebServer:
         ``reasoning_effort`` (off … max, or auto; optional) sets how hard a
         thinking model thinks for this call alone: Flight Deck's setup reads
         turn it off, so the answer isn't spent on thoughts.
+
+        ``defer`` (a background job that can wait: Work board triage, the
+        deck's reflection and arbiter) holds the call while this agent is at
+        work on a self-hosted model, up to ``defer_max_s`` — so it doesn't
+        push the run's prompt out of the server's cache (see side_calls).
         """
         base = getattr(getattr(self, "agent", None), "provider", None)
         provider = self._scoped_provider()
@@ -3217,6 +3226,15 @@ class WebServer:
             body = await request.json()
         except Exception:
             return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+
+        if body.get("defer") and self._at_work():
+            from captain_claw import side_calls
+
+            if side_calls.evicts_cache(base):
+                waited = await side_calls.wait_until_quiet(
+                    self._at_work, side_calls.max_wait(body.get("defer_max_s")))
+                log.info("Borrowed call held until the run was over", waited_s=round(waited, 1),
+                         still_at_work=self._at_work())
 
         from captain_claw.llm import (
             LLMResponse,

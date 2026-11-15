@@ -1166,12 +1166,14 @@ async def handle_chat(
             effective_content, turn_via(surface, ws, whatsapp_waid, origin), client_msg_id,
             _src, _src_label))
 
-    # ── Task naming (runs concurrently with the agent) ────────────
+    # ── Task naming (alongside the agent, or after it on a self-hosted model) ─
     if not hasattr(server, "_recent_prompts"):
         server._recent_prompts: list[str] = []
 
     # An exam's question names nothing, and isn't kept to name the user's next tasks by.
-    naming_task = None if exam else _start_task_naming(agent, content, server._recent_prompts)
+    naming_after = None if exam else _naming_after_turn(agent)
+    naming_task = None if exam else _start_task_naming(
+        agent, content, server._recent_prompts, after_turn=naming_after)
     if not exam:
         _remember_prompt(server._recent_prompts, content)
 
@@ -1191,6 +1193,7 @@ async def handle_chat(
     # Launch the heavy work as a background task.
     task = asyncio.create_task(_run_agent(
         server, ws, agent, effective_content, naming_task,
+        naming_after_turn=naming_after,
         is_public=is_public,
         turn_channel=turn_channel,
         turn_source=_src,
@@ -1281,16 +1284,35 @@ async def _naming_input(
     return clean, earlier, restore
 
 
+def _naming_after_turn(agent: Any) -> asyncio.Event | None:
+    """An event the turn sets when it's over, for naming it then — or None to
+    name it alongside the turn. On a self-hosted model the naming call, sent
+    just before the turn's first call, pushed the conversation out of the
+    server's cache: that call read ~90k tokens again (~25 s) to name the task
+    in six words. A cloud API caches per prompt, so there it runs alongside."""
+    from captain_claw import side_calls
+
+    return asyncio.Event() if side_calls.evicts_cache(getattr(agent, "provider", None)) else None
+
+
+# Longest a deferred task name waits for its turn to end.
+_NAMING_AFTER_TURN_MAX_S = 3600.0
+
+
 def _start_task_naming(
     agent: Any, content: str, recent_prompts: list[str], *, speaker_grant: str | None = None,
+    after_turn: asyncio.Event | None = None,
 ) -> asyncio.Task:
     """Name the task with a micro LLM call, concurrently with the turn.
 
     *recent_prompts* is read when the naming call runs (after the caller
     has recorded *content* in it), so continuations get their context.
     *speaker_grant* (a shared agent's member turn) makes the call the
-    member's: their privacy gate, their vault.
+    member's: their privacy gate, their vault. *after_turn* (see
+    ``_naming_after_turn``): the call waits until the turn sets it, then puts
+    the name on the usage rows the turn left unnamed.
     """
+    turn_started = datetime.now(UTC).isoformat()
     _naming_model = getattr(agent.provider, "model", "")
     _naming_provider = getattr(agent.provider, "provider", "")
     if _naming_model and "/" not in _naming_model and _naming_provider:
@@ -1323,6 +1345,12 @@ def _start_task_naming(
             _speaker.bind(getattr(agent, "_speaker_principal", None))
             _speaker.bind_grant(speaker_grant)
         agent._current_task_name = ""
+        sessions = [_session_slug(agent)]
+        if after_turn is not None:
+            try:
+                await asyncio.wait_for(after_turn.wait(), timeout=_NAMING_AFTER_TURN_MAX_S)
+            except asyncio.TimeoutError:
+                return
         text, earlier, restore = await _naming_input(agent, content, recent_prompts)
         if text is None:
             return
@@ -1330,9 +1358,28 @@ def _start_task_naming(
             text, earlier, _naming_model, _naming_api_key,
             _naming_base_url, _naming_extra_headers, restore,
         )
-        agent._current_task_name = name
+        if after_turn is None:
+            agent._current_task_name = name
+            return
+        # Named after the turn: never set live (the next turn may be running
+        # by now) — put it on the rows this turn and its after-jobs left unnamed.
+        sessions.append(_session_slug(agent))
+        manager = getattr(agent, "session_manager", None)
+        if name and manager is not None and hasattr(manager, "name_unnamed_usage"):
+            try:
+                await manager.name_unnamed_usage(sessions, turn_started, name)
+            except Exception as exc:  # noqa: BLE001 — a label, never a failed turn
+                log.debug("Task naming: usage rows not named", error=str(exc))
 
     return asyncio.create_task(_name_and_store())
+
+
+def _session_slug(agent: Any) -> str:
+    """The session id usage rows are recorded under (``_current_session_slug``)."""
+    try:
+        return str(agent._current_session_slug() or "")
+    except Exception:
+        return ""
 
 
 def _remember_prompt(recent_prompts: list[str], content: str) -> None:
@@ -1408,11 +1455,14 @@ async def _handle_speaker_chat(
         if not isinstance(recent, list):
             recent = []
             agent._recent_prompts = recent  # type: ignore[attr-defined]
-        naming_task = _start_task_naming(agent, content, recent, speaker_grant=speaker_grant or "")
+        naming_after = _naming_after_turn(agent)
+        naming_task = _start_task_naming(agent, content, recent, speaker_grant=speaker_grant or "",
+                                         after_turn=naming_after)
         _remember_prompt(recent, content)
 
         task = asyncio.create_task(_run_agent(
             server, ws, agent, content, naming_task,
+            naming_after_turn=naming_after,
             lane=speaker_key[1],
             no_flow=True,
             no_next_steps=no_next_steps,
@@ -1702,6 +1752,7 @@ async def _run_agent(
     content: str,
     naming_task: asyncio.Task | None = None,
     *,
+    naming_after_turn: asyncio.Event | None = None,
     is_public: bool = False,
     lane: str = "A",
     public_session_id: str | None = None,
@@ -1817,7 +1868,8 @@ async def _run_agent(
                         pass
                 agent._speaker_cache_refreshed_at = _now  # type: ignore[attr-defined]
 
-        if naming_task is not None:
+        # A name made after the turn (naming_after_turn) isn't waited for.
+        if naming_task is not None and naming_after_turn is None:
             try:
                 await asyncio.wait_for(naming_task, timeout=5.0)
             except (asyncio.TimeoutError, Exception):
@@ -2194,6 +2246,9 @@ async def _run_agent(
         else:
             send({"type": "error", "message": f"Error: {str(e)}"})
     finally:
+        # The turn is over: a task name held for it (a self-hosted model) runs now.
+        if naming_after_turn is not None:
+            naming_after_turn.set()
         try:
             agent._suppress_memory_context = False  # type: ignore[attr-defined]
             agent._suppress_rephrase = False  # type: ignore[attr-defined]

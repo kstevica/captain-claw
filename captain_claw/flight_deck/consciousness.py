@@ -73,6 +73,8 @@ def _env_int(name: str, default: int) -> int:
 
 # How often the free-running loop wakes to consider a pulse.
 PULSE_INTERVAL_SECONDS = max(30.0, _env_float("CONSCIOUSNESS_PULSE_SECONDS", 180.0))
+# Longest a reflection waits for its agent's run to end on a self-hosted model.
+_REFLECT_DEFER_S = 300.0
 # Minimum new messages (or any new session) before a pulse is "worth a thought".
 # Below this the beat is silent and free.
 MIN_NEW_MESSAGES = max(1, _env_int("CONSCIOUSNESS_MIN_NEW_MESSAGES", 3))
@@ -779,9 +781,12 @@ async def _reflect(
 
     last_err: Exception | None = None
     for agent in ranked:
+        # A reflection can wait for the agent's run to end (side_calls) — a
+        # shorter while than the board's: the heartbeat pulses owners one
+        # after another, so a long hold would hold every owner after this one.
         provider = RemoteLLMProvider(
             host=agent["host"], port=agent["port"], auth=agent["auth"],
-            name=agent["name"],
+            name=agent["name"], defer_s=_REFLECT_DEFER_S,
         )
         try:
             resp = await provider.complete(

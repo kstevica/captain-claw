@@ -19,12 +19,16 @@ _log = get_logger(__name__)
 class RemoteLLMProvider(LLMProvider):
     """Proxy provider that forwards ``complete()`` calls over HTTP."""
 
-    def __init__(self, host: str, port: int, auth: str = "", name: str = "") -> None:
+    def __init__(self, host: str, port: int, auth: str = "", name: str = "", *,
+                 defer_s: float = 0.0) -> None:
         self.host = host
         self.port = port
         self.auth = auth
         self.name = name
         self._base = f"http://{host}:{port}"
+        # > 0: a background call that can wait — the agent holds it while it's
+        # at work on a self-hosted model, up to this long (side_calls).
+        self.defer_s = defer_s
 
     @property
     def label(self) -> str:
@@ -48,8 +52,11 @@ class RemoteLLMProvider(LLMProvider):
             payload["temperature"] = temperature
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if self.defer_s > 0:
+            payload["defer"] = True
+            payload["defer_max_s"] = self.defer_s
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=120.0 + max(self.defer_s, 0.0)) as client:
             resp = await client.post(
                 url,
                 json=payload,

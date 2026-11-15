@@ -152,7 +152,7 @@ def model(monkeypatch):
         m.readers.append((task.get("agent_slug"), user_id))
         return {"provider": "fake", "model": "helper-model"}
 
-    async def complete(reader, system, prompt, user_id):
+    async def complete(reader, system, prompt, user_id, defer=False):
         drafting = "approve before it goes out" in system
         m.prompts.append(SimpleNamespace(system=system, prompt=prompt, user=user_id, drafting=drafting))
         if drafting and m.fail is not None:
@@ -981,9 +981,9 @@ async def test_a_message_that_comes_while_the_words_are_written_gets_no_next_ste
     tid = _task(board, pending=False)
     complete = taskboard_triage.complete
 
-    async def writes_meanwhile(reader, system, prompt, user_id):
+    async def writes_meanwhile(reader, system, prompt, user_id, defer=False):
         _says(board, tid)
-        return await complete(reader, system, prompt, user_id)
+        return await complete(reader, system, prompt, user_id, defer=defer)
 
     monkeypatch.setattr(taskboard_triage, "complete", writes_meanwhile)
     row, why = await taskboard_nextsteps.propose(ALICE, tid, "reply_with_result", 0.9, notify=False)
@@ -2014,7 +2014,7 @@ async def test_the_wait_for_a_reading_isnt_spent_on_a_task_the_rules_wont_close(
     board.merge(ALICE, ana, t)
     jev.fail = jev_routes.JevNotConnected()
 
-    async def complete(reader, system, prompt, user_id):
+    async def complete(reader, system, prompt, user_id, defer=False):
         raise RuntimeError("the model is down")
 
     monkeypatch.setattr(taskboard_triage, "complete", complete)
