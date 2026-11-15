@@ -99,6 +99,20 @@ looser on prefixed stalls, stricter on hand-back closers (which it previously
 misclassified as stalls, affecting strong models). Both directions are covered by tests,
 but heuristics drift; if false re-rolls appear, `_STALL_TRAILING_MAX_LEN` is the dial.
 
+**Later (2026-11): gerund-led announcements.** A local model running scheduled mail
+jobs answered run after run with one line and no tool call — "Running the reply-watch —
+checking the live inbox now.", "Sending the batch now — pulling the live queue first." —
+which neither the "let me / I'll" openers nor the narrated-lookup check (verb at a
+sentence start only) caught. `_announces_work` now treats a short reply (≤ 200 chars) as
+a stall when its opening or closing sentence ends on an action gerund ("…— checking the
+inbox now") or on "<what> first / now" after one, with the same length rules as the
+"let me" path. It applies to cron turns too (they run through the same loop). Nouns
+("Nothing new", "Pricing is …"), statuses ("Processing complete"), statements about the
+work ("Updating the table was the slow part"), lead-ins ("Looking at the numbers, …"),
+work set for later ("checking again in 3 hours"), hand-backs and questions stay answers.
+Dials: the verb list `_STALL_GERUND` and `_STALL_ANNOUNCE_MAX_LEN`. Tests:
+`tests/test_agent/test_gerund_stall.py`.
+
 ---
 
 ## Phase 1 — one capability signal
