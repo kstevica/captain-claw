@@ -91,7 +91,7 @@ def model(monkeypatch):
     async def reader_for(task, user_id):
         return {"provider": "fake", "model": "helper-model"}
 
-    async def complete(reader, system, prompt, user_id):
+    async def complete(reader, system, prompt, user_id, defer=False):
         m.prompts.append(SimpleNamespace(system=system, prompt=prompt, user=user_id))
         if m.during is not None:
             m.during()

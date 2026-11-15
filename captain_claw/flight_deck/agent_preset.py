@@ -1153,8 +1153,10 @@ def read_effort() -> str | None:
 
 
 async def _agent_complete(reader: dict, system: str, prompt: str, owner_id: str,
-                          max_tokens: int) -> ModelReply:
-    """One call to the agent's own model, through its REST."""
+                          max_tokens: int, *, defer_s: float = 0.0) -> ModelReply:
+    """One call to the agent's own model, through its REST. *defer_s* > 0: a
+    background job that can wait — the agent holds it while it's at work on a
+    self-hosted model, up to that long (side_calls)."""
     import httpx
 
     from captain_claw.flight_deck import server as srv
@@ -1165,14 +1167,15 @@ async def _agent_complete(reader: dict, system: str, prompt: str, owner_id: str,
         raise _AgentGoneError("not running")
     agent_idle.touch(slug)
     effort = read_effort()
+    defer = {"defer": True, "defer_max_s": defer_s} if defer_s > 0 else {}
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(2 * _CALL_TIMEOUT + 30, connect=5.0),
+        async with httpx.AsyncClient(timeout=httpx.Timeout(2 * _CALL_TIMEOUT + 30 + defer_s, connect=5.0),
                                      trust_env=False) as client:
             resp = await client.post(
                 f"http://127.0.0.1:{port}/api/llm/complete", params={"token": token} if token else {},
                 json={"messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
                       "temperature": 0.2, "max_tokens": max_tokens, "timeout": _CALL_TIMEOUT,
-                      **({"reasoning_effort": effort} if effort else {})})
+                      **({"reasoning_effort": effort} if effort else {}), **defer})
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
         raise _AgentGoneError("not answering") from exc
     finally:

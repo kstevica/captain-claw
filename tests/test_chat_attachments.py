@@ -118,7 +118,7 @@ def captured(monkeypatch):
         got["content"] = content
         got.update(kw)
 
-    def _naming(agent, content, recent):
+    def _naming(agent, content, recent, after_turn=None):
         got["naming"] = content
         return None
 

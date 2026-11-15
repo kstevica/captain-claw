@@ -100,6 +100,10 @@ _EXTRACT_TRIES = 3        # extractions of one task that may fail before it keep
 _EXTRACT_FAILED_RE = re.compile(r"^extraction failed \((\d+)/")
 _EXTRACT_MAX_TOKENS = 900
 _CALL_TIMEOUT_S = 120.0
+# A triage through an agent at work on a self-hosted model waits for its run
+# to end (up to this long): cutting in pushed the run's 90k-token prompt out
+# of the server's cache, and the run's next call took 34 s instead of 2–6.
+_DEFER_S = 900.0
 _JEV_TIMEOUT_S = 60.0
 _STATE_CHARS = 90_000     # one Jev ask's state (the API reads ~120k)
 _QUESTIONS_MAX = 240      # one Jev ask's questions (our guard is 256)
@@ -970,16 +974,21 @@ async def reader_for(task: dict, user_id: str) -> dict | None:
     return {**disk, "fallback": tier} if disk is not None else tier
 
 
-async def complete(reader: dict, system: str, prompt: str, user_id: str) -> tuple[str, str]:
+async def complete(reader: dict, system: str, prompt: str, user_id: str,
+                   *, defer: bool = False) -> tuple[str, str]:
     """One extraction call: ``(reply text, model)``, thinking off. An agent
     that stops answering hands over to its fallback. The agent's REST and the
-    tier both count the tokens toward *user_id* — the board user."""
+    tier both count the tokens toward *user_id* — the board user. *defer*: a
+    background call, held while the agent is at work (``_DEFER_S``)."""
     from captain_claw.flight_deck import agent_preset, file_library
     from captain_claw.llm import reasoning
     if reader.get("agent"):
+        defer_s = _DEFER_S if defer else 0.0
         try:
             reply = await asyncio.wait_for(
-                agent_preset._agent_complete(reader, system, prompt, user_id, _EXTRACT_MAX_TOKENS), _CALL_TIMEOUT_S)
+                agent_preset._agent_complete(reader, system, prompt, user_id, _EXTRACT_MAX_TOKENS,
+                                             defer_s=defer_s),
+                _CALL_TIMEOUT_S + defer_s)
             return reply.text, str(reader.get("model") or "")
         except agent_preset._AgentGoneError:
             if not reader.get("fallback"):
@@ -1002,7 +1011,7 @@ async def extract(view: dict, f: dict, user_id: str) -> tuple[dict, str, str]:
     nonce = new_nonce()
     goals = live_goals(user_id)
     prompt = extraction_prompt(view, f, nonce, course=prompt_lines(goals, max_chars=1000))
-    text, model = await complete(reader, _EXTRACT_SYSTEM.format(nonce=nonce), prompt, user_id)
+    text, model = await complete(reader, _EXTRACT_SYSTEM.format(nonce=nonce), prompt, user_id, defer=True)
     got = parse_extraction(text)
     if got["serves_goal"] not in {g["id"] for g in goals}:
         got["serves_goal"] = ""   # only a goal it was shown, never one it made up

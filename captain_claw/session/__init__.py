@@ -3222,6 +3222,24 @@ class SessionManager:
             "cache_read_input_tokens": cache_read_input_tokens,
         }), byok=byok)
 
+    async def name_unnamed_usage(self, session_ids: list[str], since: str, task_name: str) -> int:
+        """Put *task_name* on the usage rows of *session_ids* recorded since
+        *since* that have none — a turn named after it ran (a self-hosted
+        model: see side_calls). The number of rows named."""
+        ids = [s for s in dict.fromkeys(session_ids) if s]
+        if not ids or not task_name:
+            return 0
+        await self._ensure_db()
+        assert self._db is not None
+        marks = ",".join("?" * len(ids))
+        cur = await self._db.execute(
+            f"UPDATE llm_usage SET task_name = ? WHERE task_name = '' AND created_at >= ? "
+            f"AND session_id IN ({marks})",
+            (task_name, since, *ids),
+        )
+        await self._db.commit()
+        return int(cur.rowcount or 0)
+
     async def query_llm_usage(
         self,
         *,

@@ -721,12 +721,14 @@ async def maybe_run_arbiter(
 
         # Think through the same agent that authored the reflection.
         try:
+            from captain_claw import side_calls
             from captain_claw.games.remote_provider import RemoteLLMProvider
             from captain_claw.llm import Message
 
+            # Ranking can wait for the agent's run to end (side_calls).
             provider = RemoteLLMProvider(
                 host=author["host"], port=author["port"], auth=author["auth"],
-                name=author.get("name", ""),
+                name=author.get("name", ""), defer_s=side_calls.DEFAULT_MAX_WAIT_S,
             )
             resp = await provider.complete(
                 messages=[
