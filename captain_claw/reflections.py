@@ -439,6 +439,7 @@ def _tool_call_label(call: Any) -> str:
 # claims made without a call.
 _LANE_NOTE_LABEL = "automation result — another run; its tool calls ran there"
 _SUMMARY_LABEL = "summary"
+_CHECK_LABEL = "automatic check, not the user — the user never saw it"
 
 
 def _reflection_transcript(messages: list[dict[str, Any]]) -> str:
@@ -447,8 +448,9 @@ def _reflection_transcript(messages: list[dict[str, Any]]) -> str:
     Without the calls, a reply that only CLAIMS an action ("**Sent** to Ana")
     reads exactly like one that did it — and a reflection written from such a
     turn taught the model to keep announcing actions it never took. A reply a
-    check turned down is marked as rejected; a lane's result and a compaction
-    summary carry their own labels."""
+    check turned down is marked as rejected, and the check's note as the
+    check's, not the user's; a lane's result and a compaction summary carry
+    their own labels."""
     lines: list[str] = []
     for m in messages:
         role = m.get("role", "unknown")
@@ -461,6 +463,10 @@ def _reflection_transcript(messages: list[dict[str, Any]]) -> str:
                 label = _SUMMARY_LABEL
             elif m.get("origin") == "rejected":
                 label = f"{role} (rejected)"
+            elif msg_origin.is_code_corrective(m):
+                # Not the user's words: read as theirs, a check's note became
+                # "when the owner points out an unsupported claim, …".
+                label = _CHECK_LABEL
             else:
                 label = role
             lines.append(f"[{label}] {content}")

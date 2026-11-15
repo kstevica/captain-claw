@@ -152,3 +152,18 @@ def test_the_proposal_prompt_carries_the_rules_that_keep_bad_lessons_out():
     assert "a lesson \"X doesn't work\" turns into a refusal" in text
     assert "an instruction for this task only" in text
     assert "When unsure, it teaches nothing" in text
+
+
+def test_a_checks_note_and_the_reply_it_turned_down_are_not_the_owners_words():
+    # A check's corrective is a user-role message; read as the owner's, it
+    # became a lesson "noticed" from a correction no one made.
+    messages = [
+        {"role": "user", "content": "what's new?", "origin": "human", "turn_input": True},
+        {"role": "assistant", "content": "The agent found two blockers.", "origin": "rejected"},
+        {"role": "user", "content": "Your reply says other agents did work in this turn. Don't "
+                                    "describe results you don't have.", "origin": "corrective"},
+        {"role": "assistant", "content": "Most of what's new is deck updates.", "origin": "model"},
+        {"role": "user", "content": "[Flight Deck] Agent 'scout' has joined the fleet on port 1.",
+         "origin": "fleet_notice"},
+    ]
+    assert lp.exchange(messages) == ("", "what's new?", "Most of what's new is deck updates.")

@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from captain_claw import msg_origin
 from captain_claw.agent import Agent
 from captain_claw.config import get_config, set_config
 from captain_claw.llm import LLMProvider, LLMResponse, Message, ToolCall, ToolDefinition
@@ -549,7 +550,40 @@ async def test_a_false_send_claim_then_the_real_send(_human_turn):
     # The retry saw its own false reply and the corrective, in this turn.
     retry = provider.calls[1]
     assert retry[-2].role == "assistant" and retry[-2].content == false_sent
-    assert retry[-1].role == "user" and retry[-1].content.startswith(_CORRECTIVE_LEAD)
+    assert retry[-1].role == "user" and _CORRECTIVE_LEAD in retry[-1].content
+    # Framed as the system's check, so the retry doesn't answer it as the user.
+    assert retry[-1].content.startswith(msg_origin.CORRECTIVE_HEAD)
+
+
+@pytest.mark.asyncio
+async def test_a_retry_that_answers_the_check_as_the_user_loses_that_opening(_human_turn):
+    # "You're right, I overstated that." — said to someone who never saw the
+    # check's note — is cut; the true rest ships.
+    false_sent = "**Sent** to Ana — confirming 10:30."
+    agent, provider, mail = _mail_agent([
+        LLMResponse(content=false_sent),
+        LLMResponse(content="You're right, I overstated that. Not sent yet — nothing went out "
+                            "in this turn. Want me to send it?"),
+    ])
+    _earlier_mail_lookup(agent)
+
+    result = await agent.complete("ok, 10:30 is ok")
+
+    assert mail.actions == []
+    assert result.startswith("Not sent yet — nothing went out in this turn.")
+    assert "You're right" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_first_reply_keeps_its_opening(_human_turn):
+    # No check answered: a person's pushback may be agreed with.
+    agent, provider, mail = _mail_agent([
+        LLMResponse(content="You're right, I overstated that. Nothing went out yet."),
+    ])
+
+    result = await agent.complete("you said it was sent, but it wasn't")
+
+    assert result.startswith("You're right, I overstated that.")
 
 
 @pytest.mark.asyncio

@@ -171,8 +171,8 @@ def test_earlier_turns_drop_correctives_and_fleet_notices():
     opener = next(t for t in texts if t.endswith("and hotels?"))
     assert "Fleet changes since the previous turn: 'scout' joined, 'atlas' rebound." in opener
     assert "Fleet at the latest change: scout (running, :1), atlas (running, :2)." in opener
-    # The current turn keeps its own corrective.
-    assert texts[-1] == "Your last response was completely empty."
+    # The current turn keeps its own corrective — framed as the system's check.
+    assert texts[-1] == msg_origin.corrective_for_model("Your last response was completely empty.")
     assert agent.last_context_window["synthetic_suppressed"] == 6
 
 
@@ -270,3 +270,32 @@ def test_a_tagged_corrective_does_not_take_the_previous_answer_with_it():
     texts = [m.content for m in messages[1:]]
     assert "The Q3 total is 41,250 EUR." in texts
     assert not any("completely empty" in t for t in texts)
+
+
+def test_the_turns_corrective_reaches_the_model_as_the_systems_check():
+    # Sent bare, "Your reply says other agents did work …" was answered as the
+    # user pushing back: "You're right, I overstated that." to "what's new?".
+    agent = _agent()
+    s = agent.session
+    turn_start = len(s.messages)
+    s.add_message("user", "what's new?", origin="human")
+    s.add_message("assistant", "The agent found two blockers.", origin="rejected")
+    s.add_message("user", "Your reply says other agents did work in this turn.", origin="corrective")
+
+    messages = agent._build_messages(tool_messages_from_index=turn_start, query="what's new?")
+
+    last = messages[-1].content
+    assert last.startswith(msg_origin.CORRECTIVE_HEAD)
+    assert "Your reply says other agents did work in this turn." in last
+    assert last.endswith(msg_origin.CORRECTIVE_TAIL) and "You're right" in last
+    # Stored as written: the classifier and the guard read the bare text.
+    assert s.messages[-1]["content"] == "Your reply says other agents did work in this turn."
+    assert msg_origin.corrective_for_model(last) == last
+
+
+def test_a_persons_turn_input_is_never_a_code_corrective():
+    note = {"role": "user", "content": "Your last response was completely empty.", "origin": "corrective"}
+    assert msg_origin.is_code_corrective(note)
+    assert not msg_origin.is_code_corrective({**note, "turn_input": True})
+    assert not msg_origin.is_code_corrective({"role": "user", "content": "what's new?"})
+    assert not msg_origin.is_code_corrective({**note, "role": "assistant"})
