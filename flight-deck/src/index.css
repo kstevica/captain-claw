@@ -70,6 +70,7 @@
 .fd-markdown p:last-child { margin-bottom: 0; }
 .fd-markdown strong { color: #e4e4e7; font-weight: 600; }
 .fd-markdown em { color: #a1a1aa; }
+.fd-markdown.fd-quiet strong, .fd-markdown.fd-quiet em { color: inherit; }
 .fd-markdown ul, .fd-markdown ol { margin: 0.4em 0; padding-left: 1.4em; }
 .fd-markdown li { margin-bottom: 0.2em; }
 .fd-markdown code { background: rgba(63,63,70,0.5); padding: 0.15em 0.35em; border-radius: 4px; font-size: 0.9em; }
@@ -248,6 +249,11 @@ html.light .fd-markdown td { border-bottom-color: #e4e4e7; }
 html.light .fd-markdown blockquote { border-left-color: #d4d4d8; color: #52525b; }
 html.light .fd-markdown hr { border-top-color: #e4e4e7; }
 html.light .fd-markdown a { color: #7c3aed; }
+/* Quiet markdown (the agent's narration between steps): keeps the faint
+   text colour it is given instead of the reply's ink. */
+html.light .fd-markdown.fd-quiet,
+html.light .fd-markdown.fd-quiet strong,
+html.light .fd-markdown.fd-quiet em { color: inherit !important; }
 /* Chat panel top bar in light mode */
 html.light .bg-zinc-900\/60 { background-color: rgba(246,243,238,0.85) !important; }
 html.light .bg-zinc-900\/80 { background-color: rgba(246,243,238,0.9) !important; }
