@@ -12,6 +12,7 @@ Pure module: no network, no DB, no config.
 from __future__ import annotations
 
 import asyncio
+import re
 import types
 
 import pytest
@@ -646,11 +647,29 @@ def test_refusal_texts_exact():
     assert ma.refusal_text("autonomy", "created") == head.format("Autonomous Work") + (
         "tell the user who is waiting for a reply and offer to draft it when they ask."
     )
-    # a job meant to email: how to make it do so
-    assert ma.refusal_text("cron", "created") == head.format("a scheduled task") + (
-        "tell the user that this job's text doesn't ask to email anyone, so no email was "
+    instead = (
+        "every other email this turn will be refused the same way, so don't send or draft more. "
+        "Instead: finish the rest of the task without email, keep what you wrote (e.g. in a saved/ "
+        "file) so it needn't be written again, never record an email as sent, and in your answer "
+        "list each email that is waiting (who it is for, its subject). "
+    )
+    # a job meant to email: what to do now, and how to make it do so
+    assert ma.refusal_text("fd_scheduler", "created") == head.format("a scheduled job") + instead + (
+        "Tell the user that this job's text doesn't ask to email anyone, so no email was "
         "written. If they want it to write email, they can edit the job to say so "
         "explicitly, e.g. 'email Ana the report' or 'pošalji Ani izvještaj mailom'."
+    )
+    # an agent's own cron job: judged on the user's words, and re-created, not edited
+    assert ma.refusal_text("cron", "sent") == (
+        "[not-authorized: mail-write] Not sent: this turn was started by a scheduled task, not by "
+        "the user, and the user's own words for this job don't ask for an email (for a job an agent "
+        "created, only what the user wrote when asking for it counts, not the job's text). Nothing "
+        "was drafted or sent. Don't retry or work around this (no other tool, no send_mail) — "
+    ) + instead + (
+        "Tell the user no email went out because their words for this job don't ask for one. "
+        "They can ask you to send the waiting emails (e.g. 'send those emails'); for the job "
+        "to email on its own, they say so in their own words (e.g. 'every morning, email the "
+        "follow-ups to the new leads') and you re-create the job."
     )
     assert ma.refusal_text("peer", "created") == head.format("another agent") + (
         "tell the user no email was written because the request didn't explicitly ask for "
@@ -659,9 +678,14 @@ def test_refusal_texts_exact():
     assert ma.refusal_text("being", "created") == head.format("a being tick") + (
         "say in your answer that no email was written because this run wasn't asked to write one."
     )
-    for kind in ("cron", "fd_scheduler", "flow", "flow_tool", "plan", "mcp_task"):
+    for kind in ("fd_scheduler", "flow", "flow_tool", "plan", "mcp_task"):
         r = ma.refusal_text(kind, "sent")
         assert "edit the job" in r and "who is waiting" not in r, kind
+    r = ma.refusal_text("cron", "sent")
+    assert "re-create the job" in r and "edit the job" not in r and "who is waiting" not in r
+    # the examples it gives really do ask for email
+    assert ma.intent_scope("send those emails") == "any"
+    assert ma.intent_scope("every morning, email the follow-ups to the new leads") == "any"
     for kind in ma.AUTOMATION_KINDS:
         assert ma.is_refusal(ma.refusal_text(kind, "sent")), kind
     assert "who is waiting" in ma.refusal_text("autonomy_tool", "sent")
@@ -1561,3 +1585,70 @@ def test_module_has_no_flight_deck_import():
 
     src = inspect.getsource(ma)
     assert "captain_claw.flight_deck" not in src and "import flight_deck" not in src
+
+
+# ── one refusal per turn, then a pointer back (for_turn) ─────────────
+
+
+def test_repeat_refusals_in_a_turn_point_back_to_the_first():
+    with ma.bound(ma.automated("cron", "Check the leads table and write the follow-ups")):
+        first = ma.for_turn(ma.check_mail_write("imap_mail", "send"))
+        second = ma.for_turn(ma.check_mail_write("imap_mail", "send"))
+        draft = ma.for_turn(ma.check_mail_write("imap_mail", "create_draft"))
+    assert first == ma.refusal_text("cron", "sent")
+    assert second == (
+        "[not-authorized: mail-write] Not sent — the same refusal as the first one in this turn "
+        "(this is refusal 2). Nothing was drafted, sent or changed. Don't retry: do what that "
+        "first refusal said."
+    )
+    # another verb, same reason: still the same refusal
+    assert draft.startswith("[not-authorized: mail-write] Not created — the same refusal") and "refusal 3" in draft
+    assert ma.is_refusal(second) and ma.is_refusal(draft)
+
+
+def test_a_new_turn_and_a_new_reason_get_the_whole_refusal():
+    job = "Check the leads table and write the follow-ups"
+    with ma.bound(ma.automated("cron", job)):
+        ma.for_turn(ma.check_mail_write("imap_mail", "send"))
+        # a mailbox change is refused for its own reason: whole the first time
+        assert ma.for_turn(ma.check_mailbox_change("imap_mail", "archive")) == (
+            ma.mailbox_refusal_text("cron", "archived"))
+    with ma.bound(ma.automated("cron", job)):
+        assert ma.for_turn(ma.check_mail_write("imap_mail", "send")) == ma.refusal_text("cron", "sent")
+
+
+def test_checks_that_only_decide_a_hint_do_not_count():
+    with ma.bound(ma.automated("cron", "Summarize my inbox")):
+        for _ in range(3):
+            assert ma.check_mail_write("imap_mail", "create_draft") is not None
+        assert ma.for_turn(ma.check_mail_write("imap_mail", "send")) == ma.refusal_text("cron", "sent")
+
+
+def test_unbound_and_non_refusals_pass_through():
+    r = ma.refusal_text("being", "sent")
+    assert ma.for_turn(r) == r and ma.for_turn(r) == r
+    assert ma.for_turn(None) is None and ma.for_turn("") == ""
+    with ma.bound(ma.automated("cron", "x")):
+        assert ma.for_turn("Email not sent: SMTP said no") == "Email not sent: SMTP said no"
+
+
+async def test_parallel_calls_in_one_turn_share_the_record():
+    async def one_send():
+        await asyncio.sleep(0)
+        return ma.for_turn(ma.check_mail_write("imap_mail", "send"))
+
+    with ma.bound(ma.automated("cron", "Write the weekly follow-ups")):
+        answers = await asyncio.gather(*(one_send() for _ in range(15)))
+    whole = [a for a in answers if a == ma.refusal_text("cron", "sent")]
+    assert len(whole) == 1 and all(ma.is_refusal(a) for a in answers)
+    counts = sorted(int(re.search(r"this is refusal (\d+)", a).group(1)) for a in answers if a not in whole)
+    assert counts == list(range(2, 16))
+
+
+def test_nested_binding_keeps_the_outer_record():
+    with ma.bound(ma.automated("cron", "Write the follow-ups")):
+        ma.for_turn(ma.check_mail_write("imap_mail", "send"))
+        with ma.bound(ma.automated("peer", "")):
+            assert ma.for_turn(ma.check_mail_write("imap_mail", "send")) == ma.refusal_text("peer", "sent")
+        assert "refusal 2" in ma.for_turn(ma.check_mail_write("imap_mail", "send"))
+    assert ma.bound_authority() is None

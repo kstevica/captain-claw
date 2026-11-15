@@ -668,6 +668,29 @@ def parse_ref(value: Any, what: str = "message_id") -> Ref:
     return Ref(parts[0], int(parts[1]), int(parts[2]), parts[3])
 
 
+# Ends every answer about an ID whose folder number (UIDVALIDITY) is not the
+# folder's now; the imap_mail tool recognises a stale ID by it.
+STALE_ID_HINT = (
+    "Find the email with list_messages or search and use the Message ID it prints, exactly — "
+    "never build, guess or change an ID by hand."
+)
+
+
+def stale_ref_message(folder: str, ref_uidvalidity: int, uidvalidity: int) -> str:
+    """Why an ID made with *ref_uidvalidity* can't open *folder* (now *uidvalidity*).
+
+    A server that renumbers a folder must give it a larger UIDVALIDITY
+    (RFC 3501 2.3.1.1), so an ID with a larger one than the folder's was
+    never given out for it: mistyped, made up or from another folder."""
+    if ref_uidvalidity > uidvalidity:
+        why = (f"That ID was never given out for {folder}: its folder number doesn't match "
+               "the folder's, so it was mistyped, made up or copied from another folder.")
+    else:
+        why = (f"The server renumbered the folder {folder} since that ID was made, so that ID "
+               "won't work again.")
+    return f"{why} {STALE_ID_HINT}"
+
+
 def account_of(value: Any) -> str:
     """The account id an id (message, draft or thread) starts with ("" if none)."""
     text = str(value or "").strip()
@@ -1170,9 +1193,7 @@ class Session:
         folder = self.folder(ref.folder)
         self.select(folder, readonly=readonly)
         if ref.uidvalidity and self.uidvalidity and ref.uidvalidity != self.uidvalidity:
-            raise MailError(
-                f"The folder {folder.name} was renumbered by the server since that ID was made — "
-                "find the email again with list_messages or search.", 404)
+            raise MailError(stale_ref_message(folder.name, ref.uidvalidity, self.uidvalidity), 404)
         return folder
 
     def search(self, args: list[Any], literal: bytes | None = None) -> list[int]:

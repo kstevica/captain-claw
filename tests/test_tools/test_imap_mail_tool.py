@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from captain_claw import fabrication_guard, imap_mail_manager, mail_authority
+from captain_claw.imap_mail import STALE_ID_HINT
 from captain_claw.tools.imap_mail import ImapMailTool
 
 
@@ -139,6 +140,112 @@ async def test_move_prints_new_ids(deck):
                                   "moved": [["work:1:5:INBOX", "work:9:1:Klijenti/Šibenik"]]})
     res = await ImapMailTool().execute(action="move", message_ids=["work:1:5:INBOX"], folder="Klijenti/Šibenik")
     assert "work:1:5:INBOX → work:9:1:Klijenti/Šibenik" in res.content
+
+
+async def test_parallel_sends_in_a_scheduled_turn_refused_once_then_pointed_back(deck):
+    """A run that wrote fifteen emails it may not send gets the whole refusal
+    once, then a short pointer back to it — and the deck is never asked."""
+    import asyncio
+
+    tool = ImapMailTool()
+    job = "Check the leads table and write each lead a short follow-up"
+    with mail_authority.bound(mail_authority.automated("cron", job, "intent")):
+        answers = await asyncio.gather(*(
+            tool.execute(action="send", account="outreach", to=f"lead{i}@example.org",
+                         subject=f"Following up {i}", body="Hello")
+            for i in range(15)))
+    errors = [a.error for a in answers]
+    assert not any(a.success for a in answers) and all(mail_authority.is_refusal(e) for e in errors)
+    assert errors.count(mail_authority.refusal_text("cron", "sent")) == 1
+    short = [e for e in errors if "the same refusal as the first one" in e]
+    assert len(short) == 14 and all(len(e) < 260 for e in short)
+    assert deck.calls == []
+
+
+STALE = ("That ID was never given out for INBOX: its folder number doesn't match the folder's, so "
+         "it was mistyped, made up or copied from another folder. " + STALE_ID_HINT)
+
+
+async def test_stale_id_is_not_asked_about_again(deck):
+    deck.answers["read_message"] = (404, {"detail": STALE})
+    tool = ImapMailTool()
+    first = await tool.execute(action="read_message", message_id="work:1700000300:1:INBOX")
+    again = await tool.execute(action="read_message", message_id="work:1700000300:1:INBOX")
+    reply = await tool.execute(action="create_draft", reply_to_message_id="work:1700000300:1:INBOX", body="Hi")
+    assert first.error == STALE
+    assert again.error.startswith("Not asked again, nothing was done: message_id work:1700000300:1:INBOX")
+    assert reply.error.startswith("Not asked again") and STALE in reply.error
+    # one question to the deck, and no search for an ID this tool never printed
+    assert [a for a, _ in deck.calls] == ["read_message"]
+
+
+async def test_stale_send_draft_says_not_sent_and_is_remembered(deck):
+    deck.answers["send_draft"] = (404, {"detail": STALE})
+    tool = ImapMailTool()
+    res = await tool.execute(action="send_draft", draft_id="work:1700000300:4:Drafts")
+    again = await tool.execute(action="send_draft", draft_id="work:1700000300:4:Drafts")
+    assert res.error == f"Email not sent: {STALE}" and again.error.startswith("Not asked again")
+    assert [a for a, _ in deck.calls] == ["send_draft"]
+
+
+async def test_renumbered_folder_found_again_by_message_id(monkeypatch):
+    """An ID this tool printed went stale (the server renumbered INBOX): the
+    read finds the same email by its own Message-ID and reads that."""
+    calls = []
+    old, new = "work:1700000000:42:INBOX", "work:1700000500:7:INBOX"
+    listed = {"folder": "INBOX", "total": 1, "messages": [
+        {"id": old, "account": "work", "folder": "INBOX", "message_id": "<offer-7@example.org>",
+         "from": "Iva <iva@example.org>", "subject": "Offer", "date": "2026-11-14 09:00 +0100"}]}
+    renumbered = ("The server renumbered the folder INBOX since that ID was made, so that ID won't "
+                  "work again. " + STALE_ID_HINT)
+    message = {"id": new, "account": "work", "folder": "INBOX", "message_id": "<offer-7@example.org>",
+               "from": "Iva <iva@example.org>", "to": "me@example.com", "subject": "Offer",
+               "date": "2026-11-14 09:00 +0100", "body": "See the offer."}
+
+    async def call(self, action, payload, *, timeout=120.0):
+        calls.append((action, dict(payload)))
+        if action == "list_messages":
+            return 200, listed
+        if action == "search":
+            return 200, {"folder": "INBOX", "total": 1, "messages": [dict(message)]}
+        if action == "read_message":
+            return (200, {"message": message}) if payload["message_id"] == new else (404, {"detail": renumbered})
+        return 200, {}
+
+    monkeypatch.setattr(imap_mail_manager.ImapMailClient, "call", call)
+    tool = ImapMailTool()
+    await tool.execute(action="list_messages", account="work")
+    res = await tool.execute(action="read_message", message_id=old)
+    assert res.success and "See the offer." in res.content
+    assert res.content.startswith(f"Note: the server renumbered INBOX, so this email's Message ID changed "
+                                  f"from {old} to {new}.")
+    assert ("search", {"account": "work", "query": "header:Message-ID=<offer-7@example.org>",
+                       "max_results": 5, "folder": "INBOX"}) in calls
+    # later calls with the old ID go straight to the new one
+    calls.clear()
+    later = await tool.execute(action="read_message", message_id=old)
+    assert later.success and later.content.startswith(f"Note: {old} is now {new}")
+    assert calls == [("read_message", {"message_id": new})]
+
+
+async def test_renumbered_but_not_found_again_answers_the_deck(monkeypatch):
+    old = "work:1700000000:42:INBOX"
+    renumbered = ("The server renumbered the folder INBOX since that ID was made, so that ID won't "
+                  "work again. " + STALE_ID_HINT)
+
+    async def call(self, action, payload, *, timeout=120.0):
+        if action == "list_messages":
+            return 200, {"folder": "INBOX", "total": 1, "messages": [
+                {"id": old, "folder": "INBOX", "message_id": "<gone@example.org>"}]}
+        if action == "search":
+            return 200, {"folder": "INBOX", "total": 0, "messages": []}
+        return 404, {"detail": renumbered}
+
+    monkeypatch.setattr(imap_mail_manager.ImapMailClient, "call", call)
+    tool = ImapMailTool()
+    await tool.execute(action="list_messages", account="work")
+    res = await tool.execute(action="read_message", message_id=old)
+    assert not res.success and res.error == renumbered
 
 
 class TestRegistryGate:

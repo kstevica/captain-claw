@@ -28,7 +28,9 @@ The decision travels in a :class:`contextvars.ContextVar` (never on the
 agent), so concurrent lanes and tasks can't leak authority into each other.
 Entry points bind it (:func:`bind` / :func:`bound`); ``google_mail``,
 ``send_mail`` and Gmail-like MCP proxy tools call :func:`check_mail_write`
-before any token fetch or HTTP call.
+before any token fetch or HTTP call. The mailbox tools answer a refusal
+through :func:`for_turn`: whole the first time in a turn, then a short
+pointer back to it.
 
 The wire marker (``automation`` on chat / run_tool frames and the
 ``/api/tool`` body) is parsed by :func:`from_wire`. Flight Deck matches a
@@ -220,18 +222,35 @@ def process_default() -> Authority:
     return _process_default()
 
 
-def bind(a: Authority) -> contextvars.Token:
-    return _CURRENT.set(a)
+# The refusals this binding (a turn) has already given, by reason — see
+# :func:`for_turn`. A mutable dict bound with the authority, so the tasks a
+# turn spawns (parallel tool calls copy the context) share one record.
+_REFUSED: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
+    "captain_claw_mail_refused", default=None,
+)
+
+
+@dataclass(frozen=True)
+class _Binding:
+    authority: contextvars.Token
+    refused: contextvars.Token
+
+
+def bind(a: Authority) -> _Binding:
+    return _Binding(_CURRENT.set(a), _REFUSED.set({}))
 
 
 def reset(token: Any) -> None:
     if token is None:
         return
-    try:
-        _CURRENT.reset(token)
-    except (ValueError, RuntimeError):
-        # Created in another context (e.g. a generator closed elsewhere).
-        pass
+    pairs = ([(_REFUSED, token.refused), (_CURRENT, token.authority)] if isinstance(token, _Binding)
+             else [(_CURRENT, token)])
+    for var, tok in pairs:
+        try:
+            var.reset(tok)
+        except (ValueError, RuntimeError):
+            # Created in another context (e.g. a generator closed elsewhere).
+            pass
 
 
 @contextlib.contextmanager
@@ -1163,20 +1182,42 @@ _TRIAGE_KINDS = frozenset({"autonomy", "autonomy_tool"})
 _LINK_KINDS = frozenset({"link"})
 
 
+# What a run that wrote emails it may not send can still do: nothing it wrote
+# is lost, nothing is recorded as sent, and the user sees what is waiting.
+_INSTEAD = (
+    "every other email this turn will be refused the same way, so don't send or draft more. "
+    "Instead: finish the rest of the task without email, keep what you wrote (e.g. in a saved/ "
+    "file) so it needn't be written again, never record an email as sent, and in your answer "
+    "list each email that is waiting (who it is for, its subject). "
+)
+
+
 def refusal_text(kind: str, verb: str) -> str:
     """The refusal for an automated turn that may not write email; what the
     model should tell the user depends on what started the turn."""
+    # An agent's own cron job is judged on what the user wrote asking for it
+    # (cron_job_text), so its text asking for email isn't enough.
+    why = ("the user's own words for this job don't ask for an email (for a job an agent created, "
+           "only what the user wrote when asking for it counts, not the job's text)"
+           if kind == "cron" else "its instructions don't ask for an email to be written or sent")
     head = (
         f"{MAIL_REFUSAL_TAG} Not {verb}: this turn was started by {_label(kind)}, not by "
-        "the user, and its instructions don't ask for an email to be written or sent. "
+        f"the user, and {why}. "
         "Nothing was drafted or sent. Don't retry or work around this (no other tool, no "
         "send_mail) — "
     )
     if kind in _TRIAGE_KINDS:
         return head + "tell the user who is waiting for a reply and offer to draft it when they ask."
+    if kind == "cron":
+        return head + _INSTEAD + (
+            "Tell the user no email went out because their words for this job don't ask for one. "
+            "They can ask you to send the waiting emails (e.g. 'send those emails'); for the job "
+            "to email on its own, they say so in their own words (e.g. 'every morning, email the "
+            "follow-ups to the new leads') and you re-create the job."
+        )
     if kind in _JOB_KINDS:
-        return head + (
-            "tell the user that this job's text doesn't ask to email anyone, so no email was "
+        return head + _INSTEAD + (
+            "Tell the user that this job's text doesn't ask to email anyone, so no email was "
             "written. If they want it to write email, they can edit the job to say so "
             "explicitly, e.g. 'email Ana the report' or 'pošalji Ani izvještaj mailom'."
         )
@@ -1222,6 +1263,37 @@ def refusal_text_self(kind: str, verb: str) -> str:
 
 def is_refusal(text: str) -> bool:
     return MAIL_REFUSAL_TAG in str(text or "")
+
+
+_REFUSAL_RE = re.compile(rf"^{re.escape(MAIL_REFUSAL_TAG)} (Not [^:]{{1,40}}): (.+)$", re.S)
+
+
+def for_turn(refusal: str | None) -> str | None:
+    """*refusal* as the tool should answer it in this turn: whole the first
+    time, and after that a short reply pointing back to it.
+
+    A run that wrote fifteen emails it may not send would otherwise get the
+    same long refusal fifteen times. Refusals with the same reason count as
+    one, per binding (:func:`bind`), so parallel tool calls share the record.
+    Call it only on a refusal the tool actually answers with — never on a
+    check that only decides what to suggest (``check_mail_write(...) is None``).
+    Unbound (process default): always whole.
+    """
+    if not refusal or not is_refusal(refusal):
+        return refusal
+    seen = _REFUSED.get()
+    m = _REFUSAL_RE.match(refusal)
+    if seen is None or m is None:
+        return refusal
+    n = seen.get(m.group(2), 0) + 1
+    seen[m.group(2)] = n
+    if n == 1:
+        return refusal
+    return (
+        f"{MAIL_REFUSAL_TAG} {m.group(1)} — the same refusal as the first one in this turn "
+        f"(this is refusal {n}). Nothing was drafted, sent or changed. Don't retry: do what that "
+        "first refusal said."
+    )
 
 
 def check_mail_write(

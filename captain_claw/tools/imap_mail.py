@@ -27,11 +27,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+from collections import OrderedDict
 from typing import Any
 
 import httpx
 
 from captain_claw import mail_attachments, mail_authority
+from captain_claw.imap_mail import STALE_ID_HINT
 from captain_claw.imap_mail_manager import (
     NOT_CONNECTED,
     WHERE,
@@ -54,6 +56,12 @@ _READ_ACTIONS = ("list_accounts", "list_messages", "search", "read_message", "ge
 _ACTIONS = _READ_ACTIONS + ("create_draft", "update_draft", "send", "send_draft",
                             "archive", "move", "mark_read", "mark_unread", "create_folder")
 _MAX_ATTACHMENT_BYTES = 30 * 1024 * 1024
+# The arguments that name one email (or draft) by its ID.
+_REF_KEYS = ("message_id", "draft_id", "reply_to_message_id")
+# Reads a stale ID may be found again for, by the email's own Message-ID.
+_REFIND_ACTIONS = frozenset({"read_message", "get_attachment"})
+_PRINTED_MAX = 2000   # IDs this tool printed, with the email's Message-ID
+_STALE_MAX = 500      # IDs Flight Deck called stale (never work again)
 
 
 def _human(n: int) -> str:
@@ -187,6 +195,14 @@ class ImapMailTool(Tool):
 
     def __init__(self) -> None:
         self._client = ImapMailClient()
+        # ID → (the email's own Message-ID, its folder), for every email this
+        # tool printed: a stale ID it printed can be found again.
+        self._printed: OrderedDict[str, tuple[str, str]] = OrderedDict()
+        # ID → why it can't work: a folder's number (UIDVALIDITY) only changes
+        # forward, so a stale ID stays stale; it is not asked about again.
+        self._stale_ids: OrderedDict[str, str] = OrderedDict()
+        # stale ID → the ID the same email was found again under.
+        self._found_as: OrderedDict[str, str] = OrderedDict()
 
     # ── entry ───────────────────────────────────────────────────────
 
@@ -214,13 +230,13 @@ class ImapMailTool(Tool):
             if refusal:
                 log.info("imap_mail write refused (automated turn)", action=action,
                          kind=mail_authority.current().kind)
-                return ToolResult(success=False, error=refusal)
+                return ToolResult(success=False, error=mail_authority.for_turn(refusal))
         if action in _ORGANIZE_ACTIONS:
             refusal = mail_authority.check_mailbox_change(self.name, action)
             if refusal:
                 log.info("imap_mail mailbox change refused (automated turn)", action=action,
                          kind=mail_authority.current().kind)
-                return ToolResult(success=False, error=refusal)
+                return ToolResult(success=False, error=mail_authority.for_turn(refusal))
 
         payload = {k: v for k, v in kwargs.items() if not str(k).startswith("_") and v is not None}
         raw_atts = payload.pop("attachments", None)
@@ -244,6 +260,19 @@ class ImapMailTool(Tool):
             if key in payload:
                 payload[key] = flag(payload[key])
 
+        refused, moved = self._known_ids(payload)
+        if refused:
+            return ToolResult(success=False, error=refused)
+        res = await self._ask(action, payload, kwargs, runtime)
+        if res.success and moved:
+            res.content = "\n".join(moved) + "\n\n" + res.content
+        return res
+
+    async def _ask(self, action: str, payload: dict[str, Any], kwargs: dict[str, Any],
+                   runtime: dict[str, Any], *, refind: bool = True) -> ToolResult:
+        """Ask Flight Deck and render its answer. A stale ID (the folder's
+        number changed) is remembered; a read on one this tool printed is
+        found again by the email's own Message-ID (*refind*, once)."""
         try:
             status, data = await self._client.call(
                 action, payload, timeout=240 if payload.get("attachments") or action == "get_attachment" else 120)
@@ -262,6 +291,10 @@ class ImapMailTool(Tool):
         if status != 200:
             detail = data.get("detail")
             detail = detail if isinstance(detail, str) and detail else f"HTTP {status}"
+            if status == 404 and STALE_ID_HINT in detail:
+                found = await self._stale(action, payload, kwargs, runtime, detail, refind=refind)
+                if found is not None:
+                    return found
             if action in _SEND_ACTIONS:
                 if status == 504:
                     return ToolResult(success=False, error=f"Email may or may not have been sent: {detail}")
@@ -269,6 +302,7 @@ class ImapMailTool(Tool):
             if status == 404 and "No email inbox" in detail:
                 return ToolResult(success=False, error=NOT_CONNECTED)
             return ToolResult(success=False, error=detail)
+        self._remember_printed(data)
         try:
             render = getattr(self, f"_render_{action}")
             if action == "get_attachment":
@@ -277,6 +311,74 @@ class ImapMailTool(Tool):
         except Exception as exc:  # a formatting slip must not hide what happened
             log.error("imap_mail render failed", action=action, error=str(exc))
             return ToolResult(success=True, content=str(data)[:20_000])
+
+    # ── stale IDs ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _keep(store: OrderedDict, key: str, value: Any, most: int) -> None:
+        store[key] = value
+        store.move_to_end(key)
+        while len(store) > most:
+            store.popitem(last=False)
+
+    def _remember_printed(self, data: dict[str, Any]) -> None:
+        msgs = list(data.get("messages") or [])
+        if isinstance(data.get("message"), dict):
+            msgs.append(data["message"])
+        for m in msgs:
+            ref, mid = str(m.get("id") or ""), str(m.get("message_id") or "").strip()
+            if ref and mid and not any(c.isspace() for c in mid):
+                self._keep(self._printed, ref, (mid, str(m.get("folder") or "")), _PRINTED_MAX)
+
+    def _known_ids(self, payload: dict[str, Any]) -> tuple[str, list[str]]:
+        """Before asking: an ID found again earlier is swapped for its new one
+        (each swap noted for the model); one known stale is refused here."""
+        notes: list[str] = []
+        for key in _REF_KEYS:
+            ref = str(payload.get(key) or "").strip()
+            if ref in self._found_as:
+                payload[key] = self._found_as[ref]
+                notes.append(f"Note: {ref} is now {payload[key]} (the server renumbered its folder) — "
+                             "use the new ID.")
+            elif ref in self._stale_ids:
+                return (f"Not asked again, nothing was done: {key} {ref} already failed in this "
+                        f"session and won't start working. {self._stale_ids[ref]}"), []
+        return "", notes
+
+    async def _stale(self, action: str, payload: dict[str, Any], kwargs: dict[str, Any],
+                     runtime: dict[str, Any], detail: str, *, refind: bool) -> ToolResult | None:
+        """Flight Deck called an ID stale: remember it, and for a read on an
+        email this tool printed, find it again in its folder by its own
+        Message-ID and read that. None: answer *detail*."""
+        named = [(k, str(payload.get(k)).strip()) for k in _REF_KEYS if payload.get(k)]
+        if len(named) != 1:
+            return None
+        key, ref = named[0]
+        self._keep(self._stale_ids, ref, detail, _STALE_MAX)
+        known = self._printed.get(ref)
+        if not refind or action not in _REFIND_ACTIONS or not known:
+            return None
+        msgid, folder = known
+        query = {"account": ref.split(":", 1)[0], "query": f"header:Message-ID={msgid}", "max_results": 5}
+        if folder:
+            query["folder"] = folder
+        try:
+            status, data = await self._client.call("search", query, timeout=120)
+        except (ImapRefused, httpx.HTTPError):
+            return None
+        hits = {str(m.get("id")) for m in (data.get("messages") or []) if status == 200
+                and str(m.get("message_id") or "").strip() == msgid and m.get("id") and m.get("id") != ref}
+        if len(hits) != 1:
+            return None
+        new = hits.pop()
+        self._keep(self._found_as, ref, new, _STALE_MAX)
+        log.info("imap_mail found a stale ID again", action=action)
+        res = await self._ask(action, {**payload, key: new}, kwargs, runtime, refind=False)
+        if res.success:
+            res.content = (f"Note: the server renumbered {folder or 'this folder'}, so this email's Message "
+                           f"ID changed from {ref} to {new}. Use the new one; the old one won't work "
+                           "again.\n\n" + res.content)
+        return res
 
     # ── rendering ───────────────────────────────────────────────────
 

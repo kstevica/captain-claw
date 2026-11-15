@@ -681,7 +681,7 @@ class GoogleMailTool(Tool):
                     "google_mail write refused (automated turn)",
                     action=action, kind=mail_authority.current().kind,
                 )
-                return ToolResult(success=False, error=_refusal)
+                return ToolResult(success=False, error=mail_authority.for_turn(_refusal))
 
         # Archive / move / labels: an automated turn needs its own text to ask
         # to organize email — also before any token fetch or HTTP.
@@ -692,7 +692,7 @@ class GoogleMailTool(Tool):
                     "google_mail mailbox change refused (automated turn)",
                     action=action, kind=mail_authority.current().kind,
                 )
-                return ToolResult(success=False, error=refusal)
+                return ToolResult(success=False, error=mail_authority.for_turn(refusal))
 
         # Files to attach: every one checked and read before anything is
         # created or sent — one that can't be attached refuses the call.
