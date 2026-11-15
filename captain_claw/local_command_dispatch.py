@@ -556,6 +556,12 @@ async def dispatch_local_command(
             except ValueError as e:
                 ui.print_error(str(e))
                 return "continue"
+        from captain_claw.cron_dispatch import check_new_cron_job
+
+        refusal = await check_new_cron_job(agent.session_manager, kind, schedule)
+        if refusal:
+            ui.print_error(refusal)
+            return "continue"
         next_run_at_iso = to_utc_iso(compute_next_run(schedule))
         job = await agent.session_manager.create_cron_job(
             kind=kind, payload=payload, schedule=schedule,

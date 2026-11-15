@@ -961,6 +961,24 @@ class ExecutionQueueConfig(BaseModel):
     drop: str = "summarize"
 
 
+class CronConfig(BaseModel):
+    """Safety limits on an agent's own scheduled jobs (``cron`` tool, /cron).
+
+    A job that runs the model can't repeat more often than
+    ``min_interval_minutes`` (scripts and tools can); an agent holds at most
+    ``max_active_jobs`` active jobs; a recurring job is paused after
+    ``pause_after_bad_runs`` runs in a row that failed or did nothing (0 = never);
+    a daily or weekly run more than ``skip_missed_after_minutes`` late (the
+    agent was off at its time) is skipped, not run late (0 = always run late).
+    New and edited jobs are checked; jobs that already exist keep running.
+    """
+
+    min_interval_minutes: int = Field(default=15, ge=1)
+    max_active_jobs: int = Field(default=20, ge=1)
+    pause_after_bad_runs: int = Field(default=10, ge=0)
+    skip_missed_after_minutes: int = Field(default=120, ge=0)
+
+
 class LoggingConfig(BaseModel):
     """Logging configuration."""
 
@@ -1716,6 +1734,7 @@ class Config(BaseSettings):
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     execution_queue: ExecutionQueueConfig = Field(default_factory=ExecutionQueueConfig)
+    cron: CronConfig = Field(default_factory=CronConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
     whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)

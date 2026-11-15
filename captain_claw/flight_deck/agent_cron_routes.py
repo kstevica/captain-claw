@@ -42,7 +42,7 @@ log = get_logger(__name__)
 router = APIRouter()
 
 # A run's last monitor step that means it ended (cron_dispatch.execute_cron_job).
-_END_STEPS = frozenset({"job_done", "job_queued", "job_failed"})
+_END_STEPS = frozenset({"job_done", "job_queued", "job_failed", "job_skipped", "run_outcome"})
 # A run still "started" after this long is not shown as running: the agent
 # went down mid-run and never wrote its end.
 _RUNNING_STALE_S = 3 * 3600.0
@@ -297,6 +297,12 @@ def _edit_file(slug: str, job_id: str, action: str) -> bool:
                     " updated_at = ? WHERE id = ?",
                     (nxt, now_iso, job_id),
                 )
+                # Its count of bad runs starts afresh, as the agent's own resume
+                # does (a file from before the column has none to clear).
+                try:
+                    conn.execute("UPDATE cron_jobs SET bad_streak = 0 WHERE id = ?", (job_id,))
+                except sqlite3.OperationalError:
+                    pass
             else:
                 return False
             return cur.rowcount > 0
@@ -326,7 +332,9 @@ def _job_in_file(slug: str, job_id: str) -> sqlite3.Row | None:
 def runs_from_history(chat_history: list, *, alive: bool, now: float | None = None) -> list[dict[str, Any]]:
     """The job's runs, newest first, from the events ``cron_dispatch`` and
     ``prompt_execution`` append to it: ``[CRON] job start``, the prompt, the
-    agent's answer, ``[CRON] job done|queued|failed``."""
+    agent's answer, ``[CRON] run did nothing`` (no tool ran),
+    ``[CRON] job done|queued|failed``; ``[CRON] job skipped`` is a run that
+    missed its slot."""
     now = time.time() if now is None else now
     runs: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
@@ -336,6 +344,15 @@ def runs_from_history(chat_history: list, *, alive: bool, now: float | None = No
         role = str(ev.get("role") or "")
         content = str(ev.get("content") or "")
         at = _epoch(ev.get("timestamp"))
+        if role == "system" and content.startswith("[CRON] job skipped"):
+            # Too late for its slot (the agent was off): a run that never ran.
+            if cur is not None and cur["status"] == "running":
+                cur["status"] = "interrupted"
+            cur = None
+            runs.append({"started_at": at, "finished_at": at, "trigger": "scheduled",
+                         "status": "skipped", "result": "",
+                         "error": content.split(":", 1)[1].strip() if ":" in content else ""})
+            continue
         if role == "system" and content.startswith("[CRON] job start"):
             if cur is not None and cur["status"] == "running":
                 cur["status"] = "interrupted"
@@ -364,6 +381,10 @@ def runs_from_history(chat_history: list, *, alive: bool, now: float | None = No
                 cur["error"] = content.split(":", 1)[1].strip() if ":" in content else content
             elif content.startswith("[CRON] prompt cancelled"):
                 cur["status"], cur["finished_at"] = "cancelled", at
+            elif content.startswith("[CRON] run did nothing"):
+                # It answered, but only announced the work: no tool ran.
+                cur["status"], cur["finished_at"] = "no_action", at
+                cur["error"] = content.split(":", 1)[1].strip() if ":" in content else content
     if cur is not None and cur["status"] == "running":
         started = cur["started_at"]
         if not alive or started is None or now - started >= _RUNNING_STALE_S:
