@@ -73,6 +73,8 @@ GRANT_AWARE_PATHS = frozenset({
     "/fd/external-tools/agent/run", "/fd/external-tools/agent/follow",
     "/fd/external-tools/agent/stop",
     "/fd/asks/agent", "/fd/asks/agent/follow", "/fd/asks/agent/cancel",
+    # Approval cards go to the member whose turn it is (approval_routes.GRANT_AWARE).
+    "/fd/approvals/agent", "/fd/approvals/agent/follow", "/fd/approvals/agent/cancel",
 })  # exact match on the path with root_path removed, rstrip("/")
 
 NO_TURN_DETAIL = "No active shared-agent turn for this request"
