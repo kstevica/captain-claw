@@ -512,3 +512,35 @@ def test_app_password_refusal_in_plain_words(monkeypatch):
         s._login()
     assert exc.value.status == 401 and "needs an app password" in exc.value.message
     assert "App passwords" in exc.value.message
+
+
+# ── a stale ID (the folder's number changed) ────────────────────────
+
+
+def test_stale_id_tells_made_up_from_renumbered():
+    made_up = m.stale_ref_message("INBOX", 1700000300, 1700000000)
+    assert made_up.startswith("That ID was never given out for INBOX") and "made up" in made_up
+    renumbered = m.stale_ref_message("INBOX", 1700000000, 1700000300)
+    assert renumbered.startswith("The server renumbered the folder INBOX")
+    for text in (made_up, renumbered):
+        assert text.endswith(m.STALE_ID_HINT) and "never build, guess or change an ID" in text
+
+
+@pytest.mark.parametrize("ref_uv,now_uv,lead", [
+    (1700000300, 1700000000, "That ID was never given out"),
+    (1700000000, 1700000300, "The server renumbered"),
+])
+def test_open_ref_refuses_a_stale_id(monkeypatch, ref_uv, now_uv, lead):
+    s = m.Session(_acct())
+    inbox = m.Folder(name="INBOX", raw="INBOX", delim="/", flags=frozenset(), role="inbox")
+    monkeypatch.setattr(s, "folder", lambda spec: inbox)
+
+    def select(folder, *, readonly=True):
+        s.uidvalidity = now_uv
+
+    monkeypatch.setattr(s, "select", select)
+    with pytest.raises(m.MailError) as err:
+        s.open_ref(m.Ref("work", ref_uv, 1, "INBOX"))
+    assert err.value.status == 404 and str(err.value).startswith(lead)
+    # the same number opens the folder
+    assert s.open_ref(m.Ref("work", now_uv, 1, "INBOX")) is inbox

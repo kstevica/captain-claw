@@ -104,7 +104,7 @@ class SendMailTool(Tool):
             _refusal = mail_authority.check_mail_write("send_mail", None)
         if _refusal:
             log.info("send_mail refused (automated turn)", kind=mail_authority.current().kind)
-            return ToolResult(success=False, error=_refusal)
+            return ToolResult(success=False, error=mail_authority.for_turn(_refusal))
 
         # -- validate inputs ------------------------------------------------
         recipients = [addr.strip() for addr in (to or []) if addr.strip()]

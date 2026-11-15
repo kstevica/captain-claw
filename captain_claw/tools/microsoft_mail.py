@@ -544,7 +544,7 @@ class MicrosoftMailTool(Tool):
             if refusal:
                 log.info("microsoft_mail write refused (automated turn)",
                          action=action, kind=mail_authority.current().kind)
-                return ToolResult(success=False, error=refusal)
+                return ToolResult(success=False, error=mail_authority.for_turn(refusal))
 
         # Archive / move / categories / a new folder: an automated turn needs
         # its own text to ask to organize email — also before any token fetch.
@@ -553,7 +553,7 @@ class MicrosoftMailTool(Tool):
             if refusal:
                 log.info("microsoft_mail mailbox change refused (automated turn)",
                          action=action, kind=mail_authority.current().kind)
-                return ToolResult(success=False, error=refusal)
+                return ToolResult(success=False, error=mail_authority.for_turn(refusal))
 
         # Which emails to organize: checked before the token too.
         problem = self._take_targets(action, kwargs)
