@@ -528,17 +528,25 @@ class _RedactHttpxTokenFilter(_stdlib_logging.Filter):
     """httpx logs every request's full URL at INFO ("HTTP Request: GET …"), and
     FD's root logger prints INFO — so the probe's ``?token=<web_auth>`` would
     land in FD's log. Blank any ``token=`` query value before the record is
-    emitted (redaction only; installed once on the ``httpx`` logger)."""
+    emitted — and the Telegram bot token, which sits in the path
+    (``api.telegram.org/bot<id>:<secret>/getUpdates``, logged on every poll).
+    Redaction only; installed once on the ``httpx`` logger."""
 
     _TOKEN_PARAM = re.compile(r"([?&]token=)[^&#\s\"']*", re.IGNORECASE)
+    _BOT_TOKEN_PATH = re.compile(r"(/bot\d+:)[A-Za-z0-9_-]+")
 
     def filter(self, record: _stdlib_logging.LogRecord) -> bool:
         try:
             msg = record.getMessage()
         except Exception:
             return True
-        if "token=" in msg.lower():
-            record.msg = self._TOKEN_PARAM.sub("\\1…", msg)
+        redacted = msg
+        if "token=" in redacted.lower():
+            redacted = self._TOKEN_PARAM.sub("\\1…", redacted)
+        if "/bot" in redacted:
+            redacted = self._BOT_TOKEN_PATH.sub("\\1…", redacted)
+        if redacted != msg:
+            record.msg = redacted
             record.args = None
         return True
 

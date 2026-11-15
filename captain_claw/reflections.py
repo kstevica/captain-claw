@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 
 log = get_logger(__name__)
 
+# Finish reasons that mean the reply stopped before it was done.
+_CUT_OFF_FINISH_REASONS = frozenset({"length", "max_tokens", "interrupted"})
+
 REFLECTIONS_DIR = Path("~/.captain-claw/reflections").expanduser()
 
 # Auto-reflection cooldown in seconds (4 hours).
@@ -646,6 +649,15 @@ async def generate_reflection(agent: Agent) -> Reflection:
     )
 
     latency_ms = int((_time.monotonic() - t0) * 1000)
+    # A reflection that ran out of room is half a reflection — or, from a
+    # thinking model that used the whole budget thinking, its draft notes
+    # ("Potential final 12 bullets: …"). The agent reads the latest one back
+    # in its prompt, so it keeps the one it has; every caller reports the error.
+    if str(getattr(response, "finish_reason", "") or "").strip().lower() in _CUT_OFF_FINISH_REASONS:
+        raise RuntimeError(
+            f"the reflection was cut off at the {max_tokens}-token output limit "
+            "and was not saved; the previous one stays"
+        )
     # A goal suggestion is a line for Flight Deck, never part of the reflection
     # the agent reads back in its prompt.
     summary, goal_proposal = take_goal_proposal((response.content or "").strip())

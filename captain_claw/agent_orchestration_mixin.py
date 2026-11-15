@@ -514,6 +514,28 @@ _STALL_HANDBACK_RE = _re.compile(
     r")",
     _re.IGNORECASE,
 )
+# A promise to report what happens later, once something the agent is waiting
+# on happens — "I'll report as things land.", "I'll let you know when replies
+# come in.", "I'll keep you posted." — signs off finished work; it skips none.
+# "You're welcome — … reply-watch every 3h. I'll report as things land." was
+# forced into a tool call, and the agent answered a thank-you with an inbox
+# check nobody asked for. "I'll report back once I've checked the inbox" names
+# work for now, so an event the agent brings about ("once I…", "when we…")
+# doesn't count.
+_STALL_REPORT_LATER_RE = _re.compile(
+    r"^\s*(?:i'?ll|i\s+will)\s+(?:also\s+|just\s+|then\s+)?"
+    r"(?:(?P<posted>keep\s+you\s+(?:posted|updated|informed|in\s+the\s+loop))"
+    r"|report(?:\s+back)?|let\s+you\s+know|update\s+you|ping\s+you|tell\s+you"
+    r"|flag\s+(?:it|them|anything)|circle\s+back|get\s+back\s+to\s+you)\b",
+    _re.IGNORECASE,
+)
+_STALL_ON_EVENT_RE = _re.compile(
+    r"\b(?:as|when|whenever|once|if|the\s+moment)\s+(?!(?:i|we|me)\b)"
+    r"(?:[\w'-]+\s+){0,4}?"
+    r"(?:lands?|landed|come\s+in|comes\s+in|arrives?|changes?|happens?|shows?\s+up"
+    r"|turns?\s+up|moves?|repl(?:y|ies)|responds?|answers?|fires?|runs?|finish(?:es)?)\b",
+    _re.IGNORECASE,
+)
 # A sentence that ends in a question mark: the reply is asking the user.
 _STALL_QUESTION_RE = _re.compile(r"\?(?:\s|[*_)\"'»”]|$)")
 # Upper length bound for the CLOSING-sentence stall check. Weak models
@@ -522,6 +544,56 @@ _STALL_QUESTION_RE = _re.compile(r"\?(?:\s|[*_)\"'»”]|$)")
 # sentence misses entirely. Kept tight: a real answer that happens to end
 # on "I'll …" is virtually always longer than this.
 _STALL_TRAILING_MAX_LEN = 160
+
+
+def _signs_off_until_later(sentence: str) -> bool:
+    """The sentence promises to report later, when something happens or at
+    a set time, and asks for no work now (see ``_STALL_REPORT_LATER_RE``)."""
+    text = _stall_strip(sentence).replace("’", "'")
+    match = _STALL_REPORT_LATER_RE.match(text)
+    if not match:
+        return False
+    rest = text[match.end():]
+    if match.group("posted") and len(rest.split()) <= 3:  # "I'll keep you posted on replies."
+        return True
+    return bool(_STALL_ON_EVENT_RE.search(rest) or _STALL_LATER_RE.search(rest))
+
+
+def _without_closing_signoffs(stripped: str) -> str:
+    """*stripped* without the report-later sign-offs it ends on."""
+    text = stripped
+    while text:
+        parts = [p for p in _STALL_SENTENCE_SPLIT_RE.split(text) if p and p.strip()]
+        if not parts or not _signs_off_until_later(parts[-1]):
+            return text
+        cut = text.rfind(parts[-1].strip())
+        if cut < 0:
+            return text
+        text = text[:cut].rstrip()
+    return text
+
+
+# A user message that only thanks ("ok, thank you", "thanks a lot!", "hvala")
+# asks for nothing: a short reply to it is the answer, never a stall to force
+# into a tool call. Every word must be one of these, and one must be a thanks
+# — "ok" or "great" alone can be a go-ahead.
+_THANKS_WORDS = frozenset({
+    "thanks", "thank", "thx", "ty", "cheers", "hvala", "fala", "zahvaljujem",
+    "danke", "merci", "grazie", "gracias",
+})
+_THANKS_ONLY_WORDS = _THANKS_WORDS | frozenset({
+    "ok", "okay", "k", "you", "so", "very", "much", "a", "lot", "lots", "many",
+    "again", "great", "perfect", "cool", "nice", "good", "awesome", "super",
+    "excellent", "brilliant", "got", "it", "noted", "alright", "all", "right",
+    "fine", "that's", "thats", "that", "for", "the", "help", "now", "puno",
+    "lijepa", "ti", "vam", "odlično", "odlicno", "dobro", "sjajno", "u", "redu",
+})
+
+
+def _only_thanks(user_input: str) -> bool:
+    """The user's message does nothing but thank (see ``_THANKS_WORDS``)."""
+    words = _re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", str(user_input or "").lower().replace("’", "'"))
+    return 0 < len(words) <= 8 and set(words) <= _THANKS_ONLY_WORDS and bool(set(words) & _THANKS_WORDS)
 
 
 def _closing_sentence_stalls(stripped: str) -> bool:
@@ -747,6 +819,10 @@ def _looks_like_stall(text: str) -> bool:
     stripped = str(text).strip()
     if not stripped:
         return True
+    # A closing "I'll report as things land." signs off: judge what's before it.
+    stripped = _without_closing_signoffs(stripped)
+    if not stripped:
+        return False
     first_line = ""
     for line in stripped.splitlines():
         ln = line.strip()
@@ -3880,7 +3956,13 @@ class AgentOrchestrationMixin:
             if (
                 not response.tool_calls
                 and not _turn_produced_deliverable
-                and (_looks_like_stall(_stall_resp_text) or _false_claim or _false_web_claim)
+                and (
+                    # A reply to a plain "thank you" is the whole answer — but
+                    # an empty one still gets its retry.
+                    (_looks_like_stall(_stall_resp_text)
+                     and not (_stall_resp_text.strip() and _only_thanks(user_input)))
+                    or _false_claim or _false_web_claim
+                )
                 and self._stall_retry_count < MAX_STALL_RETRIES
             ):
                 self._stall_retry_count += 1

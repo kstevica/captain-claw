@@ -42,9 +42,11 @@ _BACKGROUND_MAINTENANCE_LABELS = {
     "session_title",
 }
 
-# Helper calls made inside a turn that keep the model's default reasoning even
-# when the user picked an effort in the chat box: rewording, summaries,
-# extraction and checks — cheap jobs that don't get better with deep thinking.
+# Helper calls that ignore the effort picked in the chat box and run with
+# thinking off where the model can switch it off (reasoning.quiet_call):
+# rewording, summaries, extraction and checks — cheap jobs that don't get
+# better with deep thinking, and whose small output budgets a thinking model
+# used up before it wrote the answer.
 _REASONING_EXEMPT_LABELS = _BACKGROUND_MAINTENANCE_LABELS | {
     "compaction_summary",
     "task_rephrase",
@@ -569,7 +571,10 @@ class AgentGuardMixin:
         # should read out as the answer.
         self._stream_label = _label or "conversation"
         try:
-            with reasoning.call_effort(None if _label in _REASONING_EXEMPT_LABELS else self._turn_reasoning_effort()):
+            with (
+                reasoning.quiet_call() if _label in _REASONING_EXEMPT_LABELS
+                else reasoning.call_effort(self._turn_reasoning_effort())
+            ):
                 response = await self.provider.complete_with_callback(
                     messages=messages,
                     tools=tools if getattr(self.provider, "supports_tools", True) else None,

@@ -127,9 +127,13 @@ async def _generate_task_name(
         # reject the value (Claude Haiku 5.5: "`temperature` is deprecated")
         # gets none, instead of failing the naming call every turn.
         from captain_claw.llm import (
+            _apply_reasoning_plan,
+            _is_reasoning_field_refused_error,
             _is_temperature_rejected_error,
             _normalize_temperature_for_model,
             _remember_temperature_unsupported,
+            _strip_reasoning_fields,
+            reasoning,
         )
         _provider = model.split("/", 1)[0] if "/" in (model or "") else ""
         temperature = _normalize_temperature_for_model(_provider, model, 0.0)
@@ -141,14 +145,24 @@ async def _generate_task_name(
             kwargs["api_base"] = base_url
         if extra_headers:
             kwargs["extra_headers"] = extra_headers
+        # Thinking off where the model can switch it off: a thinking model
+        # (Qwen 3.8 on llama.cpp) thought through all 25 tokens and the name
+        # came back empty on every turn.
+        _plan = reasoning.quiet_plan(_provider, model, base_url, max_tokens=25)
+        if _plan is not None:
+            _apply_reasoning_plan(kwargs, _plan, _provider)
 
         try:
             resp = await acompletion(**kwargs)
         except Exception as e:
-            if "temperature" not in kwargs or not _is_temperature_rejected_error(str(e).lower()):
+            msg = str(e).lower()
+            if "temperature" in kwargs and _is_temperature_rejected_error(msg):
+                _remember_temperature_unsupported(model)
+                kwargs.pop("temperature")
+            elif _plan is not None and _is_reasoning_field_refused_error(msg) and _strip_reasoning_fields(kwargs):
+                reasoning.remember_refused(model)
+            else:
                 raise
-            _remember_temperature_unsupported(model)
-            kwargs.pop("temperature")
             resp = await acompletion(**kwargs)
         name = (resp.choices[0].message.content or "").strip().strip('"\'.')
         if restore is not None and name:
