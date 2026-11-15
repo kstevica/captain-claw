@@ -64,6 +64,7 @@ from captain_claw.tools.bat_ask import AskHumanTool
 from captain_claw.tools.code_session import CodeSessionTool
 from captain_claw.tools.crew import CrewTool
 from captain_claw.tools.ask_user import AskUserTool
+from captain_claw.tools.request_secret import RequestSecretTool
 from captain_claw.tools.custom_tools import CustomToolsTool
 from captain_claw.tools.anonymize import AnonymizeTool
 from captain_claw.tools.hosting import HostingTool
@@ -168,6 +169,7 @@ __all__ = [
     "CrewTool",
     "CustomToolsTool",
     "AskUserTool",
+    "RequestSecretTool",
     "AnonymizeTool",
     "HostingTool",
     "PublicLinkTool",

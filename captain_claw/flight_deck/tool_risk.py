@@ -41,6 +41,8 @@ _TOOL_RISK: dict[str, str] = {
     "course": "read",
     # asks the person the turn is for, in their Flight Deck: nothing changes, nothing leaves
     "ask_user": "read",
+    # asks the person for a password or code in a masked box: the value stays in Flight Deck
+    "request_secret": "read",
     # keep
     "write": "write", "edit": "write", "workspace_write": "write", "datastore": "write",
     "google_drive": "write", "microsoft_onedrive": "write", "google_calendar": "write",

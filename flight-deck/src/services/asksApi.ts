@@ -7,7 +7,9 @@ import { api } from './fileLibraryApi'
 export interface AskQuestion {
   id: string
   question: string
-  kind: 'text' | 'choice' | 'multiple' | 'confirm'
+  // "secret": a password or a code (request_secret), typed into a masked box;
+  // the agent gets a reference, never the value.
+  kind: 'text' | 'choice' | 'multiple' | 'confirm' | 'secret'
   help?: string
   optional: boolean
   choices?: string[]
