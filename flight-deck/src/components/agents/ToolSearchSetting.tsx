@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { AlertTriangle, Check, Loader2 } from 'lucide-react'
+import { Check, Loader2 } from 'lucide-react'
 import { getAgentToolSearch, setAgentToolSearch, type AgentToolSearch } from '../../services/docker'
 import { SwitchTrack } from '../common/SwitchTrack'
 
@@ -11,7 +11,13 @@ const BUDGETS = [8000, 16000, 24000, 32000]
 
 const thousands = (n: number) => `${Math.round(n / 1000)}k`
 
-export function ToolSearchSetting({ kind, identifier }: { kind: 'docker' | 'process'; identifier: string }) {
+export function ToolSearchSetting({ kind, identifier, eco }: {
+  kind: 'docker' | 'process'
+  identifier: string
+  /** Eco mode as the dialog holds it (it can switch it beside this); left out,
+   *  as the deck said when this loaded. */
+  eco?: boolean
+}) {
   // undefined: loading; null: the deck couldn't say.
   const [state, setState] = useState<AgentToolSearch | null | undefined>(undefined)
   const [busy, setBusy] = useState(false)
@@ -47,13 +53,16 @@ export function ToolSearchSetting({ kind, identifier }: { kind: 'docker' | 'proc
     }
   }
 
+  const ecoOn = eco ?? state.eco
   // A budget set by hand in its config shows beside the usual ones.
   const budgets = BUDGETS.includes(state.budget_tokens)
     ? BUDGETS
     : [...BUDGETS, state.budget_tokens].sort((a, b) => a - b)
 
   return (
-    <div className="space-y-2">
+    // With Eco mode on it sends eco's own small set, so this waits: dimmed,
+    // still changeable for when Eco mode goes off.
+    <div className={`space-y-2 transition-opacity ${ecoOn ? 'opacity-60' : ''}`}>
       <button
         type="button" role="switch" aria-checked={state.enabled} disabled={busy}
         onClick={() => save(!state.enabled, state.budget_tokens)}
@@ -102,12 +111,7 @@ export function ToolSearchSetting({ kind, identifier }: { kind: 'docker' | 'proc
         </div>
       )}
 
-      {state.eco && (
-        <p className="flex items-start gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
-          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-          Eco mode is on, and it already sends a smaller set of tools. This setting applies when Eco mode is off.
-        </p>
-      )}
+      {ecoOn && <p className="text-[11px] leading-snug text-zinc-500">Applies when Eco mode is off.</p>}
       {error && <p className="text-[11px] text-red-500">{error}</p>}
     </div>
   )

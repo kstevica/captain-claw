@@ -5555,13 +5555,47 @@ def _read_agent_tool_search(agent_dir: Path, kind: str) -> dict:
     return {"enabled": default.enabled, "budget_tokens": default.budget_tokens}
 
 
+_FLAG_ON = ("on", "true", "1", "yes")
+
+
+def _flag_file_on(path: Path) -> bool:
+    """A ~/.captain-claw flag file says on (as instructions.py reads it)."""
+    try:
+        return path.read_text(encoding="utf-8").strip().lower() in _FLAG_ON
+    except OSError:
+        return False
+
+
 def _agent_eco_on(agent_dir: Path, kind: str) -> bool:
-    """Eco mode's flag, wherever this agent may read it (as the eco toggle does)."""
-    return any(f.is_file() for f in (
-        agent_dir / "data" / "home-config" / ".captain-claw" / "eco_mode.txt",
-        agent_dir / "data" / "home-config-parent" / ".captain-claw" / "eco_mode.txt",
-        _agent_home_cc(agent_dir, kind) / "eco_mode.txt",
-    ))
+    """Eco mode's switch, wherever this agent may read it: a container reads
+    data/home-config/eco_mode.txt, a process agent its HOME's ~/.captain-claw."""
+    return any(_flag_file_on(d / "eco_mode.txt") for d in _agent_reasoning_dirs(agent_dir, kind))
+
+
+def _agent_eco_locked(agent_dir: Path, kind: str) -> str:
+    """Why eco mode stays on whatever its switch says: "nano" (nano mode
+    implies it) or "config" (context.micro_instructions in its config.yaml);
+    "" when the switch decides."""
+    if any(_flag_file_on(d / "nano_mode.txt") for d in _agent_reasoning_dirs(agent_dir, kind)):
+        return "nano"
+    found: dict[str, bool] = {}
+    # The home config overlays the agent folder's, as at start-up: the first
+    # one that sets a key decides it.
+    for cfg in (_agent_home_cc(agent_dir, kind) / "config.yaml", agent_dir / "config.yaml"):
+        try:
+            data = yaml.safe_load(cfg.read_text()) or {}
+        except Exception:
+            continue
+        ctx = data.get("context") if isinstance(data, dict) else None
+        if isinstance(ctx, dict):
+            for key in ("nano_instructions", "micro_instructions"):
+                if key not in found and isinstance(ctx.get(key), bool):
+                    found[key] = ctx[key]
+    if found.get("nano_instructions"):
+        return "nano"
+    if found.get("micro_instructions"):
+        return "config"
+    return ""
 
 
 @app.get("/fd/agent-tool-search/{kind}/{identifier}")
@@ -5575,7 +5609,8 @@ async def get_agent_tool_search(
         raise HTTPException(400, "kind must be 'docker' or 'process'")
     user_id = getattr(request.state, "user_id", "")
     agent_dir = _resolve_agent_dir(identifier, kind, user_id)
-    return {**_read_agent_tool_search(agent_dir, kind), "eco": _agent_eco_on(agent_dir, kind)}
+    eco = _agent_eco_on(agent_dir, kind) or bool(_agent_eco_locked(agent_dir, kind))
+    return {**_read_agent_tool_search(agent_dir, kind), "eco": eco}
 
 
 @app.put("/fd/agent-tool-search/{kind}/{identifier}")
@@ -5625,7 +5660,9 @@ async def update_agent_eco_mode(
     """Toggle eco mode (micro instructions + lazy tools) at runtime.
 
     Writes ``eco_mode.txt`` — the agent picks it up on the next system
-    prompt build, just like cognitive mode.
+    prompt build, just like cognitive mode. Every place the agent may read
+    it from: a container reads data/home-config/eco_mode.txt itself, which
+    the nested copies alone never reached (turning eco off left it on).
     """
     if kind not in ("docker", "process"):
         raise HTTPException(400, "kind must be 'docker' or 'process'")
@@ -5633,8 +5670,7 @@ async def update_agent_eco_mode(
     user_id = getattr(request.state, "user_id", "")
     agent_dir = _resolve_agent_dir(identifier, kind, user_id)
 
-    for subdir in ("home-config", "home-config-parent"):
-        cc_dir = agent_dir / "data" / subdir / ".captain-claw"
+    for cc_dir in _agent_reasoning_dirs(agent_dir, kind):
         if cc_dir.is_dir():
             eco_file = cc_dir / "eco_mode.txt"
             if body.enabled:
@@ -5650,19 +5686,15 @@ async def get_agent_eco_mode(
     kind: str, identifier: str, request: Request,
     user: dict | None = _required_user_dep,
 ):
-    """Read current eco mode state for an agent."""
+    """Read current eco mode state for an agent: its switch, and ``locked``
+    — why it stays on whatever the switch says ("nano", "config"; "" when the
+    switch decides)."""
     if kind not in ("docker", "process"):
         raise HTTPException(400, "kind must be 'docker' or 'process'")
 
     user_id = getattr(request.state, "user_id", "")
     agent_dir = _resolve_agent_dir(identifier, kind, user_id)
-
-    for subdir in ("home-config", "home-config-parent"):
-        eco_file = agent_dir / "data" / subdir / ".captain-claw" / "eco_mode.txt"
-        if eco_file.is_file():
-            return {"enabled": True}
-
-    return {"enabled": False}
+    return {"enabled": _agent_eco_on(agent_dir, kind), "locked": _agent_eco_locked(agent_dir, kind)}
 
 
 def _write_eco_flag_on_spawn(agent_dir: Path, enabled: bool = True) -> None:

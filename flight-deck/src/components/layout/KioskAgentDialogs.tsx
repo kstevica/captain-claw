@@ -10,6 +10,7 @@ import {
   Database,
   Eye,
   Info,
+  Leaf,
   LibraryBig,
   Loader2,
   Mail,
@@ -35,8 +36,8 @@ import { KioskSkillsPanel } from './KioskAgentSkills'
 import { TopicsPanel } from '../agents/TopicsPanel'
 import { SwitchTrack } from '../common/SwitchTrack'
 import {
-  getAgentConfig, getAgentMode, getAgentModelSwitch, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentModelSwitch,
-  setAgentTaskRephrase, setAgentVision,
+  getAgentConfig, getAgentEcoMode, getAgentMode, getAgentModelSwitch, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentModelSwitch,
+  setAgentEcoMode, setAgentTaskRephrase, setAgentVision,
 } from '../../services/docker'
 import { LLM_PROVIDERS } from '../../services/tierConfig'
 import { VISION_OPTIONS, parseModelFromYaml } from '../../services/agentModel'
@@ -334,6 +335,10 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   // Switching models on its own (llm/model_switch.py): null when the deck couldn't say.
   const [selfSwitch, setSelfSwitch] = useState<boolean | null>(null)
   const [selfSwitchSaved, setSelfSwitchSaved] = useState(false)
+  // Eco mode (instructions.py): null when the deck couldn't say. `locked`: why
+  // it stays on whatever the switch says ("nano", "config"; "" when it decides).
+  const [eco, setEco] = useState<{ enabled: boolean; locked: string } | null>(null)
+  const [ecoSaved, setEcoSaved] = useState(false)
   // What its config holds, and the change being typed.
   const [model, setModel] = useState<ModelSetting>({ provider: '', model: '', baseUrl: '' })
   const [draft, setDraft] = useState({ provider: '', model: '', baseUrl: '' })
@@ -343,7 +348,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   const [modelSaved, setModelSaved] = useState(false)
   // The reasoning levels are the model's: a saved change reads them afresh.
   const [modelRev, setModelRev] = useState(0)
-  const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model' | 'rephrase' | 'switch'>('')
+  const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model' | 'rephrase' | 'switch' | 'eco'>('')
   // Model and vision are read when the agent starts: changed since it last did.
   const [pendingRestart, setPendingRestart] = useState(false)
   const [restarted, setRestarted] = useState(false)
@@ -355,13 +360,15 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
       getAgentMode(kind, key), getAgentConfig(kind, key),
       getAgentTaskRephrase(kind, key).catch(() => null),
       getAgentModelSwitch(kind, key).catch(() => null),
+      getAgentEcoMode(kind, key).catch(() => null),
     ])
-      .then(([m, cfg, tr, ms]) => {
+      .then(([m, cfg, tr, ms, ec]) => {
         if (!live) return
         const info = parseModelFromYaml(cfg.config_yaml || '')
         setMode(m.mode || 'neutra')
         setRephrase(tr ? tr.enabled : null)
         setSelfSwitch(ms ? ms.enabled : null)
+        setEco(ec ? { enabled: ec.enabled, locked: ec.locked || '' } : null)
         setVision(info.vision)
         setModel({ provider: info.provider, model: info.model, baseUrl: info.base_url })
         setDraft({ provider: info.provider, model: info.model, baseUrl: info.base_url })
@@ -475,6 +482,26 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
     } catch (e) {
       setSelfSwitch(!next)
       setError(`Couldn't change model switching: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving('')
+    }
+  }
+
+  // Read on every message — no restart.
+  const toggleEco = async () => {
+    if (!eco || eco.locked || saving) return
+    const next = !eco.enabled
+    setEco({ ...eco, enabled: next }); setSaving('eco'); setError(''); setEcoSaved(false)
+    try {
+      await setAgentEcoMode(kind, key, next)
+      // …and the agent cards' copy of it.
+      const cards = kind === 'docker' ? useContainerStore.getState() : useProcessStore.getState()
+      cards.setEcoMode(key, next)
+      setEcoSaved(true)
+      setTimeout(() => setEcoSaved(false), 2000)
+    } catch (e) {
+      setEco({ ...eco, enabled: !next })
+      setError(`Couldn't change Eco mode: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setSaving('')
     }
@@ -684,10 +711,40 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                   </button>
                 </section>
               )}
+              {eco !== null && (
+                <section>
+                  <SectionTitle icon={Leaf} title="Eco mode" saving={saving === 'eco'} saved={ecoSaved} />
+                  <button
+                    type="button" role="switch" aria-checked={eco.enabled || !!eco.locked} onClick={toggleEco}
+                    disabled={!!saving || !!eco.locked}
+                    className={`mt-1.5 flex w-full items-start gap-3 rounded-lg border border-zinc-800 px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900 disabled:cursor-not-allowed ${
+                      eco.locked ? 'opacity-60 hover:border-zinc-800 hover:bg-transparent' : ''}`}
+                  >
+                    <span className="mt-0.5"><SwitchTrack on={eco.enabled || !!eco.locked} /></span>
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium text-zinc-200">Compact instructions and a small set of tools</span>
+                      <span className="block text-[11px] leading-relaxed text-zinc-500">
+                        About two-thirds shorter instructions and only the everyday tools: suits small and local models,
+                        and costs less. Strong models do better with it off — full instructions, with tool search below
+                        keeping the tool descriptions in check. Applies from its next message.
+                      </span>
+                    </span>
+                  </button>
+                  {eco.locked && (
+                    <p className="mt-1.5 text-[11px] leading-snug text-zinc-500">
+                      {eco.locked === 'nano'
+                        ? 'Nano mode is on, and it includes Eco mode.'
+                        : "Turned on in this agent's config.yaml (context.micro_instructions), so it stays on."}
+                    </p>
+                  )}
+                </section>
+              )}
               <section>
                 {/* Tool search (tool_search.py): saved at once, read on every message. */}
                 <SectionTitle icon={PackageSearch} title="Tool search" saving={false} />
-                <div className="mt-1.5"><ToolSearchSetting kind={kind} identifier={key} /></div>
+                <div className="mt-1.5">
+                  <ToolSearchSetting kind={kind} identifier={key} eco={eco ? eco.enabled || !!eco.locked : undefined} />
+                </div>
               </section>
               {kind === 'process' && (
                 // The email meant for it (colleagues.py): saved at once, no restart.
