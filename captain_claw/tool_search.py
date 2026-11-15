@@ -13,8 +13,11 @@ When the definitions come to more than ``tools.tool_search.budget_tokens``:
   at (eco mode's intent patterns), eco mode's core set, then the rest,
   smallest first;
 - the others stay named, with a one-line summary, in the system prompt's
-  "Available tools" list, and ``search_tools`` (sent in their place) returns
-  their full definitions and loads them from the next step.
+  "Available tools" list, and ``search_tools`` (sent in their place) loads
+  the matches: their full definitions go out with every call from the next
+  step on. The result itself only names them — repeating the definitions
+  there would send each one twice on every later call (once in the tools,
+  once in the history).
 
 The registry still executes any tool by name: this only decides which
 definitions the model is given.
@@ -162,8 +165,8 @@ def search_definition(deferred: Iterable[str]) -> dict[str, Any]:
             "your 'Available tools' list are not in your function list yet: "
             f"{names}. Search by a tool's name or by what you need to do (for "
             "example 'pptx', 'resize an image', 'send an email'): the matching "
-            "tools come back with their full definitions and stay loaded for the "
-            "rest of the session, so you can call them from your next step."
+            "tools are added to your function list from your next step and stay "
+            "loaded for the rest of the session."
         ),
         "parameters": {
             "type": "object",
@@ -396,9 +399,17 @@ def search(defs: list[dict[str, Any]], query: str, limit: int = DEFAULT_LIMIT) -
     return [d for _, _, d in scored[: max(limit, n_exact)]]
 
 
+def _summary(defn: dict[str, Any]) -> str:
+    """A definition's description, cut to its first sentence."""
+    from captain_claw.agent_context_mixin import _short_tool_desc
+
+    return _short_tool_desc(str(defn.get("description", ""))) or str(defn.get("name", ""))
+
+
 def run(agent: Any, arguments: dict[str, Any]) -> Any:
-    """Execute ``search_tools``: load the matching tools for this session and
-    return their full definitions."""
+    """Execute ``search_tools``: load the matching tools for this session.
+    The result names them with a one-line summary; their definitions arrive
+    in the function list of the next call."""
     from captain_claw.tools.registry import ToolResult
 
     pool: dict[str, dict[str, Any]] = getattr(agent, "_tool_search_pool", None) or {}
@@ -432,9 +443,9 @@ def run(agent: Any, arguments: dict[str, Any]) -> Any:
         log.info("Tool search: loaded tools", query=query[:80], loaded=[d.get("name") for d in new])
     lines: list[str] = []
     if new:
-        lines.append(f"Loaded {len(new)} tool{'s' if len(new) != 1 else ''}; call "
-                     f"{'them' if len(new) != 1 else 'it'} from your next step:")
-        lines.extend(_wire({k: d.get(k) for k in ("name", "description", "parameters")}) for d in new)
+        lines.append(f"Loaded {len(new)} tool{'s' if len(new) != 1 else ''} into your function list; "
+                     f"call {'them' if len(new) != 1 else 'it'} from your next step:")
+        lines.extend(f"- {d.get('name')}: {_summary(d)}" for d in new)
     if already:
         lines.append("Already in your function list: " + ", ".join(already) + ".")
     return ToolResult(success=True, content="\n".join(lines))
