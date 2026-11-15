@@ -34,7 +34,7 @@ SOURCE_LABELS: dict[str, str] = {
     "flow": "Flows",
     "agent": "Other agents",
     "autonomy": "Autonomous work",
-    "taskboard": "Taskboard",
+    "taskboard": "Tasks",
     "line": "Your Line",
     "api": "API and MCP",
     "link": "Agent links",

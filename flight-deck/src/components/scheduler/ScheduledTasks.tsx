@@ -623,7 +623,7 @@ function RunCard({ run, showTask, onOpenTask, onOpenTaskboard, query, explain = 
             <button
               onClick={() => onOpenTaskboard(run.job_id)}
               className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-              title="This task on the Taskboard — every run, what it delivered, and whether it needs you"
+              title="This task in Tasks — every run, what it delivered, and whether it needs you"
             >
               <ListChecks className="h-3.5 w-3.5" />Open task
             </button>

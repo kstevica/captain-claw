@@ -489,7 +489,7 @@ function NotificationItem({ notification: n, large, action, hint, proposal, step
           <button
             onClick={(e) => { e.stopPropagation(); onOpenTask() }}
             className={`mt-1 flex items-center gap-1 font-medium text-teal-600 hover:underline dark:text-teal-400 ${large ? 'text-xs' : 'text-[10px]'}`}
-            title="This task on the Taskboard — its whole story, and the next step to edit before you approve"
+            title="This task in Tasks — its whole story, and the next step to edit before you approve"
           >
             <ListChecks className="h-3 w-3" />{proposal === 'waiting' && step ? 'Read it and approve' : 'Open task'}
           </button>

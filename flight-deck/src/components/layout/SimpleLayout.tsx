@@ -1249,7 +1249,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         </KioskWideDialog>
       )}
       {taskboardOpen && (
-        <KioskWideDialog label="Taskboard" phone={isMobile} onClose={closeTaskboard} widest>
+        <KioskWideDialog label="Tasks" phone={isMobile} onClose={closeTaskboard} widest>
           <TaskBoard
             phone={isMobile}
             initialAgent={taskboardAgent}
@@ -1581,7 +1581,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
     {
       title: 'Your agents at work',
       items: [
-        { icon: ListChecks, label: 'Tasks', hint: 'The Taskboard: asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
+        { icon: ListChecks, label: 'Tasks', hint: 'Asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
         ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: () => { onClose(); openCrew() }, tone: 'teal' as const }] : []),
         ...(toolsOn ? [{ icon: Wrench, label: 'Custom tools', hint: 'Programs your agents run, yours and ones offered to you', onSelect: () => { onClose(); openTools() }, tone: 'violet' as const }] : []),
         ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: () => { onClose(); openSwarm() }, tone: 'amber' as const }] : []),

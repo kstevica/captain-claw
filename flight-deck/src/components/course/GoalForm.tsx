@@ -163,7 +163,7 @@ export function GoalForm({
         </div>
         <p className="mt-1 text-[11px] text-zinc-500">
           {d.metric_kind === 'manual' ? 'You enter the current value on the goal; it fills the progress bar toward the target.'
-            : d.metric_kind === 'taskboard_done' ? 'Counts your Taskboard tasks tied to this goal and done since it went on your course.'
+            : d.metric_kind === 'taskboard_done' ? 'Counts the tasks in Tasks tied to this goal and done since it went on your course.'
               : d.metric_kind === 'link_count' ? 'Counts the work linked to this goal: tasks, plans, Autonomous Work, scheduled tasks.'
                 : 'Without a measure, progress is an estimate from the work linked to it.'}
           {badTarget && <span className="text-red-500"> The target must be a number above 0.</span>}

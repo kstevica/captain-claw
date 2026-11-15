@@ -295,7 +295,7 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
             lines={[run.trigger === 'manual' ? 'Run by hand' : 'Ran on schedule', sent.length ? `Sent to ${sent.join(', ')}` : '']
               .filter(Boolean)}
             actions={<>
-              <button className={linkCls} onClick={() => showTask(`sched:job:${run.job_id}`)}>Open on the Taskboard</button>
+              <button className={linkCls} onClick={() => showTask(`sched:job:${run.job_id}`)}>Open in Tasks</button>
               <button className={linkCls} onClick={() => openActivity({ slug: run.agent_slug })}>Open the activity log</button>
             </>} />} />
       )
@@ -309,7 +309,7 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
         detail={<Happened result={task.result_text}
           lines={[task.ask && task.ask !== task.title ? `Asked: ${task.ask}` : '', task.channel ? `Came in on ${task.channel}` : ''].filter(Boolean)}
           actions={<>
-            <button className={linkCls} onClick={() => showTask(task.id)}>Open on the Taskboard</button>
+            <button className={linkCls} onClick={() => showTask(task.id)}>Open in Tasks</button>
             {task.agent_slug && <button className={linkCls} onClick={() => openActivity({ slug: task.agent_slug })}>Open the activity log</button>}
           </>} />} />
     )
@@ -395,7 +395,7 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
                   </List>
                   {priorities.length > 6 && (
                     <button onClick={() => useTaskboardStore.getState().openTaskboard()} className={`mt-2 text-sm ${linkCls}`}>
-                      {priorities.length - 6} more on the Taskboard
+                      {priorities.length - 6} more in Tasks
                     </button>
                   )}
                 </>

@@ -124,7 +124,7 @@ export function AgentMailSetting({ slug, agentName, compact = false }: {
           </span>
           <span className={`mt-1 block leading-relaxed text-zinc-500 ${text}`}>
             {me.pick_up_mail
-              ? `It starts on email ${where ? `sent to ${where}, and ` : ''}in ${sources.length ? sources.join(', ') : 'your mail'} that names “${names}” in the subject or addresses it in the body. Each one is a task on your Taskboard.`
+              ? `It starts on email ${where ? `sent to ${where}, and ` : ''}in ${sources.length ? sources.join(', ') : 'your mail'} that names “${names}” in the subject or addresses it in the body. Each one becomes a task in Tasks.`
               : 'Off: email that names it stays where it is.'}
             {me.pick_up_mail && !sources.length && !me.inbox_email && ' Connect Gmail, Outlook or an IMAP inbox under Connections first.'}
           </span>
