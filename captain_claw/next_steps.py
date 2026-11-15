@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from captain_claw.llm import LLMProvider, LLMResponse, Message
+from captain_claw.llm import LLMProvider, LLMResponse, Message, reasoning
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -103,12 +103,15 @@ async def extract_next_steps(
             ),
         ]
 
-        llm_response: LLMResponse = await provider.complete(
-            messages=messages,
-            tools=None,
-            temperature=0,
-            max_tokens=max_tokens,
-        )
+        # Thinking off where the model can: a thinking model spent all 600
+        # tokens thinking and never wrote the JSON.
+        with reasoning.quiet_call():
+            llm_response: LLMResponse = await provider.complete(
+                messages=messages,
+                tools=None,
+                temperature=0,
+                max_tokens=max_tokens,
+            )
 
         raw = (llm_response.content or "").strip()
         if not raw:

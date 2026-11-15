@@ -98,6 +98,25 @@ def call_effort(level: Any) -> Iterator[str | None]:
         _CALL.reset(token)
 
 
+# A housekeeping call: a task name, next-step pills, a reflection, insight or
+# lesson extraction. These carry small output budgets, and a thinking model
+# counts its thinking against them — Qwen 3.8 on llama.cpp thought through
+# all 25 tokens of a task name and all 1500 of a reflection and never wrote
+# the answer. So thinking goes off where the model can switch it off; where it
+# can't, or already doesn't think unless asked, the request says nothing.
+QUIET = "quiet"
+
+
+@contextmanager
+def quiet_call() -> Iterator[None]:
+    """Run the LLM call made inside as a housekeeping call (see ``QUIET``)."""
+    token = _CALL.set(QUIET)
+    try:
+        yield
+    finally:
+        _CALL.reset(token)
+
+
 def current_turn_effort() -> str | None:
     return _TURN.get()
 
@@ -1060,6 +1079,22 @@ def plan_for(provider: str, model: str, base_url: str | None, level: Any,
     return way.build(chosen, max_tokens) if chosen else None
 
 
+def quiet_plan(provider: str, model: str, base_url: str | None,
+               *, max_tokens: int | None = None) -> Plan | None:
+    """Thinking off for a housekeeping call (see ``QUIET``), or None: the
+    model can't switch thinking off, doesn't think unless asked, isn't known,
+    or its server refused the controls earlier this run."""
+    if model_key(model) in _REFUSED:
+        return None
+    routed = _way_for(provider, model, base_url)
+    if routed is None:
+        return None
+    _family, way = routed
+    if "off" not in way.levels or way.default == "off":
+        return None
+    return way.build("off", max_tokens)
+
+
 _SHAPED_PROVIDERS = frozenset({"openai", "anthropic", "gemini", "xai", "deepseek", "openrouter", "ollama"})
 
 
@@ -1103,4 +1138,6 @@ def plan_for_provider(provider_obj: Any, *, max_tokens: int | None = None) -> Pl
     provider, model, base_url = _provider_parts(provider_obj)
     if provider not in _SHAPED_PROVIDERS:
         return None
+    if level == QUIET:
+        return quiet_plan(provider, model, base_url, max_tokens=max_tokens)
     return plan_for(provider, model, base_url, level, max_tokens=max_tokens)
