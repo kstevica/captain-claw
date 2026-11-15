@@ -754,6 +754,9 @@ async def cancel_run(run_id: str, user: dict = Depends(admin_user)) -> dict:
     if run["status"] in TERMINAL_STATES:
         raise HTTPException(409, "It has already stopped.")
     await loop_mod.cancel_run(_cs_store(), run_id)
+    from captain_claw.flight_deck import line
+
+    await line.settle(run.get("owner_id") or user["id"], "captain_swarm_run", run_id)
     return _run_summary(await _cs_store().get_run(run_id))
 
 
@@ -767,6 +770,9 @@ async def go(run_id: str, user: dict = Depends(admin_user)) -> dict:
     run = await _own_run(run_id, user)
     if run["status"] != "awaiting_go":
         raise HTTPException(409, "It isn't waiting for a Go.")
+    from captain_claw.flight_deck import line
+
+    await line.settle(run.get("owner_id") or user["id"], "captain_swarm_run", run_id)
     try:
         if run["objective"].get("kind") == "practice":
             from captain_claw.flight_deck import captain_swarm_rules as rules
@@ -799,6 +805,9 @@ async def decline(run_id: str, user: dict = Depends(admin_user)) -> dict:
     run = await _own_run(run_id, user)
     if run["status"] != "awaiting_go":
         raise HTTPException(409, "It isn't waiting for a Go.")
+    from captain_claw.flight_deck import line
+
+    await line.settle(run.get("owner_id") or user["id"], "captain_swarm_run", run_id)
     await _cs_store().set_status(run_id, "declined", "the owner declined it")
     await _cs_store().append_event(run_id, "stop", "the owner declined it")
     return _run_summary(await _cs_store().get_run(run_id))

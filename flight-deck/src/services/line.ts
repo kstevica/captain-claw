@@ -128,7 +128,12 @@ export async function markAllLineRead(): Promise<void> {
  *  read: a proposal (approved or rejected on the ledger), a goal review, a
  *  goal suggestion and a conflict between goals (answered on the Course page).
  *  The server's line.ANSWERED_REFS, client side. */
-export const ANSWERED_ELSEWHERE = new Set(['autonomy_action', 'course_review', 'course_goal', 'course_conflict'])
+// Items that need you and are answered where they live, not by being read
+// (the same list as line.ANSWERED_REFS on the server; a test holds them equal).
+export const ANSWERED_ELSEWHERE = new Set([
+  'autonomy_action', 'bat_ask', 'captain_swarm_run', 'course_conflict', 'course_goal', 'course_review',
+  'custom_tool_proposal', 'person_ask', 'purchase',
+])
 export const answeredByReading = (needsYou: boolean | undefined, refType: string | undefined) =>
   !!needsYou && !ANSWERED_ELSEWHERE.has(refType || '')
 

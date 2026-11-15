@@ -66,8 +66,8 @@ def test_classify_names_a_kind_and_whether_it_needs_you():
     # A member's suggested lesson is an "info", yet it waits for the owner.
     assert line.classify("info", "agent_lessons") == ("agent", True, "deck")
     assert line.classify("success", "agent_exam")[:2] == ("agent", False)
-    # A type nobody listed stays in the bell, as before the Line.
-    assert line.classify("something_new")[:2] == ("deck", True)
+    # Needs you means blocked on you: a type nobody listed is a report.
+    assert line.classify("something_new")[:2] == ("deck", False)
 
 
 async def test_add_notification_writes_the_line_and_the_old_bell(db):
