@@ -545,6 +545,185 @@ def _closing_sentence_stalls(stripped: str) -> bool:
     return bool(_STALL_FIRST_LINE_RE.match(last))
 
 
+# ── Gerund-led announcements ────────────────────────────────────────────
+# A weak model also announces work with no "let me / I'll" at all: it opens
+# or closes on an action gerund and stops — "Running the reply-watch —
+# checking the live inbox now.", "Sending the batch now — pulling the live
+# queue first.", "New mail in the inbox — pulling the messages first." Run
+# after run of a scheduled job ended that way, and every such reply left in
+# the agent's long chat session taught it to answer the next run the same
+# way. Only action verbs count, so "Nothing new", "Pricing is …" and
+# "Meeting moved …" (nouns) never do, and "Looking at the numbers, …" (a
+# lead-in to an answer) is not on the list.
+_STALL_GERUND = (
+    r"(?:re-?)?(?:running|sending|pulling|checking|fetching|searching|querying|scanning"
+    r"|reading|reviewing|loading|opening|grabbing|gathering|collecting|compiling|preparing"
+    r"|drafting|writing|composing|creating|generating|processing|updating|saving|syncing"
+    r"|executing|launching|triggering|handling|verifying|retrieving|analy[sz]ing"
+    r"|calculating|computing|researching|investigating|polling|refreshing|importing"
+    r"|exporting|uploading|downloading|inserting|adding|removing|deleting|archiving"
+    r"|forwarding|replying|responding|contacting|emailing|messaging|notifying|posting"
+    r"|publishing|continuing|resuming|retrying|getting|finding|locating|pinging|testing"
+    r"|comparing|matching|classifying|filtering|sorting|scoring|enriching|sourcing"
+    r"|tallying|reconciling|merging|fixing|resolving|building|doing|scheduling|booking"
+    r"|kicking\s+off|firing\s+off|setting\s+up|spinning\s+up|cleaning\s+up|following\s+up"
+    r"|reaching\s+out|putting\s+together|looking\s+(?:up|into|for|through)"
+    r"|digging\s+(?:into|through|up)|double-checking|cross-checking)"
+)
+# A clause led by one ("and now", "but first" may come before it).
+_STALL_GERUND_CLAUSE_RE = _re.compile(
+    r"^(?:(?:and|but|so|then|now|also|first|still|just|already|instead|meanwhile)[,\s]+)*"
+    r"(?P<verb>" + _STALL_GERUND + r")\b(?P<rest>.*)$",
+    _re.IGNORECASE | _re.DOTALL,
+)
+# Idioms that are no work at all ("Checking in", "Getting there", "Running late").
+_STALL_GERUND_IDIOM_RE = _re.compile(
+    r"(?:checking\s+(?:in|out)\b|pulling\s+(?:(?:it|this|that|everything|things|these)\s+)?"
+    r"(?:all\s+)?together\b|pulling\s+back\b"
+    r"|getting\s+(?:there|close|closer|better|worse|late)\b"
+    r"|doing\s+(?:great|good|well|fine|ok|okay|alright|better|nothing)\b"
+    r"|adding\s+to\s+(?:that|this)\b|building\s+on\b"
+    r"|running\s+(?:late|behind|low|short|out\b|smoothly|fine|well)\b)",
+    _re.IGNORECASE,
+)
+# What follows the gerund makes it a noun or a report: a label or table cell
+# ("Finding (2)", "Checking | ok"), a number ("Building 4 …"), or a status
+# ("Processing complete", "Booking confirmed", "Testing passed").
+_STALL_GERUND_NOUN_RE = _re.compile(
+    r"^(?:\s*[:(|]|\s*\d|\s+(?:complete|completed|done|finished|failed|succeeded|passed"
+    r"|confirmed|ok|okay|over|stopped|paused|blocked|worked|broke)\b)",
+    _re.IGNORECASE,
+)
+# Verbs that make the gerund the subject of a statement ("Updating the table
+# was the slow part", "Searching the archive turned up nothing"). Participles
+# that also read as adjectives ("the saved draft", "the returned rows") are
+# left out.
+_STALL_FINITE = (
+    r"is|was|are|were|isn't|wasn't|aren't|weren't|has|had|have|will|would|can|could|should"
+    r"|might|may|must|won't|wouldn't|can't|couldn't|shouldn't|takes|took|means|meant|seems"
+    r"|seemed|tends|helps|matters|requires|needs|shows|showed|found|finds|returns|reveals"
+    r"|revealed|turned\s+up|came\s+back|gives|gave|costs|saves|lets|makes|works|depends"
+    r"|involves|beats"
+)
+_STALL_GERUND_SUBJECT_RE = _re.compile(
+    r"^(?:\s+(?!(?:whether|if|that|what|who|which|when|where|how|to|so)\b)[^\s—–:;,.!?]+){0,6}?"
+    r"\s+(?:" + _STALL_FINITE + r")\b",
+    _re.IGNORECASE,
+)
+# A comma that leads into an answer ("Checking the logs, I see the job
+# failed", "Reading the room, it's too early"); a list of objects ("the live
+# queue, the inbox, and the Sent folder") is no lead-in.
+_STALL_LEAD_IN_RE = _re.compile(
+    r",\s*(?:(?:i|you|we|they|he|she|it|there|here)(?:'[a-z]+)?\b"
+    r"|[^,.;!?]*?\b(?:" + _STALL_FINITE + r")\b)",
+    _re.IGNORECASE,
+)
+# Work set for later or for a condition is not work announced for now: "No
+# new mail — checking again in 3 hours.", "Sending it once you confirm."
+_STALL_LATER_RE = _re.compile(
+    r"\b(?:in\s+\d+\s*(?:min(?:ute)?s?|hours?|hrs?|h|days?|weeks?)\b|later\b|tomorrow\b"
+    r"|tonight\b|next\s+(?:week|month|time|run|check|pass|cycle|round)\b"
+    r"|(?:at|by|after|around|until)\s+\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm|h|utc|cet)?\b"
+    r"|every\b|daily\b|hourly\b|weekly\b|nightly\b"
+    r"|each\s+(?:day|morning|evening|hour|week)\b|on\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b"
+    r"|(?:once|when|as\s+soon\s+as)\s+(?:you|they|she|he|we|it|the)\b"
+    r"|after\s+(?:you|they|she|he|we)\b)",
+    _re.IGNORECASE,
+)
+# A clause that closes on "now / first / right away": "— live table and
+# mailbox first." after a gerund names what the work starts with.
+_STALL_SOON_END_RE = _re.compile(
+    r"\b(?:now|first|right\s+away|immediately|straight\s+away|at\s+once|next|shortly"
+    r"|in\s+a\s+(?:moment|sec(?:ond)?|minute|bit))\W*$",
+    _re.IGNORECASE,
+)
+_STALL_CLAUSE_SUBJECT_RE = _re.compile(
+    r"\b(?:i|you|we|they|he|she|it)(?:'[a-z]+)?\b|\b(?:" + _STALL_FINITE + r")\b",
+    _re.IGNORECASE,
+)
+# An acknowledgement before the announcement: "You're right.", "Authorized."
+_STALL_ACK_RE = _re.compile(
+    r"^(?:(?:you'?re|you\s+are)\s+(?:right|correct)|ok(?:ay)?|sure|got\s+it|understood|noted"
+    r"|authori[sz]ed|approved|will\s+do|yes|yep|yeah|right|alright|all\s+right|absolutely"
+    r"|of\s+course|good\s+(?:catch|call|point)|fair\s+(?:point|enough)|thanks|thank\s+you"
+    r"|perfect|great|on\s+it)\b[^.!?]{0,60}[.!]?$",
+    _re.IGNORECASE,
+)
+_STALL_SENTENCE_SPLIT_RE = _re.compile(r"(?<=[.!?…])\s+|\s*\n\s*")
+_STALL_CLAUSE_SPLIT_RE = _re.compile(r"\s*[—–]\s*|\s+-{1,2}\s+|;\s+|:\s+")
+# Whole replies up to this long are checked; a longer one is the call
+# site's "substantial answer" anyway.
+_STALL_ANNOUNCE_MAX_LEN = 200
+
+
+def _stall_strip(part: str) -> str:
+    """A sentence or clause without its bullet, emoji or markdown wrapping."""
+    return _re.sub(r"^[^\w\"'(]+", "", part.strip()).rstrip("*_ \t").strip()
+
+
+def _gerund_clause(clause: str) -> bool:
+    """The clause announces work under way: an action gerund with its
+    object, not a noun, a status, a statement about the work, a lead-in to an
+    answer, or a step set for later."""
+    match = _STALL_GERUND_CLAUSE_RE.match(clause)
+    if not match:
+        return False
+    rest = match.group("rest").lstrip("*_")
+    return not (
+        _STALL_GERUND_IDIOM_RE.match(clause, match.start("verb"))
+        or _STALL_GERUND_NOUN_RE.match(rest)
+        or _STALL_GERUND_SUBJECT_RE.match(rest)
+        or _STALL_LEAD_IN_RE.search(rest)
+        or _STALL_LATER_RE.search(clause)
+    )
+
+
+def _sentence_announces_work(sentence: str) -> bool:
+    """The sentence ends on work under way: its last clause is a gerund
+    announcement ("Running the reply-watch — checking the live inbox now."),
+    or a short "<what> first / now" after one ("Running the follow-up pass —
+    live table and mailbox first.")."""
+    clauses = [c for c in (_stall_strip(p) for p in _STALL_CLAUSE_SPLIT_RE.split(sentence)) if c]
+    if not clauses:
+        return False
+    gerunds = [_gerund_clause(c) for c in clauses]
+    if gerunds[-1]:
+        return True
+    last = clauses[-1]
+    return bool(
+        any(gerunds)
+        and _STALL_SOON_END_RE.search(last)
+        and len(last.split()) <= 10
+        and not _STALL_LATER_RE.search(last)
+        and not _STALL_CLAUSE_SUBJECT_RE.search(last)
+    )
+
+
+def _announces_work(stripped: str) -> bool:
+    """A short reply that announces work with a gerund and delivers nothing.
+
+    Stall when its closing sentence announces work (in a one-sentence reply,
+    or a reply no longer than ``_STALL_TRAILING_MAX_LEN``), or when its
+    opening sentence does — after an acknowledgement like "You're right." —
+    and less than ``_STALL_FOLLOWTHROUGH_MIN_CHARS`` follows: the rules the
+    "Let me / I'll" check uses. A closing hand-back ("Let me know …") vetoes.
+    """
+    if len(stripped) > _STALL_ANNOUNCE_MAX_LEN:
+        return False
+    text = stripped.replace("’", "'")
+    sentences = [s for s in (_stall_strip(p) for p in _STALL_SENTENCE_SPLIT_RE.split(text)) if s]
+    if not sentences or _STALL_HANDBACK_RE.match(sentences[-1]):
+        return False
+    if _sentence_announces_work(sentences[-1]):
+        return len(sentences) == 1 or len(text) <= _STALL_TRAILING_MAX_LEN
+    start = 0
+    while start < len(sentences) - 1 and _STALL_ACK_RE.match(sentences[start]):
+        start += 1
+    if not _sentence_announces_work(sentences[start]):
+        return False
+    return len(" ".join(sentences[start + 1:])) < _STALL_FOLLOWTHROUGH_MIN_CHARS
+
+
 def _looks_like_stall(text: str) -> bool:
     """Return True when the assistant text reads as an intent-only stall.
 
@@ -554,6 +733,9 @@ def _looks_like_stall(text: str) -> bool:
     * Empty / whitespace-only output → stall.
     * Very short output (≤ ``_STALL_MAX_LEN`` chars) whose first
       non-empty line opens with an action-announcing phrase → stall.
+    * A short reply that announces work with an action gerund instead
+      ("Running the reply-watch — checking the live inbox now.") → stall
+      (see ``_announces_work``).
     * Longer messages that *open* with an action-announcing phrase but
       go on to deliver substantive content (≥
       ``_STALL_FOLLOWTHROUGH_MIN_CHARS`` chars after the first
@@ -582,7 +764,7 @@ def _looks_like_stall(text: str) -> bool:
         # into a tool call, and the event went in before the user answered.
         return False
     if not _STALL_FIRST_LINE_RE.match(first_line):
-        return _closing_sentence_stalls(stripped)
+        return _closing_sentence_stalls(stripped) or _announces_work(stripped)
     if len(stripped) <= _STALL_MAX_LEN:
         return True
     # Medium-length message that opens with a stall phrase. Look past
