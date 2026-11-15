@@ -92,7 +92,7 @@ class AnonymizeTool(Tool):
         "personal data / PII / GDPR data, or before you send a document's content somewhere it shouldn't "
         "carry names and numbers (HR: anonimiziraj, ukloni osobne podatke).\n"
         "action='anonymize' — give ONE of: `path` (a file: txt, md, csv, tsv, json, jsonl, html, docx, xlsx, "
-        "pptx, pdf — office and PDF files come back as markdown), `url` (a page), or `text`. Prefer path/url: "
+        "pptx, pdf — Word, Excel and PowerPoint files keep their format, PDF and HTML come back as markdown), `url` (a page), or `text`. Prefer path/url: "
         "the tool reads them itself, so the original never reaches your model; `text` you have already seen. "
         "A file or page result is saved as a new file (path in the result). `vault` names the case (default: "
         "this conversation's); use the same vault for documents that belong together. mode='one_way' keeps "

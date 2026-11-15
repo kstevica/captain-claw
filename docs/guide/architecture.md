@@ -8,7 +8,7 @@ Where each part of Captain Claw lives in the code.
 |---|---|
 | Agent (14-mixin composition) | `captain_claw/agent.py` |
 | LLM providers | `captain_claw/llm/` |
-| 79 tools + registry | `captain_claw/tools/` |
+| 81 tools + registry | `captain_claw/tools/` |
 | Flight Deck (FastAPI + React) | `captain_claw/flight_deck/` |
 | Device bridge (StickS3 / StopWatch / PaperColor / Waveshare, `/device/ws`) + OTA store + backgrounds | `captain_claw/flight_deck/device_bridge.py`, `device_firmware.py`, `device_backgrounds.py` |
 | Device firmware (PlatformIO, every device) | `firmware/device/` |
@@ -38,6 +38,9 @@ Where each part of Captain Claw lives in the code.
 | Forge agents (plans, app handshake, contract) | `captain_claw/flight_deck/agent_forge.py`, `agent_handshake.py`, `captain_claw/instructions/forge/`, `flight-deck/src/components/forge/` |
 | Updating the deck (engine, guard, routes) | `captain_claw/flight_deck/deck_update.py`, `deck_update_guard.py`, `deck_update_routes.py` |
 | OneDrive VFS mounts | `captain_claw/onedrive_client.py` |
+| Anonymization engine (detectors, the trusted-model lane, Office files, scans, the privacy gate's rules) | `captain_claw/anonymize/` |
+| Anonymization on the deck (vaults, routes, trusted model, name pack, files and folders, whole-chat restore, privacy gate; agent-side gate client) | `captain_claw/flight_deck/anonymize_*.py`, `flight-deck/src/components/anonymize/`; `captain_claw/anonymize_gate_client.py`, `captain_claw/tools/anonymize.py` |
+| Data rooms (store, intake, job, sweep and leak check, "Same party?", file descriptions, inbox, tasks, export, the `/fd/mcp-rooms` MCP endpoint) | `captain_claw/flight_deck/rooms_*.py`, `flight-deck/src/components/rooms/` |
 | Bat (plan, loop, judge, store) | `captain_claw/flight_deck/bat_*.py` |
 | Fabrication guard | `captain_claw/fabrication_guard.py` |
 | Lupa research desk (on the Flight Deck API) | `lupa/` |

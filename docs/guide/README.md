@@ -11,7 +11,10 @@ Video guides: **[the complete Captain guide](https://www.youtube.com/watch?v=Veh
 | **[BotPort, MCP and agent links](botport-and-mcp.md)** | Flight Decks that work together, Flight Deck as an MCP server for Claude, MCP servers for your agents, connecting your own systems |
 | **[Devices and channels](devices-and-channels.md)** | StopWatch, PaperColor, StickS3 and Waveshare, the smart-glasses HUD, WhatsApp (and your own WhatsApp), Telegram, notifications, Captain for Chrome and Captain for Mac, agents in your inbox |
 | **[Memory and cognition](memory.md)** | Six memory layers, the context engine, dreaming, the Brain Graph |
-| **[Inside an agent](agents.md)** | Every supported model, the 79 built-in tools, safety guards, the agent web UI |
+| **[Anonymization](anonymization.md)** | Names, companies, addresses and numbers out before a model sees them, back when the answer comes home: the trusted model, the Anonymize page, files and folders, the privacy gate for your agents, Captain for Chrome, vaults and their history |
+| **[Data rooms](data-rooms.md)** | A deal's data room anonymized into one vault for Claude: adding files, the run, review and **Same party?**, release, the Captain Data Rooms connector, results restored on the deck |
+| **[Vatra, Basna and Council](vatra-basna-council.md)** | Your agents as a team, step by step: which one to pick, starting a run in the kiosk or the full layout, reading the result, continuing and stopping |
+| **[Inside an agent](agents.md)** | Every supported model, the 81 built-in tools, safety guards, the agent web UI |
 | **[Architecture](architecture.md)** | Where each component lives in the code |
 | **[What's new](whats-new.md)** | Every release, newest first |
 
