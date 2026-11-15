@@ -176,31 +176,47 @@ async def person_name(db: Any, user_id: str) -> str:
     return str(user.get("display_name") or user.get("email") or "the person")
 
 
+async def preview(db: Any, *, user_id: str, agent: str, kind: str, origin: str,
+                  session_id: str = "") -> dict[str, Any]:
+    """What a call of *kind* gets now, without opening a card: allowed or
+    refused at once, or ``{"decision": "ask"}``. :func:`request` and "Why did
+    this happen?" (why.py) both decide with it."""
+    if kind not in KINDS:
+        return _allow("off")
+    mode = (await load_policy(db))[kind]
+    label = KIND_LABELS[kind].lower()
+    if mode == "off":
+        return {**_allow("off", why=f"This deck doesn't ask before agents {KIND_VERBS[kind]} "
+                                    f"(“{label}” is set to {MODE_LABELS['off']})."), "mode": mode}
+    if mode == "people_only":
+        return {**_deny(f"On this deck agents don't {KIND_VERBS[kind]}: people do that themselves.",
+                        scope="people_only", people_only=True), "mode": mode}
+    by = await person_name(db, user_id)
+    if mode == "ask":
+        if kind in (await always_allowed(db, user_id)).get(agent, []):
+            return {**_allow("always", by, f"{by} always allows this agent to {KIND_VERBS[kind]}."), "mode": mode}
+        if _conversation_allows(user_id, agent, session_id, kind):
+            return {**_allow("conversation", by, f"{by} allowed it for this conversation."), "mode": mode}
+    if not asks.attended(origin):
+        return {**_deny(
+            f"Nobody was there to allow it: this run started on its own. {by} can choose “{ALWAYS}” "
+            f"when the agent asks in a chat, or an admin can stop asking about “{label}”.",
+            scope="unattended", nobody=True), "mode": mode}
+    every = " every time" if mode == "always_ask" else ""
+    return {"decision": "ask", "scope": mode, "by": by, "mode": mode,
+            "why": f"{by} is asked first{every}, on a card in Flight Deck."}
+
+
 async def request(db: Any, *, user_id: str, agent: str, agent_name: str, kind: str, summary: str,
                   origin: str, session_id: str, ask_id: str = "", wait_s: float = DEFAULT_WAIT_S,
                   ) -> tuple[dict[str, Any] | None, asks.Ask | None]:
     """Decide a call of *kind* for the person *user_id* on *agent*: the decision
     at once, or ``(None, ask)`` while the card waits for them."""
-    if kind not in KINDS:
-        return _allow("off"), None
-    mode = (await load_policy(db))[kind]
-    label = KIND_LABELS[kind].lower()
-    if mode == "off":
-        return _allow("off"), None
-    if mode == "people_only":
-        return _deny(f"On this deck agents don't {KIND_VERBS[kind]}: people do that themselves.",
-                     scope="people_only", people_only=True), None
-    by = await person_name(db, user_id)
-    if mode == "ask":
-        if kind in (await always_allowed(db, user_id)).get(agent, []):
-            return _allow("always", by, f"{by} always allows this agent to {KIND_VERBS[kind]}."), None
-        if _conversation_allows(user_id, agent, session_id, kind):
-            return _allow("conversation", by, f"{by} allowed it for this conversation."), None
-    if not asks.attended(origin):
-        return _deny(
-            f"Nobody was there to allow it: this run started on its own. {by} can choose “{ALWAYS}” "
-            f"when the agent asks in a chat, or an admin can stop asking about “{label}”.",
-            scope="unattended", nobody=True), None
+    decided = await preview(db, user_id=user_id, agent=agent, kind=kind, origin=origin, session_id=session_id)
+    if decided["decision"] != "ask":
+        decided.pop("mode", None)
+        return decided, None
+    mode = decided["mode"]
     choices = [ONCE, CONVERSATION, ALWAYS, DENY] if mode == "ask" else [ONCE, DENY]
     question = {"id": "decision", "question": f"Let {agent_name} {KIND_VERBS[kind]}?",
                 "help": summary, "choices": choices}
@@ -210,7 +226,7 @@ async def request(db: Any, *, user_id: str, agent: str, agent_name: str, kind: s
     a = await asks.open_ask(user_id, source="approval", title=agent_name, agent_name=agent_name,
                             questions=asks.check_questions([question]), wait_s=wait_s,
                             ask_id=ask_id, ring=ring, detail=detail)
-    _PENDING[a.id] = Pending(user_id, agent, session_id, kind, by)
+    _PENDING[a.id] = Pending(user_id, agent, session_id, kind, decided["by"])
     return None, a
 
 
