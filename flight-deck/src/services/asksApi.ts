@@ -21,8 +21,11 @@ export interface AskQuestion {
 
 export interface OpenAsk {
   id: string
-  // "tool": a custom tool running for the person asks; "agent": an agent asks (ask_user).
-  source: 'tool' | 'agent'
+  // "tool": a custom tool running for the person asks; "agent": an agent asks (ask_user);
+  // "approval": an agent asks before it pays, sends, posts, shares, deletes… (approvals.py).
+  source: 'tool' | 'agent' | 'approval'
+  /** An approval card's facts: its kind and what the call will do. */
+  detail?: { kind: string; kind_label: string; summary: string; mode: string }
   title: string
   owner_name: string
   agent_name: string

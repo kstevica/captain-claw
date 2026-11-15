@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  Activity, ChevronDown, ChevronRight, Download, EyeOff, Loader2, RotateCw, Search, X,
+  Activity, ChevronDown, ChevronRight, Download, EyeOff, HelpCircle, Loader2, RotateCw, Search, X,
 } from 'lucide-react'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { fmtRelative } from '../../services/schedulerApi'
 import {
   OUTCOMES, RISKS, toolAuditApi,
-  type AuditScope, type CallQuery, type Facets, type Outcome, type Risk, type Summary, type ToolCall,
+  type AuditScope, type CallQuery, type Facets, type Outcome, type Risk, type Summary, type ToolCall, type WhyAnswer,
 } from '../../services/toolAuditApi'
 import { FullscreenButton, Highlight, libraryIconBtn as iconBtn } from '../library/libraryParts'
 import { Pill, type Tone } from '../console/parts'
@@ -442,7 +442,8 @@ function CallDetail({ call: c, admin, onAgent }: { call: ToolCall; admin: boolea
   if (c.source_label || c.source) rows.push(['Started from', c.source_label || c.source])
   if (c.member) rows.push(['Speaking', c.speaker.you ? 'You' : c.speaker.label || 'Member'])
   if (c.session_id) rows.push(['Session', <code key="s" className="text-[11px]">{c.session_id}</code>])
-  if (c.reason) rows.push([c.outcome === 'blocked' ? 'Why refused' : 'Error', c.reason])
+  // An allowed call keeps who allowed it (approval cards) as its reason.
+  if (c.reason) rows.push([c.outcome === 'blocked' ? 'Why refused' : c.outcome === 'ok' ? 'Note' : 'Error', c.reason])
   rows.push(['Record', (
     <span key="r" className="font-mono text-[11px] text-zinc-500" title={admin ? c.hash : undefined}>
       #{c.seq} · run {c.boot.slice(0, 8)}{admin ? ` · ${c.hash.slice(0, 12)}…` : ''}
@@ -458,6 +459,7 @@ function CallDetail({ call: c, admin, onAgent }: { call: ToolCall; admin: boolea
           </div>
         ))}
       </dl>
+      <WhyPanel call={c} admin={admin} />
       {c.hidden ? (
         <p className="flex items-center gap-2 rounded-lg border border-zinc-800 px-3 py-2 text-xs text-zinc-500">
           <EyeOff className="h-3.5 w-3.5 shrink-0" />
@@ -472,6 +474,56 @@ function CallDetail({ call: c, admin, onAgent }: { call: ToolCall; admin: boolea
           <p className="mt-1 text-[11px] text-zinc-600">Passwords, keys and tokens are masked; long values keep their start, length and fingerprint.</p>
         </div>
       )}
+    </div>
+  )
+}
+
+// "Why did this happen?": the deck's deciders re-run on this call's recorded
+// facts (why.py) — no model call. A layer that would decide differently today
+// says so, so a setting's effect shows before the next call.
+function WhyPanel({ call: c, admin }: { call: ToolCall; admin: boolean }) {
+  const [why, setWhy] = useState<WhyAnswer | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const ask = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      setWhy(await toolAuditApi.why(admin ? 'admin' : 'mine', c.id))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+  if (!why) {
+    return (
+      <div className="flex flex-wrap items-center gap-3">
+        <button type="button" onClick={ask} disabled={busy}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-50">
+          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <HelpCircle className="h-3.5 w-3.5" />}
+          Why did this happen?
+        </button>
+        {error && <span className="text-xs text-red-600 dark:text-red-400">{error}</span>}
+      </div>
+    )
+  }
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 p-3">
+      <p className="text-sm font-medium text-zinc-100">{why.summary}</p>
+      <ol className="mt-2 space-y-2">
+        {why.layers.map((l) => (
+          <li key={l.layer} className="text-xs leading-relaxed">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium text-zinc-300">{l.title}</span>
+              {l.changed && <Pill tone="amber">Different today</Pill>}
+            </div>
+            <p className="text-zinc-400">{l.then}</p>
+            {l.today && <p className={l.changed ? 'text-amber-700 dark:text-amber-300' : 'text-zinc-500'}>{l.today}</p>}
+          </li>
+        ))}
+      </ol>
+      <p className="mt-2 text-[11px] text-zinc-600">Worked out from what the register recorded and today's settings; no AI involved.</p>
     </div>
   )
 }

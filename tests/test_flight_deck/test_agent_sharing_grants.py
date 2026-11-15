@@ -98,7 +98,9 @@ assert {p for _, p in ALL_ROUTES} | {"/fd/context-packs/agent/vfs",
                                      "/fd/external-tools/agent/follow",
                                      "/fd/external-tools/agent/stop",
                                      "/fd/asks/agent", "/fd/asks/agent/follow",
-                                     "/fd/asks/agent/cancel", "/fd/asks/agent/secret"} == sg.GRANT_AWARE_PATHS
+                                     "/fd/asks/agent/cancel", "/fd/asks/agent/secret",
+                                     "/fd/approvals/agent", "/fd/approvals/agent/follow",
+                                     "/fd/approvals/agent/cancel"} == sg.GRANT_AWARE_PATHS
 BODIES = {
     "/fd/google/gmail/send": {"to": "Bob <bob@x.co>", "subject": "Hello", "body": "Hi Bob"},
     "/fd/deep-memory/agent/search": {"query": "q"},

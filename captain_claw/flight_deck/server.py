@@ -1974,6 +1974,12 @@ from captain_claw.flight_deck import ask_routes as _ask_routes  # noqa: E402
 
 app.include_router(_ask_routes.agent_router)
 app.include_router(_ask_routes.router)
+# Approval cards: the agent's /fd/approvals/agent first, as with asks.
+from captain_claw.flight_deck import approval_routes as _approval_routes  # noqa: E402
+
+app.include_router(_approval_routes.agent_router)
+app.include_router(_approval_routes.router)
+
 # An agent's own browser: watch it, take control, hand back.
 from captain_claw.flight_deck import browser_live_routes as _browser_live_routes  # noqa: E402
 

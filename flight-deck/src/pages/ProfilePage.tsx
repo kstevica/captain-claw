@@ -30,6 +30,7 @@ import {
 import { CappedTextarea } from '../components/profile/CappedTextarea'
 import { DeckProfileDefaults } from '../components/profile/DeckProfileDefaults'
 import { MyContextPacks } from '../components/profile/MyContextPacks'
+import { MyApprovals } from '../components/approvals/MyApprovals'
 import { ChangePasswordCard } from '../components/profile/ChangePasswordCard'
 import { PersonalDetails } from '../components/profile/PersonalDetails'
 import { ProfileResearch } from '../components/profile/ProfileResearch'
@@ -480,6 +481,9 @@ export function ProfilePage({ kiosk = false, onDirtyChange, initialTab = 'person
               showEmpty={contextPacks}
               onPacks={setMyPacks}
             />
+
+            {/* What agents ask you before they act, and what you always allow. */}
+            <MyApprovals />
           </div>
         )}
 

@@ -105,6 +105,11 @@ async def create_cron_job(server: WebServer, request: web.Request) -> web.Respon
         return web.json_response({"error": f"Bad schedule: {e}"}, status=400)
 
     sm = server.agent.session_manager
+    from captain_claw.cron_dispatch import check_new_cron_job
+
+    refusal = await check_new_cron_job(sm, kind, schedule)
+    if refusal:
+        return web.json_response({"error": refusal}, status=400)
     job = await sm.create_cron_job(
         kind=kind,
         payload=payload,
