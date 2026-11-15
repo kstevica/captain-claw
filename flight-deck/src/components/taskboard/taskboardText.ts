@@ -363,7 +363,7 @@ export const KEY_SHEET: { title: string; rows: { keys: string[]; what: string }[
     { keys: [TASK_KEYS.focus], what: 'Open the task bigger, or back' },
     { keys: ['u'], what: 'Back to the list' },
     { keys: ['/'], what: 'Search' },
-    { keys: ['g n'], what: 'Go to Needs me' },
+    { keys: ['g n'], what: 'Go to Needs you' },
     { keys: ['g o'], what: 'Go to Waiting on others' },
     { keys: ['g w'], what: 'Go to Agents working' },
     { keys: ['g d'], what: 'Go to Done' },
@@ -421,7 +421,7 @@ export function boardKey(
 }
 
 /** The row `j` (*step* 1) or `k` (-1) goes to, -1 for none. From the open task;
- *  one that just left the list (Done, on Needs me) leaves its place to the next,
+ *  one that just left the list (Done, on Needs you) leaves its place to the next,
  *  which `j` takes; with none open, from *last*, where the cursor was. */
 export function stepTo(ids: string[], openId: string | null, last: number, step: 1 | -1): number {
   if (!ids.length) return -1

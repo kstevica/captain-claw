@@ -366,7 +366,7 @@ function AppContent() {
     if (kioskLocked || deciding || !hasTaskboardLink()) return
     if (isAppShell() || consoleRequested) {
       if (takeTaskboardLink()) {
-        addNotification('info', 'Taskboard', 'That link opens a task on the Taskboard, which isn\'t part of the Admin console.')
+        addNotification('info', 'Tasks', 'That link opens a task in Tasks, which isn\'t part of the Admin console.')
       }
       return
     }

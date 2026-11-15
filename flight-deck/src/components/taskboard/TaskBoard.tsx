@@ -82,7 +82,7 @@ const PAGE = 60
 const BATCHES_EVERY_MS = 4000
 
 const VIEWS: { id: TaskView; label: string }[] = [
-  { id: 'needs_me', label: 'Needs me' },
+  { id: 'needs_me', label: 'Needs you' },
   { id: 'waiting', label: 'Waiting on others' },
   { id: 'working', label: 'Agents working' },
   { id: 'done', label: 'Done' },
@@ -135,7 +135,7 @@ const sectionTitle = 'text-[11px] font-medium uppercase tracking-wider text-zinc
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((v, i) => v === b[i])
 
-/** Why a task in Needs me is there, in a few words — and, when the agent
+/** Why a task in Needs you is there, in a few words — and, when the agent
  *  couldn't do it (or did only part), why not (`more`, '' when unsaid). */
 function needsReason(t: TaskItem): { text: string; more: string } | null {
   const say = (text: string, more = '') => ({ text, more })
@@ -387,7 +387,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         const into = found?.merged_into
         if (into) found = await taskboardApi.task(into).then((d) => d.task).catch(() => found)
         if (gone) return
-        if (!found) { notify('warning', 'Task not found', 'It isn\'t on the Taskboard (yet).'); return }
+        if (!found) { notify('warning', 'Task not found', 'It isn\'t in Tasks (yet).'); return }
         const lane = found.lane
         setSelected(found)
         setOnlyTask({ id: found.id, title: found.title || found.ask || '' })
@@ -776,14 +776,14 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         <ListChecks className="h-[18px] w-[18px]" />
       </span>
       <div className="min-w-0 flex-1">
-        <h2 className="truncate text-base font-semibold text-zinc-100">Taskboard</h2>
+        <h2 className="truncate text-base font-semibold text-zinc-100">Tasks</h2>
         {!phone && <p className="truncate text-xs text-zinc-500">Everything your agents were asked or sent — what's done, what waits, and what needs you.</p>}
       </div>
       {!phone && <SyncStatus status={status} syncing={syncing} />}
       <button onClick={() => syncNow(true)} disabled={syncing || running} className={iconBtn} title="Check for new tasks now" aria-label="Check for new tasks now">
         <RotateCw className={`h-4 w-4 ${syncing || running ? 'animate-spin' : ''}`} />
       </button>
-      <button onClick={() => setSourcesOpen(true)} className={iconBtn} title="Sources — what the Taskboard reads, and your own inboxes" aria-label="Sources">
+      <button onClick={() => setSourcesOpen(true)} className={iconBtn} title="Sources — what Tasks reads, and your own inboxes" aria-label="Sources">
         <Layers className="h-4 w-4" />
       </button>
       <span ref={exportBox} className="relative">
@@ -1306,7 +1306,7 @@ function TaskRow({ task, terms, me, active, ticked, onTick, onClick, onAnswered,
               {agentLabel && <><FoldHighlight text={agentLabel} terms={terms} />{' · '}</>}
               {people ? <><FoldHighlight text={people} terms={terms} />{' · '}</> : null}
               {agoRelative(task.last_event_at ?? task.created_at)}
-              {flags.low_confidence && <span className="italic" title="Jev wasn't sure this is a task, so it isn't counted on the Taskboard button"> · low confidence</span>}
+              {flags.low_confidence && <span className="italic" title="Jev wasn't sure this is a task, so it isn't counted on the Tasks button"> · low confidence</span>}
               {flags.historical && (
                 <span className="ml-1.5 rounded bg-zinc-800 px-1 py-px text-[10px] font-medium text-zinc-400" title="Filled in from your agents' chats of the last 30 days">
                   From history
@@ -1651,7 +1651,7 @@ function TaskDetailPane({
 
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
           <LaneChip task={task} />
-          {/* Out of Needs me (seen), the lane chip says Failed itself. */}
+          {/* Out of Needs you (seen), the lane chip says Failed itself. */}
           {failed && task.lane === 'needs_me' && <StatusChip status={task.status} />}
           {!closed && !failed && <OwesChip owes={task.owes_next} />}
           {task.in_line && <LineChip place={task.in_line} />}
@@ -1704,7 +1704,7 @@ function TaskDetailPane({
         {failed && task.lane === 'needs_me' && (
           <div className="mt-4 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2.5 text-sm text-red-700 dark:text-red-300">
             <div className="flex items-center gap-1.5 font-medium"><AlertTriangle className="h-4 w-4" />It failed</div>
-            <p className="mt-1 text-xs opacity-80">What happened is below. “Got it” takes it off Needs me; Reopen puts it back to work.</p>
+            <p className="mt-1 text-xs opacity-80">What happened is below. “Got it” takes it off Needs you; Reopen puts it back to work.</p>
           </div>
         )}
         {isMaybe(task) && !waiting && (
@@ -1905,7 +1905,7 @@ function TaskDetailPane({
               </button>
             )}
             {failed && task.lane === 'needs_me' && (
-              <button onClick={() => run('ack_failed')} disabled={!!busy} className={btn} title="Seen — take it off Needs me">
+              <button onClick={() => run('ack_failed')} disabled={!!busy} className={btn} title="Seen — take it off Needs you">
                 {icon('ack_failed', <Check className="h-4 w-4" />)}Got it<KeyHint k={TASK_KEYS.gotIt} />
               </button>
             )}
@@ -1914,13 +1914,13 @@ function TaskDetailPane({
                 {icon('not_task', <Ban className="h-4 w-4" />)}Not a task<KeyHint k={TASK_KEYS.notTask} />
               </button>
             )}
-            {/* A failure leaves Needs me by "Got it", not by a snooze or a next move. */}
+            {/* A failure leaves Needs you by "Got it", not by a snooze or a next move. */}
             {snoozed ? (
               <button onClick={() => run('unsnooze')} disabled={!!busy} className={btn}>
                 {icon('unsnooze', <BellOff className="h-4 w-4" />)}Unsnooze<KeyHint k={TASK_KEYS.snooze} />
               </button>
             ) : !closed && !failed && (
-              <button onClick={() => setSnoozeOpen(true)} disabled={!!busy} className={btn} title="Off Needs me for a while">
+              <button onClick={() => setSnoozeOpen(true)} disabled={!!busy} className={btn} title="Off Needs you for a while">
                 <Clock className="h-4 w-4" />Snooze<KeyHint k={TASK_KEYS.snooze} />
               </button>
             )}

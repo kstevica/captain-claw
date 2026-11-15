@@ -242,7 +242,7 @@ export function HistoryChip() {
 /** Taken in as a task with less certainty: it isn't counted in the badge. */
 export function LowConfidenceHint() {
   return (
-    <span title="Jev wasn't sure this is a task, so it isn't counted on the Taskboard button" className={`${chip} font-normal italic text-zinc-500`}>
+    <span title="Jev wasn't sure this is a task, so it isn't counted on the Tasks button" className={`${chip} font-normal italic text-zinc-500`}>
       Low confidence
     </span>
   )

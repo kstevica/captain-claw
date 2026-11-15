@@ -366,7 +366,7 @@ def test_it_is_labelled_the_taskboards_and_still_comes_back_to_the_task():
 
     assert turn_register._AUTOMATIONS["taskboard"] == "autonomy", "its turn attaches by autonomy:<id>"
     assert turn_source.from_automation("taskboard") == "taskboard"
-    assert turn_source.SOURCE_LABELS["taskboard"] == "Taskboard"
+    assert turn_source.SOURCE_LABELS["taskboard"] == "Tasks"
 
 
 def test_its_session_and_result_read_as_the_taskboards():

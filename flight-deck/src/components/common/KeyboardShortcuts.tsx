@@ -17,7 +17,7 @@ function shortcutsFor(simple: boolean, locked: boolean) {
     { keys: ['Cmd/Ctrl', '['], action: 'Previous Chat Tab' },
     { keys: ['Cmd/Ctrl', ']'], action: 'Next Chat Tab' },
     { keys: ['Escape'], action: 'Close Modals / Panels' },
-    ...(simple ? [{ keys: ['?'], action: 'On the Taskboard: its own shortcuts' }] : []),
+    ...(simple ? [{ keys: ['?'], action: 'In Tasks: its own shortcuts' }] : []),
   ]
 }
 

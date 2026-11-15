@@ -97,7 +97,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
 
   const act = useCallback(
     async (job: CronJob, kind: 'run' | 'pause' | 'resume' | 'remove') => {
-      if (kind === 'remove' && !confirm(`Remove cron job ${job.id.slice(0, 8)}?`)) return
+      if (kind === 'remove' && !confirm(`Remove automation ${job.id.slice(0, 8)}?`)) return
       setBusy(job.id + kind)
       try {
         if (kind === 'remove') {
@@ -145,13 +145,13 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
         <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-3">
           <Clock className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-semibold text-zinc-100">Cron jobs</div>
+            <div className="text-sm font-semibold text-zinc-100">Automations</div>
             <div className="truncate text-xs text-zinc-500">{agentName}</div>
           </div>
           <button
             onClick={() => setCreating((v) => !v)}
             className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 text-xs font-medium ${creating ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'}`}
-            title="Create a new cron job"
+            title="Create a new automation"
           >
             <Plus className="h-3.5 w-3.5" /> New job
           </button>
@@ -212,7 +212,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
               <Loader2 className="h-4 w-4 animate-spin" /> Loading…
             </div>
           ) : jobs.length === 0 ? (
-            <div className="py-10 text-center text-sm text-zinc-500">No cron jobs scheduled.</div>
+            <div className="py-10 text-center text-sm text-zinc-500">No automations yet.</div>
           ) : (
             <div className="space-y-2">
               {jobs.map((job) => {
@@ -242,7 +242,7 @@ export function CronPanel({ host, port, auth, agentName, onClose }: CronPanelPro
                     <p className="whitespace-pre-wrap break-words text-sm text-zinc-200">{taskDesc(job)}</p>
                     {job.last_status && (
                       <div className="mt-1 text-[11px] text-zinc-500">
-                        last: {job.last_status}
+                        last: {job.last_status === 'no_action' ? 'did nothing' : job.last_status}
                         {job.last_run_at ? ` (${relTime(job.last_run_at)})` : ''}
                         {job.last_error ? <span className="text-red-600 dark:text-red-400/80"> — {job.last_error}</span> : null}
                       </div>

@@ -2746,7 +2746,7 @@ const CompactMessage = memo(function CompactMessage({ message, content, actions 
             <button
               onClick={() => (task.board ? useTaskboardStore.getState().showTask(task.id) : useScheduledStore.getState().openTasks(task.id))}
               className="flex min-w-0 items-center gap-1 font-medium text-amber-700 hover:underline dark:text-amber-400"
-              title={task.board ? 'Open this task on the Taskboard' : 'Open this scheduled task and its history'}
+              title={task.board ? 'Open this task in Tasks' : 'Open this scheduled task and its history'}
             >
               {task.board ? <ListChecks className="h-3 w-3 shrink-0" /> : <AlarmClock className="h-3 w-3 shrink-0" />}
               <span className="truncate">{task.name}</span>
@@ -2786,7 +2786,7 @@ function CompactMessageDialog({ message, content, onClose }: {
   const rephrase = message.role === 'rephrase'
   const Icon = rephrase ? Wand2 : Bot
   const title = rephrase ? 'Rephrased task'
-    : message.task ? `${message.task.board ? 'Taskboard' : 'Scheduled'} · ${message.task.name}` : message.automation || 'Automated turn'
+    : message.task ? `${message.task.board ? 'Tasks' : 'Scheduled'} · ${message.task.name}` : message.automation || 'Automated turn'
   const kind = rephrase ? 'How the agent restated your request' : message.task?.board ? 'What you handed over' : 'Automatic result'
 
   useEffect(() => {

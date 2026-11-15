@@ -14,7 +14,10 @@ it is (the turn's speaker grant, ``external_tools_routes.runner_of``):
   ``{"pending": id}`` to follow;
 - ``POST /fd/asks/agent/follow`` — wait some more;
 - ``POST /fd/asks/agent/cancel`` — the turn was stopped: the question closes
-  (also when the cancel arrives before the question opened).
+  (also when the cancel arrives before the question opened);
+- ``POST /fd/asks/agent/secret`` — a secret the person typed for this agent
+  (request_secret), by its reference, as its browser types it in
+  (secrets_store: 10 minutes, 3 uses, this agent and person only).
 
 ``agent_router`` is included before ``router`` in server.py, so
 ``/fd/asks/agent`` never reads as a question's id.
@@ -35,7 +38,8 @@ router = APIRouter(prefix="/fd/asks", tags=["asks"])
 agent_router = APIRouter(prefix="/fd/asks/agent", tags=["asks"])
 
 # The agent routes a member's turn reaches with its grant (speaker_grants.GRANT_AWARE_PATHS).
-GRANT_AWARE = frozenset({"/fd/asks/agent", "/fd/asks/agent/follow", "/fd/asks/agent/cancel"})
+GRANT_AWARE = frozenset({"/fd/asks/agent", "/fd/asks/agent/follow", "/fd/asks/agent/cancel",
+                         "/fd/asks/agent/secret"})
 
 
 def _uid(user: dict) -> str:
@@ -130,7 +134,8 @@ async def agent_ask(body: AgentAskBody, request: Request) -> dict[str, Any]:
 
         name = await display_name(runner.agent, runner.user_id)
         a = await asks.open_ask(runner.user_id, source="agent", title=name, agent_name=name,
-                                questions=questions, wait_s=body.wait_s, ask_id=body.ask_id)
+                                questions=questions, wait_s=body.wait_s, ask_id=body.ask_id,
+                                asker=runner.agent)
     except asks.AskError as exc:
         raise HTTPException(422, str(exc)) from None
     done = await asks.wait_answer(a, body.wait)
@@ -150,3 +155,22 @@ async def agent_follow(body: FollowBody, request: Request) -> dict[str, Any]:
 async def agent_cancel(body: FollowBody, request: Request) -> dict[str, Any]:
     runner = await _runner(request)
     return {"cancelled": await asks.cancel(body.id, runner.user_id)}
+
+
+class SecretBody(BaseModel):
+    ref: str = Field(..., pattern=r"^sec_[0-9a-f]{16}$")
+
+
+@agent_router.post("/secret")
+async def agent_secret(body: SecretBody, request: Request) -> dict[str, Any]:
+    """The value behind a secret reference, for the agent that asked and the
+    person who typed it; 404 for anyone else, or once used up or too old."""
+    from captain_claw.flight_deck import secrets_store
+
+    runner = await _runner(request)
+    try:
+        value = secrets_store.release(body.ref, runner.user_id, runner.agent)
+    except KeyError:
+        raise HTTPException(404, "That secret is gone: it was used up, is older than 10 minutes, "
+                                 "or wasn't typed for this agent.") from None
+    return {"value": value}

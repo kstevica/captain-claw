@@ -10,6 +10,7 @@ import { DeckProfileDefaults } from '../profile/DeckProfileDefaults'
 import { DeckCourseSettings } from '../course/DeckCourseSettings'
 import { TrustedModelCard } from '../anonymize/TrustedModelCard'
 import { NamePackCard } from '../anonymize/NamePackCard'
+import { ApprovalsPolicyCard } from '../approvals/ApprovalsPolicyCard'
 import {
   CUSTOM_TOOLS_HINT, CUSTOM_TOOLS_TITLE, EVERYBODY_APPROVAL_HINT, EVERYBODY_APPROVAL_TITLE, SANDBOX_HINT, SANDBOX_TITLE, sandboxLine,
 } from '../admin/customTools'
@@ -197,6 +198,8 @@ export function SettingsConsole() {
           />
         </SettingRow>
       </Card>
+
+      <ApprovalsPolicyCard />
 
       <Card icon={Wrench} title={CUSTOM_TOOLS_TITLE} hint={sandboxLine(toolStatus?.sandbox)} bodyClassName="divide-y divide-zinc-800/80 px-5 py-4">
         <SettingRow title="On for this deck" hint={CUSTOM_TOOLS_HINT}>

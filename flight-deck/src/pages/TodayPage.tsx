@@ -559,9 +559,9 @@ export function TodayPage() {
                   {/* Cron */}
                   <Section
                     icon={<Clock className="h-3.5 w-3.5 text-sky-500" />}
-                    title="Cron jobs"
+                    title="Automations"
                     count={d.crons.length}
-                    empty="No cron jobs"
+                    empty="No automations"
                     onView={() => setDetail({ target: t, kind: 'crons' })}
                   >
                     {d.crons.slice(0, 6).map((c) => (
@@ -628,7 +628,7 @@ export function TodayPage() {
         const titles: Record<typeof detail.kind, string> = {
           insights: 'Pending insights',
           intuitions: 'Intuitions',
-          crons: 'Cron jobs',
+          crons: 'Automations',
           reflections: 'Reflections',
         }
         return (
