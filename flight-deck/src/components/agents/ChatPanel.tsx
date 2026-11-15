@@ -2263,7 +2263,9 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     const sent = splitSentFiles(message.content || '')
     return (
       <div id={`fd-msg-${message.id}`} className="group mb-3 flex flex-col items-end gap-0.5">
-        <div className={`max-w-[85%] rounded-br-sm bg-violet-600/20 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'}`}>
+        {/* A light violet wash with a hairline edge: the person's words stand
+            apart without outweighing the agent's answer (which has no bubble). */}
+        <div className={`max-w-[85%] rounded-br-sm border border-violet-600/[0.12] bg-violet-600/[0.06] dark:border-violet-500/[0.18] dark:bg-violet-500/[0.11] ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'}`}>
           {sent.text && (
             <div className={`fd-markdown ${bodyText} text-zinc-200`}>
               <MarkdownMessage content={processImagePaths(sent.text, agentConn?.host, agentConn?.port, agentConn?.auth)} />
@@ -2418,13 +2420,15 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     )
   }
 
+  // The agent's answer: plain text on the chat, no bubble — it is what the
+  // turn is for; the person's message keeps a light bubble.
   return (
-    <div id={`fd-msg-${message.id}`} className="group mb-3 flex flex-col items-start gap-0.5">
-      <div className={`max-w-[85%] rounded-bl-sm bg-zinc-800/60 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'} ${message.replay ? 'opacity-60' : ''}`}>
-        <div className={`fd-markdown ${bodyText} text-zinc-300`}>
+    <div id={`fd-msg-${message.id}`} className="group mb-4 flex flex-col items-start gap-0.5">
+      <div className={`w-full min-w-0 ${message.replay ? 'opacity-60' : ''}`}>
+        <div className={`fd-markdown ${bodyText} text-zinc-200`}>
           <MarkdownMessage content={replyMarkdown(revealed ?? cleanContent, agentConn)} />
         </div>
-        <div className="mt-1 flex items-center gap-2 text-[10px] text-zinc-600">
+        <div className="mt-1.5 flex items-center gap-2 text-[10px] text-zinc-600">
           <span>{formatTime(message.timestamp)}</span>
           {message.model && <span className="font-mono">{message.model}</span>}
           {message.replay && <span className="text-zinc-700">(history)</span>}
@@ -2894,6 +2898,13 @@ const ActivityGroup = memo(function ActivityGroup({ items, live, liveTurnUsage, 
   const hasUsage = !!usage && ((usage.prompt_tokens || 0) > 0 || (usage.completion_tokens || 0) > 0)
   const stepWord = `${steps} step${steps !== 1 ? 's' : ''}`
   const summary = live ? `${agentName} is on it · ${stepWord} so far` : `${agentName} worked through ${stepWord}`
+  // Folded, the agent's latest narration ("The feed is returning older
+  // items, so I'll pull the newest instead.") sits under the summary line,
+  // live or done; unfolded, it is back in the list where it happened.
+  let latestNarration: ChatMessage | null = null
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i].role !== 'tool' && (items[i].content || '').trim()) { latestNarration = items[i]; break }
+  }
   return (
     <div className="mb-3">
       <div className="flex items-center gap-2 text-sm text-zinc-500">
@@ -2910,6 +2921,14 @@ const ActivityGroup = memo(function ActivityGroup({ items, live, liveTurnUsage, 
           {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
         </button>
       </div>
+      {!open && latestNarration && (
+        <div className="mt-1.5 flex items-start gap-2 text-sm italic leading-relaxed text-zinc-500">
+          <CircleDot className="mt-[3px] h-3.5 w-3.5 shrink-0 text-zinc-600" />
+          <div className="fd-markdown fd-quiet min-w-0 flex-1">
+            <MarkdownMessage content={latestNarration.content} />
+          </div>
+        </div>
+      )}
       {open && (
         <div className="mt-1.5 space-y-0.5 border-l-2 border-zinc-800 py-1 pl-3">
           {items.map((m) =>
@@ -2971,7 +2990,7 @@ const ActivityNarration = memo(function ActivityNarration({ message }: { message
   return (
     <div className="flex items-start gap-1.5 px-1.5 py-0.5 text-xs italic text-zinc-500">
       <CircleDot className="mt-0.5 h-3 w-3 shrink-0 text-zinc-600" />
-      <div className="fd-markdown min-w-0 flex-1">
+      <div className="fd-markdown fd-quiet min-w-0 flex-1">
         <MarkdownMessage content={message.content} />
       </div>
     </div>
