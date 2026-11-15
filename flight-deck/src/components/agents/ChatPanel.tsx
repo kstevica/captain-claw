@@ -38,6 +38,7 @@ import {
   Pencil,
   Plus,
   ArrowUp,
+  ArrowRight,
   Moon,
   Bot,
   Wand2,
@@ -774,6 +775,7 @@ function ChatContent({
   const { isMobile } = useIsMobile()
   const [input, setInput] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const conn = useAgentConnection(session.containerId)
@@ -797,6 +799,15 @@ function ChatContent({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session.messages.length, session.held?.length])
+
+  // Suggested next steps arrive after the reply, under it: brought into view
+  // when the reader was at the end (not when they're reading further up).
+  const stepCount = session.nextStepOptions?.length ?? 0
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!stepCount || !el) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 320) messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [stepCount])
 
   // Focus input when panel opens
   useEffect(() => {
@@ -977,7 +988,7 @@ function ChatContent({
       {!shared && <PlanCard containerId={sessionKey} />}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto py-3">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto py-3">
         <div className={simple ? 'mx-auto w-full max-w-4xl px-4 wide:px-6' : 'px-4'}>
         {/* The loaded window is the newest page of the lane's log. */}
         {session.hasOlder && (
@@ -1102,18 +1113,20 @@ function ChatContent({
           />
         ))}
 
+        {/* Suggested next steps: under the reply they came from. */}
+        {!session.busy && session.nextStepOptions && session.nextStepOptions.length > 0 && (
+          <NextSteps
+            options={session.nextStepOptions}
+            disabled={!session.connected}
+            large={simple}
+            phone={isMobile}
+            onPick={(action) => onSend(action)}
+          />
+        )}
+
         <div ref={messagesEndRef} data-fd-chat-end />
         </div>
       </div>
-
-      {/* Suggested next steps */}
-      {session.nextStepOptions && session.nextStepOptions.length > 0 && (
-        <NextStepsBar
-          options={session.nextStepOptions}
-          disabled={!session.connected || session.busy}
-          onPick={(action) => onSend(action)}
-        />
-      )}
 
       {/* Attachments strip */}
       {attachments.length > 0 && !shared && (
@@ -1344,32 +1357,69 @@ function ChatContent({
   )
 }
 
-function NextStepsBar({
-  options,
-  disabled,
-  onPick,
-}: {
+// What the agent suggests doing next, under its reply: numbered pills (the
+// numbers match the menu a reply often ends with: "or should I start with
+// item 1?"). Pointing at one says what it will do; a click sends it. Folded
+// away with the ×, until the next set arrives.
+function NextSteps({ options, disabled, large, phone, onPick }: {
   options: NextStepOption[]
   disabled: boolean
+  large: boolean
+  phone: boolean
   onPick: (action: string) => void
 }) {
+  const key = options.map((o) => o.label).join('\n')
+  const [dismissed, setDismissed] = useState('')
+  const [hover, setHover] = useState<number | null>(null)
+  if (dismissed === key) return null
+  const shown = hover != null ? options[hover] : null
+  const what = shown ? (shown.description || shown.action) : ''
   return (
-    <div className="border-t border-zinc-200 px-4 py-2 dark:border-zinc-800/50">
-      <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500 dark:text-zinc-500">Suggested next steps</div>
-      <div className="flex flex-wrap gap-1.5">
+    <div className="fd-rise mb-4 mt-1" role="group" aria-label="Suggested next steps">
+      <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-zinc-500">
+        <Sparkles className="h-3.5 w-3.5 text-[var(--fd-accent-text)]" aria-hidden />
+        <span>Next steps</span>
+        <button
+          type="button"
+          onClick={() => setDismissed(key)}
+          title="Hide these suggestions"
+          aria-label="Hide suggested next steps"
+          className="ml-0.5 flex h-5 w-5 items-center justify-center rounded-full text-zinc-600 transition-colors hover:bg-zinc-800 hover:text-zinc-300"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+      <div className="flex flex-wrap gap-2">
         {options.map((opt, i) => (
           <button
             key={`${i}-${opt.label}`}
             type="button"
             disabled={disabled}
-            title={opt.description || opt.action}
+            title={phone ? undefined : opt.description || opt.action}
             onClick={() => onPick(opt.action)}
-            className="rounded-full border border-violet-300 bg-violet-50 px-3 py-1 text-xs font-medium text-violet-700 hover:border-violet-400 hover:bg-violet-100 hover:text-violet-800 dark:border-violet-500/30 dark:bg-violet-500/10 dark:font-normal dark:text-violet-200 dark:hover:bg-violet-500/20 dark:hover:text-violet-100 disabled:cursor-not-allowed disabled:opacity-40"
+            onMouseEnter={() => setHover(i)}
+            onMouseLeave={() => setHover((h) => (h === i ? null : h))}
+            onFocus={() => setHover(i)}
+            onBlur={() => setHover((h) => (h === i ? null : h))}
+            className={`group inline-flex max-w-full items-center gap-2 rounded-full border border-[var(--fd-line)] bg-[var(--fd-surface-raised)] font-medium text-zinc-200 shadow-[var(--fd-shadow-soft)] transition-all hover:-translate-y-px hover:border-violet-500/40 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40 active:translate-y-0 disabled:pointer-events-none disabled:opacity-40 ${
+              large ? `h-9 pl-1.5 text-sm ${phone ? 'pr-3.5' : 'pr-2.5'}` : `h-8 pl-1 text-xs ${phone ? 'pr-3' : 'pr-2'}`}`}
           >
-            {opt.label}
+            <span className={`flex shrink-0 items-center justify-center rounded-full bg-[var(--fd-accent-soft)] font-semibold tabular-nums text-[var(--fd-accent-text)] ${
+              large ? 'h-6 w-6 text-[11px]' : 'h-5 w-5 text-[10px]'}`}>
+              {i + 1}
+            </span>
+            <span className="min-w-0 truncate">{opt.label}</span>
+            {!phone && (
+              <ArrowRight className="h-3.5 w-3.5 shrink-0 text-[var(--fd-accent-text)] opacity-0 transition-all group-hover:translate-x-0.5 group-hover:opacity-100 group-focus-visible:opacity-100" aria-hidden />
+            )}
           </button>
         ))}
       </div>
+      {!phone && (
+        <p className={`mt-2 min-h-[1.25rem] truncate text-zinc-500 ${large ? 'text-[13px]' : 'text-xs'}`} aria-live="polite">
+          {what ? <><span className="text-[var(--fd-accent-text)]">→</span> {what}</> : 'Pick one, or write your own below.'}
+        </p>
+      )}
     </div>
   )
 }
