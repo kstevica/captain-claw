@@ -672,6 +672,14 @@ class ToolSearchConfig(BaseModel):
             "search starts deferring tools. 0 turns tool search off."
         ),
     )
+    native: bool = Field(
+        default=True,
+        description=(
+            "On Claude models that have it (Anthropic API), use Anthropic's own "
+            "tool search: deferred tools are marked defer_loading instead of left "
+            "out, so loading one keeps the prompt cache."
+        ),
+    )
 
 
 class ToolsConfig(BaseModel):

@@ -339,6 +339,7 @@ tools:
   tool_search:
     enabled: true
     budget_tokens: 16000
+    native: true   # Claude models on Anthropic's API: Anthropic's own tool search (keeps the prompt cache)
   duplicate_call_max: 1
 skills:
   managed_dir: ~/.captain-claw/skills

@@ -27,6 +27,14 @@ only grows (a search or a call adds a tool). Tool definitions sit at the front
 of every request, so a set that changed with each message would break the
 provider's prompt cache for the whole conversation.
 
+Claude models with Anthropic's own tool search (``tools.tool_search.native``,
+on by default) get the same selection the other way round: every definition
+goes out, the deferred ones marked ``defer_loading``, with Anthropic's search
+tool in place of ``search_tools``. A search then adds the tools it finds to the
+conversation instead of the tool list, so the list, and the cache behind it,
+never changes; the selection doesn't grow either. See
+``captain_claw/llm/anthropic_tool_search.py``.
+
 Flight Deck's agent settings write ``~/.captain-claw/tool_search.json``
 (``{"enabled": …, "budget_tokens": …}``), read on every call, so a change
 applies from the agent's next message without a restart. With no file the
@@ -128,6 +136,28 @@ def budget_tokens() -> int:
     return max(0, int(s["budget_tokens"])) if s["enabled"] else 0
 
 
+def native_enabled() -> bool:
+    """``tools.tool_search.native``: use the provider's own tool search where
+    the model has one."""
+    try:
+        from captain_claw.config import get_config
+
+        return bool(get_config().tools.tool_search.native)
+    except Exception:
+        return True
+
+
+def uses_native(agent: Any) -> bool:
+    """This agent's model call can use Anthropic's own tool search."""
+    if not native_enabled():
+        return False
+    check = getattr(getattr(agent, "provider", None), "supports_native_tool_search", None)
+    try:
+        return bool(check()) if callable(check) else False
+    except Exception:
+        return False
+
+
 # ── Sizing ──────────────────────────────────────────────────────────────
 
 
@@ -199,6 +229,7 @@ def select(
     intent: Iterable[str] = (),
     core: Iterable[str] = (),
     count: Callable[[str], int] | None = None,
+    native: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str], dict[str, Any] | None]:
     """Which definitions go in full.
 
@@ -210,6 +241,10 @@ def select(
     *state* is what the session kept from an earlier call. While its budget
     matches, its loaded set is reused and only grows by *used* — *intent* and
     the budget fill are decided once, when the session is first over budget.
+
+    *native* (Anthropic's own tool search): no ``search_tools`` in *sent* or
+    in the budget, and a kept set doesn't grow by *used* — a deferred tool the
+    model found stays deferred, so the tool list stays the same.
     """
     names = [str(d.get("name", "")) for d in defs]
     total = sum(sizes.get(n, 0) for n in names)
@@ -218,11 +253,15 @@ def select(
 
     present = set(names)
     used_set = set(used) & present
-    fixed = (ESSENTIAL_TOOLS | used_set | {n for n in names if n.startswith("mcp_")}) & present
+    static = (ESSENTIAL_TOOLS | {n for n in names if n.startswith("mcp_")}) & present
+    fixed = static | used_set
 
     if state is not None and int(state.get("budget", -1)) == budget:
-        loaded = (set(state.get("loaded") or []) | used_set) & present
-        loaded |= fixed
+        if native:
+            loaded = (set(state.get("loaded") or []) & present) | static
+        else:
+            loaded = (set(state.get("loaded") or []) | used_set) & present
+            loaded |= fixed
         # Kept tools that are hidden right now (an account disconnected) stay
         # in the state; they come back when the gate opens again.
         keep = set(state.get("loaded") or []) | loaded
@@ -231,7 +270,7 @@ def select(
         intent_set = set(intent)
         core_set = set(core)
         reserve = 0
-        if count is not None:
+        if count is not None and not native:
             reserve = int(count(_wire(search_definition(n for n in names if n not in loaded))))
         spent = reserve + sum(sizes.get(n, 0) for n in loaded)
         rest = sorted(
@@ -253,7 +292,7 @@ def select(
     sent = [d for d in defs if d.get("name") in loaded]
     deferred = [n for n in names if n not in loaded]
     new_state = {"budget": budget, "loaded": sorted(keep)}
-    if deferred:
+    if deferred and not native:
         sent = sent + [search_definition(deferred)]
     return sent, deferred, new_state
 
@@ -310,32 +349,48 @@ def apply(agent: Any, defs: list[dict[str, Any]], user_input: str = "") -> list[
         cache = agent._tool_search_token_cache = {}
     sizes = {str(d.get("name", "")): definition_tokens(d, count, cache) for d in defs}
     state = _get_state(agent)
+    native = uses_native(agent)
     sent, deferred, new_state = select(
         defs, sizes, budget=budget, state=state,
         used=_used_tools(agent),
         intent=_eco_select_tools_by_intent(user_input or ""),
         core=_ECO_CORE_TOOLS,
         count=count,
+        native=native,
     )
     if not deferred:
         _forget(agent)
         return defs
     if new_state != state:
         _set_state(agent, new_state)
-    agent._tool_search_pool = {str(d.get("name", "")): d for d in defs}
-    agent._tool_search_sent = frozenset(str(d.get("name", "")) for d in sent)
-    sig = (len(sent), tuple(deferred))
+    if native:
+        # Every definition, the deferred ones marked, and Anthropic's search
+        # tool last; `search_tools` isn't offered, so it has nothing to load.
+        from captain_claw.llm import anthropic_tool_search
+
+        _forget(agent)
+        later = set(deferred)
+        out = [({**d, "defer_loading": True} if str(d.get("name", "")) in later else d) for d in defs]
+        out.append(anthropic_tool_search.search_tool())
+        in_full = [d for d in defs if str(d.get("name", "")) not in later]
+    else:
+        agent._tool_search_pool = {str(d.get("name", "")): d for d in defs}
+        agent._tool_search_sent = frozenset(str(d.get("name", "")) for d in sent)
+        out = sent
+        in_full = sent[:-1]
+    sig = (native, len(in_full), tuple(deferred))
     if getattr(agent, "_tool_search_logged", None) != sig:
         agent._tool_search_logged = sig
         log.info(
             "Tool search: deferred tool definitions",
             budget=budget,
+            native=native,
             full_tokens=sum(sizes.values()),
-            sent_tokens=sum(sizes.get(str(d.get("name", "")), 0) for d in sent[:-1]),
-            sent=len(sent) - 1,
+            sent_tokens=sum(sizes.get(str(d.get("name", "")), 0) for d in in_full),
+            sent=len(in_full),
             deferred=len(deferred),
         )
-    return sent
+    return out
 
 
 # ── Search ──────────────────────────────────────────────────────────────
