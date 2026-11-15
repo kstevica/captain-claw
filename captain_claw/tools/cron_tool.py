@@ -220,6 +220,12 @@ class CronTool(Tool):
         except ValueError as exc:
             return ToolResult(success=False, error=f"Bad schedule: {exc}")
 
+        from captain_claw.cron_dispatch import check_new_cron_job
+
+        refusal = await check_new_cron_job(self._get_session_manager(), "prompt", schedule_dict)
+        if refusal:
+            return ToolResult(success=False, error=refusal)
+
         next_run = compute_next_run(schedule_dict)
         session_id = self._get_session_id()
 
