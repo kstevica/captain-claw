@@ -972,6 +972,14 @@ class AgentOrchestrationMixin:
         metadata = getattr(self.session, "metadata", None) if self.session else None
         return metadata.get(fabrication_guard.ID_LEDGER_KEY) if isinstance(metadata, dict) else None
 
+    def _answers_a_check(self) -> bool:
+        """The reply being judged answers a check's corrective (the last
+        stored message), not a "continue" after a cut-off."""
+        messages = self.session.messages if self.session else []
+        last = messages[-1] if messages else None
+        return (msg_origin.is_code_corrective(last)
+                and str(last.get("origin_detail") or "") != "continue_cut_off")
+
     def _turn_made_no_tool_call(self, turn_start_idx: int) -> bool:
         """No tool ran or was attempted in this turn: no call stored (a
         refused or failed one included), no tool result (monitor rows
@@ -3553,6 +3561,15 @@ class AgentOrchestrationMixin:
                     log.warning("Model-written lane note cut from the reply",
                                 preview=_raw_reply[:160])
                     response.content = _without_lane_note
+            # A retry that opens by answering the check's note as if the user
+            # had pushed back ("You're right, I overstated that.") loses that
+            # opening: the user never saw the note.
+            if not response.tool_calls and response.content and self._answers_a_check():
+                _conceded = fabrication_guard.without_concession(str(response.content))
+                if _conceded != str(response.content):
+                    log.info("Reply opened by answering a check — opening cut",
+                             preview=str(response.content)[:120])
+                    response.content = _conceded
             _stall_resp_text = str(response.content or "")
             # ── Made-up tool work gate ────────────────────────────
             # The reply says an email went out, but none did this turn; says

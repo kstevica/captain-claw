@@ -243,6 +243,36 @@ def is_turned_down(msg: Any) -> bool:
     return isinstance(msg, dict) and origin_of(msg) in ("rejected", "corrective")
 
 
+def is_code_corrective(msg: Any) -> bool:
+    """A user-role note code sent back mid-turn (a check asking for another
+    reply, a "continue" after a cut-off) — not anything a person wrote. A
+    turn's own input is a person's, whatever its text looks like."""
+    return (
+        isinstance(msg, dict)
+        and str(msg.get("role", "")).strip().lower() == "user"
+        and origin_of(msg) == "corrective"
+        and msg.get("turn_input") is not True
+    )
+
+
+# A corrective reaches the model as a user message. Sent bare ("Your reply
+# says other agents did work…"), the model answered it as the user pushing
+# back — "You're right, I overstated that." to a person who had only asked
+# "what's new?". It goes out framed as a check the user never sees.
+CORRECTIVE_HEAD = ("[Automatic check from the system — not a message from the user, "
+                   "who doesn't see this note.]")
+CORRECTIVE_TAIL = ("Follow it, writing for the user: don't answer this note itself — no "
+                   "\"You're right\", no apology or thanks to it — and don't mention it.")
+
+
+def corrective_for_model(text: str) -> str:
+    """A corrective as the model reads it: framed as the system's check."""
+    body = str(text or "").strip()
+    if not body or body.startswith(CORRECTIVE_HEAD):
+        return body
+    return f"{CORRECTIVE_HEAD}\n{body}\n{CORRECTIVE_TAIL}"
+
+
 def is_human_input(msg: Any) -> bool:
     """A message a person typed (or sent through a chat surface)."""
     return (

@@ -1880,6 +1880,19 @@ def _delegation_claims(reply: str, names: Iterable[str] = ()) -> list[_Delegatio
     return found
 
 
+# Tools whose results carry other agents' work from earlier runs: the Line
+# is the timeline of what the user's agents did on their own. Asked "what's
+# new?", an agent read it and retold "The agent found two blockers …" from a
+# note there — this check turned that down as a hand-off that never ran, and
+# the retry walked back a true answer.
+FEED_TOOLS = frozenset({"line"})
+
+
+def _read_a_feed(steps: Iterable[ToolStep]) -> bool:
+    """A read of another agent's results answered in this turn."""
+    return any(s.name in FEED_TOOLS and s.ok for s in steps)
+
+
 def _handoffs_tried(steps: Iterable[ToolStep]) -> bool:
     """Any call to a peer this turn, answered or not (not a fleet listing)."""
     return any(s.name in DELEGATION_TOOLS and s.action not in ("list_agents", "spawn_agent")
@@ -1892,7 +1905,7 @@ def _delegation_claim(reply: str, request: str, facts: TurnFacts) -> tuple[bool,
     if not facts.delegation_tools or facts.others_turn or not reply.strip():
         return False, ""
     steps = facts.turn_steps
-    if any(_is_handoff(s) for s in steps):
+    if any(_is_handoff(s) for s in steps) or _read_a_feed(steps):
         return False, ""
     if _RECALL_REQUEST_RE.search(request) or _OTHERS_DID_RE.search(request):
         return False, ""
@@ -1919,6 +1932,54 @@ def delegation_corrective(claim: str) -> str:
 
 DELEGATION_BACKSTOP = ("Note: no other agent was contacted in this turn — the team work described "
                        "above did not happen.")
+
+
+# ── A reply to the check, not to the user ────────────────────────────
+#
+# A check's corrective reaches the model as a user message; a model that
+# reads it as the person pushing back opens its retry with "You're right, I
+# overstated that." — to someone who only asked "what's new?". The
+# corrective is framed as the system's (msg_origin.corrective_for_model);
+# what still slips through is cut from the front of the retry.
+
+_CONCEDE_HEAD = (
+    r"(?:you(?:'|’)re|you\s+are)\s+(?:absolutely\s+|quite\s+|totally\s+)?(?:right|correct)"
+    r"|that(?:'|’)s\s+(?:fair|true|right|correct)|fair\s+(?:point|enough)|good\s+catch"
+    r"|point\s+taken|my\s+(?:mistake|bad|apologies)|apologies|sorry|i\s+apologi[sz]e"
+    r"|i\s+stand\s+corrected|(?:ima[šs]|imate)\s+pravo|u\s+pravu\s+(?:si|ste)"
+    r"|ispri[čc]avam\s+se|oprosti(?:te)?|moja\s+gre[šs]ka"
+)
+_CONCEDE_TAIL = (
+    r"i\s+(?:overstated|overclaimed|misspoke|was\s+wrong|got\s+(?:that|it)\s+wrong|"
+    r"made\s+(?:that|it)\s+up|shouldn(?:'|’)t\s+have\s+said\s+(?:that|it)|jumped\s+ahead)"
+    r"(?:\s+(?:that|it|there|this))?"
+)
+# A first sentence that is nothing but the concession: dropped whole.
+_CONCESSION_SENTENCE_RE = re.compile(
+    r"^\s*(?:(?:" + _CONCEDE_HEAD + r")(?:\s+(?:about|for)\s+(?:that|this|the\s+confusion))?"
+    r"(?:\s*[,;:—–-]\s*(?:" + _CONCEDE_TAIL + r"))?|(?:" + _CONCEDE_TAIL + r"))\s*[.!]+\s*",
+    re.IGNORECASE,
+)
+# A concession leading into the answer ("You're right — the note is …"):
+# only the opener goes.
+_CONCESSION_OPENER_RE = re.compile(r"^\s*(?:" + _CONCEDE_HEAD + r")\s*[,;:—–-]\s*", re.IGNORECASE)
+
+
+def without_concession(reply: str) -> str:
+    """*reply* without an opening that answers a check's note as if the user
+    had pushed back ("You're right, I overstated that."); unchanged when
+    nothing would be left."""
+    text = str(reply or "")
+    for _ in range(3):   # "U pravu si, ispričavam se. …" is two openers
+        for regex in (_CONCESSION_SENTENCE_RE, _CONCESSION_OPENER_RE):
+            m = regex.match(text)
+            if m and text[m.end():].strip():
+                rest = text[m.end():]
+                text = rest[:1].upper() + rest[1:]
+                break
+        else:
+            break
+    return text
 
 
 # ── Scheduled jobs ───────────────────────────────────────────────────

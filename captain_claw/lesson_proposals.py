@@ -31,6 +31,7 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from captain_claw import msg_origin
 from captain_claw.logging import get_logger
 
 if TYPE_CHECKING:
@@ -91,9 +92,23 @@ def _content(m: dict[str, Any]) -> str:
     return str(c or "").strip()
 
 
+def _code_made(m: dict[str, Any]) -> bool:
+    if m.get("turn_input") is True:
+        return False   # a turn's own input is what a person sent
+    if msg_origin.is_turned_down(m):
+        return True
+    return (str(m.get("role", "")).strip().lower() == "user"
+            and msg_origin.origin_of(m) in msg_origin.USER_INJECTED_ORIGINS)
+
+
 def exchange(messages: list[dict[str, Any]]) -> tuple[str, str, str]:
     """(the answer the owner's last message follows, that message, the
-    agent's answer to it) from a session's messages — "" where there is none."""
+    agent's answer to it) from a session's messages — "" where there is none.
+    What code put in the chat is no one's words: a check's note sent back to
+    the model ("Don't describe results … you don't have"), the reply it
+    turned down, a fleet notice. Read as the owner's, a check's note became a
+    lesson the agent "noticed" from a correction no one made."""
+    messages = [m for m in messages if not _code_made(m)]
     user_at = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), -1)
     if user_at < 0:
         return "", "", ""

@@ -5268,6 +5268,14 @@ class AgentContextMixin:
                 if msg_origin.is_lane_note(msg):
                     pending_lane_notes.append((idx, self._lane_note_as_user(msg)))
                     continue
+                # A check's note goes out framed as the system's, or the model
+                # answers it as the user pushing back ("You're right, …").
+                if msg_origin.is_code_corrective(msg):
+                    _framed = msg_origin.corrective_for_model(str(msg.get("content", "") or ""))
+                    if _framed != str(msg.get("content", "") or ""):
+                        msg = dict(msg)
+                        msg["content"] = _framed
+                        msg.pop("token_count", None)
                 if (
                     filter_historical_tools
                     and idx < tool_messages_from_index

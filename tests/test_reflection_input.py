@@ -118,3 +118,20 @@ def test_the_reflection_prompt_forbids_reporting_directives():
     assert 'an "[assistant]" reply that reports an action without one' in text
     assert '"[automation result …]" lines are other runs\' results' in text
     assert '"[summary]" lines' in text
+
+
+def test_a_checks_note_is_not_read_as_the_user():
+    # Read as "[user]", a check's corrective became "when the owner points
+    # out an unsupported claim, …" in the reflection.
+    lines = reflections._reflection_transcript([
+        {"role": "user", "content": "what's new?", "origin": "human"},
+        {"role": "assistant", "content": "The agent found two blockers.", "origin": "rejected"},
+        {"role": "user", "content": "Your reply says other agents did work in this turn.",
+         "origin": "corrective"},
+        {"role": "assistant", "content": "Most of what's new is deck updates."},
+    ]).splitlines()
+
+    assert lines[0] == "[user] what's new?"
+    assert lines[2] == (f"[{reflections._CHECK_LABEL}] "
+                        "Your reply says other agents did work in this turn.")
+    assert not lines[2].startswith("[user]")

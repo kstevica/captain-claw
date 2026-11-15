@@ -223,3 +223,54 @@ async def test_an_ambiguous_start_is_refused(cron):
     sm.jobs.append(_Job("684107ffffff", {"type": "daily", "hour": 1, "minute": 0}))
     result = await tool.execute(action="pause", job_id="6841")
     assert not result.success and "give more of the ID" in result.error
+
+
+# ── results retold from the Line ──
+#
+# Asked "what's new?", an agent read the Line and retold an earlier run's
+# note ("The agent found two blockers …"); the check turned it down as a
+# hand-off that never ran, and the retry walked back a true answer.
+
+_RETOLD = ("Most of what's new is deck updates.\n\n- **Concept assessment (Sat 14 Nov, 19:15 UTC):** "
+           "v2 is done, but don't circulate it yet. The agent found two blockers when it checked "
+           "the three files.")
+
+
+def test_a_result_retold_from_the_line_read_this_turn_passes():
+    assert _judge(_RETOLD, request="what's new?").kinds == (fg.DELEGATION_CLAIM,)
+    line = ToolStep("line", "recent", {"action": "recent", "since": "48h"},
+                    "Your user's Line — 3 items.\n- Sat 14 Nov 19:15 · Concept assessment v2 done; "
+                    "two blockers found in the three files.")
+    assert _judge(_RETOLD, request="what's new?", turn_steps=(line,)).kinds == ()
+
+
+def test_a_line_read_that_failed_backs_nothing():
+    failed = ToolStep("line", "recent", {"action": "recent"}, "Error: Flight Deck not reachable")
+    assert _judge(_RETOLD, request="what's new?", turn_steps=(failed,)).kinds == (
+        fg.DELEGATION_CLAIM,)
+
+
+# ── a reply to the check, not to the user ──
+
+
+@pytest.mark.parametrize("reply, shipped", [
+    ("You're right, I overstated that. No agent was contacted in this turn.",
+     "No agent was contacted in this turn."),
+    ("You’re right — the note is from Saturday.", "The note is from Saturday."),
+    ("Good catch. Here is what's new.", "Here is what's new."),
+    ("I overstated that. The note is from Saturday.", "The note is from Saturday."),
+    ("Sorry about that. Here is what's new.", "Here is what's new."),
+    ("U pravu si, ispričavam se. Evo što je novo.", "Evo što je novo."),
+])
+def test_an_opening_that_answers_the_check_is_cut(reply, shipped):
+    assert fg.without_concession(reply) == shipped
+
+
+@pytest.mark.parametrize("reply", [
+    "You're right.",
+    "You're right that the note is from Saturday; the rest is unchanged.",
+    "Most of what's new is deck updates.",
+    "Correct figures are in the attached sheet.",
+])
+def test_anything_else_ships_as_written(reply):
+    assert fg.without_concession(reply) == reply
