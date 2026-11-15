@@ -9,6 +9,7 @@ import { ModelSelector } from '../common/ModelSelector'
 import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { AgentMailSetting } from './AgentMailSetting'
 import { ModelSwitchSetting } from './ModelSwitchSetting'
+import { ToolSearchSetting } from './ToolSearchSetting'
 
 interface AgentConfigEditorProps {
   /** 'local' agents live on a remote host — only their label/description are
@@ -347,6 +348,12 @@ export function AgentConfigEditor({
                   {(kind === 'docker' || kind === 'process') && (
                     <Field label="Switch models" hint="Saved at once — applies from its next message.">
                       <ModelSwitchSetting kind={kind} identifier={identifier} />
+                    </Field>
+                  )}
+
+                  {(kind === 'docker' || kind === 'process') && (
+                    <Field label="Tool search" hint="Saved at once — applies from its next message.">
+                      <ToolSearchSetting kind={kind} identifier={identifier} />
                     </Field>
                   )}
                 </>

@@ -653,6 +653,27 @@ def without_retired_tools(names: list[str]) -> list[str]:
     return [n for n in names if n not in RETIRED_TOOLS]
 
 
+class ToolSearchConfig(BaseModel):
+    """Tool search for agents in full mode (eco and nano off).
+
+    When the tool definitions an agent would send come to more than
+    ``budget_tokens``, only the basics, the tools used in the session, the
+    tools the first message points at and eco mode's core set go in full,
+    while the budget lasts; the rest are named in the prompt and loaded on
+    demand through ``search_tools``. See ``captain_claw/tool_search.py``.
+    """
+
+    enabled: bool = True
+    budget_tokens: int = Field(
+        default=16000,
+        ge=0,
+        description=(
+            "Tokens of tool definitions sent in full per model call before tool "
+            "search starts deferring tools. 0 turns tool search off."
+        ),
+    )
+
+
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
@@ -737,6 +758,7 @@ class ToolsConfig(BaseModel):
     mcp_servers: list[MCPServerConfig] = Field(default_factory=list)
     require_confirmation: list[str] = ["shell", "write", "edit"]
     plugin_dirs: list[str] = ["skills/tools"]
+    tool_search: ToolSearchConfig = Field(default_factory=ToolSearchConfig)
 
     # These tools are always available — re-inject if removed by user.
     # Google and Microsoft tools are always registered but the tool registry

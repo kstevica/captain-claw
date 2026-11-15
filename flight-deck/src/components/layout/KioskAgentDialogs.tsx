@@ -14,6 +14,7 @@ import {
   Loader2,
   Mail,
   MoreHorizontal,
+  PackageSearch,
   PenLine,
   RotateCw,
   Shuffle,
@@ -26,6 +27,7 @@ import {
 } from 'lucide-react'
 import { IntentionsPanel } from '../agents/IntentionsPanel'
 import { AgentMailSetting } from '../agents/AgentMailSetting'
+import { ToolSearchSetting } from '../agents/ToolSearchSetting'
 import { AgentPicture } from '../agents/AgentPicture'
 import { KioskInsightsPanel } from './KioskAgentInsights'
 import { MenuSheet, type MenuItem, type MenuSection } from './KioskMenuSheet'
@@ -682,6 +684,11 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                   </button>
                 </section>
               )}
+              <section>
+                {/* Tool search (tool_search.py): saved at once, read on every message. */}
+                <SectionTitle icon={PackageSearch} title="Tool search" saving={false} />
+                <div className="mt-1.5"><ToolSearchSetting kind={kind} identifier={key} /></div>
+              </section>
               {kind === 'process' && (
                 // The email meant for it (colleagues.py): saved at once, no restart.
                 <section>

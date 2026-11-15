@@ -379,6 +379,21 @@ export const setAgentModelSwitch = (kind: 'process' | 'docker', id: string, enab
     body: JSON.stringify({ enabled }),
   })
 
+/** Tool search (captain_claw/tool_search.py): past budget_tokens of tool
+ *  descriptions per message, rarely used tools load on demand. Full mode only —
+ *  `eco` says eco mode is on, which keeps its own smaller set. Applies from
+ *  its next message. */
+export type AgentToolSearch = { enabled: boolean; budget_tokens: number; eco: boolean }
+
+export const getAgentToolSearch = (kind: 'process' | 'docker', id: string) =>
+  fdFetch<AgentToolSearch>(`/agent-tool-search/${kind}/${id}`)
+
+export const setAgentToolSearch = (kind: 'process' | 'docker', id: string, enabled: boolean, budgetTokens: number) =>
+  fdFetch<{ ok: boolean; enabled: boolean; budget_tokens: number }>(`/agent-tool-search/${kind}/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled, budget_tokens: budgetTokens }),
+  })
+
 /** Reasoning effort for every source but the web chat (whose chat box has its
  *  own picker): a default and a level per source, "auto" = the model's own. */
 export interface AgentReasoningSettings { default?: string; channels: Record<string, string> }

@@ -5517,6 +5517,102 @@ async def update_agent_model_switch(
     return {"ok": True, "enabled": body.enabled}
 
 
+# ── Tool search: past a budget, rarely used tools load on demand (tool_search.py) ──
+
+class AgentToolSearchUpdate(BaseModel):
+    enabled: bool
+    budget_tokens: int = Field(default=16000, ge=1000, le=200000)
+
+
+def _read_agent_tool_search(agent_dir: Path, kind: str) -> dict:
+    """As the agent decides: its switch file, else its config, else the defaults."""
+    from captain_claw import tool_search
+    from captain_claw.config import ToolSearchConfig
+
+    try:
+        switch = tool_search.parse_switch(
+            (_agent_home_cc(agent_dir, kind) / tool_search.SWITCH_FILENAME).read_text(encoding="utf-8"))
+    except OSError:
+        switch = None
+    if switch is not None:
+        return switch
+    default = ToolSearchConfig()
+    # The home config overlays the agent folder's, as at start-up.
+    for cfg in (_agent_home_cc(agent_dir, kind) / "config.yaml", agent_dir / "config.yaml"):
+        try:
+            data = yaml.safe_load(cfg.read_text()) or {}
+        except Exception:
+            continue
+        tools = data.get("tools") if isinstance(data, dict) else None
+        section = tools.get("tool_search") if isinstance(tools, dict) else None
+        if isinstance(section, dict):
+            try:
+                budget = int(section.get("budget_tokens", default.budget_tokens))
+            except (TypeError, ValueError):
+                budget = default.budget_tokens
+            enabled = bool(section.get("enabled", default.enabled)) and budget > 0
+            return {"enabled": enabled, "budget_tokens": budget if budget > 0 else default.budget_tokens}
+    return {"enabled": default.enabled, "budget_tokens": default.budget_tokens}
+
+
+def _agent_eco_on(agent_dir: Path, kind: str) -> bool:
+    """Eco mode's flag, wherever this agent may read it (as the eco toggle does)."""
+    return any(f.is_file() for f in (
+        agent_dir / "data" / "home-config" / ".captain-claw" / "eco_mode.txt",
+        agent_dir / "data" / "home-config-parent" / ".captain-claw" / "eco_mode.txt",
+        _agent_home_cc(agent_dir, kind) / "eco_mode.txt",
+    ))
+
+
+@app.get("/fd/agent-tool-search/{kind}/{identifier}")
+async def get_agent_tool_search(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Tool search on or off and its budget, and whether eco mode is on (which
+    keeps its own smaller tool set, so tool search doesn't apply)."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    return {**_read_agent_tool_search(agent_dir, kind), "eco": _agent_eco_on(agent_dir, kind)}
+
+
+@app.put("/fd/agent-tool-search/{kind}/{identifier}")
+async def update_agent_tool_search(
+    kind: str, identifier: str, body: AgentToolSearchUpdate, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Turn tool search on or off, or change its budget. The switch file
+    applies from the agent's next message; every config copy gets it too, so
+    it holds after a restart and travels with the agent's config."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    from captain_claw import tool_search
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    for cc_dir in _agent_reasoning_dirs(agent_dir, kind):
+        if cc_dir.is_dir():
+            (cc_dir / tool_search.SWITCH_FILENAME).write_text(
+                tool_search.render_switch(body.enabled, body.budget_tokens), encoding="utf-8")
+    for cfg_path in _agent_config_paths(agent_dir):
+        if not cfg_path.is_file():
+            continue
+        try:
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        tools = data.get("tools") if isinstance(data.get("tools"), dict) else {}
+        section = tools.get("tool_search") if isinstance(tools.get("tool_search"), dict) else {}
+        tools["tool_search"] = {**section, "enabled": body.enabled, "budget_tokens": body.budget_tokens}
+        data["tools"] = tools
+        cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+    return {"ok": True, "enabled": body.enabled, "budget_tokens": body.budget_tokens}
+
+
 class AgentEcoModeUpdate(BaseModel):
     enabled: bool = False
 

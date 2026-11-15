@@ -12,11 +12,15 @@
   writes Neutra too (an archetype's default mode would otherwise come back);
 * ``GET /fd/agent-task-rephrase`` is off by default (switch file, else config),
   and ``PUT`` writes the switch and every config copy;
+* ``GET /fd/agent-tool-search`` is on at 16,000 by default (switch file, else
+  config) and says whether eco mode is on; ``PUT`` writes the switch and every
+  config copy;
 * ``PUT /fd/agent-model`` with only ``vision`` leaves the model alone.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -350,6 +354,55 @@ async def test_turning_task_rephrase_on_writes_the_switch_and_every_config_copy(
         r = await c.put("/fd/agent-task-rephrase/process/bob-agent", headers=_hdr(CAROL), json={"enabled": True})
         assert r.status_code in (403, 404)
         assert (cc / "task_rephrase.txt").read_text() == "off"
+
+
+@pytest.mark.asyncio
+async def test_tool_search_is_on_by_default_and_reads_file_then_config(deck):
+    cc = server.DATA_DIR / "bob-agent" / "data" / "home-config-parent" / ".captain-claw"
+    async with _client() as c:
+        get = lambda: c.get("/fd/agent-tool-search/process/bob-agent", headers=_hdr(BOB))  # noqa: E731
+        assert (await get()).json() == {"enabled": True, "budget_tokens": 16000, "eco": False}
+
+        (cc / "config.yaml").write_text(yaml.dump({"tools": {"tool_search": {"budget_tokens": 24000}}}))
+        assert (await get()).json() == {"enabled": True, "budget_tokens": 24000, "eco": False}
+
+        (cc / "config.yaml").write_text(yaml.dump({"tools": {"tool_search": {"budget_tokens": 0}}}))
+        assert (await get()).json() == {"enabled": False, "budget_tokens": 16000, "eco": False}
+
+        (cc / "tool_search.json").write_text('{"enabled": true, "budget_tokens": 8000}')
+        (cc / "eco_mode.txt").write_text("on")
+        assert (await get()).json() == {"enabled": True, "budget_tokens": 8000, "eco": True}
+
+        assert (await c.get("/fd/agent-tool-search/process/bob-agent", headers=_hdr(CAROL))).status_code in (403, 404)
+
+
+@pytest.mark.asyncio
+async def test_changing_tool_search_writes_the_switch_and_every_config_copy(deck):
+    agent_dir = server.DATA_DIR / "bob-agent"
+    cc = agent_dir / "data" / "home-config-parent" / ".captain-claw"
+    async with _client() as c:
+        r = await c.put("/fd/agent-tool-search/process/bob-agent", headers=_hdr(BOB),
+                        json={"enabled": False, "budget_tokens": 24000})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"ok": True, "enabled": False, "budget_tokens": 24000}
+        assert json.loads((cc / "tool_search.json").read_text()) == {"enabled": False, "budget_tokens": 24000}
+        for path in (agent_dir / "config.yaml", cc / "config.yaml"):
+            data = yaml.safe_load(path.read_text())
+            assert data["tools"] == {"tool_search": {"enabled": False, "budget_tokens": 24000}}
+            assert data["model"]["model"] == "bob-agent-m"  # the rest of the config stays
+        assert (await c.get("/fd/agent-tool-search/process/bob-agent", headers=_hdr(BOB))).json() == {
+            "enabled": False, "budget_tokens": 24000, "eco": False}
+
+        # A budget too small to hold the basics is refused.
+        r = await c.put("/fd/agent-tool-search/process/bob-agent", headers=_hdr(BOB),
+                        json={"enabled": True, "budget_tokens": 10})
+        assert r.status_code == 422
+
+        # Not Carol's to change.
+        r = await c.put("/fd/agent-tool-search/process/bob-agent", headers=_hdr(CAROL),
+                        json={"enabled": True, "budget_tokens": 8000})
+        assert r.status_code in (403, 404)
+        assert json.loads((cc / "tool_search.json").read_text())["enabled"] is False
 
 
 # ── vision only ─────────────────────────────────────────────────────────────
