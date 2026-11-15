@@ -17,7 +17,8 @@
   config copy;
 * ``GET /fd/agent-eco-mode`` says why eco mode stays on whatever its switch says
   (nano mode, the config), and ``PUT`` reaches the file a container reads
-  itself (turning eco off used to leave a container in eco mode);
+  itself (turning eco off used to leave a container in eco mode); the nano
+  switch the same (turning nano on used to do nothing for a container);
 * ``PUT /fd/agent-model`` with only ``vision`` leaves the model alone.
 """
 
@@ -470,6 +471,42 @@ async def test_turning_eco_off_reaches_the_file_a_container_reads(deck, monkeypa
 
         r = await c.put("/fd/agent-eco-mode/docker/c-1", headers=_hdr(BOB), json={"enabled": True})
         assert own.read_text() == "on"
+
+
+@pytest.mark.asyncio
+async def test_the_nano_switch_reaches_the_file_a_container_reads(deck, monkeypatch):
+    from types import SimpleNamespace
+
+    def find(identifier, user_id):
+        if identifier == "c-1" and user_id == BOB:
+            return SimpleNamespace(name="bob-box")
+        raise server.HTTPException(404, "not found")
+
+    monkeypatch.setattr(server, "_find_container", find)
+    box = server.DATA_DIR / "bob-box"
+    server._write_eco_flag_on_spawn(box)   # spawn leaves data/home-config/.captain-claw too
+    own = box / "data" / "home-config" / "nano_mode.txt"
+    async with _client() as c:
+        get = lambda: c.get("/fd/agent-nano-mode/docker/c-1", headers=_hdr(BOB))  # noqa: E731
+        assert (await get()).json() == {"enabled": False}
+
+        r = await c.put("/fd/agent-nano-mode/docker/c-1", headers=_hdr(BOB), json={"enabled": True})
+        assert r.status_code == 200, r.text
+        assert own.read_text() == "on"
+        assert (await get()).json() == {"enabled": True}
+        # Nano keeps eco mode on.
+        eco = await c.get("/fd/agent-eco-mode/docker/c-1", headers=_hdr(BOB))
+        assert eco.json()["locked"] == "nano"
+
+        r = await c.put("/fd/agent-nano-mode/docker/c-1", headers=_hdr(BOB), json={"enabled": False})
+        assert r.status_code == 200
+        assert not own.exists()
+        assert not (box / "data" / "home-config" / ".captain-claw" / "nano_mode.txt").exists()
+        assert (await get()).json() == {"enabled": False}
+
+        assert (await c.put("/fd/agent-nano-mode/docker/c-1", headers=_hdr(CAROL),
+                            json={"enabled": True})).status_code in (403, 404)
+        assert not own.exists()
 
 
 # ── vision only ─────────────────────────────────────────────────────────────

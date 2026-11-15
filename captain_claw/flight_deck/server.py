@@ -5742,7 +5742,10 @@ async def update_agent_nano_mode(
 
     Writes ``nano_mode.txt`` — the agent picks it up on the next system
     prompt build.  Nano implies eco/micro: tool definitions are stripped
-    to a barebone allowlist and prompts use nano_<name> templates.
+    to a barebone allowlist and prompts use nano_<name> templates. Every
+    place the agent may read it from: a container reads
+    data/home-config/nano_mode.txt itself, which the nested copies alone
+    never reached (turning nano on did nothing for a container).
     """
     if kind not in ("docker", "process"):
         raise HTTPException(400, "kind must be 'docker' or 'process'")
@@ -5750,8 +5753,7 @@ async def update_agent_nano_mode(
     user_id = getattr(request.state, "user_id", "")
     agent_dir = _resolve_agent_dir(identifier, kind, user_id)
 
-    for subdir in ("home-config", "home-config-parent"):
-        cc_dir = agent_dir / "data" / subdir / ".captain-claw"
+    for cc_dir in _agent_reasoning_dirs(agent_dir, kind):
         if cc_dir.is_dir():
             nano_file = cc_dir / "nano_mode.txt"
             if body.enabled:
@@ -5767,19 +5769,13 @@ async def get_agent_nano_mode(
     kind: str, identifier: str, request: Request,
     user: dict | None = _required_user_dep,
 ):
-    """Read current nano mode state for an agent."""
+    """Read current nano mode state for an agent, as the agent reads its switch."""
     if kind not in ("docker", "process"):
         raise HTTPException(400, "kind must be 'docker' or 'process'")
 
     user_id = getattr(request.state, "user_id", "")
     agent_dir = _resolve_agent_dir(identifier, kind, user_id)
-
-    for subdir in ("home-config", "home-config-parent"):
-        nano_file = agent_dir / "data" / subdir / ".captain-claw" / "nano_mode.txt"
-        if nano_file.is_file():
-            return {"enabled": True}
-
-    return {"enabled": False}
+    return {"enabled": any(_flag_file_on(d / "nano_mode.txt") for d in _agent_reasoning_dirs(agent_dir, kind))}
 
 
 class AgentMravModeUpdate(BaseModel):
