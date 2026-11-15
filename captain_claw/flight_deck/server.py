@@ -1974,6 +1974,10 @@ from captain_claw.flight_deck import ask_routes as _ask_routes  # noqa: E402
 
 app.include_router(_ask_routes.agent_router)
 app.include_router(_ask_routes.router)
+# An agent's own browser: watch it, take control, hand back.
+from captain_claw.flight_deck import browser_live_routes as _browser_live_routes  # noqa: E402
+
+app.include_router(_browser_live_routes.router)
 app.include_router(external_tools_catalog_router)
 app.include_router(external_tool_proposals.agent_router)
 app.include_router(external_tool_proposals.router)

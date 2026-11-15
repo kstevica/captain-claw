@@ -105,6 +105,40 @@ def describe_answers(questions: list[dict[str, Any]], answers: dict[str, Any]) -
     return "\n".join(lines)
 
 
+def turn_origin(agent: Any) -> str:
+    origin = getattr(agent, "_turn_source", None)
+    return str(origin[0]) if isinstance(origin, tuple) and origin else ""
+
+
+async def ask_and_follow(questions: list[dict[str, Any]], wait_s: float, agent: Any, stream: Any = None,
+                         waiting: str = "Waiting for their answer in Flight Deck…\n") -> tuple[int, Any]:
+    """Ask in Flight Deck and follow the question until it ends: ``(status,
+    json)``. Stopping the turn (or a failed line) closes the question.
+    Raises httpx.HTTPError when Flight Deck can't be reached."""
+    ask_id = "xa_" + secrets.token_hex(8)
+    finished = False
+    try:
+        status, data = await _call("", {"questions": questions, "wait_s": wait_s, "origin": turn_origin(agent),
+                                        "wait": 20, "ask_id": ask_id})
+        told = False
+        while status == 200 and isinstance(data, dict) and data.get("pending"):
+            if not told and callable(stream):
+                told = True
+                try:
+                    stream(waiting)
+                except Exception:  # noqa: BLE001
+                    pass
+            status, data = await _call("/follow", {"id": data["pending"], "wait": 25})
+        finished = True
+        return status, data
+    finally:
+        if not finished:
+            try:
+                await _call("/cancel", {"id": ask_id})
+            except Exception:  # noqa: BLE001
+                pass
+
+
 class AskUserTool(Tool):
     name = "ask_user"
     description = (
@@ -151,33 +185,10 @@ class AskUserTool(Tool):
         except (TypeError, ValueError):
             minutes = 10.0
         wait_s = max(1.0, min(minutes, 60.0)) * 60
-        agent = kwargs.get("_agent")
-        origin = getattr(agent, "_turn_source", None)
-        origin = str(origin[0]) if isinstance(origin, tuple) and origin else ""
-        ask_id = "xa_" + secrets.token_hex(8)
-        stream = kwargs.get("_stream_callback")
-        finished = False
         try:
-            status, data = await _call("", {"questions": questions, "wait_s": wait_s, "origin": origin,
-                                            "wait": 20, "ask_id": ask_id})
-            told = False
-            while status == 200 and isinstance(data, dict) and data.get("pending"):
-                if not told and callable(stream):
-                    told = True
-                    try:
-                        stream("Waiting for their answer in Flight Deck…\n")
-                    except Exception:  # noqa: BLE001
-                        pass
-                status, data = await _call("/follow", {"id": data["pending"], "wait": 25})
-            finished = True
+            status, data = await ask_and_follow(questions, wait_s, kwargs.get("_agent"), kwargs.get("_stream_callback"))
         except httpx.HTTPError as exc:
             return ToolResult(success=False, error=f"Flight Deck didn't answer ({type(exc).__name__}): ask in your reply instead.")
-        finally:
-            if not finished:  # the turn was stopped (or the line failed): the question closes
-                try:
-                    await _call("/cancel", {"id": ask_id})
-                except Exception:  # noqa: BLE001
-                    pass
         if status != 200 or not isinstance(data, dict):
             detail = data.get("detail") if isinstance(data, dict) else data
             return ToolResult(success=False, error=f"The question couldn't be asked: {detail}")
