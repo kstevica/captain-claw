@@ -71,8 +71,8 @@ def _report(agent: Any) -> str:
     lines.append(f"Running now: {now_name}" + (" — for this turn only" if turn_only else "") + ".")
     limit = model_switch.team_limit(provider, base_url)
     if limit is not None:
-        # A non-admin's agent on the team's key: the team's tier models only.
-        lines.append("This agent runs on the team's key, so it can only use the models the team's "
+        # A non-admin's agent on the team's tiers: the model the admin gave it.
+        lines.append("This agent runs on the team's tiers, so it stays on the model the team's "
                      "admin picked for it" + (f" ({', '.join(limit)})" if limit else "") + ". For "
                      "another model the user asks an admin, or uses their own API key.")
     if len(options) < 2 and limit is not None:
