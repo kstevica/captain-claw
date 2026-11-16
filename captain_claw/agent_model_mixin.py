@@ -14,10 +14,10 @@ log = get_logger(__name__)
 
 
 def _team_only_text(models: list[str]) -> str:
-    """Why a non-admin's agent on the team's key can't run another model."""
+    """Why a non-admin's agent on the team's tiers can't run another model."""
     names = ", ".join(models) or "the model it was set up with"
-    return ("This agent runs on your team's key, so it stays on the models your team's admin "
-            f"picked for it ({names}). Ask an admin for another one, or use your own API key.")
+    return ("This agent runs on your team's tiers, so it stays on the model your team's admin "
+            f"picked for it ({names}). Ask an admin to change it, or use your own API key.")
 
 
 class AgentModelMixin:
@@ -354,7 +354,7 @@ class AgentModelMixin:
             home_provider, home_model, home_base = self._switch_home()
             if not same_endpoint(provider, raw.get("base_url"), home_provider, home_base):
                 return None
-            # …nor once the team's key holds it to models this isn't one of.
+            # …nor once the team's tiers hold it to models this isn't one of.
             if not model_switch.is_model(model, home_model) and not model_switch.in_limit(
                     model, model_switch.team_limit(home_provider, home_base)):
                 return None
@@ -611,7 +611,7 @@ class AgentModelMixin:
 
     def _drop_disallowed_switch(self) -> bool:
         """Back to the configured model when this conversation was switched to
-        one the team's key no longer allows (:func:`model_switch.team_limit`,
+        one the team's tiers no longer allow (:func:`model_switch.team_limit`,
         fetched since). True when it went back."""
         session = getattr(self, "session", None)
         if session is None or not isinstance(session.metadata, dict):

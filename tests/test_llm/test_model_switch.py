@@ -314,7 +314,7 @@ async def test_a_limit_keeps_only_the_team_s_models(cfg, _home):
     assert _models(agent.model_switch_choices()) == ["deepseek-flash"]
     assert agent.model_switch_wire() is None  # no picker
     ok, message, _c = await agent.switch_model("deepseek-v4-pro")
-    assert not ok and "team's key" in message and "deepseek-flash" in message
+    assert not ok and "team's tiers" in message and "deepseek-flash" in message
     assert agent.provider.model == "deepseek-flash"
 
 
@@ -342,7 +342,7 @@ async def test_the_allowlist_is_held_too(cfg, _home):
     agent._resolve_allowed_model = lambda key: {
         "id": "pro", "provider": "openai", "model": "deepseek-v4-pro", "base_url": _DS}
     ok, message = await agent.set_session_model("pro")
-    assert not ok and "team's key" in message
+    assert not ok and "team's tiers" in message
     assert agent.provider.model == "deepseek-flash"
 
 

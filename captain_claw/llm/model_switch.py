@@ -17,9 +17,9 @@ are not touched. The models it can pick:
   ``~/.captain-claw/model_choices.json``;
 * the agent's own ``model.allowed`` entries on that endpoint.
 
-A non-admin's agent on the team's key is held to the team's tier models at its
-endpoint: Flight Deck sends them as ``limit`` with the list above, and only
-those (and the configured model) are choices — the team pays for that key.
+A non-admin's agent on the team's tiers stays on its configured model:
+Flight Deck sends it as ``limit`` with the list above, and nothing else is a
+choice — the team pays for those tiers, and its admin picks the model.
 
 Whether the agent may switch on its own — to a cheaper model for simple work,
 a smarter one for a hard task — is ``~/.captain-claw/model_switch.txt``
@@ -263,9 +263,9 @@ def custom_models(provider: str, base_url: str) -> list[dict[str, str]]:
 
 
 def team_limit(provider: str, base_url: str) -> list[str] | None:
-    """The only models this agent may run at this endpoint — its team's tier
-    models, while it is a non-admin's on the team's key (as last fetched).
-    None when it isn't held to any."""
+    """The only models this agent may run at this endpoint — the one its
+    config names, while it is a non-admin's on the team's tiers (as last
+    fetched). None when it isn't held to any."""
     data = _read_custom()
     if not data or not same_endpoint(data.get("provider"), data.get("base_url"), provider, base_url):
         return None

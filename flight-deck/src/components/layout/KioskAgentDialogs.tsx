@@ -13,6 +13,7 @@ import {
   Leaf,
   LibraryBig,
   Loader2,
+  Lock,
   Mail,
   MoreHorizontal,
   PackageSearch,
@@ -343,6 +344,10 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   const [model, setModel] = useState<ModelSetting>({ provider: '', model: '', baseUrl: '' })
   const [draft, setDraft] = useState({ provider: '', model: '', baseUrl: '' })
   const [apiKey, setApiKey] = useState('')
+  // On the team's tiers a non-admin can't change its model (the deck says
+  // why); a key of their own frees it — `ownKey` while they're giving one.
+  const [locked, setLocked] = useState('')
+  const [ownKey, setOwnKey] = useState(false)
   // The endpoint follows the provider until it is typed in.
   const [urlTouched, setUrlTouched] = useState(false)
   const [modelSaved, setModelSaved] = useState(false)
@@ -370,6 +375,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
         setSelfSwitch(ms ? ms.enabled : null)
         setEco(ec ? { enabled: ec.enabled, locked: ec.locked || '' } : null)
         setVision(info.vision)
+        setLocked(cfg.model_locked || '')
         setModel({ provider: info.provider, model: info.model, baseUrl: info.base_url })
         setDraft({ provider: info.provider, model: info.model, baseUrl: info.base_url })
       })
@@ -382,13 +388,16 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   const switched = provider !== model.provider
   const modelDirty = switched || draft.model.trim() !== model.model || draft.baseUrl.trim() !== model.baseUrl || !!apiKey.trim()
   const signIn = SIGN_IN_PROVIDERS.has(provider)
+  const fieldsLocked = !!locked && !ownKey
+  // Off the team's tiers only on a key of their own.
+  const needsKey = !!locked && ownKey && !signIn
 
   const pickProvider = (next: string) => {
     setDraft((d) => ({ ...d, provider: next, baseUrl: urlTouched ? d.baseUrl : next.trim() === model.provider ? model.baseUrl : defaultEndpoint(next.trim()) }))
   }
 
   const saveModel = async () => {
-    if (!modelDirty || !provider || !draft.model.trim() || saving) return
+    if (!modelDirty || !provider || !draft.model.trim() || saving || fieldsLocked || (needsKey && !apiKey.trim())) return
     setSaving('model'); setError(''); setModelSaved(false)
     const next = { provider, model: draft.model.trim(), baseUrl: signIn ? '' : draft.baseUrl.trim() }
     try {
@@ -402,6 +411,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
       setDraft(next)
       setModelRev((n) => n + 1)
       setApiKey(''); setUrlTouched(false)
+      if (needsKey) { setLocked(''); setOwnKey(false) }  // on their own key now
       setPendingRestart(true); setRestarted(false)
       setModelSaved(true)
       setTimeout(() => setModelSaved(false), 2000)
@@ -414,7 +424,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
 
   const undoModel = () => {
     setDraft({ provider: model.provider, model: model.model, baseUrl: model.baseUrl })
-    setApiKey(''); setUrlTouched(false)
+    setApiKey(''); setUrlTouched(false); setOwnKey(false)
   }
 
   // The mode applies on its next reply — no restart.
@@ -520,9 +530,11 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   const textOnly = SIGN_IN_PROVIDERS.has(model.provider)
   const current = MODES.find((m) => m.id === mode) ?? MODES[0]
   const providerLabel = LLM_PROVIDERS.find((p) => p.value === provider)?.label || provider || 'the new provider'
-  const keyHint = switched
-    ? `The key for ${providerLabel}. Leave it empty to use your team's key, if your deck has one.`
-    : 'Leave it empty to keep the key it uses now.'
+  const keyHint = needsKey
+    ? `Your own key for ${providerLabel} — the agent leaves your team's tiers and runs on it.`
+    : switched
+      ? `The key for ${providerLabel}. Leave it empty to use your team's key, if your deck has one.`
+      : 'Leave it empty to keep the key it uses now.'
 
   return (
     <AgentDialog title="Agent settings" icon={SlidersHorizontal} agentName={agent.name} size="wide" onClose={close}>
@@ -550,13 +562,33 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                 <p className="mb-2.5 text-[11px] leading-relaxed text-zinc-500">
                   The AI model it runs on, and the key that pays for it. Applies once the agent restarts.
                 </p>
+                {locked && (
+                  <div className="mb-2.5 flex items-start gap-2.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2.5">
+                    <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                    <div className="min-w-0 text-xs leading-relaxed text-zinc-400">
+                      {ownKey
+                        ? 'With your own API key below, you pick the model and pay for it.'
+                        : 'Your team\'s admin picks this agent\'s model, because it runs on your team\'s tiers. Ask an admin to change it.'}
+                      {!ownKey && !signIn && (
+                        <button
+                          type="button"
+                          onClick={() => setOwnKey(true)}
+                          className="mt-1 block text-xs font-medium text-violet-400 transition-colors hover:text-violet-300"
+                        >
+                          Use my own API key instead
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div className="grid grid-cols-1 gap-2 wide:grid-cols-[2fr_3fr]">
                   <label className="block min-w-0">
                     <span className="mb-1 block text-[11px] font-medium text-zinc-400">Provider</span>
                     <select
                       value={draft.provider}
                       onChange={(e) => pickProvider(e.target.value)}
-                      className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-sm text-zinc-200 focus:border-violet-500/60 focus:outline-none"
+                      disabled={fieldsLocked}
+                      className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-2 text-sm text-zinc-200 focus:border-violet-500/60 focus:outline-none disabled:cursor-not-allowed disabled:text-zinc-400 disabled:opacity-70"
                     >
                       {/* What it runs on now, even if it isn't one of the list. */}
                       {!LLM_PROVIDERS.some((p) => p.value === model.provider) && (
@@ -565,35 +597,38 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                       {LLM_PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
                     </select>
                   </label>
-                  <TextField label="Model" value={draft.model} onChange={(v) => setDraft((d) => ({ ...d, model: v }))} placeholder="e.g. gpt-4.1-mini" />
+                  <TextField label="Model" value={draft.model} onChange={(v) => setDraft((d) => ({ ...d, model: v }))} placeholder="e.g. gpt-4.1-mini" disabled={fieldsLocked} />
                 </div>
                 {signIn ? (
                   <p className="mt-2 text-[11px] text-zinc-500">Local Google sign-in — no API key or endpoint.</p>
                 ) : (
                   <div className="mt-2 space-y-2">
-                    <TextField
-                      label="API key" type="password" value={apiKey} onChange={setApiKey}
-                      placeholder={switched ? 'sk-…' : 'Unchanged'} hint={keyHint}
-                    />
+                    {!fieldsLocked && (
+                      <TextField
+                        label="API key" type="password" value={apiKey} onChange={setApiKey}
+                        placeholder={switched || needsKey ? 'sk-…' : 'Unchanged'} hint={keyHint}
+                      />
+                    )}
                     <TextField
                       label="Endpoint (optional)" value={draft.baseUrl}
                       onChange={(v) => { setUrlTouched(true); setDraft((d) => ({ ...d, baseUrl: v })) }}
-                      placeholder="The provider's own" hint="Only for a self-hosted or local server, e.g. http://127.0.0.1:8000/v1"
+                      placeholder="The provider's own" disabled={fieldsLocked}
+                      hint={fieldsLocked ? undefined : 'Only for a self-hosted or local server, e.g. http://127.0.0.1:8000/v1'}
                     />
                   </div>
                 )}
-                {modelDirty && (
+                {(modelDirty || ownKey) && (
                   <div className="mt-2.5 flex items-center justify-end gap-2">
                     <button
                       onClick={undoModel}
                       disabled={saving === 'model'}
                       className="rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
                     >
-                      Undo
+                      {modelDirty ? 'Undo' : 'Cancel'}
                     </button>
                     <button
                       onClick={saveModel}
-                      disabled={!!saving || !provider || !draft.model.trim()}
+                      disabled={!!saving || !modelDirty || !provider || !draft.model.trim() || (needsKey && !apiKey.trim())}
                       className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50"
                     >
                       {saving === 'model' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
@@ -692,7 +727,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                   </button>
                 </section>
               )}
-              {selfSwitch !== null && (
+              {selfSwitch !== null && !locked && (
                 <section>
                   <SectionTitle icon={Shuffle} title="Switch models" saving={saving === 'switch'} saved={selfSwitchSaved} />
                   <button
@@ -796,13 +831,14 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   )
 }
 
-function TextField({ label, value, onChange, placeholder, hint, type = 'text' }: {
+function TextField({ label, value, onChange, placeholder, hint, type = 'text', disabled = false }: {
   label: string
   value: string
   onChange: (v: string) => void
   placeholder?: string
   hint?: string
   type?: 'text' | 'password'
+  disabled?: boolean
 }) {
   return (
     <label className="block min-w-0">
@@ -812,9 +848,10 @@ function TextField({ label, value, onChange, placeholder, hint, type = 'text' }:
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
+        disabled={disabled}
         spellCheck={false}
         autoComplete={type === 'password' ? 'new-password' : 'off'}
-        className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+        className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none disabled:cursor-not-allowed disabled:text-zinc-400 disabled:opacity-70"
       />
       {hint && <span className="mt-1 block text-[11px] leading-snug text-zinc-500">{hint}</span>}
     </label>

@@ -145,8 +145,8 @@ async def put_endpoints(body: SwitchEndpoints, admin: dict = Depends(require_adm
 @router.get("/agent/models")
 async def agent_models(request: Request, provider: str = "", base_url: str = "") -> dict:
     """For one of this deck's agents: the models an admin listed for the
-    endpoint it runs on, and — for a non-admin's agent on the team's key — the
-    ``limit``: the only models it may switch to (the team's tier models there).
+    endpoint it runs on, and — for a non-admin's agent on the team's tiers —
+    the ``limit``: the only models it may run (the one its config names).
     No ``limit``: it isn't held to any."""
     from captain_claw.flight_deck import google_oauth_routes as _g
     from captain_claw.flight_deck.server import _find_agent_by_auth, team_model_limit

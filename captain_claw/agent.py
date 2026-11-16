@@ -614,8 +614,8 @@ class Agent(
                     model_switch.maybe_refresh(provider, base_url)
             except Exception:
                 pass
-        # A model this conversation may no longer run (the team's key holds a
-        # non-admin's agent to the team's models) goes back to the configured one.
+        # A model this conversation may no longer run (the team's tiers hold a
+        # non-admin's agent to its configured model) goes back to that one.
         drop = getattr(self, "_drop_disallowed_switch", None)
         if callable(drop) and not getattr(self, "_turn_depth", 0):
             try:

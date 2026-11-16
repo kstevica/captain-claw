@@ -258,15 +258,24 @@ class TestModelChange:
         assert r.status_code == 200, r.text
         assert (_model()["base_url"], _model()["api_key"]) == (EVIL, "sk-bobs-own")
 
+    # An agent on the team's tiers keeps its model (test_team_model_limit.py),
+    # so these start on the owner's own key — with the team's still in .env —
+    # and move onto a tier the team runs, leaving the key blank.
     async def test_the_teams_gateway_gets_its_own_key(self, deck):
-        assert (await _set_model({"base_url": GW})).status_code == 200
+        _write_agent({"model": {**BOB_CONFIG["model"], "api_key": "sk-bobs-own"}})
+        r = await _set_model({"model": "m", "base_url": GW, "api_key": ""})
+        assert r.status_code == 200, r.text
         env = _files()[1]
         assert f"OPENAI_API_KEY={GW_KEY}" in env and ORG_OPENAI not in env
-        assert (await _set_model({"base_url": ""})).status_code == 200   # …and back
-        assert f"OPENAI_API_KEY={ORG_OPENAI}" in _files()[1]
+        r = await _set_model({"model": "m", "base_url": ""})   # …and on the tiers now, it stays
+        assert r.status_code == 403 and "team's tiers" in r.json()["detail"]
+        assert _model()["base_url"] == GW
 
     async def test_a_new_provider_gets_the_teams_key_for_it(self, deck):
-        r = await _set_model({"provider": "anthropic", "model": "claude"})
+        await deck.set_system_setting("fd:shared-tier-sets", _published(
+            _tier(), _tier(GW), _tier(ROUTED), _tier(provider="anthropic")))
+        _write_agent({"model": {**BOB_CONFIG["model"], "api_key": "sk-bobs-own"}})
+        r = await _set_model({"provider": "anthropic", "model": "m"})
         assert r.status_code == 200, r.text
         assert f"ANTHROPIC_API_KEY={ORG_ANTHROPIC}" in _files()[1]
 
@@ -308,10 +317,12 @@ class TestConfigEdit:
         assert (await _save_config({"config_yaml": yaml.dump(cfg)})).status_code == 400
 
     async def test_ordinary_edits_go_through(self, deck):
-        r = await _save_config({"config_yaml": self._config(model="gpt-4.1-mini"),
-                                "env": BOB_ENV + "TAVILY_API_KEY=tv-1\n"})
+        # (Its model stays: it runs on the team's tiers — test_team_model_limit.py.)
+        cfg = yaml.dump({**BOB_CONFIG, "context": {"max_tokens": 120000}}, sort_keys=False)
+        r = await _save_config({"config_yaml": cfg, "env": BOB_ENV + "TAVILY_API_KEY=tv-1\n"})
         assert r.status_code == 200, r.text
-        assert _model()["model"] == "gpt-4.1-mini" and "TAVILY_API_KEY=tv-1" in _files()[1]
+        assert yaml.safe_load(_files()[0])["context"] == {"max_tokens": 120000}
+        assert "TAVILY_API_KEY=tv-1" in _files()[1]
 
     async def test_a_masked_read_saved_back_goes_through(self, deck):
         async with _client() as c:
