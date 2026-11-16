@@ -1,6 +1,7 @@
 """Web UI server for Captain Claw."""
 
 import asyncio
+import contextlib
 import copy
 import json
 import os
@@ -37,6 +38,10 @@ from captain_claw.session_orchestrator import SessionOrchestrator
 from captain_claw.telegram_bridge import TelegramBridge, TelegramMessage
 
 log = get_logger(__name__)
+
+# How long a cron turn waits for the main chat to be idle before it gives up
+# (cron_dispatch.MainChatBusyError: that run is skipped; the job runs at its next time).
+_CRON_LANE_WAIT_SECONDS = 15 * 60
 
 
 # ── Server-side audio playback ─────────────────────────────
@@ -1510,10 +1515,33 @@ class WebServer:
                         await bridge.send_message(chat_id, f"*Cron result:*\n{text}")
                     break
 
+        @contextlib.asynccontextmanager
+        async def _hold_main_lane():
+            """A cron turn moving the main agent onto its job's session: wait
+            while a turn runs in the main chat, and hold the chat busy until
+            the agent is back on it — a chat turn on the switched agent would
+            write into the job's session (as the owner's Telegram turn does,
+            web/telegram._tg_owner_lane). Busy also tells Flight Deck's idle
+            controller the agent is at work."""
+            from captain_claw.cron_dispatch import MainChatBusyError
+
+            deadline = time.monotonic() + _CRON_LANE_WAIT_SECONDS
+            while server._busy:
+                if time.monotonic() > deadline:
+                    raise MainChatBusyError(
+                        f"the main conversation stayed busy for {_CRON_LANE_WAIT_SECONDS // 60} minutes")
+                await asyncio.sleep(0.5)
+            server._busy = True
+            try:
+                yield
+            finally:
+                server._busy = False
+
         return RuntimeContext(
             agent=self.agent,
             ui=_WebCronUI(),  # type: ignore[arg-type]
             on_cron_output=_cron_output_deliver,
+            hold_main_lane=_hold_main_lane,
         )
 
     # ── Delegated handlers ───────────────────────────────────────────
@@ -3894,6 +3922,8 @@ async def _run_server(config: Config) -> None:
 
         ctx = server._get_web_runtime_context()
         server._runtime_ctx = ctx
+        # The cron tool's run action starts a job through it.
+        server.agent._runtime_context = ctx  # type: ignore[union-attr]
         cron_worker = asyncio.create_task(cron_scheduler_loop(ctx))
         log.info("cron_scheduler_started")
         print("  Cron scheduler started.")

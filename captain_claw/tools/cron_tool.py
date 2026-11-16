@@ -141,9 +141,13 @@ class CronTool(Tool):
         return get_session_manager()
 
     def _get_session_id(self) -> str:
-        """Return the current session ID from the agent."""
+        """Return the current session ID from the agent — for a scheduled
+        job's own session, the chat that job reports to, so a job set up
+        during one of its runs reports there too."""
         if self._agent and self._agent.session:
-            return str(self._agent.session.id)
+            from captain_claw.cron_dispatch import job_chat_session_id
+
+            return job_chat_session_id(self._agent.session) or str(self._agent.session.id)
         raise RuntimeError("No active session — cannot create cron job.")
 
     @staticmethod

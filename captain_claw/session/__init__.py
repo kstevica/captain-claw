@@ -179,6 +179,10 @@ class CronJob:
     monitor_history: list[dict[str, Any]] = field(default_factory=list)
     # Runs in a row that failed or did nothing (cron_dispatch.note_run_outcome).
     bad_streak: int = 0
+    # The session a prompt job's runs happen in, its own (cron_dispatch.
+    # job_run_session); "" until its first run makes one. ``session_id`` stays
+    # the chat it was set up from, where its results are reported.
+    run_session_id: str = ""
 
     @classmethod
     def from_row(cls, row: tuple[Any, ...]) -> "CronJob":
@@ -195,6 +199,7 @@ class CronJob:
                 bad_streak = int(row[14] or 0)
             except (TypeError, ValueError):
                 bad_streak = 0
+        run_session_id = str(row[15] or "") if len(row) > 15 else ""
         return cls(
             id=str(row[0]),
             kind=str(row[1]),
@@ -211,6 +216,7 @@ class CronJob:
             chat_history=json.loads(chat_history_raw),
             monitor_history=json.loads(monitor_history_raw),
             bad_streak=bad_streak,
+            run_session_id=run_session_id,
         )
 
 
@@ -734,7 +740,8 @@ class SessionManager:
                     last_error TEXT,
                     chat_history TEXT NOT NULL DEFAULT '[]',
                     monitor_history TEXT NOT NULL DEFAULT '[]',
-                    bad_streak INTEGER NOT NULL DEFAULT 0
+                    bad_streak INTEGER NOT NULL DEFAULT 0,
+                    run_session_id TEXT NOT NULL DEFAULT ''
                 )
             """)
             await self._db.execute(
@@ -1066,6 +1073,12 @@ class SessionManager:
             await self._db.execute(
                 "ALTER TABLE cron_jobs ADD COLUMN bad_streak INTEGER NOT NULL DEFAULT 0"
             )
+        if "run_session_id" not in existing:
+            # Jobs from before: "" — the first run after the update makes the
+            # job's own session.
+            await self._db.execute(
+                "ALTER TABLE cron_jobs ADD COLUMN run_session_id TEXT NOT NULL DEFAULT ''"
+            )
 
     async def get_or_create_session(self, name: str = "default") -> Session:
         """Get or create a session.
@@ -1388,7 +1401,7 @@ class SessionManager:
             SELECT
                 id, kind, payload, schedule, session_id, enabled,
                 created_at, updated_at, last_run_at, next_run_at, last_status, last_error,
-                chat_history, monitor_history, bad_streak
+                chat_history, monitor_history, bad_streak, run_session_id
             FROM cron_jobs
             WHERE id = ?
             """,
@@ -1432,7 +1445,7 @@ class SessionManager:
                 SELECT
                     id, kind, payload, schedule, session_id, enabled,
                     created_at, updated_at, last_run_at, next_run_at, last_status, last_error,
-                    chat_history, monitor_history, bad_streak
+                    chat_history, monitor_history, bad_streak, run_session_id
                 FROM cron_jobs
                 WHERE enabled = 1
                 ORDER BY next_run_at ASC
@@ -1444,7 +1457,7 @@ class SessionManager:
                 SELECT
                     id, kind, payload, schedule, session_id, enabled,
                     created_at, updated_at, last_run_at, next_run_at, last_status, last_error,
-                    chat_history, monitor_history, bad_streak
+                    chat_history, monitor_history, bad_streak, run_session_id
                 FROM cron_jobs
                 ORDER BY enabled DESC, next_run_at ASC
                 LIMIT ?
@@ -1463,7 +1476,7 @@ class SessionManager:
             SELECT
                 id, kind, payload, schedule, session_id, enabled,
                 created_at, updated_at, last_run_at, next_run_at, last_status, last_error,
-                chat_history, monitor_history, bad_streak
+                chat_history, monitor_history, bad_streak, run_session_id
             FROM cron_jobs
             WHERE enabled = 1 AND next_run_at <= ?
             ORDER BY next_run_at ASC
@@ -1487,6 +1500,7 @@ class SessionManager:
         chat_history: list[dict[str, Any]] | None = None,
         monitor_history: list[dict[str, Any]] | None = None,
         bad_streak: int | None = None,
+        run_session_id: str | None = None,
     ) -> bool:
         """Update mutable cron job fields.
 
@@ -1526,6 +1540,9 @@ class SessionManager:
         if monitor_history is not None:
             assignments.append("monitor_history = ?")
             params.append(json.dumps(monitor_history))
+        if run_session_id is not None:
+            assignments.append("run_session_id = ?")
+            params.append(str(run_session_id))
 
         params.append(job_id)
         cursor = await self._db.execute(

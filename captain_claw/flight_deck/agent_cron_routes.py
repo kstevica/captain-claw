@@ -1,8 +1,10 @@
 """Agents' own schedules in Flight Deck's Scheduled tasks.
 
 An agent's ``cron`` tool (``tools/cron_tool.py``) keeps its jobs in the
-agent's own ``data/sessions/sessions.db`` and runs them itself, in the chat
-it set them up from. Scheduled tasks lists Flight Deck's own scheduler; these
+agent's own ``data/sessions/sessions.db`` and runs them itself — a prompt job
+in a session of its own ("⏰ <task>"), reporting to the chat it was set up
+from. Each job also keeps its own record of its runs (``chat_history``), which
+is what the runs list reads. Scheduled tasks lists Flight Deck's own scheduler; these
 routes put the agents' jobs next to it, so a job an agent set up in chat is
 not invisible:
 
@@ -345,13 +347,20 @@ def runs_from_history(chat_history: list, *, alive: bool, now: float | None = No
         content = str(ev.get("content") or "")
         at = _epoch(ev.get("timestamp"))
         if role == "system" and content.startswith("[CRON] job skipped"):
+            error = content.split(":", 1)[1].strip() if ":" in content else ""
+            if (cur is not None and cur["status"] == "running" and not cur["result"]
+                    and at is not None and cur["started_at"] is not None
+                    and at - cur["started_at"] < _RUNNING_STALE_S):
+                # Started, then gave up waiting for the main chat: that run skipped.
+                cur.update(status="skipped", finished_at=at, error=error)
+                cur = None
+                continue
             # Too late for its slot (the agent was off): a run that never ran.
             if cur is not None and cur["status"] == "running":
                 cur["status"] = "interrupted"
             cur = None
             runs.append({"started_at": at, "finished_at": at, "trigger": "scheduled",
-                         "status": "skipped", "result": "",
-                         "error": content.split(":", 1)[1].strip() if ":" in content else ""})
+                         "status": "skipped", "result": "", "error": error})
             continue
         if role == "system" and content.startswith("[CRON] job start"):
             if cur is not None and cur["status"] == "running":
