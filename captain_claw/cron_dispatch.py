@@ -343,12 +343,9 @@ def task_names_a_tool(task_text: str, tool_names: Iterable[str]) -> bool:
     """Whether a job's text calls one of the agent's tools by its code name
     (``google_drive``, ``web_fetch`` …). Only names with an underscore count:
     "read" or "browser" are also plain words a reminder may use."""
-    text = task_text or ""
-    for name in tool_names or ():
-        name = str(name or "")
-        if "_" in name and re.search(rf"(?<![\w]){re.escape(name)}(?![\w])", text):
-            return True
-    return False
+    from captain_claw.fabrication_guard import tools_named
+
+    return bool(tools_named(task_text, tool_names))
 
 
 def run_did_nothing(
