@@ -1336,6 +1336,7 @@ class AgentOrchestrationMixin:
             delegation_tools=frozenset() if held else offered & fabrication_guard.DELEGATION_TOOLS,
             others_turn=isinstance(turn, tuple) and bool(turn) and turn[0] in ("peer", "delegated_result"),
             schedule_tools=frozenset() if held else offered & fabrication_guard.SCHEDULE_TOOLS,
+            scheduled=isinstance(turn, tuple) and bool(turn) and turn[0] == "cron",
         )
         return fabrication_guard.judge_reply(raw, text, facts)
 

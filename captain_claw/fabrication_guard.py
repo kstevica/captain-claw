@@ -69,6 +69,7 @@ PAYMENT_CLAIM = "false_payment"       # says something was paid; the ledger does
 WHATSAPP_CLAIM = "false_whatsapp_send"  # says a WhatsApp message went out; no send did
 DELEGATION_CLAIM = "false_delegation"  # says other agents did work; none was contacted
 SCHEDULE_CLAIM = "false_schedule_change"  # says a scheduled job changed; none did (or another did)
+SKIPPED_TOOLS = "scheduled_no_tools"  # a scheduled run called none of the tools its task names
 
 
 # ── Tool results ─────────────────────────────────────────────────────
@@ -2209,6 +2210,20 @@ class TurnFacts:
     others_turn: bool = False
     # The cron tool, when this turn offers it: none, no schedule check.
     schedule_tools: frozenset[str] = frozenset()
+    # A scheduled job's run (agent cron or Flight Deck's scheduler): its task
+    # naming tools it then never called is a skipped run.
+    scheduled: bool = False
+
+
+def tools_named(text: str, tools: Iterable[str]) -> tuple[str, ...]:
+    """The tools *text* names by their code name (``google_drive``,
+    ``web_search``), in *tools*' order. Only names with an underscore count:
+    "read" or "browser" are also plain words."""
+    text = text or ""
+    return tuple(
+        name for name in tools or ()
+        if "_" in str(name) and re.search(rf"(?<!\w){re.escape(str(name))}(?!\w)", text)
+    )
 
 
 @dataclass(frozen=True)
@@ -2242,6 +2257,7 @@ CALENDAR_BACKSTOP = "Note: no calendar event was created or changed in this turn
 CALENDAR_BACKSTOP_REFUSED = ("Note: no calendar event was created or changed in this turn — the "
                              "change was refused.")
 LOOKUP_BACKSTOP = "Note: the searches and checks described above did not run."
+SKIPPED_TOOLS_BACKSTOP = "Note: this scheduled run used none of its tools — nothing above was checked."
 _ID_BACKSTOP_TAIL = " returned by any tool."
 # The lookups a corrective may point at, read-only, when the turn offers them.
 _LOOKUP_CALLS = (
@@ -2346,6 +2362,18 @@ def lookup_corrective(narrated: Sequence[str], tools: Iterable[str] = ()) -> str
             "up now" + (f" ({', '.join(calls)})" if calls else "") + " and report only what it "
             "returns; otherwise answer without describing any search, check or lookup, and say "
             "plainly what you don't know.")
+
+
+def skipped_tools_corrective(named: Sequence[str]) -> str:
+    """What a scheduled run is told when it called none of the tools its task
+    names. Its earlier runs' reports sit in the chat without their tool calls,
+    and a model copies them as a run (a daily check reported, for days, a
+    search it never made, with record IDs and all)."""
+    return (f"This is a scheduled run and its task says to use {', '.join(named)}, but you called "
+            "none of them in this turn — so nothing was searched, checked, written or sent, and "
+            "what your reply reports did not happen. Earlier runs' reports in this chat are not "
+            "this run's results. Call the tools now, as the task says, and report only what they "
+            "return.")
 
 
 def id_corrective(ids: Sequence[str]) -> str:
@@ -2471,14 +2499,17 @@ def judge_reply(raw: str, reply: str, facts: TurnFacts) -> Verdict:
     lines |= wa_lines
     deleg_false, deleg_claim = _delegation_claim(reply, request, facts)
     sched_false, sched_claim, sched_removed = _schedule_claim(reply, request, facts)
+    skipped = (tools_named(request, sorted(facts.tools))
+               if facts.scheduled and facts.no_tool_call else ())
+    # A skipped run's corrective already says nothing it describes ran.
     narrated = (narrated_lookups(reply, has_pasted_content(request))
-                if facts.no_tool_call and not _HOW_TO_RE.match(request) else ())
+                if facts.no_tool_call and not skipped and not _HOW_TO_RE.match(request) else ())
     fabricated = () if facts.known is None else fabricated_ids(raw, facts.known, request)
     kinds = tuple(kind for kind, on in (
         (MAIL_CLAIM, mail_false), (CALENDAR_CLAIM, cal_false), (PAYMENT_CLAIM, pay_false),
         (WHATSAPP_CLAIM, wa_false), (DELEGATION_CLAIM, deleg_false),
-        (SCHEDULE_CLAIM, sched_false), (NARRATED_LOOKUP, bool(narrated)),
-        (FABRICATED_ID, bool(fabricated)),
+        (SCHEDULE_CLAIM, sched_false), (SKIPPED_TOOLS, bool(skipped)),
+        (NARRATED_LOOKUP, bool(narrated)), (FABRICATED_ID, bool(fabricated)),
     ) if on)
     if not kinds:
         return Verdict(claim_lines=lines)
@@ -2518,6 +2549,11 @@ def judge_reply(raw: str, reply: str, facts: TurnFacts) -> Verdict:
                      f'Also: your reply says "{_quote(sched_claim)}", but this turn\'s cron calls '
                      "don't show that change — check cron action=list and say what is scheduled now.")
         backstop.append(SCHEDULE_BACKSTOP_OTHER if sched_removed else SCHEDULE_BACKSTOP)
+    if skipped:
+        parts.append(skipped_tools_corrective(skipped) if not parts else
+                     f"Also: this scheduled run's task says to use {', '.join(skipped)} and you "
+                     "called none of them — nothing your reply reports was checked.")
+        backstop.append(SKIPPED_TOOLS_BACKSTOP)
     if narrated:
         parts.append(lookup_corrective(narrated, facts.tools) if not parts else
                      f"Also: your reply describes lookups ({_lookup_quotes(narrated)}) that never "
