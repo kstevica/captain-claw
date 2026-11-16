@@ -1384,6 +1384,15 @@ class AutonomousWorkConfig(BaseModel):
     # without auth pushes to every allowlisted number; with auth, nowhere.
     nudge_to_whatsapp: bool = True
     notify_waid: str = ""
+    # Which nudges reach those phones (WhatsApp, Telegram) — flight_deck/
+    # phone_gate.py. The chat, the Line and the bell get every nudge; the phone
+    # only the ones worth a ping: Jev decides, with rules when Jev can't answer.
+    # One ping per email thread / calendar event / follow-up in
+    # ``phone_repeat_hours``; held while the user wrote on a phone in the last
+    # ``phone_hold_while_chatting_min`` minutes. Off = every nudge, as before.
+    phone_filter: bool = True
+    phone_repeat_hours: int = 6
+    phone_hold_while_chatting_min: int = 10
     # The other channels nudges — and proposals waiting for approval — reach
     # (WhatsApp above is one of them, for both): the user's own chat with the
     # deck's shared Telegram bot, and their connected devices, which beep and

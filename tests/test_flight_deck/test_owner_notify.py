@@ -41,6 +41,8 @@ def store(tmp_path, monkeypatch):
     s = autonomy.AutonomyStore(tmp_path / "autonomy.db")
     monkeypatch.setattr(autonomy, "_STORE", s)
     base = AutonomousWorkConfig().model_dump()
+    # Routing is tested here; which nudges ring the phone is test_phone_gate.py.
+    base["phone_filter"] = False
     monkeypatch.setattr(autonomy, "global_defaults", lambda: dict(base))
     monkeypatch.setattr(autonomy_routes, "global_defaults", lambda: dict(base))
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")

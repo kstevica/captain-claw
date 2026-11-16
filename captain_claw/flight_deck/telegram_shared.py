@@ -589,6 +589,12 @@ async def route_update(db, update: dict[str, Any]) -> str:
                 pass
             return "over_limit"
 
+    if isinstance(msg, dict):
+        # The user is talking here now: Autonomous Work's phone gate holds its
+        # nudges meanwhile and reads this conversation before ringing the phone.
+        from captain_claw.flight_deck import phone_gate
+        phone_gate.note_inbound(phone_gate.tg_key(tg_user), text or str(msg.get("caption") or ""))
+
     slug = str(link["agent_slug"])
     from captain_claw.flight_deck import agent_idle
 

@@ -418,17 +418,30 @@ async def _execute_and_judge(
             # Also send the nudge to the owner's own channels — the ones they
             # switched on (the agent turn already surfaces it in web chat).
             if output:
+                from captain_claw.flight_deck import phone_gate
                 from captain_claw.flight_deck.line import agent_name
-                from captain_claw.flight_deck.owner_notify import notify_owner, nudge_texts, task_of
+                from captain_claw.flight_deck.owner_notify import (
+                    notify_owner,
+                    nudge_texts,
+                    ring_phones,
+                    task_of,
+                )
                 name = str(agent.get("name") or agent.get("slug") or "").strip()
                 # With the link to its task on the Taskboard, when it is about one
                 # (off this loop: the board's lock can be held for a while).
                 said, bell_body = nudge_texts(await asyncio.to_thread(task_of, action), output)
+                # Only the nudges worth a ping ring the phones (phone_gate): the
+                # chat, the Line and the bell get every one. A nudge held while the
+                # user is chatting rings later, if it is still worth it then.
+                gate = await phone_gate.decide(
+                    user_id, action, output, cfg,
+                    ring_later=lambda: ring_phones(user_id, "nudge", said, cfg))
                 # ``source``: this agent's chat has the nudge already (its turn) —
                 # when it is the user's Line agent, the Line doesn't post it there again.
                 await notify_owner(user_id, "nudge", said, cfg=cfg, action_id=str(aid), device_text=output,
                                    bell=("autonomy_nudge", f"Nudge from {name}" if name else "Nudge", bell_body),
-                                   source=agent_name(str(agent.get("slug") or "")))
+                                   source=agent_name(str(agent.get("slug") or "")),
+                                   phones=gate.send)
             # If this nudge was reminding about a tracked follow-up, re-arm it
             # (escalate: sooner each time) — or retire it after enough nudges.
             fu_id = str((action.get("payload") or {}).get("follow_up_id") or "")

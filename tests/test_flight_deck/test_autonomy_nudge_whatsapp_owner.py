@@ -22,7 +22,9 @@ def store(tmp_path, monkeypatch):
     s = autonomy.AutonomyStore(tmp_path / "autonomy.db")
     monkeypatch.setattr(autonomy, "_STORE", s)
     # Pure shipped defaults — never the dev box's config.yaml.
-    monkeypatch.setattr(autonomy, "global_defaults", lambda: AutonomousWorkConfig().model_dump())
+    # Routing is tested here; which nudges ring the phone is test_phone_gate.py.
+    monkeypatch.setattr(autonomy, "global_defaults",
+                        lambda: {**AutonomousWorkConfig().model_dump(), "phone_filter": False})
     return s
 
 
