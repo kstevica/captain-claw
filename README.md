@@ -1,4 +1,4 @@
-# Captain Claw
+# Captain
 
 ### Command a fleet of AI agents — on every deck, every desk, every wrist
 
@@ -9,10 +9,10 @@
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](docs/guide/agents.md#multi-model-support)
 
 <p align="center">
-  <a href="docs/guide/whats-new.md#whats-new-in-082"><img src="docs/screenshots/hero-0.8.2.webp" width="100%" alt="Captain Claw 0.8.2: the BotPort hub's live network map, the kiosk's Share on network dialog on a phone, a StopWatch speaking an answer and a PaperColor e-paper dashboard"></a>
+  <a href="docs/guide/whats-new.md#whats-new-in-082"><img src="docs/screenshots/hero-0.8.2.webp" width="100%" alt="Captain 0.8.2: the BotPort hub's live network map, the kiosk's Share on network dialog on a phone, a StopWatch speaking an answer and a PaperColor e-paper dashboard"></a>
 </p>
 
-> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**. Since **0.8.4** you can **teach an agent your work and test it**, and see every task on one **Taskboard**. Since **0.8.5** your agents run **Claude Code, Codex, OpenCode, Crush and Pi as their crew**, and you can **say what you need and get a whole team**, with its schedules and its software. Since **0.8.6** everything they do on their own is on **one Line**, **Captain Swarm** makes them measurably better at your real work, and **Captain** for your desktop is a 75 MB download that updates itself. Since **0.8.8** they see what you see: **Captain for Chrome** sends the page you're on, and **Captain for Mac** sends what's on your screen from any app. Since **0.9.1** your private data stays yours: **anonymization** turns names, companies and numbers into tokens before a model sees them and puts them back when the answer comes home, and **data rooms** let Claude read a whole deal's files without learning who is in them.
+> Most AI tools give you one agent in a chat box. Captain **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**. Since **0.8.4** you can **teach an agent your work and test it**, and see every task on one **Taskboard**. Since **0.8.5** your agents run **Claude Code, Codex, OpenCode, Crush and Pi as their crew**, and you can **say what you need and get a whole team**, with its schedules and its software. Since **0.8.6** everything they do on their own is on **one Line**, **Captain Swarm** makes them measurably better at your real work, and **Captain** for your desktop is a 75 MB download that updates itself. Since **0.8.8** they see what you see: **Captain for Chrome** sends the page you're on, and **Captain for Mac** sends what's on your screen from any app. Since **0.9.1** your private data stays yours: **anonymization** turns names, companies and numbers into tokens before a model sees them and puts them back when the answer comes home, and **data rooms** let Claude read a whole deal's files without learning who is in them.
 
 **[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://cohort001.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[▶️ YouTube](https://www.youtube.com/@captain--ai-agents)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)** · **[🧭 Guides](docs/guide/README.md)** · **[📝 What's new](docs/guide/whats-new.md)**
 
@@ -20,7 +20,7 @@
 
 <p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>Captain for Chrome and for Mac</strong> &nbsp;·&nbsp; <strong>custom tools Crew builds for your agents</strong> &nbsp;·&nbsp; <strong>anonymization and data rooms for Claude</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>81 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>131 ready-made archetypes</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>Claude Code, Codex, OpenCode, Crush and Pi as your crew</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
 
-## Why Captain Claw
+## Why Captain
 
 - **🛸 A fleet, not a chatbot.** Spawn specialists from 131 ready-made archetypes (31 generalists and 100 specialists, for your industry or your own life) plus the ones your admin generates for your company, describe a goal and let **Agent Forge** design the whole team, or say what you need in your own words and **Forge agents** plans a standing team with its schedules and its software.
 - **🎓 Agents you can train.** Give an agent your documents and it keeps them whole at no token cost, reads what you budget for, and learns rules and facts you review. Then exam it, and see exactly where it went wrong It drafts lessons from your corrections for you to approve, works toward the goals you set on its **Course**, and fits in one file to back up, move to another deck or hand to a client.
@@ -231,7 +231,7 @@ Cursor and Claude Code give you one very good agent that plans, writes, reviews,
 
 ## Pick the right shape for the problem
 
-One agent isn't always the answer — and one orchestration strategy never is. Captain Claw ships **seven distinct modes**, each tuned to a different kind of work.
+One agent isn't always the answer — and one orchestration strategy never is. Captain ships **seven distinct modes**, each tuned to a different kind of work.
 
 | | |
 |---|---|
@@ -290,10 +290,10 @@ Reference: **[USAGE.md](USAGE.md)** (every command, tool and config key) · **[F
 
 ## ⭐ Star the repo
 
-Captain Claw is **MIT licensed and free forever** — your data stays on your machine, bring your own keys or run 100% local with Ollama. It's built solo and growing fast, and every star helps another builder discover it. **If it looks useful, would you give it a star?**
+Captain is **MIT licensed and free forever** — your data stays on your machine, bring your own keys or run 100% local with Ollama. It's built solo and growing fast, and every star helps another builder discover it. **If it looks useful, would you give it a star?**
 
 <p align="center">
-  <a href="https://github.com/kstevica/captain-claw"><img src="https://img.shields.io/github/stars/kstevica/captain-claw?style=for-the-badge&logo=github&label=Star%20Captain%20Claw&color=gold" alt="Star Captain Claw on GitHub"></a>
+  <a href="https://github.com/kstevica/captain-claw"><img src="https://img.shields.io/github/stars/kstevica/captain-claw?style=for-the-badge&logo=github&label=Star%20Captain&color=gold" alt="Star Captain on GitHub"></a>
 </p>
 
 [![Star History Chart](https://api.star-history.com/svg?repos=kstevica/captain-claw&type=Date)](https://star-history.com/#kstevica/captain-claw&Date)
