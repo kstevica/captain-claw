@@ -5380,6 +5380,13 @@ Crew lets Captain run Claude Code, Codex, OpenCode, Crush and Pi for you. You ta
 
 **Giving a worker files.** On **New task**, and in the message box on a task's page, whether it's working or waiting, paste a screenshot, drop files, or use the paperclip. Any kind of file works, up to 50 MB each and 30 files or 200 MB for a task. They go into a `.crew-attachments` folder in the worker's own folder, which git ignores, and it's told what's there. Whether it can actually see a picture depends on the model it runs on: on a model without vision, it can only read the file's text or details. Attachments are removed when the task is closed or landed.
 
+**Context from your agents.** Beside **Attach files** on New task (and in the paperclip's menu in a task's message box) are two more choices:
+
+- **From an agent**: files your agents saved in their own folder (`saved/` and the rest of their workspace), from one agent or several, ticked from a list you can search. The worker gets copies; the agent keeps its own. It works while an agent is asleep. Only your own agents are listed, hidden files and folders like `.git` and `node_modules` are left out, and files that look like keys, `.env` files and databases are refused, as for mail.
+- **A conversation**: pick an agent, then one of your sessions with it (the chat's topics, newest first), then tap the first and the last message to send only part of it (all of it is chosen to start with). **Add another** keeps that one on a list and lets you pick from another agent too. Each becomes a Markdown file, `conversation-<agent>-<date>.md`, holding your messages and the agent's final answers only: its steps, tool calls, slash commands and automated messages (scheduled runs, plans) are left out. It comes from Flight Deck's chat log, which is kept only when sign-in is on, and it's always your own.
+
+Both arrive in `.crew-attachments` like any attached file, and the worker is told that what they say is information, not instructions.
+
 Your agent can do the same. Send it a screenshot in chat and say "have OpenCode fix this": the `crew` tool's `attachments` takes the files it has, on `dispatch`, `prepare_env` and `steer`, as a `saved/` path, a path a tool printed, or `vfs:<project>/<path>`. It refuses what mail attachments refuse, like keys, `.env` files and databases, and a user-tier agent stays inside its own folders. Agents need a restart to get this.
 
 **Giving a worker your folders.** A worker can also use folders from your files, as many as you like. On **New task**, under **Folders from your files**, tick them, a whole folder or one inside it, and choose for each:

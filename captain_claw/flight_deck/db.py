@@ -2268,6 +2268,27 @@ class FlightDeckDB:
         rows.reverse()  # Return chronological order
         return rows
 
+    async def get_chat_turns(
+        self, session_id: str, user_id: str,
+        after_id: int = 0, before_id: int | None = None, limit: int = 5000,
+    ) -> list[dict]:
+        """The user and assistant rows of one chat log with ``after_id < id <
+        before_id``, oldest first, at most ``limit``. Unknown or foreign
+        session: ``[]``."""
+        assert self._db is not None
+        if not await self.get_chat_session(session_id, user_id):
+            return []
+        query = ("SELECT id, role, content, metadata, created_at FROM chat_messages"
+                 " WHERE session_id = ? AND role IN ('user', 'assistant') AND id > ?")
+        params: list = [session_id, int(after_id)]
+        if before_id is not None:
+            query += " AND id < ?"
+            params.append(int(before_id))
+        query += " ORDER BY id ASC LIMIT ?"
+        params.append(max(1, min(int(limit), 20000)))
+        async with self._db.execute(query, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
     async def list_chat_topics(self, session_id: str, user_id: str) -> list[dict]:
         """The topic dividers of one chat log, oldest first — ``system`` rows
         whose metadata carries a ``topic`` object (the chat timeline's "New

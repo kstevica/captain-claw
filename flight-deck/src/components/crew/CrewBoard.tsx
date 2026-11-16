@@ -10,7 +10,8 @@ import {
 } from '../../services/crewApi'
 import { hostingApi, type HostedSite } from '../../services/hostingApi'
 import { CrewActivity } from './CrewActivity'
-import { AttachButton, AttachmentList, useAttachments } from './CrewAttachments'
+import { AttachmentList, useAttachments } from './CrewAttachments'
+import { AttachChoices } from './CrewContext'
 import { CrewChanges } from './CrewChanges'
 import { EnvironmentCard } from './CrewEnvironment'
 import { CrewFiles } from './CrewFiles'
@@ -330,7 +331,7 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
           )}
           <AttachmentList files={attachments.files} onRemove={attachments.remove} />
           <div className="flex items-end gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-1.5 transition-colors focus-within:border-violet-500/60 focus-within:ring-2 focus-within:ring-violet-500/15">
-            <AttachButton onPick={attachments.onPick} compact />
+            <AttachChoices onPick={attachments.onPick} onStaged={attachments.addStaged} compact />
             <textarea
               value={steer}
               onChange={(ev) => setSteer(ev.target.value)}
@@ -562,7 +563,7 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
             />
           </label>
           <div className="-mt-3 space-y-2">
-            <AttachButton onPick={attachments.onPick} />
+            <AttachChoices onPick={attachments.onPick} onStaged={attachments.addStaged} />
             <AttachmentList files={attachments.files} onRemove={attachments.remove} />
           </div>
 
