@@ -41,6 +41,9 @@ class HostingTool(Tool):
         "kind='static' serves files at /vfs/<name>/ (needs an index.html at the served root, else a "
         "file listing); kind='app' runs a process (give `start_cmd`, e.g. 'node server.js') and "
         "reverse-proxies it at /vfs-apps/<name>/ — apps are started automatically on publish. "
+        "Running an app needs the user to be an admin, or an admin to have approved hosted apps for "
+        "them (Users → Crew); if Flight Deck refuses, tell the user that and offer a static site, "
+        "don't try again. "
         "`name` is the URL slug (lowercase letters, digits, dashes). "
         "`project` is the VFS project/folder the files live in (the first path segment, as used by "
         "Code); `subdir` narrows to a sub-path inside it. Split any file path you're given into "
@@ -48,8 +51,9 @@ class HostingTool(Tool):
         "subdir='showcase/abc123' (point at the folder that CONTAINS index.html, never the "
         "index.html file itself). Re-publishing a name you own updates it (and restarts the app). "
         "Other actions: 'list' your published sites, 'stop' a site or app (it goes offline and keeps "
-        "its address), 'start' it again, 'status' (URL, running state, recent logs, visit count), "
-        "'unpublish' to remove. Returns the public URL — relay it to the user."
+        "its address), 'start' it again, 'restart' an app (stop and start, to pick up changed files), "
+        "'status' (URL, running state, recent logs, visit count), 'unpublish' to remove. Returns the "
+        "public URL — relay it to the user."
     )
     timeout_seconds = 60.0
 
@@ -58,11 +62,11 @@ class HostingTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["publish", "list", "start", "stop", "status", "unpublish"],
+                "enum": ["publish", "list", "start", "stop", "restart", "status", "unpublish"],
                 "description": (
                     "publish — put a VFS folder online (create or, if you own the name, update); "
                     "list — your published sites/apps; stop — take a site or app offline, keeping its "
-                    "address; start — bring it back; "
+                    "address; start — bring it back; restart — stop an app and start it again; "
                     "status — URL + running state + recent logs + visits; unpublish — remove."
                 ),
             },
@@ -169,7 +173,7 @@ class HostingTool(Tool):
                 return await self._publish(fd_url, **kwargs)
             if action == "list":
                 return await self._list(fd_url)
-            if action in ("start", "stop", "status", "unpublish"):
+            if action in ("start", "stop", "restart", "status", "unpublish"):
                 return await self._one(fd_url, action, **kwargs)
             return ToolResult(success=False, error=f"Unknown action '{action}'.")
         except Exception as e:  # noqa: BLE001
@@ -244,10 +248,11 @@ class HostingTool(Tool):
             return ToolResult(success=True, content=f"Unpublished **{name}**.")
         if action == "stop":
             return ToolResult(success=True, content=f"Stopped **{name}** — {d.get('message', 'ok')}.")
-        if action == "start":
+        if action in ("start", "restart"):
             if d.get("started"):
+                verb = "Restarted" if action == "restart" else "Started"
                 return ToolResult(success=True, content=(
-                    f"Started **{name}** — live at {self._pub_url(d)}" + self._local_note(d)))
+                    f"{verb} **{name}** — live at {self._pub_url(d)}" + self._local_note(d)))
             logtail = (d.get("log") or "").strip()
             return ToolResult(success=False, error=(
                 f"Could not start **{name}**: {d.get('message', '')}."

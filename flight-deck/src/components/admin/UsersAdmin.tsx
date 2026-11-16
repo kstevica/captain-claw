@@ -71,8 +71,22 @@ function userPlan(user: UserInfo): string {
 // The most the list loads (the server's cap); search and filters work on these.
 const USERS_MAX = 1000
 
-// Whether the deck offers Crew (FD_CREW) and its terminal (FD_CREW_TERMINAL).
-interface DeckCrew { offered: boolean; terminal: boolean }
+// Whether the deck offers Crew (FD_CREW), its terminal (FD_CREW_TERMINAL) and hosted
+// apps (FD_CREW_APPS), and what a non-admin's apps may take there (0 = no limit).
+interface DeckCrew {
+  offered: boolean
+  terminal: boolean
+  apps?: boolean
+  app_limits?: { per_user: number; memory_mb: number; hours: number }
+}
+
+function appLimitsNote(limits?: DeckCrew['app_limits']): string {
+  if (!limits) return ''
+  const parts = [`up to ${limits.per_user} at once`]
+  if (limits.memory_mb) parts.push(`${limits.memory_mb >= 1024 && limits.memory_mb % 1024 === 0 ? `${limits.memory_mb / 1024} GB` : `${limits.memory_mb} MB`} of memory each`)
+  if (limits.hours) parts.push(`stopped after ${limits.hours} hour${limits.hours === 1 ? '' : 's'}`)
+  return parts.join(', ')
+}
 
 async function fetchUsers(limit = 100, offset = 0): Promise<{ users: UserInfo[]; total: number; crew?: DeckCrew }> {
   const res = await fetch(`/fd/admin/users?limit=${limit}&offset=${offset}`, {
@@ -358,24 +372,33 @@ function CreateUserForm({ onCreated, onClose, config }: {
   )
 }
 
-/** What an admin approved this user for: their coding agents, and how many at once. */
-interface CrewChoice { approved: boolean; harnesses: string[]; max_parallel: number; terminal: boolean }
+/** What an admin approved this user for: their coding agents, how many at once, and what else. */
+interface CrewChoice { approved: boolean; harnesses: string[]; max_parallel: number; terminal: boolean; apps: boolean }
+
+const NO_CREW: CrewChoice = { approved: false, harnesses: [], max_parallel: 2, terminal: false, apps: false }
 
 function userCrew(user: UserInfo): CrewChoice {
   try {
     const c = JSON.parse(user.metadata || '{}').crew
     if (c?.approved === true) {
-      return { approved: true, harnesses: Array.isArray(c.harnesses) ? c.harnesses : [], max_parallel: Number(c.max_parallel) || 2, terminal: c.terminal === true }
+      return {
+        approved: true, harnesses: Array.isArray(c.harnesses) ? c.harnesses : [], max_parallel: Number(c.max_parallel) || 2,
+        terminal: c.terminal === true, apps: c.apps === true,
+      }
     }
   } catch { /* no approval */ }
-  return { approved: false, harnesses: [], max_parallel: 2, terminal: false }
+  return NO_CREW
 }
 
 // A worker has a shell of its own, as the deck's OS user: whoever is approved
 // here is trusted with this server, and the dialog says that in those words.
-function CrewApproval({ isAdmin, value, wasApproved, name, understood, onUnderstood, onChange, deck }: {
-  isAdmin: boolean; value: CrewChoice; wasApproved: boolean; name: string
-  understood: boolean; onUnderstood: (v: boolean) => void; onChange: (v: CrewChoice) => void
+// Hosted apps lend that same reach to a program that keeps running and that
+// anyone with its address can reach, so they get words and a tick of their own.
+function CrewApproval({ isAdmin, value, wasApproved, wasApps, name, understood, onUnderstood, appsUnderstood, onAppsUnderstood, onChange, deck }: {
+  isAdmin: boolean; value: CrewChoice; wasApproved: boolean; wasApps: boolean; name: string
+  understood: boolean; onUnderstood: (v: boolean) => void
+  appsUnderstood: boolean; onAppsUnderstood: (v: boolean) => void
+  onChange: (v: CrewChoice) => void
   deck: DeckCrew
 }) {
   if (!deck.offered) {
@@ -393,7 +416,7 @@ function CrewApproval({ isAdmin, value, wasApproved, name, understood, onUnderst
           checked={value.approved}
           onChange={(e) => onChange(e.target.checked
             ? { ...value, approved: true, harnesses: value.harnesses.length ? value.harnesses : CREW_AGENTS.map((a) => a.id) }
-            : { approved: false, harnesses: [], max_parallel: 2, terminal: false })}
+            : NO_CREW)}
           className="accent-teal-500"
         />
         Crew <span className="text-xs text-zinc-500">— coding agents run for them</span>
@@ -423,6 +446,34 @@ function CrewApproval({ isAdmin, value, wasApproved, name, understood, onUnderst
             </label>
           ) : (
             <p className="text-xs text-zinc-500">The terminal is turned off on this Flight Deck (<code>FD_CREW_TERMINAL=off</code>).</p>
+          )}
+          {deck.apps !== false ? (
+            <label className="flex items-start gap-2 text-xs text-zinc-400">
+              <input type="checkbox" checked={value.apps} onChange={(e) => onChange({ ...value, apps: e.target.checked })} className="mt-0.5 accent-teal-500" />
+              <span>
+                Hosted apps <span className="text-zinc-500">— they can run what they build as an app on this server, at a public
+                address{appLimitsNote(deck.app_limits) ? ` (${appLimitsNote(deck.app_limits)})` : ''}. It runs as the same system user as
+                their coding agents, in their own Crew home, without the deck's keys or their saved logins.</span>
+              </span>
+            </label>
+          ) : (
+            <p className="text-xs text-zinc-500">Hosted apps are turned off on this Flight Deck (<code>FD_CREW_APPS=off</code>).</p>
+          )}
+          {value.apps && !wasApps && deck.apps !== false && (
+            <div className="space-y-1.5 rounded-md bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-200">
+              <p className="flex items-start gap-1.5">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  This goes further than their coding agents: an app keeps running when they're gone, and anyone with its
+                  address can send it requests, with no sign-in. A flaw in their app is a way into this server for whoever
+                  finds it, with the same reach as their coding agents, other people's files and the deck's database included.
+                </span>
+              </p>
+              <label className="flex items-center gap-1.5 font-medium">
+                <input type="checkbox" checked={appsUnderstood} onChange={(e) => onAppsUnderstood(e.target.checked)} className="accent-amber-500" />
+                I understand: {name} can run public apps on this server
+              </label>
+            </div>
           )}
           {!wasApproved && (
             <div className="space-y-1.5 rounded-md bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-200">
@@ -525,6 +576,7 @@ function UserRow({
   const [kiosk, setKiosk] = useState(() => userKioskFlag(user))
   const [crew, setCrew] = useState(() => userCrew(user))
   const [crewUnderstood, setCrewUnderstood] = useState(false)
+  const [appsUnderstood, setAppsUnderstood] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [agentsOpen, setAgentsOpen] = useState(false)
@@ -567,6 +619,7 @@ function UserRow({
       const crewSaved = JSON.stringify(userCrew(user))
       await updateUser(user.id, { plan, role, kiosk, ...(role !== 'admin' && JSON.stringify(crew) !== crewSaved ? { crew } : {}) })
       setCrewUnderstood(false)
+      setAppsUnderstood(false)
       onUpdate()
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : 'Failed to update user')
@@ -634,11 +687,13 @@ function UserRow({
           )}
           {user.role !== 'admin' && userCrew(user).approved && (
             <span
-              title="Approved for Crew: their coding agents run on this server"
+              title={userCrew(user).apps
+                ? 'Approved for Crew and hosted apps: their coding agents and their apps run on this server'
+                : 'Approved for Crew: their coding agents run on this server'}
               className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-teal-500/15 text-teal-700 dark:text-teal-300"
             >
               <Ship className="h-3 w-3" />
-              crew
+              {userCrew(user).apps ? 'crew + apps' : 'crew'}
             </span>
           )}
           {usage && (usage.messages > 0 || usage.tokens > 0) && (
@@ -702,9 +757,12 @@ function UserRow({
             isAdmin={role === 'admin'}
             value={crew}
             wasApproved={userCrew(user).approved}
+            wasApps={userCrew(user).apps}
             name={user.display_name || user.email}
             understood={crewUnderstood}
             onUnderstood={setCrewUnderstood}
+            appsUnderstood={appsUnderstood}
+            onAppsUnderstood={setAppsUnderstood}
             onChange={setCrew}
           />
 
@@ -782,7 +840,9 @@ function UserRow({
           <div className="flex items-center gap-2 pt-1">
             <button
               onClick={handleSave}
-              disabled={saving || (role !== 'admin' && crew.approved && (!crew.harnesses.length || (!userCrew(user).approved && !crewUnderstood)))}
+              disabled={saving || (role !== 'admin' && crew.approved && (
+                !crew.harnesses.length || (!userCrew(user).approved && !crewUnderstood)
+                || (crew.apps && !userCrew(user).apps && deckCrew.apps !== false && !appsUnderstood)))}
               className="rounded-md bg-violet-600 px-3 py-1.5 text-xs text-white hover:bg-violet-500 disabled:opacity-50"
             >
               {saving ? 'Saving...' : 'Save Changes'}

@@ -85,6 +85,12 @@ These are code changes already in this build; the env vars above turn them on.
   apart from Codex's own ([sandbox plan](agent-os-sandbox-plan.md)). The browser
   terminal needs its own tick. `FD_CREW=off` turns Crew off for the deck, and
   `FD_CREW_TERMINAL=off` takes the terminal from everyone.
+- **Hosted apps need a tick of their own** on a Crew approval. A non-admin's app
+  runs with their worker's reach (the same system user, their own Crew home, none
+  of the deck's keys), but it keeps running and anyone with its address can reach
+  it, so a flaw in it is a way into the server. Limits: `FD_CREW_APPS_PER_USER`
+  (2), `FD_CREW_APPS_MAX_RUNNING` (6), `FD_CREW_APP_MEMORY_MB` (1024),
+  `FD_CREW_APP_HOURS` (0, none). `FD_CREW_APPS=off` takes them from every non-admin.
 
 ## First-run checklist
 

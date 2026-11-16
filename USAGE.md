@@ -5263,7 +5263,18 @@ Hosting (sidebar: **Workspace → Hosting**) publishes a VFS folder at a public,
 
 So a client call should be `fetch(\`${FD_BASE_PATH}api/x\`)` (or a bundler base derived from `FD_BASE_PATH`), never `fetch("/api")`. Apps built with the **Code** module get this baked in automatically — its plan/build prompts require base-path awareness and the code-reviewer flags root-absolute URLs and hardcoded ports as findings.
 
-Endpoints: management under `/fd/hosting/*` (list / publish `POST` / edit `PUT` / `start` / `stop` / unpublish `DELETE`); public serving at `/vfs/<name>/…` and `/vfs-apps/<name>/…` (registered before the SPA catch-all).
+Endpoints: management under `/fd/hosting/*` (list / publish `POST` / edit `PUT` / `start` / `stop` / `restart` / unpublish `DELETE`); public serving at `/vfs/<name>/…` and `/vfs-apps/<name>/…` (registered before the SPA catch-all). A stopped site or app answers 404 and keeps its address.
+
+**Who can run an app.** A page is anyone's. An app runs a program on the server, so on a deck with sign-in it needs an admin, or someone an admin approved for Crew with **Hosted apps** ticked (Users → Crew). It's the app's owner who counts, whoever presses Start: an admin can't start an app for someone who isn't approved. A non-admin's app gets what their Crew worker already has and no more: the deck's system user, their own Crew home, a short list of variables, and none of the deck's keys or their saved logins. It runs at a lower priority, and within limits: how many at once for one person and for the deck, a port from one range, and memory, checked every 30 seconds, plus an optional running time. One that goes past a limit is stopped, with a line saying why in its output. Taking the tick away, or the approval, stops their apps, and they keep their addresses. Admins' apps run as before, with Flight Deck's environment minus its own secrets, and have none of these limits.
+
+| Environment variable | Default | What it does |
+|---|---|---|
+| `FD_CREW_APPS` | on | `off` takes hosted apps away from every non-admin |
+| `FD_CREW_APPS_PER_USER` | 2 | a non-admin's apps running at once |
+| `FD_CREW_APPS_MAX_RUNNING` | 6 | all non-admins' apps running at once, on this deck |
+| `FD_CREW_APP_MEMORY_MB` | 1024 | memory one app may use, with everything it started (0 = no limit) |
+| `FD_CREW_APP_HOURS` | 0 | how long a non-admin's app runs before it's stopped (0 = no limit) |
+| `VFS_APPS_PORT_BASE` / `VFS_APPS_PORT_SPAN` | 26100 / 100 | the ports apps get: from the base, this many |
 
 ### Public file links — NEW in 0.8.1
 
@@ -5347,7 +5358,7 @@ An agent now knows its job even if nobody has opened its chat: Flight Deck tells
 
 Plans are under `/fd/agent-forge/plans`.
 
-**Known gaps.** It has run end to end with a stand-in model, CLI and app; a real model's plan and a real worker building to the contract have yet to be tried together. A team's tables live in `vfs:<team>/.datastore/store.db`, which the Data library doesn't list. A non-admin can't host a runnable app, so Connect needs an admin or another host for it. Agents come from the archetype catalog, and it isn't in an admin's dialog for a user's agents. The desktop app embeds its own bundle, so it gets this with a new build.
+**Known gaps.** It has run end to end with a stand-in model, CLI and app; a real model's plan and a real worker building to the contract have yet to be tried together. A team's tables live in `vfs:<team>/.datastore/store.db`, which the Data library doesn't list. A non-admin can host a runnable app only with **Hosted apps** ticked on their Crew approval, so otherwise Connect needs an admin or another host for it. Agents come from the archetype catalog, and it isn't in an admin's dialog for a user's agents. The desktop app embeds its own bundle, so it gets this with a new build.
 
 ### Crew: coding agents working for you — NEW in 0.8.5
 
@@ -5430,7 +5441,7 @@ This doesn't isolate anything further: workers still run as the deck's system us
 
 **Where results go.** A worktree is out of an agent's reach, so when a task finishes its work comes to your VFS, under `vfs:crew/<project>/<task>/`: `report.md` is the worker's whole message, and `files/` holds the whole project if it's small (under 300 files and 20 MB), otherwise only what the task changed. Only commits are copied, with no `.git`. Your agent reads them there, and the callback tells it where, so it never needs a worker to print files into a message. In the page, a task's **Files** tab shows them, can copy a big project whole, and **Put this page online** publishes one with an `index.html` from that clean copy. Agents do the same with `hosting`. Discarding a task's work removes its copy. A project's own folder also stays readable directly, at the `vfs:` path `crew action=options` shows.
 
-**Live sites.** Crew's **Live sites** lists everything you've put on the web, whether you, your agent or a task did it. **Stop** takes a page or an app offline and keeps its address, **Start** brings it back, and the bin removes it and frees the address. **Publish** puts something new online: what a task made, or one of your folders, at an address you choose. Anyone with the address can open it, with no sign-in. On a deck with sign-in, only an admin can run an app; a page is anyone's. Your agent can do the same with `hosting`.
+**Live sites.** Crew's **Live sites** lists everything you've put on the web, whether you, your agent or a task did it. **Stop** takes a page or an app offline and keeps its address, **Start** brings it back, **Restart** stops an app and starts it again to pick up changed files, and the bin removes it and frees the address. **Publish** puts something new online: what a task made, or one of your folders, at an address you choose, as a page or as an app with the command that starts it. An app made from a task runs in the task's whole copy. Anyone with the address can open it, with no sign-in. A page is anyone's; on a deck with sign-in, running an app needs an admin, or **Hosted apps** ticked on your Crew approval (see [Who can run an app](#hosting-new-in-072)). Your agent can do the same with `hosting`, and `crew action=files` tells it how to run a task's results as an app when you may.
 
 **Free models.** OpenCode has free models that need no key, so an approved person can use it with no login at all. A model picked in OpenCode's own screen stays in that person's home, which a non-admin's worker doesn't share, so choose a default in Crew → Logins or name one on a task. With no key and no model chosen, a task is refused rather than left to OpenCode's own pick: your code goes to whichever model runs, and [they differ in what happens to it](https://opencode.ai/docs/zen/).
 
@@ -5452,6 +5463,7 @@ This doesn't isolate anything further: workers still run as the deck's system us
 |---|---|
 | `FD_CREW=off` | Turns Crew off for the whole deck. |
 | `FD_CREW_TERMINAL=off` | Takes the browser terminal away from everyone on this deck, admins too. |
+| `FD_CREW_APPS=off` | Takes hosted apps away from every non-admin on this deck. Its limits are under [Hosting](#hosting-new-in-072). |
 | `FD_CREW_CLAUDE_PERMISSION` | Claude Code's permission mode for workers: `auto` (default, Claude's own safety check on each call), `acceptEdits` or `bypassPermissions`. |
 | `FD_CREW_MAX_RUNNING` | Workers running at once on this deck (default 8). |
 | `FD_CREW_STALL_MINUTES` | Silence before you're told a worker seems stuck (default 15). It keeps running. |
@@ -6804,7 +6816,7 @@ Flight Deck uses environment variables:
 | `FD_TASKBOARD_DISABLED` | (unset) | **NEW in 0.8.4.** `true` stops the [Taskboard](#taskboard--new-in-084)'s sweep and triage; it then fills only when opened |
 | `FD_SETUP_TOKENS_PER_MIN` / `FD_SETUP_REASONING` | `40000` / `off` | **NEW in 0.8.4.** Pace and thinking level of a [setup read](#onboarding--new-in-084); `0` is unpaced, `auto` leaves the model's own level |
 | `FD_PROFILE_REASONING` | `low` | **NEW in 0.8.4.** Thinking level for the [Profile](#profile--new-in-084) researcher |
-| `FD_CREW` / `FD_CREW_TERMINAL` | on / on | **NEW in 0.8.5.** `off` turns [Crew](#crew-coding-agents-working-for-you--new-in-085), or its browser terminal, off for the whole deck |
+| `FD_CREW` / `FD_CREW_TERMINAL` / `FD_CREW_APPS` | on / on / on | **NEW in 0.8.5.** `off` turns [Crew](#crew-coding-agents-working-for-you--new-in-085), its browser terminal, or non-admins' hosted apps off for the whole deck |
 | `FD_CREW_CLAUDE_PERMISSION` | `auto` | **NEW in 0.8.5.** Claude Code's permission mode for workers: `auto`, `acceptEdits` or `bypassPermissions` |
 | `FD_CREW_MAX_RUNNING` / `FD_CREW_MAX_TURN_HOURS` / `FD_CREW_STALL_MINUTES` | `8` / `6` / `15` | **NEW in 0.8.5.** Workers at once on this deck; the longest one turn may run; silence before you're told a worker seems stuck |
 | `FD_CREW_WORKING_SECONDS` / `FD_CREW_MODEL_SILENCE_SECONDS` / `FD_CREW_ERROR_WAIT_SECONDS` / `FD_CREW_RETRY_WAIT_SECONDS` | `60` / `300` / `300` / `20` | **NEW in 0.8.5.** How often the still-working line refreshes; how long a model server through the deck can say nothing; how long a CLI gets to show it's past a failed call; the first wait between tries |

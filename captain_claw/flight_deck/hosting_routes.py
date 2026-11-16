@@ -5,7 +5,14 @@
 * Public static serving at ``/vfs/<name>/…`` — no auth; resolves to the
   publisher's VFS folder recorded in the registry.
 * Public app reverse-proxy at ``/vfs-apps/<name>/…`` — HTTP (all methods) and
-  WebSocket, forwarded to the app's Flight-Deck-assigned localhost port.
+  WebSocket, forwarded to the app's Flight-Deck-assigned localhost port. A
+  stopped app, like a stopped site, is a 404 and keeps its address.
+
+Who may run an app is its owner's approval (``crew_access.app_reach``), whoever
+presses Start: an admin's (or any, with sign-in off) runs as Flight Deck's own
+processes do; an approved Crew user's with hosted apps ticked runs with what their
+Crew worker has, under ``crew_access.app_limits``. Every start goes through
+:func:`launch`.
 
 The public routes are included before the SPA catch-all, so ``/vfs`` and
 ``/vfs-apps`` win over ``index.html``.
@@ -32,27 +39,96 @@ router = APIRouter(tags=["hosting"])
 _PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 
 # A hosted app (kind='app') runs its start command as a process on the shared
-# host, so on a sign-in deck it is reserved for admins; with sign-in off there
-# is a single trust domain and it stays open to everyone. Static sites are
-# always open.
-_APP_ADMIN_ONLY = ("Hosting a runnable app is reserved for admins on this deck. "
-                   "You can still publish a static site (kind='static').")
+# host: on a sign-in deck that's an admin's, or an approved Crew user's with
+# hosted apps ticked. With sign-in off there is a single trust domain and it stays
+# open to everyone. Static sites are always open.
+_APP_NOT_APPROVED = ("Running an app on this Flight Deck needs an admin's approval: Users → Crew → Hosted apps. "
+                     "You can still publish a static site (kind='static').")
 
 
-def _app_hosting_restricted() -> bool:
-    from captain_claw.flight_deck.auth import _fd_auth_enabled
-    return _fd_auth_enabled()
-
-
-async def _owner_is_admin(owner_id: str) -> bool:
-    if not owner_id:
-        return False
+async def _user_row(uid: str) -> dict | None:
+    if not uid:
+        return None
     try:
         from captain_claw.flight_deck.auth import get_db
-        u = await get_db().get_user_by_id(owner_id)
-    except Exception:  # noqa: BLE001
-        return False
-    return bool(u) and u.get("role") == "admin"
+        return await get_db().get_user_by_id(uid)
+    except Exception:  # noqa: BLE001 — unreadable is no approval
+        return None
+
+
+async def app_reach_of(owner_id: str) -> tuple[str, dict | None]:
+    """How *owner_id*'s apps may run ("deck", "crew" or "" for not at all), and their row."""
+    from captain_claw.flight_deck import crew_access
+
+    row = await _user_row(owner_id)
+    return crew_access.app_reach(row), row
+
+
+async def _must_run_apps(owner_id: str) -> None:
+    reach, _ = await app_reach_of(owner_id)
+    if not reach:
+        raise HTTPException(403, _APP_NOT_APPROVED)
+
+
+async def launch(name: str) -> tuple[bool, str]:
+    """Start *name*, on its owner's approval and terms: the one way an app starts.
+
+    Refused (403) when its owner may not run apps, whoever asks, an admin
+    included: it would run as them. For an approved Crew user it runs with their
+    Crew terminal's environment (their own home, a short list of variables, no
+    deck secrets, no saved logins), held back, and within ``app_limits`` (409)."""
+    from captain_claw.flight_deck import crew_access, crew_logins
+
+    ent = vh.load_registry().get(name)
+    if not ent:
+        raise HTTPException(404, "not found")
+    if ent.get("kind") != "app":
+        return vh.start_app(name)  # a page: back online
+    reach, owner = await app_reach_of(str(ent.get("owner") or ""))
+    if not reach:
+        raise HTTPException(403, _APP_NOT_APPROVED)
+    if vh.app_is_alive(name):
+        return True, "already running"
+    if reach == "deck":
+        return vh.start_app(name)
+    limits = crew_access.app_limits()
+    mine = sorted(n for n in vh.running_apps(owner=owner["id"]) if n != name)
+    if len(mine) >= limits.per_user:
+        raise HTTPException(409, f"{len(mine)} of your apps are running ({', '.join(mine)}), as many as one person may "
+                                 "run at once here. Stop one first.")
+    if len(vh.running_apps(reach="crew")) >= limits.deck:
+        raise HTTPException(409, "This Flight Deck is running as many apps as it allows at once. Try again later, "
+                                 "or ask an admin.")
+    env = crew_logins.person_env(owner, crew_access.grant_of(owner))
+    env.pop("COLORTERM", None)
+    return vh.start_app(name, env=env, reach="crew")
+
+
+async def enforce_apps(owner_id: str) -> list[str]:
+    """Stop *owner_id*'s running apps that their approval no longer covers as they
+    run: withdrawn, or started with more reach than they have now (an admin who
+    was made a user). Stopped, they keep their address."""
+    reach, _ = await app_reach_of(owner_id)
+    stopped = []
+    for name in vh.running_apps(owner=owner_id):
+        if reach and vh.load_registry().get(name, {}).get("reach", "deck") == reach:
+            continue
+        vh.stop_app(name)
+        vh.note_in_log(name, "Stopped: its owner's approval for hosted apps changed. Start it again to run it "
+                             "as it stands now.")
+        stopped.append(name)
+    return stopped
+
+
+async def enforce_app_owners() -> None:
+    """At start-up and from Crew's watcher: every owner of a running app, against
+    their approval as it is now (it may have changed while the deck was down)."""
+    owners = {str(vh.load_registry().get(n, {}).get("owner") or "") for n in vh.running_apps()}
+    for owner in owners:
+        try:
+            await enforce_apps(owner)
+        except Exception:  # noqa: BLE001 — one owner's bad row isn't everyone's
+            continue
 
 # Hop-by-hop headers never forwarded in either direction (RFC 7230 §6.1) + Host.
 _HOP = {
@@ -131,8 +207,8 @@ async def publish(body: PublishBody, user: dict = Depends(get_current_user)):
         raise HTTPException(400, "project is required")
     if body.kind == "app" and not body.start_cmd.strip():
         raise HTTPException(400, "a start command is required for apps")
-    if body.kind == "app" and _app_hosting_restricted() and user.get("role") != "admin":
-        raise HTTPException(403, _APP_ADMIN_ONLY)
+    if body.kind == "app":
+        await _must_run_apps(user["id"])
 
     reg = vh.load_registry()
     if name in reg:
@@ -169,8 +245,8 @@ async def edit(name: str, body: EditBody, user: dict = Depends(get_current_user)
         raise HTTPException(400, "project is required")
     if body.kind == "app" and not body.start_cmd.strip():
         raise HTTPException(400, "a start command is required for apps")
-    if body.kind == "app" and _app_hosting_restricted() and user.get("role") != "admin":
-        raise HTTPException(403, _APP_ADMIN_ONLY)
+    if body.kind == "app":
+        await _must_run_apps(str(ent.get("owner") or ""))
 
     updated = {
         **ent,
@@ -303,8 +379,8 @@ async def agent_publish(body: AgentPublishReq, request: Request,
         raise HTTPException(400, "project is required")
     if body.kind == "app" and not body.start_cmd.strip():
         raise HTTPException(400, "a start command is required for apps")
-    if body.kind == "app" and _app_hosting_restricted() and not await _owner_is_admin(owner):
-        raise HTTPException(403, _APP_ADMIN_ONLY)
+    if body.kind == "app":
+        await _must_run_apps(owner)
 
     reg = vh.load_registry()
     existing = reg.get(name)
@@ -329,7 +405,10 @@ async def agent_publish(body: AgentPublishReq, request: Request,
 
     started, start_msg = False, ""
     if body.kind == "app" and body.auto_start:
-        started, start_msg = vh.start_app(name)
+        try:
+            started, start_msg = await launch(name)
+        except HTTPException as exc:  # published, not started: a limit, said as such
+            start_msg = str(exc.detail)
 
     view = _view(name, vh.load_registry().get(name, entry))
     view["updated"] = bool(existing)
@@ -353,20 +432,33 @@ async def agent_list(body: _AgentReq, request: Request,
     return {"entries": mine}
 
 
-@router.post("/fd/hosting/agent/start")
-async def agent_start(body: AgentNameReq, request: Request,
-                      auth_user: dict | None = Depends(get_optional_user)):
+async def _agent_start(body: AgentNameReq, request: Request, auth_user: dict | None, *, again: bool) -> dict:
     owner = _agent_owner(body, auth_user)
     ent = _agent_owned(body.name, owner)
-    if ent.get("kind") == "app" and _app_hosting_restricted() and not await _owner_is_admin(owner):
-        raise HTTPException(403, _APP_ADMIN_ONLY)
-    ok, msg = vh.start_app(body.name)
+    if ent.get("kind") == "app":
+        await _must_run_apps(owner)  # before a restart stops what's running
+        if again:
+            vh.stop_app(body.name)
+    ok, msg = await launch(body.name)
     view = _view(body.name, vh.load_registry().get(body.name, ent))
     view.update({"started": ok, "message": msg})
     await _add_public_url(view, request, owner)
     if not ok:
         view["log"] = vh.read_app_log(body.name, tail=40)
     return view
+
+
+@router.post("/fd/hosting/agent/start")
+async def agent_start(body: AgentNameReq, request: Request,
+                      auth_user: dict | None = Depends(get_optional_user)):
+    return await _agent_start(body, request, auth_user, again=False)
+
+
+@router.post("/fd/hosting/agent/restart")
+async def agent_restart(body: AgentNameReq, request: Request,
+                        auth_user: dict | None = Depends(get_optional_user)):
+    """Stop it and start it again: the way to pick up changed files."""
+    return await _agent_start(body, request, auth_user, again=True)
 
 
 @router.post("/fd/hosting/agent/stop")
@@ -408,10 +500,21 @@ async def agent_status(body: AgentNameReq, request: Request,
 # site "agent" here, asking for a login an agent doesn't have.
 @router.post("/fd/hosting/{name}/start")
 async def start(name: str, user: dict = Depends(get_current_user)):
+    _owned_entry(name, user)
+    ok, msg = await launch(name)
+    if not ok:
+        raise HTTPException(400, msg)
+    return {"ok": True, "message": msg}
+
+
+@router.post("/fd/hosting/{name}/restart")
+async def restart(name: str, user: dict = Depends(get_current_user)):
+    """Stop it and start it again: the way to pick up changed files."""
     ent = _owned_entry(name, user)
-    if ent.get("kind") == "app" and _app_hosting_restricted() and user.get("role") != "admin":
-        raise HTTPException(403, _APP_ADMIN_ONLY)
-    ok, msg = vh.start_app(name)
+    if ent.get("kind") == "app":
+        await _must_run_apps(str(ent.get("owner") or ""))  # before stopping what's running
+        vh.stop_app(name)
+    ok, msg = await launch(name)
     if not ok:
         raise HTTPException(400, msg)
     return {"ok": True, "message": msg}
@@ -493,9 +596,18 @@ async def serve_static_path(name: str, path: str, request: Request):
 
 # ── Public app reverse-proxy (HTTP) ───────────────────────────────────────
 
+def _published_app(name: str) -> dict:
+    """A public request's app. One that isn't running (stopped by its owner, by a
+    limit, never started, or ended by itself), or isn't an app, is a 404 like a
+    stopped site, and says no more: the address stays its owner's."""
+    ent = vh.load_registry().get(name)
+    if not ent or ent.get("kind") != "app" or ent.get("stopped") or not vh.app_is_alive(name):
+        raise HTTPException(404, "not found")
+    return ent
+
+
 async def _proxy_http(name: str, path: str, request: Request) -> Response:
-    if not vh.app_is_alive(name):
-        return JSONResponse({"error": f"App '{name}' is not running. Start it from the Hosting page."}, status_code=502)
+    _published_app(name)
     port = vh.app_port(name)
     if not port:
         return JSONResponse({"error": "app has no port"}, status_code=502)
@@ -535,8 +647,9 @@ async def proxy_app_path(name: str, path: str, request: Request):
 # ── Public app reverse-proxy (WebSocket) ──────────────────────────────────
 
 async def _proxy_ws(ws: WebSocket, name: str, path: str) -> None:
+    ent = vh.load_registry().get(name) or {}
     port = vh.app_port(name)
-    if not port or not vh.app_is_alive(name):
+    if ent.get("stopped") or not port or not vh.app_is_alive(name):
         await ws.close(code=1011)
         return
     import websockets
