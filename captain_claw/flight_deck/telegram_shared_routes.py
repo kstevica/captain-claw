@@ -502,6 +502,12 @@ async def relay(token: str, method: str, request: Request):
             await ts.call(bot_token, "setChatMenuButton", body)
         return {"ok": True, "result": True}
 
+    if method in ("sendMessage", "editMessageText") and params.get("text"):
+        # What the agent tells the user — the phone gate reads it before a nudge.
+        from captain_claw.flight_deck import phone_gate
+        phone_gate.note_outbound(phone_gate.tg_key(params.get("chat_id")), str(params["text"]),
+                                 replace_last=method == "editMessageText")
+
     url = f"{ts.api_base()}/bot{bot_token}/{method}"
     try:
         if files:

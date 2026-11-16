@@ -1748,6 +1748,11 @@ async def _handle_message(waid: str, message: dict[str, Any]) -> None:
     if mtype == "reaction":
         return
 
+    # The user is talking here now: Autonomous Work's phone gate holds its
+    # nudges meanwhile and reads this conversation before ringing the phone.
+    from captain_claw.flight_deck import phone_gate
+    phone_gate.note_inbound(phone_gate.wa_key(waid), text)
+
     # Acknowledge receipt visually as soon as possible. The "typing…" stays
     # until the agent's reply lands (or ~25 s). Background task so it can't
     # delay the rest of the handler.
@@ -2384,6 +2389,8 @@ async def _relay_to_waid(waid: str, text: str, payload: dict | None = None) -> N
         if payload.get("notice"):
             await _send_whatsapp_text(waid, text)
             return
+    from captain_claw.flight_deck import phone_gate
+    phone_gate.note_outbound(phone_gate.wa_key(waid), text)
     await _send_whatsapp_reply(waid, text)
 
 
@@ -3070,6 +3077,8 @@ async def push_to_waid(waid: str, text: str) -> bool:
         return False
     if is_push_muted(waid):
         return False
+    from captain_claw.flight_deck import phone_gate
+    phone_gate.note_outbound(phone_gate.wa_key(waid), text)
     await _send_whatsapp_reply(waid, text)
     return True
 

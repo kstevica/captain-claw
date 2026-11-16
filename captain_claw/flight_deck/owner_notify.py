@@ -144,12 +144,15 @@ def _device_key(user_id: str, device_id: str) -> str:
 async def notify_owner(
     user_id: str, kind: str, text: str, *, device_text: str = "", cfg: dict[str, Any] | None = None,
     bell: tuple[str, str, str] | None = None, action_id: str = "", source: str = "",
+    phones: bool = True,
 ) -> dict[str, Any]:
     """Send ``text`` to each channel ``user_id`` switched on. ``kind`` ("nudge",
     "proposal", "test") names the log lines; ``device_text`` is the devices'
     line (default: the text's first); ``bell`` = (type, title, body) goes to
     the bell first, about ``action_id``, from agent ``source`` (by name: the
-    Line doesn't hand it back to that agent). Returns what each channel did, None
+    Line doesn't hand it back to that agent). ``phones=False`` leaves WhatsApp
+    and Telegram out (a nudge phone_gate kept off the phone; ``ring_phones``
+    sends it later if it was only held). Returns what each channel did, None
     where it is off: WhatsApp ``[sent, total]``, Telegram ``True/False``,
     devices how many beeped, the bell ``True/False``. Never raises."""
     out: dict[str, Any] = {"whatsapp": None, "telegram": None, "devices": None, "bell": None}
@@ -179,34 +182,8 @@ async def notify_owner(
     except Exception as exc:  # noqa: BLE001
         _log.debug("quiet hours for %s unknown: %s", user_id, exc)
 
-    if cfg.get("nudge_to_whatsapp", True) and not hushed:
-        try:
-            from captain_claw.flight_deck.fd_dispatch import _nudge_waids
-            from captain_claw.flight_deck.whatsapp_bridge import push_to_waid
-
-            waids, skipped = _nudge_waids(cfg)
-            sent = 0
-            for waid in waids:
-                if await push_to_waid(waid, text):
-                    sent += 1
-            out["whatsapp"] = [sent, len(waids)]
-            if waids:
-                store.log(user_id, f"{kind} → whatsapp", f"sent to {sent}/{len(waids)} recipient(s)")
-            elif skipped:
-                store.log(user_id, f"{kind} → whatsapp skipped", skipped)
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("%s whatsapp delivery failed: %s", kind, exc)
-
-    if cfg.get("notify_telegram", False) and not hushed:
-        try:
-            from captain_claw.flight_deck.fd_scheduler import _deliver_telegram_owner
-
-            res = await _deliver_telegram_owner(user_id, text)
-            out["telegram"] = bool(res.get("ok"))
-            store.log(user_id, f"{kind} → telegram" + ("" if res.get("ok") else " skipped"),
-                      str(res.get("note") or ""))
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("%s telegram delivery failed: %s", kind, exc)
+    if phones and not hushed:
+        out.update(await ring_phones(user_id, kind, text, cfg))
 
     if cfg.get("notify_devices", True):
         try:
@@ -225,6 +202,53 @@ async def notify_owner(
                           f"{'beeped' if beep else 'shown quietly (quiet hours) on'} {len(reached)} device(s)")
         except Exception as exc:  # noqa: BLE001
             _log.debug("%s device delivery failed: %s", kind, exc)
+    return out
+
+
+async def ring_phones(user_id: str, kind: str, text: str,
+                      cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Send ``text`` to the phones ``user_id`` switched on: WhatsApp
+    (``nudge_to_whatsapp``) and their Telegram chat with the deck's bot
+    (``notify_telegram``). Returns ``{"whatsapp": [sent, total] | None,
+    "telegram": True/False | None}``. Never raises."""
+    out: dict[str, Any] = {"whatsapp": None, "telegram": None}
+    text = str(text or "").strip()
+    if not text:
+        return out
+    try:
+        cfg = cfg or resolve_config(user_id)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("notify: no config for %s: %s", user_id, exc)
+        return out
+    store = get_store()
+    if cfg.get("nudge_to_whatsapp", True):
+        try:
+            from captain_claw.flight_deck.fd_dispatch import _nudge_waids
+            from captain_claw.flight_deck.whatsapp_bridge import push_to_waid
+
+            waids, skipped = _nudge_waids(cfg)
+            sent = 0
+            for waid in waids:
+                if await push_to_waid(waid, text):
+                    sent += 1
+            out["whatsapp"] = [sent, len(waids)]
+            if waids:
+                store.log(user_id, f"{kind} → whatsapp", f"sent to {sent}/{len(waids)} recipient(s)")
+            elif skipped:
+                store.log(user_id, f"{kind} → whatsapp skipped", skipped)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("%s whatsapp delivery failed: %s", kind, exc)
+
+    if cfg.get("notify_telegram", False):
+        try:
+            from captain_claw.flight_deck.fd_scheduler import _deliver_telegram_owner
+
+            res = await _deliver_telegram_owner(user_id, text)
+            out["telegram"] = bool(res.get("ok"))
+            store.log(user_id, f"{kind} → telegram" + ("" if res.get("ok") else " skipped"),
+                      str(res.get("note") or ""))
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("%s telegram delivery failed: %s", kind, exc)
     return out
 
 
