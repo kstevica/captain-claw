@@ -72,8 +72,14 @@ The fix, one PR:
   `owner_id` already is in Basna. (Check that every agent-side caller sends `web_auth`.)
 - FD: `hosting` `kind='app'` (publish with `auto_start`, `start`) is admin-only on a
   sign-in deck until apps run inside the same sandbox as agents. Static sites stay open.
+  *Since 2026-11: also an approved Crew user's with **Hosted apps** ticked, on purpose:
+  their worker already has shell-level reach as the deck user, and the app gets no more
+  (their Crew home and environment, no deck secrets, limits). Decided by the app's owner
+  in `hosting_routes.launch`, whoever starts it. When agents and workers get a sandbox,
+  these apps belong in it too.*
 - Agent: `deck_confine` refuses `hosting` app actions for the `user` tier, with the same
-  message as the other code-running tools.
+  message as the other code-running tools. *Since 2026-11 it doesn't: the owner's
+  approval changes while an agent runs, so Flight Deck decides on every call.*
 - Agent: for the `user` tier, `direct_api`, `apis`, `web_fetch` and `browser` refuse
   loopback, link-local and private addresses (resolved, not just the literal host).
 

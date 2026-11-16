@@ -270,20 +270,22 @@ def test_user_agent_installs_no_skill_dependencies(deck):
     assert not res.ok and res.message == deck_confine.EXEC_REFUSED
 
 
-# ── hosting: a non-admin's agent publishes static sites, not apps ────
+# ── hosting: an app is Flight Deck's to allow, on the owner's approval ────
+#
+# A non-admin's agent used to be refused here. Whether its owner may run an app
+# is an admin's tick that changes while the agent runs (Users → Crew → Hosted
+# apps), so the call goes to Flight Deck, which decides on every call
+# (tests/test_flight_deck/test_hosting_crew_apps.py).
 
 
-async def test_user_agent_publishes_static_not_apps(deck):
+async def test_user_agent_hosting_calls_reach_flight_deck(deck):
     assert (await call(deck, "hosting", {"action": "publish", "kind": "static",
                                          "name": "site", "project": "saved"})).success
     for args in ({"action": "publish", "kind": "app", "name": "srv",
                   "project": "saved", "start_cmd": "node server.js"},
                  {"action": "start", "name": "srv"}):
-        with pytest.raises(ToolBlockedError) as info:
-            await call(deck, "hosting", args)
-        assert info.value.reason == deck_confine.HOSTING_APP_REFUSED
-    assert not deck.probes["hosting"].calls or all(
-        c.get("kind") != "app" for c in deck.probes["hosting"].calls)
+        assert (await call(deck, "hosting", args)).success
+    assert [c.get("action") for c in deck.probes["hosting"].calls] == ["publish", "publish", "start"]
 
 
 async def test_admin_agent_hosts_apps(deck):

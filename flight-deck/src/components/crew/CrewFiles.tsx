@@ -34,7 +34,7 @@ function LinkCard({ link, busy, onStart }: { link: CrewLink; busy: boolean; onSt
     return (
       <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
         <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-zinc-800 text-zinc-400"><Globe className="h-[18px] w-[18px]" /></span>
-        <p className="min-w-0 flex-1 basis-48 text-sm text-zinc-400">This page is stopped. It keeps its address, and comes back when you start it.</p>
+        <p className="min-w-0 flex-1 basis-48 text-sm text-zinc-400">This {link.kind === 'app' ? 'app' : 'page'} is stopped. It keeps its address, and comes back when you start it.</p>
         <button disabled={busy} onClick={onStart} className={primaryBtn}><Play className="h-4 w-4" /> Start</button>
       </div>
     )
@@ -46,7 +46,11 @@ function LinkCard({ link, busy, onStart }: { link: CrewLink; busy: boolean; onSt
         <span className="min-w-0 flex-1 basis-48"><CopyChip text={fullUrl(link.url)} /></span>
         <a href={link.url} target="_blank" rel="noreferrer" className={quietBtn}><ExternalLink className="h-4 w-4" /> Open</a>
       </div>
-      <p className="text-xs text-zinc-500">Anyone with this address can open it. It follows the task's files, without the repository's history. Stop or remove it under Live sites.</p>
+      <p className="text-xs text-zinc-500">
+        {link.kind === 'app'
+          ? "Anyone with this address can open it. It runs the task's files, without the repository's history: restart it under Live sites to pick up new ones, or stop or remove it there."
+          : "Anyone with this address can open it. It follows the task's files, without the repository's history. Stop or remove it under Live sites."}
+      </p>
     </div>
   )
 }
