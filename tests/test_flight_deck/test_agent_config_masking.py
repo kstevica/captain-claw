@@ -221,11 +221,13 @@ class TestSaveKeepsTheRealValues:
         got = await _read(BOB)
         env = got["env"].replace("OLLAMA_BASE_URL=http://127.0.0.1:11434", "OLLAMA_BASE_URL=http://box:11434")
         env = env.replace("ANTHROPIC_API_KEY=····abcd", "export ANTHROPIC_API_KEY = '····abcd'")
-        config = got["config_yaml"].replace("gpt-4.1", "gpt-4.1-mini")
+        # (Not the model: on the team's key a non-admin keeps to the team's —
+        # test_team_model_limit.py.)
+        config = got["config_yaml"].replace("vision: true", "vision: false")
         r = await _save(BOB, {"config_yaml": config, "env": env + "NEW_VAR=1\n"})
         assert r.status_code == 200, r.text
         cfg_text, env_text = _files("bob-agent")
-        assert f"api_key: {ENDPOINT_KEY}" in cfg_text and "gpt-4.1-mini" in cfg_text
+        assert f"api_key: {ENDPOINT_KEY}" in cfg_text and "vision: false" in cfg_text
         assert "····" not in cfg_text and "····" not in env_text
         assert f"export ANTHROPIC_API_KEY = '{TEAM_KEY}'" in env_text
         assert f'BRAVE_API_KEY="{OWN_KEY}"' in env_text

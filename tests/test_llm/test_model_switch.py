@@ -287,3 +287,75 @@ async def test_refresh_keeps_what_flight_deck_lists(monkeypatch, _home):
 async def test_refresh_without_flight_deck_does_nothing(_home):
     assert await model_switch.refresh_custom("openai", "http://gw:4000/v1") is False
     assert not model_switch.CHOICES_PATH.exists()
+
+
+# ── the team's key holds a non-admin's agent to the team's models ─────
+
+_DS = "https://api.deepseek.com"
+
+
+def _deepseek(cfg):
+    cfg.model.provider, cfg.model.base_url, cfg.model.model = "openai", _DS, "deepseek-flash"
+    agent = FakeAgent(model="deepseek-flash")
+    agent.provider.provider, agent.provider.base_url = "openai", _DS
+    return agent
+
+
+async def test_without_a_limit_the_catalog_is_offered(cfg, _home):
+    agent = _deepseek(cfg)
+    assert [c["model"] for c in agent.model_switch_wire()["choices"]] == ["deepseek-v4-pro", "deepseek-flash"]
+    ok, _m, choice = await agent.switch_model("smartest")
+    assert ok and choice["model"] == "deepseek-v4-pro"
+
+
+async def test_a_limit_keeps_only_the_team_s_models(cfg, _home):
+    model_switch.save_custom("openai", _DS, [], limit=["deepseek-flash"])
+    agent = _deepseek(cfg)
+    assert _models(agent.model_switch_choices()) == ["deepseek-flash"]
+    assert agent.model_switch_wire() is None  # no picker
+    ok, message, _c = await agent.switch_model("deepseek-v4-pro")
+    assert not ok and "team's key" in message and "deepseek-flash" in message
+    assert agent.provider.model == "deepseek-flash"
+
+
+async def test_a_limit_naming_the_pricier_model_lets_it_through(cfg, _home):
+    model_switch.save_custom("openai", _DS, [], limit=["deepseek-flash", "deepseek-v4-pro"])
+    ok, _m, choice = await _deepseek(cfg).switch_model("pro")
+    assert ok and choice["model"] == "deepseek-v4-pro"
+
+
+async def test_a_switch_made_before_the_limit_goes_back_at_the_next_turn(cfg, _home):
+    agent = _deepseek(cfg)
+    ok, _m, _c = await agent.switch_model("deepseek-v4-pro")
+    assert ok and agent.provider.model == "deepseek-v4-pro"
+    assert agent._drop_disallowed_switch() is False  # nothing holds it yet
+    model_switch.save_custom("openai", _DS, [], limit=["deepseek-flash"])
+    assert agent._session_model_selection() is None  # a reload doesn't bring it back
+    assert agent._drop_disallowed_switch() is True
+    assert agent.provider.model == "deepseek-flash" and "model_selection" not in agent.session.metadata
+    assert agent._drop_disallowed_switch() is False
+
+
+async def test_the_allowlist_is_held_too(cfg, _home):
+    model_switch.save_custom("openai", _DS, [], limit=["deepseek-flash"])
+    agent = _deepseek(cfg)
+    agent._resolve_allowed_model = lambda key: {
+        "id": "pro", "provider": "openai", "model": "deepseek-v4-pro", "base_url": _DS}
+    ok, message = await agent.set_session_model("pro")
+    assert not ok and "team's key" in message
+    assert agent.provider.model == "deepseek-flash"
+
+
+async def test_refresh_keeps_the_limit_flight_deck_sends(monkeypatch, _home):
+    import httpx
+
+    def handler(_request):
+        return httpx.Response(200, json={"models": [], "limit": ["deepseek-flash"]})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    monkeypatch.setenv("FD_URL", "http://fd.test")
+    assert await model_switch.refresh_custom("openai", _DS) is True
+    assert model_switch.team_limit("openai", _DS) == ["deepseek-flash"]
+    assert model_switch.team_limit("openai", "http://gw:4000/v1") is None  # another endpoint
+    assert model_switch.fetched_recently("openai", _DS) is True

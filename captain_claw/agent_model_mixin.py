@@ -8,6 +8,16 @@ import os
 from captain_claw.config import Config, get_config
 from captain_claw.flight_deck.endpoints import same_endpoint
 from captain_claw.llm import create_provider, model_switch, set_provider
+from captain_claw.logging import get_logger
+
+log = get_logger(__name__)
+
+
+def _team_only_text(models: list[str]) -> str:
+    """Why a non-admin's agent on the team's key can't run another model."""
+    names = ", ".join(models) or "the model it was set up with"
+    return ("This agent runs on your team's key, so it stays on the models your team's admin "
+            f"picked for it ({names}). Ask an admin for another one, or use your own API key.")
 
 
 class AgentModelMixin:
@@ -341,8 +351,12 @@ class AgentModelMixin:
             # A model switched to on the configured endpoint: once the agent
             # runs somewhere else (its model changed in Flight Deck), it no
             # longer applies.
-            home_provider, _home_model, home_base = self._switch_home()
+            home_provider, home_model, home_base = self._switch_home()
             if not same_endpoint(provider, raw.get("base_url"), home_provider, home_base):
+                return None
+            # …nor once the team's key holds it to models this isn't one of.
+            if not model_switch.is_model(model, home_model) and not model_switch.in_limit(
+                    model, model_switch.team_limit(home_provider, home_base)):
                 return None
         return {
             "id": str(raw.get("id", "")).strip(),
@@ -398,6 +412,12 @@ class AgentModelMixin:
         option = self._resolve_allowed_model(key)
         if not option:
             return False, f"Model not found in allowlist: {selector}"
+        home_provider, _home_model, home_base = self._switch_home()
+        limit = model_switch.team_limit(home_provider, home_base)
+        if limit is not None and not (
+                same_endpoint(option.get("provider"), option.get("base_url"), home_provider, home_base)
+                and model_switch.in_limit(str(option.get("model") or ""), limit)):
+            return False, _team_only_text(limit)
 
         try:
             self._apply_model_option(
@@ -532,10 +552,22 @@ class AgentModelMixin:
         blocked = self._model_switch_blocked()
         if blocked:
             return False, blocked, None
+        # Flight Deck's answer (the team's limit too) is checked when it's old.
+        home_provider, _home_model, home_base = self._switch_home()
+        if home_provider and not model_switch.fetched_recently(home_provider, home_base):
+            try:
+                await model_switch.refresh_custom(home_provider, home_base)
+            except Exception:
+                pass
+        limit = model_switch.team_limit(home_provider, home_base)
         options = self.model_switch_choices()
         if len(options) < 2:
+            if limit is not None:
+                return False, _team_only_text(limit), None
             return False, "There is no other model to switch to on this agent's provider.", None
         choice, could_be = model_switch.resolve(options, selector)
+        if choice is None and limit is not None and not could_be:
+            return False, _team_only_text(limit), None
         if choice is None:
             names = ", ".join(o["model"] for o in (could_be or options))
             what = f"{selector!r} could be: {names}" if could_be else f"No model {selector!r} here — the choices are: {names}"
@@ -576,6 +608,30 @@ class AgentModelMixin:
                 return True, f"Switched to {choice['name']}, but it couldn't be kept for later: {exc}", choice
         where = "for the rest of this turn" if mode == "turn" else "for this conversation from now on"
         return True, f"Switched to {choice['name']} ({choice['model']}) {where}.", choice
+
+    def _drop_disallowed_switch(self) -> bool:
+        """Back to the configured model when this conversation was switched to
+        one the team's key no longer allows (:func:`model_switch.team_limit`,
+        fetched since). True when it went back."""
+        session = getattr(self, "session", None)
+        if session is None or not isinstance(session.metadata, dict):
+            return False
+        raw = session.metadata.get("model_selection")
+        if not isinstance(raw, dict) or not raw.get("switch"):
+            return False
+        provider, home_model, base_url = self._switch_home()
+        model = str(raw.get("model") or "").strip()
+        if model_switch.is_model(model, home_model) or model_switch.in_limit(
+                model, model_switch.team_limit(provider, base_url)):
+            return False
+        session.metadata.pop("model_selection", None)
+        try:
+            self._activate_choice({"model": home_model, "default": True})
+        except Exception as exc:
+            log.warning("Couldn't go back to the configured model", error=str(exc))
+        log.info("Switched model dropped: not one of the team's models",
+                 model=model, back_to=home_model)
+        return True
 
     def _restore_turn_model(self) -> bool:
         """Back to the model the turn started on, after a switch for the turn
