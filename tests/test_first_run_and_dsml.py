@@ -46,6 +46,91 @@ def test_plain_text_is_untouched():
     assert dsml.strip_dsml(text) == text and dsml.dsml_calls(text) == []
 
 
+# Broken markup DeepSeek Flash wrote (cohort001, 2026-11-16): a strict reader
+# found no call in any of these, so the reply shipped and the tool never ran.
+_B = "｜｜DSML｜｜"
+
+
+def _p(name, value, string="true", q='"'):
+    return f"<{_B} parameter name={q}{name}{q} string={q}{string}{q}>{value}</{_B} parameter>\n"
+
+
+def test_an_invoke_left_open_runs_when_the_block_closes():
+    text = (f"Checking now.\n\n<{_B} calls>\n<{_B} invoke name=\"glob\">\n"
+            + _p("pattern", "**/draft*") + _p("scope", "workspace") + f"</{_B} calls>")
+    assert dsml.dsml_calls(text) == [("glob", {"pattern": "**/draft*", "scope": "workspace"})]
+    assert dsml.strip_dsml(text) == "Checking now."
+
+
+def test_a_stray_fullwidth_lt_in_closers_and_prose_after():
+    text = (f"<{_B} calls>\n<{_B} invoke name=\"cron\">\n" + _p("action", "list")
+            + f"</＜｜DSML｜｜ invoke>\n<{_B} invoke name=\"glob\">\n" + _p("pattern", "*.png")
+            + "</＜｜DSML｜｜ calls>\n\nIf that went through, you'll get a mail.")
+    assert dsml.dsml_calls(text) == [("cron", {"action": "list"}), ("glob", {"pattern": "*.png"})]
+    assert dsml.strip_dsml(text) == "If that went through, you'll get a mail."
+
+
+def test_an_opening_calls_tag_used_as_the_closer():
+    text = (f"<{_B} calls>\n<{_B} invoke name=\"image_manipulation\">\n" + _p("action", "info")
+            + _p("paths", '["saved/a.png"]', string="false") + f"<{_B} calls>")
+    assert dsml.dsml_calls(text) == [("image_manipulation", {"action": "info", "paths": ["saved/a.png"]})]
+    assert dsml.strip_dsml(text) == ""
+
+
+def test_single_quotes_and_an_invoke_without_parameters():
+    quoted = f"<{_B} calls> <{_B} invoke name='insights'> " + _p("action", "add", q="'") + f"</{_B} calls>"
+    assert dsml.dsml_calls(quoted) == [("insights", {"action": "add"})]
+    bare = f"<{_B} calls>\n<{_B} invoke name=\"self_check\">\n\n</{_B} calls>"
+    assert dsml.dsml_calls(bare) == [("self_check", {})]
+
+
+def test_two_blocks_each_with_an_open_invoke():
+    text = (f"<{_B} calls>\n<{_B} invoke name=\"colleagues\">\n" + _p("action", "list")
+            + f"</{_B} calls>\n<{_B} invoke name=\"glob\">\n" + _p("pattern", "*.md")
+            + f"</{_B} calls>")
+    assert dsml.dsml_calls(text) == [("colleagues", {"action": "list"}), ("glob", {"pattern": "*.md"})]
+    assert dsml.strip_dsml(text) == ""
+
+
+def test_an_unfinished_call_never_runs():
+    cut_value = f"Writing it.\n<{_B} calls>\n<{_B} invoke name=\"write\">\n" + _p("path", "saved/x.html") \
+        + f"<{_B} parameter name=\"content\" string=\"true\"><!doctype html>\n<html><head>"
+    assert dsml.dsml_calls(cut_value) == []
+    assert dsml.strip_dsml(cut_value) == "Writing it."
+    quoted_at_end = f"It broke on this:\n<{_B} calls>\n<{_B} invoke name=\"glob\">"
+    assert dsml.dsml_calls(quoted_at_end) == []
+    assert dsml.strip_dsml(quoted_at_end) == "It broke on this:"
+    quoted_mid = f"The call `<{_B} invoke name=\"glob\">` failed silently, so I switched."
+    assert dsml.dsml_calls(quoted_mid) == []
+    assert dsml.strip_dsml(quoted_mid) == "The call `` failed silently, so I switched."
+
+
+def test_the_history_keeps_no_call_markup():
+    from captain_claw.agent import Agent
+    from captain_claw.llm import LLMProvider, LLMResponse
+    from captain_claw.session import Session
+
+    class _Stub(LLMProvider):
+        provider = "openai"
+        model = "stub"
+
+        async def complete(self, messages, tools=None, temperature=None, max_tokens=None):
+            return LLMResponse(content="ok")
+
+        async def complete_streaming(self, messages, tools=None, temperature=None, max_tokens=None):
+            if False:
+                yield ""
+
+        def count_tokens(self, text):
+            return len(text.split()) or 1
+
+    agent = Agent(provider=_Stub())
+    agent.session = Session(id="s1", name="default")
+    agent._add_session_message("assistant", f"Testing now.\n\n<{_B} calls>\n<{_B} invoke name=\"glob\">")
+    agent._add_session_message("assistant", f"<{_B} calls>\n<{_B} invoke name=\"glob\">")
+    assert [m["content"] for m in agent.session.messages] == ["Testing now.", ""]
+
+
 def test_the_agent_runs_dsml_calls():
     from captain_claw.agent_tool_loop_mixin import AgentToolLoopMixin
 

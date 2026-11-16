@@ -1428,6 +1428,14 @@ class AgentSessionMixin:
             from captain_claw.card_scrub import scrub
 
             content = scrub(content)[0]
+        # DeepSeek's call markup (captain_claw/dsml.py) is a call, never words:
+        # left in the history, a broken call teaches the model to write it again
+        # instead of calling the tool. An emptied message is skipped in context.
+        if content and role == "assistant":
+            from captain_claw.dsml import has_dsml, strip_dsml
+
+            if has_dsml(content):
+                content = strip_dsml(content)
         # Attach model label for assistant messages so the UI can display it.
         model_label = ""
         if role == "assistant":
