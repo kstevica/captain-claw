@@ -238,6 +238,53 @@ def test_a_cron_turn_that_skipped_its_tool_is_counted_bad(tmp_path):
     with_sm(tmp_path, run)
 
 
+# ── a scheduled run that skips its tools is sent back once ───────────
+
+from captain_claw import fabrication_guard as fg  # noqa: E402
+
+DAILY_WATCH = (
+    "DAILY WATCH: new tenders for the service.\n"
+    "1) Run web_search on these queries: ...\n"
+    "2) Check each candidate; record new ones in saved/tmp/watch/register.md."
+)
+COPIED_REPLY = (
+    "Starting the daily watch. Running the queries in parallel.\n\n"
+    "Checking the official gazette and the single notices.\n\n"
+    "**Nothing new.**\n\nNine queries — new notice IDs (70001, 70002) checked one by one."
+)
+
+
+def _facts(**kw):
+    base = dict(request=DAILY_WATCH, no_tool_call=True, scheduled=True,
+                tools=frozenset({"web_search", "web_fetch", "read", "write"}))
+    base.update(kw)
+    return fg.TurnFacts(**base)
+
+
+def test_tools_named_counts_code_names_only():
+    assert fg.tools_named(DAILY_WATCH, ["read", "web_search", "web_fetch"]) == ("web_search",)
+    assert fg.tools_named("read the register", ["read"]) == ()
+
+
+def test_scheduled_run_without_its_tools_is_turned_down():
+    verdict = fg.judge_reply(COPIED_REPLY, COPIED_REPLY, _facts())
+    assert verdict.false and verdict.kinds[0] == fg.SKIPPED_TOOLS
+    assert "web_search" in verdict.corrective
+    assert verdict.backstop == fg.SKIPPED_TOOLS_BACKSTOP
+    assert fg.NARRATED_LOOKUP not in verdict.kinds   # one corrective, not two
+
+
+@pytest.mark.parametrize("facts", [
+    dict(scheduled=False),                 # a person's turn: the lookup check decides
+    dict(no_tool_call=False),              # it did call tools
+    dict(tools=frozenset({"read"})),       # the named tool isn't offered
+    dict(request="Remind me to stretch."),  # names no tool
+])
+def test_other_turns_are_not_skipped_runs(facts):
+    verdict = fg.judge_reply("Time to stretch!", "Time to stretch!", _facts(**facts))
+    assert fg.SKIPPED_TOOLS not in verdict.kinds
+
+
 # ── list/scale machinery stays out of cron turns ─────────────────────
 
 
