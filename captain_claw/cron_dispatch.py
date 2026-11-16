@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -216,9 +217,63 @@ def wrap_cron_prompt(job_id: str | None, prompt_text: str) -> str:
         "later or in N minutes — now is the moment. If the task needs your tools, "
         "call them in this turn: a reply that only says you are doing it does "
         "nothing. Reply in the same language as the task.\n"
-        f"{checklist}\n"
-        f"Task:\n{prompt_text}"
+        f"{checklist}"
+        "If the task has an end (every row filled, every file processed, a "
+        "marker past its last value) and you have just checked with your tools "
+        "that the end is reached, so later runs would have nothing left to do, "
+        f"put {JOB_COMPLETE_MARKER} alone on the last line of your reply: this "
+        "job is then stopped. Never for a job meant to repeat (a digest, a "
+        "recurring check) or when only this run's batch is done.\n"
+        f"\nTask:\n{prompt_text}"
     )
+
+
+# A job whose task has an end says it reached it with this line (see
+# wrap_cron_prompt); the run then stops the job. Two jobs that had filled their
+# sheet kept reading one cell every 15 minutes for hours, ~100k input tokens a
+# run, each reply saying "done — remove this job".
+JOB_COMPLETE_MARKER = "[JOB COMPLETE]"
+_JOB_COMPLETE_LINE_RE = re.compile(
+    r"^[\s*_`>]*\[\s*JOB[\s_-]+COMPLETE\s*\][\s*_`.!]*$", re.IGNORECASE | re.MULTILINE,
+)
+
+
+def job_complete_claimed(reply: str) -> bool:
+    """Whether *reply* carries the job-complete line (any case, any markdown)."""
+    return bool(_JOB_COMPLETE_LINE_RE.search(reply or ""))
+
+
+def strip_job_complete(reply: str) -> str:
+    """*reply* without the job-complete line, for what the user is shown."""
+    return _JOB_COMPLETE_LINE_RE.sub("", reply or "").rstrip()
+
+
+async def stop_completed_job(ctx: RuntimeContext, job_id: str, *, session_id: str = "") -> bool:
+    """Stop a repeating job whose run said its task is finished: disabled with
+    status ``completed`` (resumable like a paused one), and its chat is told.
+    True when the job was stopped."""
+    sm = ctx.agent.session_manager
+    try:
+        job = await sm.load_cron_job(job_id)
+    except Exception:
+        log.debug("cron complete: job load failed", job_id=job_id, exc_info=True)
+        return False
+    if job is None or not getattr(job, "enabled", False):
+        return False
+    why = "Its task says the work is finished, so it won't run again. Resume it if there is more to do."
+    await sm.update_cron_job(job_id, enabled=False, last_status="completed", last_error=why)
+    log.info("cron job stopped: task complete", job_id=job_id)
+    await cron_monitor_event(ctx, "job_completed", history_job_id=job_id, job_id=job_id)
+    await cron_chat_event(ctx, job_id, "system", f"[CRON] job stopped: {why}")
+    target = session_id or str(getattr(job, "session_id", "") or "")
+    if ctx.on_cron_output and target:
+        try:
+            await ctx.on_cron_output(
+                target, f"⏹ Cron {job_id[:8]} stopped — {_job_description(job)}\n\n{why}".strip(),
+            )
+        except Exception:
+            log.debug("cron complete notice failed", exc_info=True)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -284,15 +339,34 @@ def turn_tool_calls(agent: Any) -> int:
         return len(counts)
 
 
-def run_did_nothing(reply: str, tool_calls: int) -> bool:
+def task_names_a_tool(task_text: str, tool_names: Iterable[str]) -> bool:
+    """Whether a job's text calls one of the agent's tools by its code name
+    (``google_drive``, ``web_fetch`` …). Only names with an underscore count:
+    "read" or "browser" are also plain words a reminder may use."""
+    text = task_text or ""
+    for name in tool_names or ():
+        name = str(name or "")
+        if "_" in name and re.search(rf"(?<![\w]){re.escape(name)}(?![\w])", text):
+            return True
+    return False
+
+
+def run_did_nothing(
+    reply: str, tool_calls: int, *, task_text: str = "", tool_names: Iterable[str] = (),
+) -> bool:
     """A prompt run that used no tool and whose reply is empty, only announces
     the work ("Running the reply-watch — checking the inbox now.") or narrates
-    lookups that never ran. A reply with no tool that just says something
-    ("Time to stretch!") is a run that did its job."""
+    lookups that never ran — or whose job names a tool to use (*task_text*,
+    *tool_names*) and still called none: its "the marker reads 501, confirmed
+    by reading" was copied from earlier runs (dozens of such runs, all counted
+    ok, so the pause after bad runs never came). A reply with no tool that just says
+    something ("Time to stretch!") is a run that did its job."""
     if tool_calls > 0:
         return False
     text = (reply or "").strip()
     if not text:
+        return True
+    if task_text and task_names_a_tool(task_text, tool_names):
         return True
     try:
         from captain_claw.agent_orchestration_mixin import _looks_like_stall

@@ -350,6 +350,91 @@ class AgentContextGovernorMixin:
         selected.update(prior_kept)
         return after, dropped + (len(chain) - len(kept_chain)) + len(prior) - len(prior_kept)
 
+    def _plain_fill(
+        self,
+        candidate_messages: list[dict[str, Any]],
+        candidate_sidx: list[int | None],
+        selected: set[int],
+        used_tokens: int,
+        history_budget: int,
+        background_pos: int | None,
+        cost: Callable[[int], int],
+    ) -> tuple[int, int]:
+        """The packer without the governor: everything when it fits; past the
+        budget, cut-and-hold too. Adds to *selected*, returns ``(used, dropped)``.
+
+        It used to drop the oldest messages one by one, as many as each call
+        needed, and fill gaps with smaller older ones: the first kept message
+        moved on every call of a long turn, so the provider's prompt cache
+        missed the whole history every time (one scheduled run: dozens of
+        calls, each billed ~90k uncached tokens). Now a cut keeps the newest whole
+        steps down to ~60% of the budget, and the following calls keep that
+        cut and only append — one cache miss per cut."""
+        free = [p for p in range(len(candidate_messages))
+                if p not in selected and p != background_pos]
+        if used_tokens + sum(cost(p) for p in free) <= history_budget:
+            selected.update(free)
+            return used_tokens + sum(cost(p) for p in free), 0
+        dropped = 0
+        # Live notes (newest positions) first, as before.
+        for pos in reversed(free):
+            if "_live_notes" in candidate_messages[pos]:
+                c = cost(pos)
+                if used_tokens + c <= history_budget:
+                    selected.add(pos)
+                    used_tokens += c
+                else:
+                    dropped += 1
+        rest = [p for p in free if "_live_notes" not in candidate_messages[p]]
+        room = max(0, history_budget - used_tokens)
+        window = getattr(self, "_turn_window", None)
+        if not isinstance(window, dict):
+            window = {"floor": None, "prior": None}
+
+        def _tail(floor: int) -> list[int]:
+            start = next((i for i, p in enumerate(rest)
+                          if candidate_sidx[p] is not None and candidate_sidx[p] >= floor), len(rest))
+            return rest[start:]
+
+        held = window.get("plain_floor")
+        if held is not None:
+            kept = _tail(held)
+            kept_cost = sum(cost(p) for p in kept)
+            if kept_cost <= room:
+                selected.update(kept)
+                return used_tokens + kept_cost, dropped + len(rest) - len(kept)
+        # Cut on a message boundary that keeps each tool result with its call:
+        # a step opens at a user or assistant message.
+        groups: list[list[int]] = []
+        for pos in rest:
+            role = str(candidate_messages[pos].get("role", "")).strip().lower()
+            if role in ("user", "assistant") or not groups:
+                groups.append([pos])
+            else:
+                groups[-1].append(pos)
+        low = max(0, int(self._GOVERNOR_LOW * history_budget) - used_tokens)
+        kept_groups: list[list[int]] = []
+        acc = 0
+        for group in reversed(groups):
+            c = sum(cost(p) for p in group)
+            if acc + c > room:
+                if not kept_groups:
+                    continue         # one step bigger than the whole room: skip it, keep older ones
+                break
+            if kept_groups and acc + c > low:
+                break
+            kept_groups.insert(0, group)
+            acc += c
+        kept = [p for g in kept_groups for p in g]
+        floor = next((candidate_sidx[p] for p in kept if candidate_sidx[p] is not None), None)
+        window["plain_floor"] = floor
+        self._turn_window = window
+        log.info("Context window cut", dropped_messages=len(rest) - len(kept),
+                 kept_messages=len(kept), history_after=used_tokens + acc,
+                 budget=history_budget, recut=held is not None)
+        selected.update(kept)
+        return used_tokens + acc, dropped + len(rest) - len(kept)
+
     # ── reasoning echo ───────────────────────────────────────────────
 
     def _echo_floor_after_cut(self, candidate_messages: list[dict[str, Any]],
