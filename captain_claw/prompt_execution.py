@@ -7,6 +7,7 @@ the mutable state that used to live inside ``run_interactive()``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -210,11 +211,18 @@ async def run_prompt_in_active_session(
     on_assistant_text: Callable[[str], Awaitable[None]] | None = None,
     after_turn: Callable[[int, str, str], Awaitable[None]] | None = None,
     channel: str | None = None,
+    cron_reply_session_id: str | None = None,
+    on_cron_result: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     """Execute one user prompt using the currently selected session.
 
     *channel* names the surface the prompt came from (cli, telegram, slack…),
-    recorded on the turn's opening message."""
+    recorded on the turn's opening message.
+
+    A cron run's result, pause and stop notices go to *cron_reply_session_id*
+    (the chat its job was set up from) — by default the session the run is in.
+    *on_cron_result* gets the result too, to keep it in that chat when the run
+    happened in the job's own session."""
     if not prompt_text.strip():
         return
 
@@ -223,6 +231,10 @@ async def run_prompt_in_active_session(
 
     agent = ctx.agent
     ui = ctx.ui
+
+    def _reply_session_id() -> str:
+        """Where this cron run reports: its job's chat, else its own session."""
+        return (cron_reply_session_id or "").strip() or (agent.session.id if agent.session else "")
 
     async def _turn_authority() -> mail_authority.Authority:
         """Who started this turn, for the mail-write guard.
@@ -398,25 +410,29 @@ async def run_prompt_in_active_session(
                         )
                 # Always confirm completion back to the request's origin —
                 # with the job id + task, even when the run produced no text.
-                if ctx.on_cron_output and agent.session:
+                reply_sid = _reply_session_id()
+                from captain_claw.cron_dispatch import format_cron_completion
+
+                result_msg = format_cron_completion(
+                    cron_job_id, prompt_text or "", assistant_text.strip(), ok=True,
+                    did_nothing=did_nothing,
+                )
+                if ctx.on_cron_output and reply_sid:
                     try:
-                        from captain_claw.cron_dispatch import format_cron_completion
-                        msg = format_cron_completion(
-                            cron_job_id, prompt_text or "", assistant_text.strip(), ok=True,
-                            did_nothing=did_nothing,
-                        )
-                        await ctx.on_cron_output(agent.session.id, msg)
+                        await ctx.on_cron_output(reply_sid, result_msg)
                     except Exception:
                         log.debug("on_cron_output callback failed", exc_info=True)
+                if on_cron_result:
+                    try:
+                        await on_cron_result(result_msg)
+                    except Exception:
+                        log.debug("cron result not kept in its chat", exc_info=True)
                 outcome_noted = True
                 await note_run_outcome(
-                    ctx, cron_job_id, "no_action" if did_nothing else "ok",
-                    session_id=agent.session.id if agent.session else "",
+                    ctx, cron_job_id, "no_action" if did_nothing else "ok", session_id=reply_sid,
                 )
                 if job_complete:
-                    await stop_completed_job(
-                        ctx, cron_job_id, session_id=agent.session.id if agent.session else "",
-                    )
+                    await stop_completed_job(ctx, cron_job_id, session_id=reply_sid)
             if on_assistant_text:
                 outbound_text = assistant_text.strip()
                 if not outbound_text and agent.session:
@@ -478,7 +494,9 @@ async def run_prompt_in_active_session(
                     try:
                         from captain_claw.cron_dispatch import note_run_outcome
 
-                        await note_run_outcome(ctx, cron_job_id, "failed", detail=str(e))
+                        await note_run_outcome(
+                            ctx, cron_job_id, "failed", detail=str(e), session_id=_reply_session_id(),
+                        )
                     except Exception:
                         log.debug("cron outcome record failed", exc_info=True)
                 # execute_cron_job must not count it a second time.
@@ -542,6 +560,7 @@ async def run_queued_followup_prompt(ctx: RuntimeContext, run: FollowupRun) -> N
         source=str(payload.get("source", "followup")).strip() or "followup",
         cron_job_id=str(payload.get("cron_job_id", "")).strip() or None,
         trigger=str(payload.get("trigger", "scheduled")).strip() or "scheduled",
+        reply_session_id=str(payload.get("reply_session_id", "")).strip(),
     )
 
 
@@ -554,7 +573,11 @@ async def dispatch_prompt_in_session(
     cron_job_id: str | None = None,
     trigger: str = "scheduled",
     dedupe_mode: str = "prompt",
+    reply_session_id: str = "",
 ) -> str:
+    """Run *prompt_text* in *session_id*, or queue it as a follow-up while
+    that session is busy. A cron job's run reports to *reply_session_id* (the
+    chat the job was set up from) when it runs in a session of its own."""
     from captain_claw.cron_dispatch import cron_chat_event, cron_monitor_event
 
     session_lane = resolve_session_lane(session_id)
@@ -568,6 +591,7 @@ async def dispatch_prompt_in_session(
             source=source,
             cron_job_id=cron_job_id,
             trigger=trigger,
+            reply_session_id=reply_session_id,
         )
         return "executed"
 
@@ -604,6 +628,7 @@ async def dispatch_prompt_in_session(
                 "source": source,
                 "trigger": trigger,
                 "cron_job_id": cron_job_id or "",
+                "reply_session_id": reply_session_id or "",
             },
         ),
         settings,
@@ -640,6 +665,12 @@ async def dispatch_prompt_in_session(
     return "queued"
 
 
+# Results Flight Deck mirrors into the main chat wait in its session's metadata
+# under this key until the chat is idle (web/chat_handler.PENDING_RESULTS_KEY).
+# One that arrives while the agent is on a job's session lands there instead.
+_PENDING_RESULTS_KEY = "automation_results"
+
+
 async def run_prompt_in_session(
     ctx: RuntimeContext,
     session_id: str,
@@ -648,15 +679,33 @@ async def run_prompt_in_session(
     *,
     cron_job_id: str | None = None,
     trigger: str = "scheduled",
+    reply_session_id: str = "",
 ) -> None:
-    from captain_claw.cron_dispatch import cron_chat_event, cron_monitor_event
+    """Run *prompt_text* as a cron turn in *session_id*, then put the agent
+    back on the session it was on. *reply_session_id* is the chat a job set up
+    there reports to when *session_id* is the job's own session: the result
+    goes there and is kept in its history.
+
+    A web agent's main chat runs its turns outside the command queue, so the
+    switch waits for it to be idle and holds it busy meanwhile
+    (``ctx.hold_main_lane``): a chat turn running on the switched agent would
+    write into the job's session."""
+    from captain_claw.cron_dispatch import cron_monitor_event, keep_result_in_chat
 
     agent = ctx.agent
     selected = await agent.session_manager.load_session(session_id)
     if not selected:
         raise ValueError(f"Session not found: {session_id}")
+    reply_session_id = (reply_session_id or "").strip()
+    if reply_session_id == selected.id:
+        reply_session_id = ""
 
     async def _execute() -> None:
+        hold = getattr(ctx, "hold_main_lane", None)
+        async with (hold() if callable(hold) else contextlib.nullcontext()):
+            await _run()
+
+    async def _run() -> None:
         previous_session = agent.session
         previous_session_id = previous_session.id if previous_session else None
         previous_pipeline_mode = agent.pipeline_mode
@@ -664,15 +713,24 @@ async def run_prompt_in_session(
         if switched:
             agent.session = selected
             agent.refresh_session_runtime_flags()
+        run_session = agent.session
         # Force loop mode for cron — no human in the loop to iterate
         # on contract feedback, so contracts would just timeout.
         agent.pipeline_mode = "loop"
         agent.planning_enabled = False
+
+        async def _keep_result(text: str) -> None:
+            await keep_result_in_chat(
+                ctx, reply_session_id, text, job_id=cron_job_id or "",
+                open_session=previous_session if switched else None,
+            )
+
         try:
             await cron_monitor_event(
                 ctx, "prompt_start",
                 history_job_id=cron_job_id,
                 source=source, session_id=selected.id,
+                **({"reply_session_id": reply_session_id} if reply_session_id else {}),
             )
             ctx.ui.print_message(
                 "system",
@@ -698,6 +756,8 @@ async def run_prompt_in_session(
                 raise_on_error=bool(cron_job_id),
                 lane=CommandLane.CRON,
                 queue=False,
+                cron_reply_session_id=reply_session_id or None,
+                on_cron_result=_keep_result if (reply_session_id and cron_job_id) else None,
             )
             await cron_monitor_event(
                 ctx, "prompt_done",
@@ -732,8 +792,28 @@ async def run_prompt_in_session(
             agent.pipeline_mode = previous_pipeline_mode
             agent.planning_enabled = previous_pipeline_mode == "contracts"
             if switched and previous_session is not None:
-                restored = await agent.session_manager.load_session(previous_session_id)
-                agent.session = restored or previous_session
+                # The very object it was on, not a fresh load: what it holds
+                # unsaved (results waiting for the chat to be idle) stays.
+                agent.session = previous_session
                 agent.refresh_session_runtime_flags()
+                await _carry_pending_results(agent, run_session, previous_session)
 
     await enqueue_agent_task(ctx, selected.id, _execute, lane=CommandLane.CRON)
+
+
+async def _carry_pending_results(agent: Any, run_session: Any, chat: Any) -> None:
+    """Move results mirrored into the chat while the agent was on the run's
+    session (they landed there) back to the chat's waiting list."""
+    meta = getattr(run_session, "metadata", None)
+    chat_meta = getattr(chat, "metadata", None)
+    if run_session is chat or not isinstance(meta, dict) or not isinstance(chat_meta, dict):
+        return
+    moved = meta.pop(_PENDING_RESULTS_KEY, None)
+    if not moved:
+        return
+    chat_meta.setdefault(_PENDING_RESULTS_KEY, []).extend(moved)
+    try:
+        await agent.session_manager.save_session(run_session)
+        await agent.session_manager.save_session(chat)
+    except Exception:
+        log.debug("mirrored results not moved back to the chat", exc_info=True)

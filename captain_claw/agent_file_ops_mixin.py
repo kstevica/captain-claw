@@ -241,10 +241,16 @@ class AgentFileOpsMixin:
             return None
 
     def _current_session_slug(self) -> str:
-        """Return normalized session id used for folder scoping."""
+        """Return normalized session id used for folder scoping.
+
+        A session that keeps its files in another one's folders says so with
+        ``files_session_id`` (a scheduled job's own session: its files stay in
+        the chat it was set up from, where earlier runs left them)."""
         session_key = "default"
         if self.session and self.session.id:
-            session_key = self._normalize_session_slug(str(self.session.id))
+            meta = getattr(self.session, "metadata", None)
+            files_in = meta.get("files_session_id") if isinstance(meta, dict) else None
+            session_key = self._normalize_session_slug(str(files_in or self.session.id))
         return session_key
 
     def _build_script_relative_path(

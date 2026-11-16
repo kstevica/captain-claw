@@ -397,3 +397,76 @@ def test_live_notes_go_in_first():
     sidx.append(None)
     kept, used, _ = _fill(packer, msgs, sidx, 200)
     assert 30 in kept and used <= 200
+
+
+# ── a run in the job's own session reports to the chat ───────────────
+
+
+def _isolated_turn(sm, job_id, reply, tool_calls, text="Fill rows until B1 > 500."):
+    """A cron turn in the job's own session ("job-session") whose job was
+    set up in "chat-1"."""
+    from captain_claw.prompt_execution import run_prompt_in_active_session
+
+    agent = _Agent(sm, reply, tool_calls)
+    agent.session = types.SimpleNamespace(id="job-session", messages=[])
+    sent: list[tuple[str, str]] = []
+    kept: list[str] = []
+
+    async def on_cron_output(session_id, msg):
+        sent.append((session_id, msg))
+
+    async def on_cron_result(msg):
+        kept.append(msg)
+
+    ctx = types.SimpleNamespace(agent=agent, ui=_Ui(), on_cron_output=on_cron_output,
+                                last_next_steps=[])
+    coro = run_prompt_in_active_session(
+        ctx, text, queue=False, cron_job_id=job_id,
+        cron_reply_session_id="chat-1", on_cron_result=on_cron_result,
+    )
+    return coro, sent, kept
+
+
+def test_a_finish_in_the_jobs_session_stops_it_and_tells_the_chat(tmp_path):
+    async def run(sm):
+        job = await _job(sm)
+        coro, sent, kept = _isolated_turn(
+            sm, job.id, "B1 = 501, every row filled.\n[JOB COMPLETE]", {"google_drive": 1})
+        await coro
+        got = await sm.load_cron_job(job.id)
+        assert got.enabled is False and got.last_status == "completed"
+        # The result and the stop notice both go to the chat, never the job's session.
+        assert [sid for sid, _ in sent] == ["chat-1", "chat-1"]
+        assert sent[0][1].startswith(f"✅ Cron {job.id[:8]} finished")
+        assert "stopped" in sent[1][1]
+        assert all("JOB COMPLETE" not in text for _, text in sent)
+        # The result is kept in the chat as the chat saw it.
+        assert kept == [sent[0][1]]
+
+    with_sm(tmp_path, run)
+
+
+def test_a_run_that_did_nothing_in_the_jobs_session_pauses_and_tells_the_chat(tmp_path):
+    cfg_mod._config.cron.pause_after_bad_runs = 1
+
+    async def run(sm):
+        job = await _job(sm)
+        coro, sent, kept = _isolated_turn(sm, job.id, "Checking the sheet now.", {})
+        await coro
+        got = await sm.load_cron_job(job.id)
+        assert got.enabled is False and got.last_status == "paused" and got.bad_streak == 1
+        assert [sid for sid, _ in sent] == ["chat-1", "chat-1"]
+        assert "did nothing" in sent[0][1] and "paused" in sent[1][1]
+        assert kept and "did nothing" in kept[0]
+
+    with_sm(tmp_path, run)
+
+
+def test_a_run_in_the_chat_itself_reports_there_as_before(tmp_path):
+    async def run(sm):
+        job = await _job(sm)
+        coro, sent = _run_turn(sm, job.id, "Rows 101–150 written; B1 = 151.", {"google_drive": 3})
+        await coro
+        assert [sid for sid, _ in sent] == ["s1"]
+
+    with_sm(tmp_path, run)

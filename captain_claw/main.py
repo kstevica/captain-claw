@@ -341,6 +341,8 @@ async def run_interactive() -> None:
     ui.set_runtime_status("user input")
 
     ctx = RuntimeContext(agent=agent, ui=ui)
+    # The cron tool's run action starts a job through it.
+    agent._runtime_context = ctx
 
     # Start platform bridges
     await init_platforms(ctx)

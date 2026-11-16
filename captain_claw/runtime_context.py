@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -51,6 +52,13 @@ class RuntimeContext:
     # Callback invoked when a cron job produces assistant output.
     # Signature: (session_id: str, text: str) -> Awaitable[None]
     on_cron_output: Callable[[str, str], Awaitable[None]] | None = None
+
+    # Optional: an async context manager factory a cron turn runs under while
+    # it moves the agent onto a job's session. The web server's main chat runs
+    # its turns outside the command queue, so it waits for that chat to be
+    # idle and holds it busy meanwhile (prompt_execution.run_prompt_in_session).
+    # None (the CLI): the command queue already runs one turn at a time.
+    hold_main_lane: Callable[[], AbstractAsyncContextManager[None]] | None = None
 
     telegram: PlatformState = field(default_factory=lambda: PlatformState(
         name="telegram",

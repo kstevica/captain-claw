@@ -36,6 +36,8 @@ async def list_cron_jobs(server: WebServer, request: web.Request) -> web.Respons
             "schedule": j.schedule,
             "schedule_text": schedule_text,
             "session_id": j.session_id,
+            # A prompt job's own session, where its runs happen ("" before its first).
+            "run_session_id": getattr(j, "run_session_id", ""),
             "enabled": j.enabled,
             "created_at": j.created_at,
             "updated_at": j.updated_at,

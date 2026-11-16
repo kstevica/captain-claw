@@ -437,3 +437,381 @@ def test_fd_reads_did_nothing_and_skipped_runs():
     assert [r["status"] for r in runs] == ["no_action", "skipped"]
     assert runs[0]["error"] == cd.NO_ACTION_TEXT
     assert runs[1]["error"].startswith("missed its 2026-11-14 09:00 UTC slot")
+
+
+# ── a prompt job runs in a session of its own ─────────────────────────
+
+
+class _AnyUi:
+    def can_capture_escape(self):
+        return False
+
+    def __getattr__(self, name):
+        return lambda *a, **kw: None
+
+
+class _TurnAgent:
+    """What a cron prompt turn touches; records what the model was given."""
+
+    def __init__(self, manager, chat, reply="Checked the inbox: 2 new mails.", on_turn=None):
+        self.session_manager = manager
+        self.session = chat
+        self.pipeline_mode = "contracts"
+        self.planning_enabled = True
+        self._turn_is_automated = False
+        self.tools = SimpleNamespace(list_tools=lambda: ["read", "google_mail"])
+        self._reply = reply
+        self._on_turn = on_turn
+        self.turns: list[dict] = []
+
+    def refresh_session_runtime_flags(self):
+        return None
+
+    def _count_tokens(self, text):
+        return len(str(text or "").split())
+
+    def _record_timing_event(self, kind):
+        return None
+
+    async def _turn(self, prompt):
+        from captain_claw import mail_authority
+
+        s = self.session
+        self.turns.append({
+            "session_id": s.id, "name": s.name, "metadata": dict(s.metadata),
+            "history": [str(m.get("content") or "") for m in s.messages],
+            "job_text": mail_authority.current().job_text,
+        })
+        if self._on_turn:
+            self._on_turn(self)
+        # The turn's own messages, as the agent keeps them.
+        s.add_message("user", prompt)
+        s.add_message("assistant", self._reply)
+        self._turn_tool_call_counts = {"google_mail|{}": 1}
+        return self._reply
+
+    async def complete(self, prompt):
+        return await self._turn(prompt)
+
+    async def stream(self, prompt):
+        yield await self._turn(prompt)
+
+
+def _turn_ctx(agent):
+    from captain_claw.execution_queue import CommandQueueManager, FollowupQueueManager
+
+    ctx = _Ctx(agent.session_manager)
+    ctx.agent = agent
+    ctx.ui = _AnyUi()
+    ctx.command_queue = CommandQueueManager()
+    ctx.followup_queue = FollowupQueueManager()
+    ctx.last_next_steps = []
+    return ctx
+
+
+CHAT_HISTORY = [
+    "Can you look at my inbox every morning?",
+    "Done — a daily inbox check at 09:00.",
+    "Earlier run: inbox checked, nothing new — confirmed.",
+]
+INBOX_JOB = "check the inbox with google_mail and list new mails"
+
+
+async def _chat(sm, *, session_id=None, **meta):
+    from captain_claw.session import Session
+
+    chat = Session(id=session_id, name="main chat", metadata=dict(meta)) if session_id else \
+        await sm.create_session(name="main chat", metadata=dict(meta))
+    for i, text in enumerate(CHAT_HISTORY):
+        chat.add_message("user" if i % 2 == 0 else "assistant", text)
+    await sm.save_session(chat)
+    return chat
+
+
+async def _chat_job(sm, chat, text=INBOX_JOB, payload=None):
+    return await sm.create_cron_job(
+        kind="prompt", payload=payload or {"text": text}, schedule=DAILY, session_id=chat.id,
+        next_run_at=to_utc_iso(compute_next_run(DAILY)),
+    )
+
+
+def _mentions_chat(history):
+    return any(line in text for text in history for line in CHAT_HISTORY)
+
+
+def test_a_run_sees_only_its_jobs_session_and_reports_to_the_chat(cron_cfg, tmp_path):
+    from captain_claw import msg_origin
+    from captain_claw.flight_deck import agent_cron_routes as acr
+
+    async def run(sm):
+        chat = await _chat(sm)
+        agent = _TurnAgent(sm, chat)
+        ctx = _turn_ctx(agent)
+        job = await _chat_job(sm, chat)
+        await cd.execute_cron_job(ctx, job, trigger="manual")
+
+        # The model turn ran in the job's session, without the chat's history.
+        (turn,) = agent.turns
+        assert turn["session_id"] != chat.id
+        assert turn["name"] == f"⏰ {INBOX_JOB}"
+        assert turn["metadata"][cd.JOB_SESSION_KEY] == job.id
+        assert not _mentions_chat(turn["history"])
+        # The agent is back on the chat — the very object it was on.
+        assert agent.session is chat
+
+        # The result reached the chat: live, and kept in its history as a note.
+        assert [sid for sid, _ in ctx.sent] == [chat.id]
+        assert ctx.sent[0][1].startswith(f"✅ Cron {job.id[:8]} finished")
+        stored = await sm.load_session(chat.id)
+        assert [m["content"] for m in stored.messages[:3]] == CHAT_HISTORY
+        assert len(stored.messages) == 4  # nothing else of the run is in the chat
+        note = stored.messages[-1]
+        assert note["content"] == ctx.sent[0][1]
+        assert (note["origin"], note["origin_detail"], note["cron_job_id"]) == (
+            "system_note", "cron_result", job.id)
+        assert msg_origin.is_lane_note(note)
+
+        # The job knows its session; the run is there, and the job's record says ok.
+        got = await sm.load_cron_job(job.id)
+        assert got.run_session_id == turn["session_id"]
+        assert got.last_status == "ok" and got.bad_streak == 0
+        own = await sm.load_session(got.run_session_id)
+        assert any("Checked the inbox" in str(m.get("content")) for m in own.messages)
+        assert own.metadata[cd.JOB_CHAT_KEY] == chat.id
+
+        # Flight Deck's Scheduled view still reads the run from the job's record.
+        runs = acr.runs_from_history(got.chat_history, alive=True)
+        assert [r["status"] for r in runs] == ["ok"]
+        assert "Checked the inbox" in runs[0]["result"]
+
+        # The next run: the same session, its own earlier run in view, the chat not.
+        await cd.execute_cron_job(ctx, got, trigger="manual")
+        second = agent.turns[1]
+        assert second["session_id"] == turn["session_id"]
+        assert any("Checked the inbox" in text for text in second["history"])
+        assert not _mentions_chat(second["history"])
+        assert len((await sm.load_session(chat.id)).messages) == 5
+
+    with_sm(tmp_path, run)
+
+
+def test_an_existing_job_gets_its_session_on_its_first_run(cron_cfg, tmp_path):
+    """A job and file from before sessions per job: no column, no session.
+    The first run after the update makes the job's session and records it."""
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE cron_jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL,"
+        " schedule TEXT NOT NULL, session_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,"
+        " created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_run_at TEXT,"
+        " next_run_at TEXT NOT NULL, last_status TEXT NOT NULL DEFAULT 'pending', last_error TEXT,"
+        " chat_history TEXT NOT NULL DEFAULT '[]', monitor_history TEXT NOT NULL DEFAULT '[]',"
+        " bad_streak INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.execute(
+        "INSERT INTO cron_jobs (id, kind, payload, schedule, session_id, created_at, updated_at,"
+        " next_run_at) VALUES ('old-job', 'prompt', ?, '{\"type\": \"daily\", \"hour\": 9}',"
+        " 'old-chat', '2026-01-01', '2026-01-01', '2026-01-02')",
+        ('{"text": "' + INBOX_JOB + '"}',),
+    )
+    conn.commit()
+    conn.close()
+
+    async def run():
+        manager = SessionManager(path)
+        try:
+            chat = await _chat(manager, session_id="old-chat")
+            job = await manager.load_cron_job("old-job")
+            assert job is not None and job.run_session_id == ""
+            agent = _TurnAgent(manager, chat)
+            ctx = _turn_ctx(agent)
+            await cd.execute_cron_job(ctx, job, trigger="manual")
+            got = await manager.load_cron_job("old-job")
+            assert got.run_session_id and got.run_session_id != "old-chat"
+            assert agent.turns[0]["session_id"] == got.run_session_id
+            assert not _mentions_chat(agent.turns[0]["history"])
+            assert ctx.sent and ctx.sent[0][0] == "old-chat"
+            assert got.last_status == "ok"
+        finally:
+            await manager.close()
+
+    asyncio.run(run())
+
+
+def test_the_jobs_session_is_only_ever_its_own(tmp_path):
+    async def run(sm):
+        chat = await _chat(sm)
+        ctx = _Ctx(sm)
+        ctx.agent.session = chat
+        job = await _chat_job(sm, chat)
+        # An id that points at another session (here the chat) is never adopted.
+        await sm.update_cron_job(job.id, run_session_id=chat.id)
+        own = await cd.job_run_session(ctx, await sm.load_cron_job(job.id))
+        assert own.id != chat.id and cd.is_job_session(own, job.id)
+        assert (await sm.load_cron_job(job.id)).run_session_id == own.id
+        assert (await cd.job_run_session(ctx, await sm.load_cron_job(job.id))).id == own.id
+        # Deleted: a new one, recorded.
+        await sm.delete_session(own.id)
+        fresh = await cd.job_run_session(ctx, await sm.load_cron_job(job.id))
+        assert fresh.id != own.id
+        assert (await sm.load_cron_job(job.id)).run_session_id == fresh.id
+        # Another job with the same task gets a session of its own, not this one.
+        twin = await _chat_job(sm, chat)
+        twin_session = await cd.job_run_session(ctx, twin)
+        assert twin_session.name == fresh.name and twin_session.id != fresh.id
+        assert cd.is_job_session(twin_session, twin.id)
+
+    with_sm(tmp_path, run)
+
+
+def test_the_jobs_session_follows_the_chats_settings(tmp_path):
+    async def run(sm):
+        chat = await _chat(
+            sm, model_selection={"id": "model-a"}, origin={"kind": "whatsapp", "address": "chat-a"},
+            session_instructions="Answer briefly.", queue={"mode": "collect"},
+        )
+        ctx = _Ctx(sm)
+        ctx.agent.session = chat
+        job = await _chat_job(sm, chat)
+        meta = (await cd.job_run_session(ctx, job)).metadata
+        assert meta["model_selection"] == {"id": "model-a"}
+        assert meta["origin"] == {"kind": "whatsapp", "address": "chat-a"}
+        assert meta["session_instructions"] == "Answer briefly."
+        assert "queue" not in meta  # only the settings a run follows
+        assert meta[cd.JOB_CHAT_KEY] == chat.id and meta[cd.FILES_SESSION_KEY] == chat.id
+        # A setting dropped in the chat is dropped from the job's next run too.
+        del chat.metadata["model_selection"]
+        meta = (await cd.job_run_session(ctx, await sm.load_cron_job(job.id))).metadata
+        assert "model_selection" not in meta
+
+    with_sm(tmp_path, run)
+
+
+def test_a_jobs_session_keeps_its_files_in_the_chats_folder():
+    from captain_claw.agent_file_ops_mixin import AgentFileOpsMixin
+
+    def slug(session):
+        agent = SimpleNamespace(session=session,
+                                _normalize_session_slug=AgentFileOpsMixin._normalize_session_slug)
+        return AgentFileOpsMixin._current_session_slug(agent)
+
+    assert slug(SimpleNamespace(id="job-session", metadata={cd.FILES_SESSION_KEY: "chat-1"})) == "chat-1"
+    assert slug(SimpleNamespace(id="chat-1", metadata={})) == "chat-1"
+    assert slug(None) == "default"
+
+
+def test_a_job_set_up_during_a_run_reports_to_the_chat():
+    from captain_claw.tools.cron_tool import CronTool
+
+    tool = CronTool.__new__(CronTool)
+    tool._agent = SimpleNamespace(session=SimpleNamespace(
+        id="job-session", metadata={cd.JOB_SESSION_KEY: "j1", cd.JOB_CHAT_KEY: "chat-1"}))
+    assert tool._get_session_id() == "chat-1"
+    tool._agent.session = SimpleNamespace(id="chat-1", metadata={})
+    assert tool._get_session_id() == "chat-1"
+
+
+def test_mail_authority_still_comes_from_the_jobs_own_text(cron_cfg, tmp_path):
+    from captain_claw import mail_authority
+
+    payload = {"text": "email the inbox summary to the team", "author": "agent",
+               "mail_intent_text": "check my inbox every morning"}
+
+    async def run(sm):
+        chat = await _chat(sm)
+        agent = _TurnAgent(sm, chat)
+        job = await _chat_job(sm, chat, payload=payload)
+        await cd.execute_cron_job(_turn_ctx(agent), job, trigger="manual")
+        assert agent.turns[0]["job_text"] == mail_authority.cron_job_text(payload)
+
+    with_sm(tmp_path, run)
+
+
+def test_the_web_main_chat_is_held_while_the_agent_is_on_the_jobs_session(cron_cfg, tmp_path):
+    import contextlib
+
+    events: list = []
+
+    async def run(sm):
+        chat = await _chat(sm)
+        agent = _TurnAgent(sm, chat, on_turn=lambda a: events.append(("turn", a.session is chat)))
+        ctx = _turn_ctx(agent)
+
+        @contextlib.asynccontextmanager
+        async def hold():
+            events.append("hold")
+            yield
+            events.append(("release", agent.session is chat))
+
+        ctx.hold_main_lane = hold
+        await cd.execute_cron_job(ctx, await _chat_job(sm, chat), trigger="manual")
+
+    with_sm(tmp_path, run)
+    assert events == ["hold", ("turn", False), ("release", True)]
+
+
+def test_results_mirrored_into_the_chat_mid_run_go_back_to_it(cron_cfg, tmp_path):
+    """Flight Deck mirrors a result into ``agent.session`` — the job's while it
+    runs; it belongs to the chat."""
+
+    def mirror(agent):
+        agent.session.metadata.setdefault("automation_results", []).append(
+            {"label": "Scheduled task", "text": "Report ready."})
+
+    async def run(sm):
+        chat = await _chat(sm)
+        agent = _TurnAgent(sm, chat, on_turn=mirror)
+        job = await _chat_job(sm, chat)
+        await cd.execute_cron_job(_turn_ctx(agent), job, trigger="manual")
+        assert [r["text"] for r in chat.metadata["automation_results"]] == ["Report ready."]
+        own = await sm.load_session((await sm.load_cron_job(job.id)).run_session_id)
+        assert "automation_results" not in own.metadata
+
+    with_sm(tmp_path, run)
+
+
+def test_a_queued_run_still_reports_to_the_chat(monkeypatch):
+    import captain_claw.prompt_execution as pe
+    from captain_claw.execution_queue import FollowupRun
+
+    seen: dict = {}
+
+    async def fake_run(ctx, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(pe, "run_prompt_in_session", fake_run)
+    run = FollowupRun(prompt="check the inbox", enqueued_at_ms=0, metadata={
+        "session_id": "job-session", "cron_job_id": "j1", "reply_session_id": "chat-1"})
+    asyncio.run(pe.run_queued_followup_prompt(SimpleNamespace(), run))
+    assert seen["session_id"] == "job-session" and seen["reply_session_id"] == "chat-1"
+
+
+def test_a_run_that_gave_up_on_a_busy_main_chat_is_skipped_not_bad(cron_cfg, tmp_path):
+    import contextlib
+
+    from captain_claw.flight_deck import agent_cron_routes as acr
+
+    async def run(sm):
+        chat = await _chat(sm)
+        agent = _TurnAgent(sm, chat)
+        ctx = _turn_ctx(agent)
+
+        @contextlib.asynccontextmanager
+        async def busy():
+            raise cd.MainChatBusyError("the main conversation stayed busy for 15 minutes")
+            yield  # pragma: no cover
+
+        ctx.hold_main_lane = busy
+        job = await _chat_job(sm, chat)
+        await cd.execute_cron_job(ctx, job, trigger="scheduled")
+        assert agent.turns == [] and agent.session is chat
+        got = await sm.load_cron_job(job.id)
+        assert got.last_status == "skipped" and got.bad_streak == 0 and got.enabled is True
+        assert got.last_error.startswith("the main conversation stayed busy")
+        assert got.next_run_at > to_utc_iso(now_utc())
+        # One run in the Scheduled view: skipped, with the reason.
+        runs = acr.runs_from_history(got.chat_history, alive=True)
+        assert [r["status"] for r in runs] == ["skipped"]
+        assert runs[0]["error"].startswith("the main conversation stayed busy")
+
+    with_sm(tmp_path, run)

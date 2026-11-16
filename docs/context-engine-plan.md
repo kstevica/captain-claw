@@ -234,7 +234,9 @@ as dated one-liners, and a count of the automated turns and tool results folded 
 automation lane, workers) is still summarised by the model. Verified end to end against a real
 agent server and a stub LLM: an automated frame and a lane-A chat at once (no crosstalk, result
 mirrored), and the cue. Agent-local
-cron jobs (`/cron`, the cron tool) still run in the session they were created in.
+cron prompt jobs (`/cron`, the cron tool) run in a session of their own per job ("⏰ <task>",
+`cron_jobs.run_session_id`), reporting each result to the chat they were created in (live and as
+a note in its history) and keeping their files in that chat's folders.
 
 - Automated traffic (cron, autonomy, fleet notices) gets its own sessions, still listed for the
   user (user decision).

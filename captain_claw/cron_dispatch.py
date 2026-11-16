@@ -501,6 +501,154 @@ async def skip_missed_run(ctx: RuntimeContext, job: Any, why: str) -> None:
             log.debug("cron skip notice failed", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# A prompt job's own session
+# ---------------------------------------------------------------------------
+#
+# A prompt job runs in a session of its own (as Flight Deck's scheduled tasks
+# do), not in the chat it was set up from: run there, every run loaded that
+# whole conversation (35–140k input tokens a run in long chats, against
+# 20–30k in a session of its own), and a model copied earlier runs' replies,
+# kept in that history without their tool calls, instead of calling its tools.
+# The chat still gets each run's result (``ctx.on_cron_output`` and a note in
+# its history); the job's session keeps only that job's runs.
+
+class MainChatBusyError(RuntimeError):
+    """A run gave up waiting for the main chat to be idle (the web server's
+    ``RuntimeContext.hold_main_lane``): skipped, never counted as a bad run."""
+
+
+# Marks a session as one job's own: its runs, nothing else.
+JOB_SESSION_KEY = "cron_job"
+# The chat the job reports to (the one it was set up from).
+JOB_CHAT_KEY = "cron_chat_session_id"
+# Where the job's files live: the chat's saved/ folders, as before, so a job
+# that keeps a file across runs finds it (agent_file_ops_mixin).
+FILES_SESSION_KEY = "files_session_id"
+# Chat settings a run follows: the model, tool policy and instructions the
+# chat has, and where its results go (Flight Deck syncs the same keys onto its
+# automation lane, web/chat_handler._SHARED_SESSION_KEYS). Copied every run,
+# so a change in the chat reaches the job's next run.
+JOB_SESSION_INHERITED_KEYS = (
+    "model_selection", "tool_policy", "session_instructions",
+    "origin", "whatsapp_waid", "fd_url", "fleet_identity", "fleet_instructions", "peer_agents",
+)
+
+
+def job_session_name(job: Any) -> str:
+    """``⏰ <start of the task>`` — how the job's session is listed."""
+    words = _job_description(job)
+    if len(words) > 60:
+        words = words[:57] + "…"
+    if not words:
+        words = "Scheduled job " + str(getattr(job, "id", "") or "")[:8]
+    return f"⏰ {words}"
+
+
+def is_job_session(session: Any, job_id: str = "") -> bool:
+    """Whether *session* is a job's own (*job_id*'s, when given)."""
+    meta = getattr(session, "metadata", None)
+    if session is None or not isinstance(meta, dict):
+        return False
+    owner = str(meta.get(JOB_SESSION_KEY) or "")
+    return bool(owner) and (not job_id or owner == job_id)
+
+
+def job_chat_session_id(session: Any) -> str:
+    """The chat a job's session reports to; "" for any other session."""
+    meta = getattr(session, "metadata", None)
+    if not is_job_session(session) or not isinstance(meta, dict):
+        return ""
+    return str(meta.get(JOB_CHAT_KEY) or "")
+
+
+async def job_run_session(ctx: RuntimeContext, job: Any) -> Any:
+    """The session *job*'s runs happen in: its known one, else the newest of
+    its name that is marked as this job's, else a new one (a job from before
+    sessions per job gets its own on its first run). Only a session marked as
+    this job's is ever used. Each call copies the chat's settings onto it and
+    records its id on the job."""
+    import copy
+
+    sm = ctx.agent.session_manager
+    job_id = str(getattr(job, "id", "") or "")
+    chat_id = str(getattr(job, "session_id", "") or "").strip()
+    known = str(getattr(job, "run_session_id", "") or "").strip()
+    current = getattr(ctx.agent, "session", None)
+
+    async def _load(session_id: str) -> Any:
+        # Open on the agent right now (someone reading it): that very object,
+        # so neither save clobbers the other's messages.
+        if current is not None and str(getattr(current, "id", "")) == session_id:
+            return current
+        return await sm.load_session(session_id)
+
+    session = None
+    if known:
+        session = await _load(known)
+        if not is_job_session(session, job_id):
+            session = None
+    name = job_session_name(job)
+    if session is None:
+        by_name = await sm.load_session_by_name(name)
+        if is_job_session(by_name, job_id):
+            session = await _load(by_name.id)
+    if session is None:
+        session = await sm.create_session(name=name, metadata={JOB_SESSION_KEY: job_id})
+        log.info("cron job session created", job_id=job_id, session_id=session.id)
+
+    chat = None
+    if chat_id:
+        try:
+            chat = await _load(chat_id)
+        except Exception:
+            log.debug("cron job: chat load failed", job_id=job_id, exc_info=True)
+    meta = session.metadata
+    meta[JOB_SESSION_KEY] = job_id
+    meta["title"] = name
+    session.name = name  # the job's task was edited
+    if chat_id:
+        meta[JOB_CHAT_KEY] = chat_id
+        meta[FILES_SESSION_KEY] = chat_id
+    chat_meta = getattr(chat, "metadata", None)
+    if isinstance(chat_meta, dict):
+        for key in JOB_SESSION_INHERITED_KEYS:
+            if key in chat_meta:
+                meta[key] = copy.deepcopy(chat_meta[key])
+            else:
+                meta.pop(key, None)
+    await sm.save_session(session)
+    if session.id != known:
+        await sm.update_cron_job(job_id, run_session_id=session.id)
+    return session
+
+
+async def keep_result_in_chat(
+    ctx: RuntimeContext, chat_session_id: str, text: str, *,
+    job_id: str = "", open_session: Any = None,
+) -> bool:
+    """Keep a run's result in the chat it reports to, as the chat saw it live:
+    the chat's history used to hold the whole run, now it holds the result —
+    a note the model reads as another run's (``msg_origin.is_lane_note``), so
+    a follow-up there has it as context. *open_session* is the chat's Session
+    object when the agent has it open (written to directly, so its unsaved
+    state isn't lost). True when kept."""
+    text = (text or "").strip()
+    if not text or not chat_session_id:
+        return False
+    sm = ctx.agent.session_manager
+    chat = open_session
+    if chat is None or str(getattr(chat, "id", "")) != chat_session_id:
+        chat = await sm.load_session(chat_session_id)
+    if chat is None:
+        return False
+    chat.add_message("assistant", text, origin="system_note", origin_detail="cron_result")
+    if job_id:
+        chat.messages[-1]["cron_job_id"] = job_id
+    await sm.save_session(chat)
+    return True
+
+
 # Script / tool execution in session
 # ---------------------------------------------------------------------------
 
@@ -831,13 +979,17 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
             prompt_text = str(payload.get("text", "")).strip() if isinstance(payload, dict) else ""
             if not prompt_text:
                 raise ValueError(f"Cron job {job_id} has empty prompt payload")
+            # The run happens in the job's own session; its result goes to
+            # the chat the job was set up from (session_id).
+            run_session = await job_run_session(ctx, job)
             dispatch_status = await dispatch_prompt_in_session(
                 ctx,
-                session_id=session_id,
+                session_id=run_session.id,
                 prompt_text=prompt_text,
                 source=f"cron:{trigger}:{job_id}",
                 cron_job_id=job_id,
                 trigger=trigger,
+                reply_session_id=session_id,
             )
             queued_for_followup = dispatch_status == "queued"
         elif kind in {"script", "tool"}:
@@ -911,14 +1063,19 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
         await sm.update_cron_job(job_id, **update_kwargs)
     except Exception as e:
         error_text = str(e)
-        log.error("cron_job_execute_failed", job_id=job_id, trigger=trigger, error=error_text)
+        # The main chat stayed busy: not the job's doing — skipped, not a bad run.
+        busy = isinstance(e, MainChatBusyError)
+        if busy:
+            log.warning("cron job skipped: main chat busy", job_id=job_id, trigger=trigger)
+        else:
+            log.error("cron_job_execute_failed", job_id=job_id, trigger=trigger, error=error_text)
         await cron_monitor_event(
-            ctx, "job_failed", history_job_id=job_id,
+            ctx, "job_skipped" if busy else "job_failed", history_job_id=job_id,
             trigger=trigger, job_id=job_id, error=error_text,
         )
         await cron_chat_event(
             ctx, job_id, "system",
-            f"[CRON] job failed: {error_text}",
+            f"[CRON] job {'skipped' if busy else 'failed'}: {error_text}",
             trigger=trigger,
         )
         try:
@@ -929,9 +1086,10 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
             job_id,
             last_run_at=started_at_iso,
             next_run_at=next_run_at_iso,
+            **({"last_status": "skipped", "last_error": error_text} if busy else {}),
         )
         # A prompt turn that failed has already counted itself.
-        if not getattr(e, "_cron_outcome_noted", False):
+        if not busy and not getattr(e, "_cron_outcome_noted", False):
             await note_run_outcome(ctx, job_id, "failed", detail=error_text)
     finally:
         ctx.cron_running_job_ids.discard(job_id)
