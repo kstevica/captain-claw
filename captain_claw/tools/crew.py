@@ -567,7 +567,8 @@ class CrewTool(Tool):
         return f" It runs on {task.get('harness_label') or 'the CLI'}'s own login." if task.get("harness_label") else ""
 
     @staticmethod
-    def _where_lines(results: dict) -> list[str]:
+    def _where_lines(results: dict, *, apps: bool = False) -> list[str]:
+        """*apps*: the user may run a hosted app here, so say how to run what it made."""
         lines = []
         if results.get("files_path"):
             what = "the whole project" if results.get("whole") else "only what it changed"
@@ -577,13 +578,19 @@ class CrewTool(Tool):
         if results.get("publish"):
             lines.append(f"For a link to this page: hosting action=publish kind=static project={results['publish']['project']} "
                          f"subdir={results['publish']['subdir']} name=<a short name>")
+        if apps and results.get("files_path"):
+            project, _, subdir = results["files_path"].removeprefix("vfs:").strip("/").partition("/")
+            first = "" if results.get("whole") else "First crew action=files whole=true, so the whole project is there. Then "
+            lines.append(f"To run it as an app (a server, not a page), only when the user wants that: {first}hosting action=publish "
+                         f"kind=app project={project} subdir={subdir} start_cmd=<the command that starts it; it must listen on "
+                         f"$PORT> name=<a short name>")
         return lines
 
     async def _do_files(self, client: Any, **kwargs: Any) -> ToolResult:
         refused, data = await self._with_task(client, "files", kwargs, whole=bool(kwargs.get("whole")))
         if refused is not None:
             return refused
-        lines = self._where_lines(data)
+        lines = self._where_lines(data, apps=bool(data.get("apps")))
         if data.get("landed") and data.get("project_path"):
             lines.insert(0, f"Merged. The project itself: {data['project_path']}")
         names = data.get("files") or []

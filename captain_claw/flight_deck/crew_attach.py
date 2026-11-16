@@ -61,13 +61,64 @@ def _drop_old(uid: str) -> None:
             continue
 
 
-async def save_upload(uid: str, upload: Any) -> dict[str, Any]:
-    """Keeps an uploaded file for this person until they send it or it goes stale."""
+_TEXT_TYPES = {".md": "text/markdown", ".markdown": "text/markdown", ".log": "text/plain", ".jsonl": "application/x-ndjson",
+               ".yaml": "application/yaml", ".yml": "application/yaml", ".toml": "application/toml", ".ts": "text/plain",
+               ".tsx": "text/plain"}
+
+
+def type_of(name: str) -> str:
+    """A file's type by its name: the platform's table misses some (``.md`` on a Mac)."""
+    ext = os.path.splitext(name)[1].lower()
+    return _TEXT_TYPES.get(ext) or mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+
+def _new_slot(uid: str) -> tuple[str, Path]:
     _drop_old(uid)
-    name = clean_name(upload.filename or "")
     upload_id = secrets.token_hex(10)
     folder = _uploads(uid) / upload_id
     folder.mkdir()
+    return upload_id, folder
+
+
+def _kept(folder: Path, upload_id: str, name: str, size: int, kind: str) -> dict[str, Any]:
+    meta = {"id": upload_id, "name": name, "size": size, "type": kind}
+    (folder / _META).write_text(json.dumps(meta), encoding="utf-8")
+    return meta
+
+
+def stage_copy(uid: str, source: Path, name: str = "") -> dict[str, Any]:
+    """A file already on this computer (one an agent of theirs made), kept like an upload.
+    The caller has checked it's theirs to hand over."""
+    name = clean_name(name or source.name)
+    size = source.stat().st_size
+    if size > MAX_FILE_BYTES:
+        raise HTTPException(413, f"{name} is bigger than {MAX_FILE_BYTES // 1_000_000} MB.")
+    if not size:
+        raise HTTPException(400, f"{name} is empty.")
+    upload_id, folder = _new_slot(uid)
+    try:
+        shutil.copyfile(source, folder / name)
+    except OSError:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(404, f"{name} couldn't be read.") from None
+    return _kept(folder, upload_id, name, size, type_of(name))
+
+
+def stage_text(uid: str, name: str, text: str, kind: str = "text/markdown") -> dict[str, Any]:
+    """Words made here (a conversation written out), kept like an upload."""
+    name = clean_name(name)
+    data = text.encode("utf-8")
+    if len(data) > MAX_FILE_BYTES:
+        raise HTTPException(413, f"{name} would be bigger than {MAX_FILE_BYTES // 1_000_000} MB. Choose fewer messages.")
+    upload_id, folder = _new_slot(uid)
+    (folder / name).write_bytes(data)
+    return _kept(folder, upload_id, name, len(data), kind)
+
+
+async def save_upload(uid: str, upload: Any) -> dict[str, Any]:
+    """Keeps an uploaded file for this person until they send it or it goes stale."""
+    name = clean_name(upload.filename or "")
+    upload_id, folder = _new_slot(uid)
     size = 0
     try:
         with (folder / name).open("wb") as out:
@@ -84,9 +135,7 @@ async def save_upload(uid: str, upload: Any) -> dict[str, Any]:
     # The browser's word for it goes into a prompt, so it has to look like a type.
     said = (upload.content_type or "").split(";")[0].strip()
     kind = said if _MEDIA_TYPE.match(said) else mimetypes.guess_type(name)[0] or "application/octet-stream"
-    meta = {"id": upload_id, "name": name, "size": size, "type": kind}
-    (folder / _META).write_text(json.dumps(meta), encoding="utf-8")
-    return meta
+    return _kept(folder, upload_id, name, size, kind)
 
 
 def drop_upload(uid: str, upload_id: str) -> None:

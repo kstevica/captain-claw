@@ -65,6 +65,7 @@ log = get_logger(__name__)
 
 _POLL_S = 2.0
 _ENFORCE_EVERY = 30  # ticks
+_APPS_EVERY = 15  # ticks: hosted apps' memory, running time and owners
 _READ_MAX = 4_000_000
 _DIFF_MAX = 400_000
 _REPORT_NAME = "report.md"
@@ -1547,10 +1548,13 @@ async def enforce_grant(uid: str) -> int:
     """An approval just went or narrowed: what it no longer covers stops now."""
     from captain_claw.flight_deck import crew_terminal
 
+    from captain_claw.flight_deck import hosting_routes
+
     user = await _user_of(uid)
     grant = crew_access.grant_of(user)
     if not grant.terminal:
         crew_terminal.close_for(uid)
+    await hosting_routes.enforce_apps(uid)  # their hosted apps, by the same approval
     stopped = 0
     for task in _store().with_status(*crew_store.ACTIVE):
         # A repository being got has no harness, and needs only the approval.
@@ -1562,7 +1566,11 @@ async def enforce_grant(uid: str) -> int:
 
 
 async def forget_user(uid: str) -> None:
-    """Their account is gone: so are their workers and their Crew folder."""
+    """Their account is gone: so are their workers, their running apps and their Crew folder."""
+    from captain_claw.flight_deck import vfs_hosting
+
+    for name in vfs_hosting.running_apps(owner=uid):
+        vfs_hosting.stop_app(name)
     for task in _store().with_status(*crew_store.ACTIVE):
         if task["user_id"] == uid:
             await stop(uid, task["id"], "Stopped: the account was deleted.")
@@ -2170,7 +2178,9 @@ def _with_live_link(uid: str, results: dict[str, Any]) -> dict[str, Any]:
     entry = vfs_hosting.load_registry().get(known.get("name")) or {}
     if entry.get("owner") != uid:
         return {k: v for k, v in results.items() if k != "link"}
-    return {**results, "link": {**known, "stopped": bool(entry.get("stopped"))}}
+    # An app that isn't running is as good as stopped, to whoever wants to open it.
+    stopped = bool(entry.get("stopped")) or (entry.get("kind") == "app" and not vfs_hosting.app_is_alive(known["name"]))
+    return {**results, "link": {**known, "stopped": stopped}}
 
 
 def read_result(uid: str, task_id: str, path: str) -> dict[str, Any]:
@@ -2192,18 +2202,33 @@ def read_result(uid: str, task_id: str, path: str) -> dict[str, Any]:
             "text": "" if binary else data.decode("utf-8", "replace")}
 
 
-async def link(uid: str, task_id: str, wanted: str = "") -> dict[str, Any]:
+async def link(uid: str, task_id: str, wanted: str = "", *, kind: str = "static", start_cmd: str = "") -> dict[str, Any]:
     """A person's way to a page they can open and send on: the clean copy published,
-    so no .git goes with it. Stays current as the copy does. *wanted* names its address."""
+    so no .git goes with it. Stays current as the copy does. *wanted* names its address.
+
+    ``kind="app"`` runs the whole copy instead, with *start_cmd*, at /vfs-apps/<name>/,
+    on its owner's approval for hosted apps (``hosting_routes.launch``). A copy that
+    changes is picked up by a restart."""
     from captain_claw.flight_deck import hosting_routes, vfs_hosting
 
+    if kind not in ("static", "app"):
+        raise HTTPException(400, "kind is 'static' (a page) or 'app' (a program that runs).")
+    start_cmd = start_cmd.strip()
+    if kind == "app":
+        await hosting_routes._must_run_apps(uid)
+        if not start_cmd:
+            raise HTTPException(400, "Say how to start it: the command that runs its server, like npm start.")
     results = await files(uid, task_id, whole=True)
     registry = vfs_hosting.load_registry()
     known = results.get("link") or {}
     if known:
+        if known.get("kind", "static") != kind:
+            raise HTTPException(409, f"What it made is already online as {known['name']}. Remove that first, on Live sites.")
         return known
-    if not results.get("publish"):
+    if kind == "static" and not results.get("publish"):
         raise HTTPException(409, "There's no index.html in it, so there's no page to open.")
+    if kind == "app" and not results.get("files_path"):
+        raise HTTPException(409, "It made no files, so there's nothing to run.")
     task = _get(uid, task_id)
     base = re.sub(r"[^a-z0-9]+", "-", project_of(task)[1].lower()).strip("-")[:50] or "crew"
     name = wanted.strip().lower() or f"{base}-{task_id[-4:]}"
@@ -2214,14 +2239,28 @@ async def link(uid: str, task_id: str, wanted: str = "") -> dict[str, Any]:
             raise HTTPException(409, f"The name '{name}' is already taken.")
     while name in registry:
         name = f"{base}-{os.urandom(2).hex()}"
-    entry = {"kind": "static", "owner": uid, "start_cmd": "", **results["publish"]}
+    if kind == "app":
+        # The whole copy, not the page's folder: a server needs its package files.
+        rel = PurePosixPath(*Path(results["path"].removeprefix("vfs:")).parts[1:]) / "files"
+        entry = {"kind": "app", "owner": uid, "project": "crew", "subdir": str(rel), "start_cmd": start_cmd}
+    else:
+        entry = {"kind": "static", "owner": uid, "start_cmd": "", **results["publish"]}
     if vfs_hosting.entry_dir(entry) is None:
         raise HTTPException(404, "Its files aren't there any more.")
     registry[name] = entry
     vfs_hosting.save_registry(registry)
-    made = {"name": name, "url": hosting_routes._view(name, entry)["url"]}
+    made = {"name": name, "url": hosting_routes._view(name, entry)["url"], **({"kind": "app"} if kind == "app" else {})}
     _store().update(task_id, results={**(task.get("results") or {}), "link": made})
-    return {**made, "stopped": False}
+    if kind == "static":
+        return {**made, "stopped": False}
+    try:
+        started, message = await hosting_routes.launch(name)
+    except HTTPException as exc:  # it has its address; a limit kept it from starting
+        started, message = False, str(exc.detail)
+    out = {**made, "stopped": not started, "started": started, "message": message}
+    if not started:
+        out["log"] = vfs_hosting.read_app_log(name, tail=40)
+    return out
 
 
 async def diff(uid: str, task_id: str) -> dict[str, str]:
@@ -2478,6 +2517,18 @@ async def tick(*, enforce: bool = False) -> None:
     await _start_queued()
 
 
+async def watch_apps() -> None:
+    """Approved non-admins' hosted apps: stopped when past their memory or running
+    time (``crew_access.app_limits``), or when an owner's approval no longer covers
+    how one runs."""
+    from captain_claw.flight_deck import hosting_routes, vfs_hosting
+
+    limits = crew_access.app_limits()
+    for name, why in await asyncio.to_thread(vfs_hosting.police, limits.memory_mb, limits.hours):
+        log.info("Crew: stopped a hosted app", app=name, why=why)
+    await hosting_routes.enforce_app_owners()
+
+
 async def _loop(stop_event: asyncio.Event) -> None:
     ticks = 0
     while not stop_event.is_set():
@@ -2485,6 +2536,11 @@ async def _loop(stop_event: asyncio.Event) -> None:
             await tick(enforce=ticks % _ENFORCE_EVERY == 0)
         except Exception as exc:  # noqa: BLE001 — the watcher outlives any one bad read
             log.warning("Crew watcher pass failed", error=str(exc))
+        if ticks % _APPS_EVERY == 0:
+            try:
+                await watch_apps()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Crew: watching hosted apps failed", error=str(exc))
         ticks += 1
         try:
             await asyncio.wait_for(stop_event.wait(), _POLL_S)

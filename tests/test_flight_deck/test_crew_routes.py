@@ -559,6 +559,65 @@ async def test_a_task_link_can_be_named_and_follows_the_site(deck):
         assert (await client.post(f"{url}/link", json={"name": "again"})).json()["name"] == "again"
 
 
+async def test_what_a_task_made_runs_as_an_app_only_for_someone_approved_for_hosted_apps(deck, monkeypatch):
+    import shlex
+    import socket
+    import sys
+
+    from captain_claw.flight_deck import vfs_hosting
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        monkeypatch.setenv("VFS_APPS_PORT_BASE", str(probe.getsockname()[1]))
+    monkeypatch.setenv("VFS_APPS_PORT_SPAN", "50")
+    await _approve(deck, deck.user)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        made = (await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:page", "project": "Game"})).json()
+    await _settle(deck.user["id"], made["id"])
+    url = f"/fd/crew/tasks/{made['id']}"
+    start = f"{shlex.quote(sys.executable)} -m http.server $PORT --bind 127.0.0.1"
+    async with _client(deck.user) as client:
+        assert (await client.get("/fd/crew/me")).json()["apps"] is False
+        refused = await client.post(f"{url}/link", json={"name": "game-app", "kind": "app", "start_cmd": start})
+        assert refused.status_code == 403 and "Hosted apps" in refused.json()["detail"]
+        assert (await client.post(f"{url}/files")).json()["apps"] is False
+    async with _client(deck.admin) as admin:
+        listed = (await admin.get("/fd/admin/users")).json()
+        assert listed["crew"]["apps"] is True and listed["crew"]["app_limits"]["per_user"] == 2
+    await _approve(deck, deck.user, apps=True)
+    try:
+        async with _client(deck.user) as client:
+            me = (await client.get("/fd/crew/me")).json()
+            assert me["apps"] is True and me["app_limits"] == {"per_user": 2, "memory_mb": 1024, "hours": 0}
+            assert (await client.post(f"{url}/link", json={"kind": "app"})).status_code == 400  # how to start it?
+            app = (await client.post(f"{url}/link", json={"name": "game-app", "kind": "app", "start_cmd": start})).json()
+            assert app["url"] == "/vfs-apps/game-app/" and app["kind"] == "app" and app["started"] is True, app
+            entry = vfs_hosting.load_registry()["game-app"]
+            assert entry["project"] == "crew" and entry["subdir"].endswith("/files") and entry["reach"] == "crew"
+            # The whole copy is what runs, not only the page's folder.
+            assert (vfs_hosting.entry_dir(entry) / "site" / "index.html").is_file()
+            end = time.monotonic() + 15
+            while True:
+                try:
+                    page = httpx.get(f"http://127.0.0.1:{entry['port']}/site/index.html", timeout=2)
+                    break
+                except httpx.HTTPError:
+                    assert time.monotonic() < end, vfs_hosting.read_app_log("game-app")
+                    await asyncio.sleep(0.1)
+            assert page.status_code == 200 and page.text.startswith("<html>")
+            # One link per task: the same again, and not a page as well.
+            assert (await client.post(f"{url}/link", json={"kind": "app", "start_cmd": start})).json()["name"] == "game-app"
+            assert (await client.post(f"{url}/link")).status_code == 409
+            files = (await client.post(f"{url}/files")).json()
+            assert files["link"]["name"] == "game-app" and files["link"]["stopped"] is False and files["apps"] is True
+            vfs_hosting.stop_app("game-app")
+            assert (await client.post(f"{url}/files")).json()["link"]["stopped"] is True
+    finally:
+        for name in list(vfs_hosting.load_registry()):
+            vfs_hosting.stop_app(name)
+
+
 async def test_no_index_means_no_page_to_link(deck):
     await _approve(deck, deck.user)
     async with _client(deck.user) as client:

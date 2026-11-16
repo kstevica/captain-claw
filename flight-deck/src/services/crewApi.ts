@@ -58,11 +58,22 @@ export interface CrewModelChoices {
   tier_set: string
 }
 
+/** What one approved non-admin's hosted apps may take; 0 is no limit. */
+export interface CrewAppLimits {
+  per_user: number
+  memory_mb: number
+  hours: number
+}
+
 export interface CrewMe {
   offered: boolean
   allowed: boolean
   trusted?: boolean
   terminal?: boolean
+  /** May run a hosted app: an admin, or approved for hosted apps. */
+  apps?: boolean
+  /** Only for someone who isn't an admin: admins' apps have no such limits. */
+  app_limits?: CrewAppLimits | null
   max_parallel?: number
   harnesses?: CrewHarness[]
   logins?: Record<string, { hint: string; saved_at: string }>
@@ -99,12 +110,26 @@ export interface CrewLink {
   name: string
   url: string
   stopped?: boolean
+  /** Only an app says so: a link without it is a page. */
+  kind?: 'app'
+  /** An app just made: whether it came up, and if not, why and its last output. */
+  started?: boolean
+  message?: string
+  log?: string
 }
 
 export interface CrewFiles extends CrewResults {
   uncommitted: number
   landed: boolean
   project_path: string
+  apps?: boolean
+}
+
+/** A page, or the whole copy run as an app with a start command. */
+export interface CrewLinkAs {
+  name?: string
+  kind?: 'static' | 'app'
+  start_cmd?: string
 }
 
 export interface CrewFile {
@@ -273,8 +298,53 @@ export interface CrewTerminalTarget {
   task?: string
 }
 
+/** A file kept for a message that's still being written: uploaded, or copied in from an agent. */
+export interface CrewStaged {
+  id: string
+  name: string
+  size: number
+  type: string
+}
+
+/** One of the person's agents, whose files can go to a worker. */
+export interface CrewContextAgent {
+  id: string
+  name: string
+}
+
+export interface CrewAgentFile {
+  path: string
+  name: string
+  size: number
+  modified: number
+}
+
+/** A chat with an agent from Flight Deck's log: `id` is the lane (`proc-<slug>`, `…::B`, `shared:…`). */
+export interface CrewConversation {
+  id: string
+  agent: string
+  lane: string
+  updated_at: string
+}
+
+/** One of its sessions (the timeline's topics); `id` 0 is a log from before topics. */
+export interface CrewConversationSession {
+  id: number
+  title: string
+  started_at: string
+  count: number | null
+}
+
+export interface CrewConversationMessage {
+  id: number
+  role: 'user' | 'assistant'
+  at: string
+  text: string
+  chars: number
+}
+
 /** A multipart body, so not through api(), which says it's JSON. Renews a token that ran out, as that does. */
-async function uploadFile(file: File): Promise<{ id: string; name: string; size: number; type: string }> {
+async function uploadFile(file: File): Promise<CrewStaged> {
   const send = () => {
     const { token } = useAuthStore.getState()
     const form = new FormData()
@@ -300,6 +370,19 @@ export const crewApi = {
     api<CrewTask>(`/fd/crew/tasks/${id}/folders`, { method: 'PUT', body: JSON.stringify({ folders }) }),
   upload: uploadFile,
   dropUpload: (id: string) => api<{ ok: boolean }>(`/fd/crew/uploads/${id}`, { method: 'DELETE' }),
+  contextAgents: () => api<{ agents: CrewContextAgent[] }>('/fd/crew/agents').then((r) => r.agents),
+  agentFiles: (agent: string) => api<{ files: CrewAgentFile[]; more: boolean }>(`/fd/crew/agents/${encodeURIComponent(agent)}/files`),
+  /** Copies them in, kept like uploads: all or none. */
+  attachAgentFiles: (agent: string, paths: string[]) =>
+    post<{ files: CrewStaged[] }>('/fd/crew/uploads/agent-files', { agent, paths }).then((r) => r.files),
+  conversations: () => api<{ conversations: CrewConversation[]; kept: boolean }>('/fd/crew/conversations'),
+  conversationSessions: (lane: string) =>
+    api<{ sessions: CrewConversationSession[] }>(`/fd/crew/conversations/sessions?${new URLSearchParams({ lane })}`).then((r) => r.sessions),
+  conversationMessages: (lane: string, session: number) =>
+    api<{ messages: CrewConversationMessage[]; more: boolean }>(`/fd/crew/conversations/messages?${new URLSearchParams({ lane, session: String(session) })}`),
+  /** Messages first..last of one session, written out as a Markdown file and kept like an upload. */
+  attachConversation: (lane: string, session: number, first: number, last: number) =>
+    post<CrewStaged>('/fd/crew/uploads/conversation', { lane, session, first, last }),
   envs: () => api<{ envs: CrewEnv[] }>('/fd/crew/envs'),
   saveEnv: (id: string, body: CrewEnvSettings) => api<CrewEnv>(`/fd/crew/envs/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   envCurrent: (id: string) => post<CrewEnv>(`/fd/crew/envs/${id}/current`),
@@ -322,7 +405,10 @@ export const crewApi = {
   diff: (id: string) => api<{ committed: string; uncommitted: string; note?: string }>(`/fd/crew/tasks/${id}/diff`),
   files: (id: string, whole = false) => post<CrewFiles>(`/fd/crew/tasks/${id}/files?whole=${whole}`),
   file: (id: string, path: string) => api<CrewFile>(`/fd/crew/tasks/${id}/file?path=${encodeURIComponent(path)}`),
-  link: (id: string, name = '') => post<CrewLink>(`/fd/crew/tasks/${id}/link`, name ? { name } : undefined),
+  link: (id: string, name = '', as: CrewLinkAs = {}) => {
+    const body = { ...(name ? { name } : {}), ...as }
+    return post<CrewLink>(`/fd/crew/tasks/${id}/link`, Object.keys(body).length ? body : undefined)
+  },
   newProject: (name: string) => post<{ project: string; key: string; path: string }>('/fd/crew/projects', { name }),
   tidy: (key: string) => post<{ cleared: number; kept: number }>('/fd/crew/projects/tidy', { key }),
   dispatch: (body: CrewDispatch) => post<CrewTask>('/fd/crew/tasks', body),

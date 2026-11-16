@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Activity, ArrowLeft, Check, ExternalLink, FileCode2, FolderOpen, Globe, Loader2, Play, Plus, Server, Square, Terminal, Trash2,
+  Activity, ArrowLeft, Check, ExternalLink, FileCode2, FolderOpen, Globe, Loader2, Play, Plus, RotateCw, Server, Square, Terminal, Trash2,
 } from 'lucide-react'
 import { EmptyState, Pill, Segmented, Sheet, labelCls } from '../console/parts'
 import { AppLogs, SiteVisits } from '../../pages/HostingPage'
-import { crewApi, type CrewMe, type CrewTask } from '../../services/crewApi'
+import { crewApi, type CrewAppLimits, type CrewMe, type CrewTask } from '../../services/crewApi'
 import { hostingApi, type HostedSite } from '../../services/hostingApi'
 import {
   ChoiceTile, CopyChip, ErrorLine, dangerBtn, errorOf, fieldClass, fullUrl, hasPage, primaryBtn, quietBtn, sureDangerBtn, taskOfSite,
@@ -15,9 +15,24 @@ import { libraryIconBtn } from '../library/libraryParts'
 //
 // What this person has put on the web, whoever put it there: them, their agent, or
 // a task's Files tab. The same two verbs for a page and an app: a stopped one
-// keeps its address and comes back when it's started.
+// keeps its address and comes back when it's started. An app also restarts, to
+// pick up changed files.
 
 export const isLive = (s: HostedSite) => s.running && !s.missing
+
+/** Whether this person may run a hosted app: an admin, or an admin approved it (Users → Crew). */
+const canRunApps = (me: CrewMe | null) => !!(me?.apps ?? me?.trusted)
+
+const megabytes = (mb: number) => (mb >= 1024 && mb % 1024 === 0 ? `${mb / 1024} GB` : `${mb} MB`)
+
+/** What a non-admin's apps may take, in a sentence; nothing for an admin's. */
+function appLimitsText(limits?: CrewAppLimits | null): string {
+  if (!limits) return ''
+  const parts = [`up to ${limits.per_user} running at once`]
+  if (limits.memory_mb) parts.push(`${megabytes(limits.memory_mb)} of memory each`)
+  if (limits.hours) parts.push(`${limits.hours} hour${limits.hours === 1 ? '' : 's'} at a time`)
+  return `Your apps: ${parts.join(', ')}.`
+}
 
 function SitePill({ site }: { site: HostedSite }) {
   if (site.missing) return <Pill tone="amber">Files gone</Pill>
@@ -88,6 +103,9 @@ function SiteCard({ site, task, canRunApps, onChanged, onOpenTask }: {
         <div className="flex flex-wrap items-center gap-1.5">
           {isLive(site) && <a href={site.url} target="_blank" rel="noreferrer" className={quietBtn}><ExternalLink className="h-4 w-4" /> Open</a>}
           {site.running && !site.missing && <button disabled={busy} onClick={() => act(() => hostingApi.stop(site.name))} className={quietBtn}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />} Stop</button>}
+          {app && site.running && !site.missing && canRunApps && (
+            <button disabled={busy} onClick={() => act(() => hostingApi.restart(site.name))} className={`${quietBtn} !p-2`} title="Restart it: stop and start again, to pick up changed files" aria-label="Restart it"><RotateCw className="h-4 w-4" /></button>
+          )}
           {!site.running && startable && <button disabled={busy} onClick={() => act(() => hostingApi.start(site.name))} className={primaryBtn}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} Start</button>}
           <button
             onClick={() => setMore((v) => !v)} aria-expanded={more} title={app ? 'Its output' : 'Its visits'} aria-label={app ? 'Its output' : 'Its visits'}
@@ -101,7 +119,7 @@ function SiteCard({ site, task, canRunApps, onChanged, onOpenTask }: {
             <button disabled={busy} onClick={() => setSure(true)} className={`${dangerBtn} !border-zinc-800 !p-2`} title="Remove it: its address goes too" aria-label="Remove it"><Trash2 className="h-4 w-4" /></button>
           )}
         </div>
-        {!startable && !site.running && !site.missing && <p className="basis-full text-xs text-zinc-500">Only an admin can start an app on this Flight Deck.</p>}
+        {!startable && !site.running && !site.missing && <p className="basis-full text-xs text-zinc-500">Hosted apps aren't turned on for your account. An admin can turn them on, under Users → Crew.</p>}
         {site.missing && <p className="basis-full text-xs text-amber-700 dark:text-amber-300">The folder it served is gone, so there's nothing to show. Remove it, or publish something new.</p>}
         {error && <div className="basis-full"><ErrorLine text={error} /></div>}
       </div>
@@ -118,7 +136,7 @@ export function CrewSites({ sites, tasks, me, onBack, onChanged, onOpenTask, onP
   const online = list.filter(isLive)
   const rest = list.filter((s) => !isLive(s))
   const card = (s: HostedSite) => (
-    <SiteCard key={s.name} site={s} task={taskOfSite(s, tasks)} canRunApps={!!me?.trusted} onChanged={onChanged} onOpenTask={onOpenTask} />
+    <SiteCard key={s.name} site={s} task={taskOfSite(s, tasks)} canRunApps={canRunApps(me)} onChanged={onChanged} onOpenTask={onOpenTask} />
   )
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
@@ -157,20 +175,30 @@ const toName = (text: string) => text.toLowerCase().replace(/[^a-z0-9-]+/g, '-')
 export function PublishSheet({ tasks, sites, me, onClose, onDone }: {
   tasks: CrewTask[]; sites: HostedSite[]; me: CrewMe | null; onClose: () => void; onDone: () => void
 }) {
+  const appsOk = canRunApps(me)
   const hosted = useMemo(() => new Set(sites.map((s) => s.name)), [sites])
-  const pages = useMemo(() => tasks.filter((t) => hasPage(t.results) && !hosted.has(t.results?.link?.name ?? '')), [tasks, hosted])
+  const unlinked = useMemo(() => tasks.filter((t) => !hosted.has(t.results?.link?.name ?? '')), [tasks, hosted])
+  const pages = useMemo(() => unlinked.filter((t) => hasPage(t.results)), [unlinked])
+  // An app runs the task's whole copy, so any task that left files will do.
+  const runnable = useMemo(() => unlinked.filter((t) => !!t.results?.files_path), [unlinked])
+  const [kind, setKind] = useState<'static' | 'app'>('static')
+  const app = appsOk && kind === 'app'
+  const made = app ? runnable : pages
   const [source, setSource] = useState<'task' | 'folder'>(pages.length ? 'task' : 'folder')
-  const [taskId, setTaskId] = useState(pages[0]?.id ?? '')
+  const [picked, setTaskId] = useState(pages[0]?.id ?? '')
+  // A page and an app choose from different tasks: the choice is one on the list shown.
+  const taskId = made.some((t) => t.id === picked) ? picked : (made[0]?.id ?? '')
   const [projects, setProjects] = useState<string[]>([])
   const [project, setProject] = useState('')
   const [folders, setFolders] = useState<string[]>([''])
   const [folder, setFolder] = useState('')
-  const [kind, setKind] = useState<'static' | 'app'>('static')
   const [startCmd, setStartCmd] = useState('')
   const [name, setName] = useState('')
   const [named, setNamed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // It has its address but didn't start: what's left is to close and look at its output.
+  const [published, setPublished] = useState(false)
 
   useEffect(() => {
     hostingApi.projects().then((r) => {
@@ -186,7 +214,7 @@ export function PublishSheet({ tasks, sites, me, onClose, onDone }: {
   }, [source, project])
 
   // A name to start from, until they type their own.
-  const chosen = pages.find((t) => t.id === taskId)
+  const chosen = made.find((t) => t.id === taskId)
   useEffect(() => {
     if (named) return
     const word = source === 'task' ? chosen?.project_name : (folder.split('/').pop() || project)
@@ -194,17 +222,29 @@ export function PublishSheet({ tasks, sites, me, onClose, onDone }: {
   }, [named, source, chosen?.project_name, folder, project])
 
   const taken = hosted.has(name)
-  const app = source === 'folder' && kind === 'app'
   const ready = !!name && !taken && (source === 'task' ? !!chosen : !!project) && (!app || !!startCmd.trim())
+
+  const notStarted = (why: string) => {
+    setPublished(true)
+    setError(`It's at its address, but it didn't start: ${why.replace(/\.?$/, '.')} Start it again from its card, where its output is too.`)
+    setBusy(false)
+  }
 
   const submit = async () => {
     setBusy(true); setError('')
     try {
       if (source === 'task') {
-        await crewApi.link(taskId, name)
+        const link = await crewApi.link(taskId, name, app ? { kind: 'app', start_cmd: startCmd.trim() } : {})
+        if (app && link.started === false) return notStarted(link.message || 'no reason given')
       } else {
-        await hostingApi.publish({ name, kind, project, subdir: folder, start_cmd: startCmd.trim() })
-        if (app) await hostingApi.start(name)
+        await hostingApi.publish({ name, kind: app ? 'app' : 'static', project, subdir: folder, start_cmd: app ? startCmd.trim() : '' })
+        if (app) {
+          try {
+            await hostingApi.start(name)
+          } catch (e) {
+            return notStarted(errorOf(e))
+          }
+        }
       }
       onDone()
     } catch (e) {
@@ -214,10 +254,13 @@ export function PublishSheet({ tasks, sites, me, onClose, onDone }: {
   }
 
   const prefix = `${window.location.origin}/${app ? 'vfs-apps' : 'vfs'}/`
+  const limits = app ? appLimitsText(me?.app_limits) : ''
   return (
     <Sheet
-      icon={Globe} title="Publish a site" subtitle="Put a page or an app on the web, at an address of its own." onClose={onClose}
-      footer={(
+      icon={Globe} title="Publish a site" subtitle="Put a page or an app on the web, at an address of its own." onClose={published ? onDone : onClose}
+      footer={published ? (
+        <button onClick={onDone} className={primaryBtn}><Check className="h-4 w-4" /> Done</button>
+      ) : (
         <>
           <button onClick={onClose} className={quietBtn}>Cancel</button>
           <button onClick={submit} disabled={busy || !ready} className={primaryBtn}>{busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />} Publish</button>
@@ -225,61 +268,68 @@ export function PublishSheet({ tasks, sites, me, onClose, onDone }: {
       )}
     >
       <div className="space-y-5">
+        {appsOk && (
+          <div>
+            <p className={labelCls}>What it is</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <ChoiceTile icon={FolderOpen} title="A page" hint="Its files, as they are. Needs an index.html." on={!app} disabled={published} onClick={() => setKind('static')} />
+              <ChoiceTile icon={Server} title="An app that runs" hint="Starts a program here, and passes visitors to it." on={app} disabled={published} onClick={() => setKind('app')} />
+            </div>
+          </div>
+        )}
+
         <div>
           <p className={labelCls}>What to publish</p>
           <Segmented
             label="What to publish" value={source} onChange={setSource}
-            options={[{ value: 'task', label: 'What a task made', count: pages.length }, { value: 'folder', label: 'One of your folders' }]}
+            options={[{ value: 'task', label: 'What a task made', count: made.length }, { value: 'folder', label: 'One of your folders' }]}
           />
         </div>
 
-        {source === 'task' && (pages.length ? (
+        {source === 'task' && (made.length ? (
           <div className="space-y-2">
-            {pages.map((t) => <ChoiceTile key={t.id} icon={FileCode2} title={<span className="line-clamp-2">{t.title}</span>} hint={t.project_name} on={taskId === t.id} onClick={() => setTaskId(t.id)} />)}
+            {made.map((t) => <ChoiceTile key={t.id} icon={app ? Server : FileCode2} title={<span className="line-clamp-2">{t.title}</span>} hint={t.project_name} on={taskId === t.id} onClick={() => setTaskId(t.id)} />)}
           </div>
         ) : (
           <p className="rounded-2xl border border-dashed border-zinc-800 p-5 text-center text-sm text-zinc-500">
-            No task has made a page yet: it needs an <code className="rounded bg-zinc-800 px-1 text-xs">index.html</code>.
+            {app ? 'No finished task has left files to run yet.' : <>No task has made a page yet: it needs an <code className="rounded bg-zinc-800 px-1 text-xs">index.html</code>.</>}
           </p>
         ))}
 
         {source === 'folder' && (
-          <>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className={labelCls}>Project
-                <select value={project} onChange={(e) => setProject(e.target.value)} className={`${fieldClass} mt-1.5 font-normal`}>
-                  {!projects.length && <option value="">No projects yet</option>}
-                  {projects.map((p) => <option key={p} value={p}>{p}</option>)}
-                </select>
-              </label>
-              <label className={labelCls}>Folder
-                <select value={folder} onChange={(e) => setFolder(e.target.value)} className={`${fieldClass} mt-1.5 font-normal`}>
-                  {folders.map((f) => <option key={f || '_top'} value={f}>{f || 'The whole project'}</option>)}
-                </select>
-              </label>
-            </div>
-            {me?.trusted && (
-              <div className="grid gap-2 sm:grid-cols-2">
-                <ChoiceTile icon={FolderOpen} title="A page" hint="Its files, as they are. Needs an index.html." on={kind === 'static'} onClick={() => setKind('static')} />
-                <ChoiceTile icon={Server} title="An app that runs" hint="Starts a program here, and passes visitors to it." on={kind === 'app'} onClick={() => setKind('app')} />
-              </div>
-            )}
-            {app && (
-              <label className={labelCls}>How to start it
-                <input value={startCmd} onChange={(e) => setStartCmd(e.target.value)} placeholder="npm run start" spellCheck={false} className={`${fieldClass} mt-1.5 font-mono font-normal`} />
-                <span className="mt-1.5 block font-normal leading-relaxed text-zinc-500">It has to listen on the port in <code className="rounded bg-zinc-800 px-1">PORT</code>.</span>
-              </label>
-            )}
-          </>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className={labelCls}>Project
+              <select value={project} onChange={(e) => setProject(e.target.value)} className={`${fieldClass} mt-1.5 font-normal`}>
+                {!projects.length && <option value="">No projects yet</option>}
+                {projects.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </label>
+            <label className={labelCls}>Folder
+              <select value={folder} onChange={(e) => setFolder(e.target.value)} className={`${fieldClass} mt-1.5 font-normal`}>
+                {folders.map((f) => <option key={f || '_top'} value={f}>{f || 'The whole project'}</option>)}
+              </select>
+            </label>
+          </div>
+        )}
+
+        {app && (
+          <label className={labelCls}>How to start it
+            <input value={startCmd} onChange={(e) => setStartCmd(e.target.value)} placeholder={source === 'task' ? 'npm install && npm start' : 'npm run start'} spellCheck={false} className={`${fieldClass} mt-1.5 font-mono font-normal`} />
+            <span className="mt-1.5 block font-normal leading-relaxed text-zinc-500">
+              It has to listen on the port in <code className="rounded bg-zinc-800 px-1">PORT</code>.
+              {source === 'task' && ' It runs in the whole project, as the task left it.'}
+              {limits && ` ${limits}`}
+            </span>
+          </label>
         )}
 
         <label className={labelCls}>Its address
           <input
             value={name} onChange={(e) => { setName(toName(e.target.value)); setNamed(true) }}
-            placeholder="my-site" spellCheck={false} autoComplete="off" className={`${fieldClass} mt-1.5 font-normal`}
+            placeholder="my-site" spellCheck={false} autoComplete="off" disabled={published} className={`${fieldClass} mt-1.5 font-normal`}
           />
-          <span className={`mt-1.5 block break-all font-normal ${taken ? 'text-red-600 dark:text-red-400' : 'text-zinc-500'}`}>
-            {taken ? `You already have a site called ${name}.` : <>{prefix}<span className="text-zinc-300">{name || 'my-site'}</span>/</>}
+          <span className={`mt-1.5 block break-all font-normal ${taken && !published ? 'text-red-600 dark:text-red-400' : 'text-zinc-500'}`}>
+            {taken && !published ? `You already have a site called ${name}.` : <>{prefix}<span className="text-zinc-300">{name || 'my-site'}</span>/</>}
           </span>
         </label>
         <ErrorLine text={error} />

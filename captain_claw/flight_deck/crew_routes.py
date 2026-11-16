@@ -24,6 +24,10 @@
   GET    /fd/crew/model-choices         what a worker can run on besides its CLI's own: agents' models, tiers
   GET/POST /fd/crew/llm/*               a worker's calls to that model, on its turn's key (crew_model)
   POST/DELETE /fd/crew/uploads[/{id}]   a file for a task or a message that's still being written
+  GET    /fd/crew/agents[/{slug}/files] their agents, and what's in one's workspace, to attach
+  POST   /fd/crew/uploads/agent-files   some of those files, kept like uploads
+  GET    /fd/crew/conversations[/sessions|/messages]   their chats with agents, to pick from
+  POST   /fd/crew/uploads/conversation  a range of one, written out and kept like an upload
   GET    /fd/crew/vfs                   folders of their VFS a worker can use
   PUT    /fd/crew/tasks/{id}/folders    which of them a task has, from its next turn
   POST   /fd/crew/projects              a new project, ready for tasks
@@ -64,6 +68,7 @@ from pydantic import BaseModel
 from captain_claw.flight_deck import (
     crew_access,
     crew_attach,
+    crew_context,
     crew_env,
     crew_harness,
     crew_logins,
@@ -125,6 +130,8 @@ class DispatchBody(BaseModel):
 
 class LinkBody(BaseModel):
     name: str = ""
+    kind: str = "static"  # "app": run the copy, with start_cmd
+    start_cmd: str = ""
 
 
 class SteerBody(BaseModel):
@@ -237,8 +244,13 @@ async def _me(user: dict, *, ask_for_models: bool = True) -> dict[str, Any]:
                 "default_model": crew_logins.effective_model(defaults, own, harness),
                 "models": _with_own(own, harness, listed)}
 
+    limits = crew_access.app_limits()
     out.update(
         trusted=grant.trusted, max_parallel=grant.max_parallel, terminal=grant.terminal,
+        # Hosted apps, by the hosting rule (crew_access.app_reach); limits only bind a non-admin's.
+        apps=bool(crew_access.app_reach(row)),
+        app_limits=None if grant.trusted else {"per_user": limits.per_user, "memory_mb": limits.memory_mb,
+                                               "hours": limits.hours},
         harnesses=await asyncio.gather(*(one(h) for h in grant.harnesses)),
         logins=await crew_logins.read_meta(db, row["id"]),
         login_names=list(crew_logins.LOGIN_NAMES), free_terms_url=crew_runner.FREE_TERMS_URL,
@@ -467,6 +479,60 @@ async def drop_upload(upload_id: str, user: dict = Depends(get_current_user)) ->
     return {"ok": True}
 
 
+class AgentFilesBody(BaseModel):
+    agent: str
+    paths: list[str] = []
+
+
+class ConversationBody(BaseModel):
+    lane: str
+    session: int = 0
+    first: int
+    last: int
+
+
+@router.get("/agents")
+async def context_agents(user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return {"agents": crew_context.own_agents(row)}
+
+
+@router.get("/agents/{slug}/files")
+async def context_agent_files(slug: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return await asyncio.to_thread(crew_context.list_files, row, slug)
+
+
+@router.post("/uploads/agent-files", status_code=201)
+async def upload_agent_files(body: AgentFilesBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return {"files": await asyncio.to_thread(crew_context.stage_files, row, body.agent, body.paths)}
+
+
+@router.get("/conversations")
+async def context_conversations(user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return {"conversations": await crew_context.conversations(get_db(), row), "kept": _fd_auth_enabled()}
+
+
+@router.get("/conversations/sessions")
+async def context_sessions(lane: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return {"sessions": await crew_context.sessions(get_db(), row, lane)}
+
+
+@router.get("/conversations/messages")
+async def context_messages(lane: str, session: int = 0, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return await crew_context.messages(get_db(), row, lane, session)
+
+
+@router.post("/uploads/conversation", status_code=201)
+async def upload_conversation(body: ConversationBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return await crew_context.stage_conversation(get_db(), row, body.lane, body.session, body.first, body.last)
+
+
 @router.get("/vfs")
 async def vfs_folders(user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, grant = await _approved(user)
@@ -510,7 +576,7 @@ async def task_diff(task_id: str, user: dict = Depends(get_current_user)) -> dic
 @router.post("/tasks/{task_id}/files")
 async def task_files(task_id: str, whole: bool = False, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, _ = await _approved(user)
-    return await crew_runner.files(row["id"], task_id, whole=whole)
+    return {**await crew_runner.files(row["id"], task_id, whole=whole), "apps": bool(crew_access.app_reach(row))}
 
 
 @router.get("/tasks/{task_id}/file")
@@ -522,7 +588,8 @@ async def task_file(task_id: str, path: str, user: dict = Depends(get_current_us
 @router.post("/tasks/{task_id}/link")
 async def task_link(task_id: str, body: LinkBody | None = None, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, _ = await _approved(user)
-    return await crew_runner.link(row["id"], task_id, body.name if body else "")
+    body = body or LinkBody()
+    return await crew_runner.link(row["id"], task_id, body.name, kind=body.kind, start_cmd=body.start_cmd)
 
 
 @router.post("/tasks/{task_id}/steer")
@@ -749,7 +816,7 @@ async def agent_clone(body: AgentCloneBody, request: Request) -> dict[str, Any]:
 @router.post("/agent/files")
 async def agent_files(body: AgentTaskBody, request: Request) -> dict[str, Any]:
     row, _, _ = await _agent_caller(request)
-    return await crew_runner.files(row["id"], body.task_id, whole=body.whole)
+    return {**await crew_runner.files(row["id"], body.task_id, whole=body.whole), "apps": bool(crew_access.app_reach(row))}
 
 
 @router.get("/agent/tasks")

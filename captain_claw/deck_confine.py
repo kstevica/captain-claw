@@ -55,11 +55,6 @@ EXEC_REFUSED = (
     "Not available on this deck: running commands and driving the computer are "
     "reserved for admins' agents. Use read/write/glob and the other tools instead."
 )
-HOSTING_APP_REFUSED = (
-    "Not available on this deck: hosting a runnable app (kind='app') starts a "
-    "process on the server and is reserved for admins' agents. You can still "
-    "publish a static site with kind='static'."
-)
 PRIVATE_URL_REFUSED = (
     "Not allowed on this deck: that address is on the server itself or a "
     "private network. Use a public http(s) address."
@@ -187,21 +182,6 @@ def active() -> bool:
 
 def exec_blocked(name: str) -> bool:
     return tier() == "user" and name in EXEC_TOOLS
-
-
-def hosting_app_blocked(name: str, arguments: dict | None) -> bool:
-    """A `user`-tier agent may publish a static site but not a runnable app: an
-    app runs its start command as a process on the shared host. Static hosting,
-    and every other hosting action (list/stop/status/unpublish), stay open."""
-    if tier() != "user" or name != "hosting":
-        return False
-    args = arguments or {}
-    action = str(args.get("action") or "").strip().lower()
-    if action == "start":
-        return True
-    if action == "publish":
-        return str(args.get("kind") or "static").strip().lower() == "app"
-    return False
 
 
 def external_links_allowed() -> bool:

@@ -1082,12 +1082,12 @@ class ToolRegistry:
 
         # A multi-user deck (deck_confine): an owner call's paths stay in this
         # agent's own roots, and a non-admin's agent runs no code on the host.
+        # (A hosted app is Flight Deck's to allow, on the owner's approval as it
+        # is now: hosting_routes.launch.)
         # Inside the tool context, after prepare_call, so shared folders resolve.
         if not speaker_call and _deck_confine.active():
             if _deck_confine.exec_blocked(name):
                 raise ToolBlockedError(name, _deck_confine.EXEC_REFUSED)
-            if _deck_confine.hosting_app_blocked(name, arguments):
-                raise ToolBlockedError(name, _deck_confine.HOSTING_APP_REFUSED)
             confine_error = tool_context.run(
                 _deck_confine.check_tool_paths, name, arguments, effective_base_path)
             if confine_error:
