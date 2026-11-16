@@ -5771,15 +5771,11 @@ class AgentContextMixin:
                 _marker_pos = (_marker_pos | _echo_pos) - _new_echo
                 _echo_pos = _new_echo
         else:
-            for pos in range(len(candidate_messages) - 1, -1, -1):
-                if pos in selected or pos == background_pos:
-                    continue
-                msg_tokens = _cost(pos)
-                if used_tokens + msg_tokens <= history_budget:
-                    selected.add(pos)
-                    used_tokens += msg_tokens
-                else:
-                    dropped_messages += 1
+            used_tokens, _plain_dropped = self._plain_fill(
+                candidate_messages, candidate_sidx, selected, used_tokens,
+                history_budget, background_pos, _cost,
+            )
+            dropped_messages += _plain_dropped
 
         selected_messages: list[dict[str, Any]] = []
         live_parts: list[tuple[str, str]] = []

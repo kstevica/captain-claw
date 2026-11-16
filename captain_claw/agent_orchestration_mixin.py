@@ -34,6 +34,10 @@ MAX_FABRICATION_RETRIES = fabrication_guard.MAX_FABRICATION_RETRIES
 # real progress must still be stopped ~iteration 26 when it is going nowhere.
 _STUCK_WARMUP_SCALE = 40
 
+# The links in a message that make it a list to work through (each link one
+# item), when the list extractor found fewer: below this they are references.
+_MIN_INPUT_URLS_FOR_LIST = 3
+
 
 # Context-overflow wordings that carry no parseable numbers (Anthropic, Gemini,
 # llama.cpp, Moonshot, newer OpenAI) — the governor still re-cuts and tightens.
@@ -171,6 +175,8 @@ _CONTENT_FETCH_TOOLS: frozenset[str] = frozenset({
 # present, but they only reach ``tool_defs`` after passing the
 # ``requires_google`` gate in the registry — so when Google OAuth is
 # disconnected they're filtered out upstream and never kept regardless.
+# Session metadata key of eco mode's kept set (see _eco_kept_tools).
+_ECO_STATE_KEY = "eco_tools"
 _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     "shell", "read", "write", "edit", "glob", "grep",
     "web_fetch", "web_search",
@@ -1152,6 +1158,24 @@ _STALL_MAIL_NEUTRAL_INSTRUCTION = (
 class AgentOrchestrationMixin:
     """Core request orchestration: complete() and stream()."""
 
+    def _eco_kept_tools(self, wanted: set[str] | frozenset[str]) -> set[str]:
+        """Eco mode's full-definition set for this call: the session's kept set
+        plus *wanted*, kept in the session's metadata. It only grows, so the
+        tool list changes once per new tool rather than on every call."""
+        meta = getattr(getattr(self, "session", None), "metadata", None)
+        if isinstance(meta, dict):
+            stored = meta.get(_ECO_STATE_KEY)
+        else:
+            stored = getattr(self, "_eco_tools_kept", None)
+        kept = {str(n) for n in stored} if isinstance(stored, (list, tuple, set, frozenset)) else set()
+        grown = kept | set(wanted)
+        if grown != kept or stored is None:
+            if isinstance(meta, dict):
+                meta[_ECO_STATE_KEY] = sorted(grown)
+            else:
+                self._eco_tools_kept = set(grown)
+        return grown
+
     def _should_nudge_mail(
         self, resp_text: str, avail_tool_names: set[str], turn_start_idx: int,
     ) -> bool:
@@ -2015,7 +2039,7 @@ class AgentOrchestrationMixin:
         # Workers execute a single focused task — skip the heavyweight list
         # task extraction / coverage pipeline which can cause endless loops
         # on simple fetch-and-summarize instructions.
-        if getattr(self, "_is_worker", False) or _relayed_turn:
+        if getattr(self, "_is_worker", False) or _relayed_turn or self._scale_system_disabled():
             list_task_plan = list_task_plan  # keep default (disabled)
         elif _force_script:
             # Force-script mode: skip list extraction entirely.
@@ -2049,7 +2073,12 @@ class AgentOrchestrationMixin:
         ):
             url_extraction_source = user_input if clarification_context_applied else effective_user_input
             input_urls = self._extract_urls(url_extraction_source)
-            if len(input_urls) > len(list_task_plan.get("members", [])):
+            # A list is several links. One or two are where to look ("the
+            # database is at <url>"), not a worklist; read as one, a single
+            # link made a one-member list whose "process every member" note
+            # rode on every later call of the turn.
+            if (len(input_urls) >= _MIN_INPUT_URLS_FOR_LIST
+                    and len(input_urls) > len(list_task_plan.get("members", []))):
                 existing_members = set(
                     str(m).strip() for m in list_task_plan.get("members", [])
                 )
@@ -2790,7 +2819,14 @@ class AgentOrchestrationMixin:
                             _tn = _tc.get("name") or _tc.get("function", {}).get("name", "")
                             if _tn:
                                 _session_used.add(_tn)
-                _keep = _ECO_CORE_TOOLS | _intent_tools | _turn_used | _session_used
+                # Kept per session and only grown: tool definitions sit at the
+                # front of every request, so a set re-picked from each call's
+                # wording and the last 40 messages changed call to call and
+                # the provider's prompt cache missed everything behind it
+                # (a run's first call found ~1k of ~100k tokens in the cache).
+                _keep = self._eco_kept_tools(
+                    _ECO_CORE_TOOLS | _intent_tools | _turn_used | _session_used,
+                )
                 # Always preserve MCP tools (registered by Flight Deck via the
                 # MCPProxyConnector — names are prefixed ``mcp_<server>_<tool>``).
                 # The user opted into them explicitly by configuring an MCP

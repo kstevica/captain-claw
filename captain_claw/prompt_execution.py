@@ -344,15 +344,32 @@ async def run_prompt_in_active_session(
                 from captain_claw.cron_dispatch import (
                     NO_ACTION_TEXT,
                     checklist_parts,
+                    job_complete_claimed,
                     note_run_outcome,
                     parts_accounted,
                     run_did_nothing,
+                    stop_completed_job,
+                    strip_job_complete,
                     turn_tool_calls,
                 )
                 from captain_claw.session_export import truncate_history_text
 
                 tool_calls = turn_tool_calls(agent)
-                did_nothing = run_did_nothing(assistant_text, tool_calls)
+                try:
+                    _tool_names = list(agent.tools.list_tools())
+                except Exception:
+                    _tool_names = []
+                did_nothing = run_did_nothing(
+                    assistant_text, tool_calls, task_text=prompt_text, tool_names=_tool_names,
+                )
+                # "The task is finished" counts only from a run that checked
+                # with its tools; the line itself isn't shown.
+                claims_complete = job_complete_claimed(assistant_text)
+                job_complete = claims_complete and tool_calls > 0 and not did_nothing
+                if claims_complete:
+                    assistant_text = strip_job_complete(assistant_text)
+                    if not job_complete:
+                        log.warning("cron run claimed completion without checking", job_id=cron_job_id)
                 await cron_chat_event(
                     ctx, cron_job_id, "assistant", assistant_text,
                     trigger=cron_trigger or "", source=cron_source or "",
@@ -396,6 +413,10 @@ async def run_prompt_in_active_session(
                     ctx, cron_job_id, "no_action" if did_nothing else "ok",
                     session_id=agent.session.id if agent.session else "",
                 )
+                if job_complete:
+                    await stop_completed_job(
+                        ctx, cron_job_id, session_id=agent.session.id if agent.session else "",
+                    )
             if on_assistant_text:
                 outbound_text = assistant_text.strip()
                 if not outbound_text and agent.session:

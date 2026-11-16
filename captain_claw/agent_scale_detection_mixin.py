@@ -1036,6 +1036,15 @@ class AgentScaleDetectionMixin:
         """
         if getattr(self, "_skip_deferred_scale", False):
             return True
+        # A scheduled job's run (per turn, never latched: the same agent
+        # serves people too). The job's text is its own batch procedure,
+        # usually naming the site it works on: read as list members, that
+        # URL became a one-item worklist whose GUARD/SCALE notes blocked
+        # the job's own globs and reads, and a model that read the notes as
+        # prompt injection said so in every report.
+        _origin = getattr(self, "_turn_origin", None)
+        if isinstance(_origin, tuple) and _origin and _origin[0] == "cron":
+            return True
         # A Vatra reporter (and any assemble-only spawn) sets CLAW_NO_SCALE=1.
         # Its job is to fuse teammates' pieces into one deliverable — the "pieces"
         # look exactly like list members whose textual evidence never lands in the
