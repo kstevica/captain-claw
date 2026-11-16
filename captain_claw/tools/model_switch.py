@@ -69,6 +69,14 @@ def _report(agent: Any) -> str:
     now_name = f"{now['name']} ({now['model']})" if now else running or "unknown"
     turn_only = getattr(agent, "_turn_model_restore", None) is not None
     lines.append(f"Running now: {now_name}" + (" — for this turn only" if turn_only else "") + ".")
+    limit = model_switch.team_limit(provider, base_url)
+    if limit is not None:
+        # A non-admin's agent on the team's key: the team's tier models only.
+        lines.append("This agent runs on the team's key, so it can only use the models the team's "
+                     "admin picked for it" + (f" ({', '.join(limit)})" if limit else "") + ". For "
+                     "another model the user asks an admin, or uses their own API key.")
+    if len(options) < 2 and limit is not None:
+        return "\n".join(lines)
     if len(options) < 2:
         lines.append("There is no other model to switch to here. An admin can list more models for "
                      "this endpoint in Flight Deck (Console → Models).")
