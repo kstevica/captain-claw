@@ -1342,6 +1342,11 @@ async def _on_agent_frame(ch: Any, st: _AgentState, payload: dict) -> None:
                 st.verdict.set()  # ours was taken
         elif status == "agent_reconnecting":
             # The link dropped: a turn written on it may never get its answer.
+            # Only one written around the drop: a command ("new topic", /new)
+            # never echoes its id and would otherwise sit in ``sent`` until the
+            # next turn prunes it — and be reported when the agent next falls
+            # asleep, long after it was answered.
+            st.prune()
             st.unsure.update(st.sent)
             st.sent.clear()
             st.verdict.set()

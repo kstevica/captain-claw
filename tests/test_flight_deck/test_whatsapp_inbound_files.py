@@ -712,6 +712,22 @@ async def test_turns_on_a_link_that_dropped_are_reported_not_lost(bridge, monkey
     assert '"email Marko the report"' in notice and "send it again" in notice
 
 
+async def test_an_old_unconfirmed_command_is_not_reported_when_the_agent_sleeps(bridge, monkeypatch):
+    """"new topic" runs as /new: answered, but no "thinking" echoes its id. Half
+    an hour later the idle agent falls asleep (the link drops) and wakes for the
+    next message — the old command is no turn "written on the dropped link"."""
+    monkeypatch.setattr(wb, "_UNSURE_GRACE", 0.1)
+    st = wb._agent_state(bridge.ch)
+    await wb._handle_message(WAID, _text("wamid.DL3", "new topic"))
+    assert st.sent
+    for turn in st.sent.values():
+        turn.at -= 39 * 60
+    await wb._on_agent_frame(bridge.ch, st, {"type": "status", "status": "agent_reconnecting"})
+    await wb._on_agent_frame(bridge.ch, st, {"type": "status", "status": "agent_connected"})
+    await _settle(bridge, rounds=2)
+    assert not any(t.startswith("⚠️ The link") for t in bridge.texts)
+
+
 async def test_a_turn_confirmed_after_the_link_returns_is_not_reported(bridge, monkeypatch):
     monkeypatch.setattr(wb, "_UNSURE_GRACE", 0.3)
     st = wb._agent_state(bridge.ch)
