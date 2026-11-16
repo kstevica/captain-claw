@@ -15,7 +15,7 @@ const RISK_LEVELS = ['low', 'normal', 'high']
 // Reset leaves server-owned keys alone, and the WhatsApp nudge binding and
 // notification switches, which live on the Connections cards.
 const RESET_SKIP = new Set(['max_autonomy_level', 'db_path', 'notify_waid', 'nudge_to_whatsapp',
-  'notify_telegram', 'notify_devices'])
+  'notify_telegram', 'notify_devices', 'phone_filter'])
 const JUDGE_MODES = [
   { v: 'auto', label: 'Auto (LLM judges)' },
   { v: 'human', label: 'Human only' },

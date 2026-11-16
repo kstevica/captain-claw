@@ -323,6 +323,41 @@ def test_switches_save_and_survive_a_whole_config_save(client, store, channels):
 def test_a_switch_must_be_a_bool(client):
     assert client.put("/fd/autonomy/notify", headers=_as(ALICE),
                       json={"devices": "off"}).status_code == 400
+    assert client.put("/fd/autonomy/notify", headers=_as(ALICE),
+                      json={"phone_filter": "on"}).status_code == 400
+
+
+def test_the_phone_filter_switch_saves_and_survives_a_whole_config_save(client, store):
+    """Connections → Notifications: only the nudges that can't wait ring the
+    phones (phone_gate), or every one. A stale Autonomous Work tab sending its
+    old value back doesn't flip it."""
+    r = client.put("/fd/autonomy/notify", headers=_as(ALICE), json={"phone_filter": True})
+    assert r.json()["phone_filter"] == {"on": True, "kept_off_today": 0}
+    client.put("/fd/autonomy/config", headers=_as(ALICE), json={"config": {"phone_filter": False}})
+    assert autonomy.resolve_config(ALICE)["phone_filter"] is True
+    r = client.put("/fd/autonomy/notify", headers=_as(ALICE), json={"phone_filter": False})
+    assert r.json()["phone_filter"]["on"] is False
+    assert autonomy.resolve_config(ALICE)["phone_filter"] is False
+
+
+def test_the_card_counts_the_nudges_kept_off_the_phone_today(client, store):
+    def nudge(uid, phone):
+        row = store.add_action(uid, kind="nudge", title="n", status="done")
+        store.update_payload(row["id"], {"phone": phone})
+        return row
+
+    nudge(ALICE, {"sent": False, "why": "repeat"})
+    nudge(ALICE, {"sent": False, "why": "jev:can_wait"})
+    nudge(ALICE, {"sent": False, "held": True, "why": "chatting"})   # still waiting
+    nudge(ALICE, {"sent": True, "why": "jev:send"})
+    nudge(BOB, {"sent": False, "why": "repeat"})
+    old = nudge(ALICE, {"sent": False, "why": "repeat"})
+    with store._lock:
+        store._c().execute("UPDATE autonomous_actions SET created_at = ? WHERE id = ?",
+                           ("2026-01-01T00:00:00+00:00", old["id"]))
+        store._c().commit()
+    body = client.get("/fd/autonomy/notify", headers=_as(ALICE)).json()
+    assert body["phone_filter"]["kept_off_today"] == 2
 
 
 def test_the_test_goes_out_once_a_minute(client, store, channels):
