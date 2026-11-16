@@ -1,6 +1,6 @@
 import { useEffect, useState, type ComponentType, type ReactNode } from 'react'
 import { isAppShell } from '../../services/desktopShell'
-import { Bell, Loader2, Check, AlertCircle, ChevronDown, MessageCircle, Send, Watch, Bot } from 'lucide-react'
+import { Bell, Loader2, Check, AlertCircle, ChevronDown, MessageCircle, Send, Watch, Bot, Filter } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 import { useUIStore } from '../../stores/uiStore'
 
@@ -30,6 +30,8 @@ interface NotifyState {
   waiting: number
   channels: Record<ChannelId, Channel>
   agent?: LineAgent
+  /** Only the nudges that can't wait ring WhatsApp / Telegram (phone_gate.py). */
+  phone_filter?: { on: boolean; kept_off_today: number }
 }
 
 const LEVELS: { id: Level; label: string }[] = [
@@ -85,7 +87,7 @@ export default function NotificationsConnection({ kiosk = false, open = false }:
   const [state, setState] = useState<NotifyState | null>(null)
   const [collapsed, setCollapsed] = useState(!open)
   const [loading, setLoading] = useState(false)
-  const [saving, setSaving] = useState<ChannelId | 'agent' | null>(null)
+  const [saving, setSaving] = useState<ChannelId | 'agent' | 'phone_filter' | null>(null)
   const [testing, setTesting] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -110,7 +112,7 @@ export default function NotificationsConnection({ kiosk = false, open = false }:
     return () => window.removeEventListener(NOTIFY_CHANGED, reload)
   }, [])
 
-  const save = async (id: ChannelId | 'agent', body: Record<string, unknown>) => {
+  const save = async (id: ChannelId | 'agent' | 'phone_filter', body: Record<string, unknown>) => {
     setSaving(id); setError(null); setNotice(null)
     try {
       const res = await api('/fd/autonomy/notify', { method: 'PUT', body: JSON.stringify(body) })
@@ -314,6 +316,60 @@ export default function NotificationsConnection({ kiosk = false, open = false }:
               </div>
             )}
           </div>
+
+          {state.phone_filter && (() => {
+            const pf = state.phone_filter
+            const phonesOn = state.channels.whatsapp.on || state.channels.telegram.on
+            return (
+              <label
+                className={
+                  'flex items-start gap-3 rounded-md border border-zinc-800 px-3 py-2.5 cursor-pointer ' +
+                  (phonesOn ? '' : 'opacity-60')
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={pf.on}
+                  disabled={saving !== null}
+                  onChange={(e) => save('phone_filter', { phone_filter: e.target.checked })}
+                  className="mt-0.5 h-3.5 w-3.5 accent-violet-600"
+                />
+                <Filter className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 text-xs text-zinc-200">
+                    Only nudges that can't wait reach your phone
+                    {saving === 'phone_filter' && <Loader2 className="h-3 w-3 animate-spin text-zinc-500" />}
+                  </div>
+                  <div className="text-[11px] text-zinc-500">
+                    WhatsApp and Telegram get the nudges someone is waiting on or that are due soon —
+                    Jev picks them when it's connected, simple rules when not. The rest stay on your
+                    Line and in the bell. Off: every nudge rings.
+                  </div>
+                  {!phonesOn && (
+                    <div className="text-[11px] text-zinc-500">WhatsApp and Telegram are both off.</div>
+                  )}
+                  {phonesOn && pf.on && pf.kept_off_today > 0 && (
+                    <div className="text-[11px] text-zinc-500">
+                      {pf.kept_off_today} kept off the phone today
+                      {/* The kiosk and the desktop app have no Autonomous Work page and its log. */}
+                      {!kiosk && !isAppShell() && (
+                        <>
+                          {' — '}
+                          <button
+                            type="button"
+                            onClick={(e) => { e.preventDefault(); setView('autonomous-work') }}
+                            className="underline hover:no-underline"
+                          >
+                            see why in the log
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </label>
+            )
+          })()}
 
           <p className="text-[11px] text-zinc-500">
             Needs you: what waits for you or failed, and nudges. Everything: all of it but fleet

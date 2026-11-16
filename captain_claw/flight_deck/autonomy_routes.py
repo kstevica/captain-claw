@@ -303,8 +303,24 @@ def _line_agents(uid: str) -> list[dict[str, str]]:
     from captain_claw.flight_deck.line import user_agents
 
     return user_agents(uid)
-_NOTIFY_KEYS = ("notify_telegram", "notify_devices")
+_NOTIFY_KEYS = ("notify_telegram", "notify_devices", "phone_filter")
 _last_notify_test_at: dict[str, float] = {}
+
+
+def _kept_off_today(uid: str) -> int:
+    """How many of this user's nudges phone_gate kept off the phone in the last
+    24 hours (a held one that is still waiting doesn't count)."""
+    from datetime import UTC, datetime, timedelta
+
+    cutoff = (datetime.now(UTC) - timedelta(hours=24)).isoformat()
+    n = 0
+    for a in get_store().list_actions(uid, limit=200):
+        if (a.get("created_at") or "") < cutoff:
+            break
+        phone = (a.get("payload") or {}).get("phone")
+        if isinstance(phone, dict) and phone.get("sent") is False and not phone.get("held"):
+            n += 1
+    return n
 
 
 def _notify_state(uid: str) -> dict[str, Any]:
@@ -349,6 +365,12 @@ def _notify_state(uid: str) -> dict[str, Any]:
                            else "none connected now — they hear it when they next connect"),
             },
         },
+        # Which nudges ring WhatsApp / Telegram (phone_gate.py): only the ones
+        # that can't wait, or every one.
+        "phone_filter": {
+            "on": bool(cfg.get("phone_filter", True)),
+            "kept_off_today": _kept_off_today(uid),
+        },
         # One agent whose chat gets the Line too (a card it keeps as context).
         "agent": {
             "slug": picked["slug"] if picked else "",
@@ -377,7 +399,8 @@ async def put_notify_route(
     ``whatsapp`` / ``telegram`` — true / false (the switch), or how much of the
     Line: "everything" / "needs_you" / "off"; ``devices`` — true / false;
     ``agent`` — one of the user's agents ("" = none) and ``agent_level``
-    ("everything" / "needs_you")."""
+    ("everything" / "needs_you"); ``phone_filter`` — true (only the nudges that
+    can't wait ring the phones) / false (every nudge)."""
     uid = _user_id(request)
     body = await request.json()
     if not isinstance(body, dict):
@@ -407,6 +430,10 @@ async def put_notify_route(
         if body["agent_level"] not in ("everything", "needs_you"):
             raise HTTPException(status_code=400, detail='agent_level must be "everything" or "needs_you"')
         overrides["line_agent_level"] = body["agent_level"]
+    if "phone_filter" in body:
+        if not isinstance(body["phone_filter"], bool):
+            raise HTTPException(status_code=400, detail="phone_filter must be true or false")
+        overrides["phone_filter"] = body["phone_filter"]
     save_config(uid, overrides)
     if devices_were_on and body.get("devices") is False:
         from captain_claw.flight_deck.owner_notify import devices_switched_off
