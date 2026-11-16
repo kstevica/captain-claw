@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type DragEvent } from 'react'
-import { AlertTriangle, FileText, Loader2, Paperclip, X } from 'lucide-react'
-import { crewApi } from '../../services/crewApi'
+import { AlertTriangle, FileText, Loader2, X } from 'lucide-react'
+import { crewApi, type CrewStaged } from '../../services/crewApi'
 import { errorOf } from './crewParts'
 
 // ── Files a person hands a worker ──
@@ -59,6 +59,11 @@ export function useAttachments(enabled = true) {
     })
   }, [])
 
+  /** Kept by the deck already: an agent's files copied in, a conversation written out. */
+  const addStaged = useCallback((list: CrewStaged[]) => {
+    setFiles((old) => [...old, ...list.map((made) => ({ key: `${made.id}-${crypto.randomUUID()}`, id: made.id, name: made.name, size: made.size }))])
+  }, [])
+
   const remove = useCallback((key: string) => {
     setFiles((old) => {
       const gone = old.find((f) => f.key === key)
@@ -114,30 +119,11 @@ export function useAttachments(enabled = true) {
   }, [add])
 
   return {
-    files, add, remove, clear, onPaste, onDragOver, onDrop, onPick,
+    files, add, addStaged, remove, clear, onPaste, onDragOver, onDrop, onPick,
     ids: files.filter((f) => f.id).map((f) => f.id as string),
     // A file that didn't go up holds the message back: it's meant to go with it, so it's not left out quietly.
     ready: files.every((f) => f.id && !f.error),
   }
-}
-
-export function AttachButton({ onPick, label = 'Attach files', compact = false }: {
-  onPick: (ev: ChangeEvent<HTMLInputElement>) => void; label?: string; compact?: boolean
-}) {
-  const input = useRef<HTMLInputElement>(null)
-  return (
-    <>
-      <input ref={input} type="file" multiple onChange={onPick} className="hidden" aria-hidden="true" tabIndex={-1} />
-      <button
-        type="button" onClick={() => input.current?.click()} title={compact ? label : undefined} aria-label={label}
-        className={compact
-          ? 'flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200'
-          : 'inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200'}
-      >
-        <Paperclip className={compact ? 'h-4 w-4' : 'h-3.5 w-3.5'} />{!compact && label}
-      </button>
-    </>
-  )
 }
 
 export function AttachmentList({ files, onRemove }: { files: AttachedFile[]; onRemove: (key: string) => void }) {

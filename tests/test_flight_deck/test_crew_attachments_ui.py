@@ -87,11 +87,11 @@ def test_a_browser_that_only_lists_items_still_works():
     assert _taken(clip) == ["shot.png"]
 
 
-def test_both_boxes_take_paste_drop_and_the_paperclip():
+def test_both_boxes_take_paste_drop_the_paperclip_and_agent_context():
     """Reading the source: the task's message box and the new task's, and only Crew's modal is 90%."""
     text = _BOARD.read_text(encoding="utf-8")
     assert text.count("onPaste={attachments.onPaste}") == 2
-    assert text.count("<AttachButton onPick={attachments.onPick}") == 2
+    assert text.count("<AttachChoices onPick={attachments.onPick} onStaged={attachments.addStaged}") == 2
     assert text.count("<AttachmentList files={attachments.files}") == 2
     assert "onDrop: attachments.onDrop" in text and "onDrop={attachments.onDrop}" in text
     assert "crewApi.steer(task.id, text, running && !later, attachments.ids)" in text
