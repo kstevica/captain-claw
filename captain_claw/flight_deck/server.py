@@ -2898,6 +2898,100 @@ def _team_key_refusal(blockers: list[str]) -> HTTPException:
         "team set up — give a key of your own for that endpoint, or ask an admin."))
 
 
+# ── Which models the team's key pays for ────────────────────────────────
+# A non-admin's agent on the team's key runs the models the team's published
+# tier sets name for its endpoint, nothing else: an admin chose those, and the
+# team pays. On a key of their own (BYOK, or one they typed) it's their choice.
+
+async def _rides_team_key(model: dict, env: dict[str, str], provider_keys: dict | None = None) -> bool:
+    """Whether an agent with this ``model`` section and ``.env`` pays with the
+    team's key: an org key, Flight Deck's own key, "@system", or none where the
+    team has one for its endpoint (the heal writes it in). False for a key of
+    its own, for no key the team could fill, and for a model that needs none (a
+    local server, a ChatGPT sign-in)."""
+    provider = str(model.get("provider") or "").strip().lower()
+    base_url = str(model.get("base_url") or "").strip()
+    names = _provider_key_env_names(provider)
+    if not names or _signs_in_through_chatgpt(provider, str(model.get("model") or "")):
+        return False
+    key = str(model.get("api_key") or "").strip() or str((provider_keys or {}).get(provider) or "").strip()
+    if not key:
+        key = next((str(env.get(n) or "").strip() for n in names if str(env.get(n) or "").strip()), "")
+    deck_env = {os.environ.get(n, "").strip() for n in names} - {""}
+    if key == "@system" or (key and key in deck_env):
+        return True
+    if not key:
+        return bool(await _team_key(provider, base_url)) or (not base_url and bool(deck_env))
+    return key in await _org_keys()
+
+
+async def _team_tier_models(provider: str, base_url: str) -> list[str]:
+    """The models the team's published tier sets run at this endpoint."""
+    from captain_claw.flight_deck.endpoints import same_endpoint
+
+    sets = (await _system_json("fd:shared-tier-sets")).get("sets")
+    out: list[str] = []
+    for st in sets if isinstance(sets, list) else []:
+        tiers = st.get("tiers") if isinstance(st, dict) else None
+        for tier in (tiers.values() if isinstance(tiers, dict) else []):
+            if not isinstance(tier, dict):
+                continue
+            name = str(tier.get("model") or "").strip()
+            if name and name not in out and same_endpoint(
+                    tier.get("provider"), tier.get("base_url") or "", provider, base_url):
+                out.append(name)
+    return out
+
+
+def _is_team_model(model_name: str, team_models: list[str]) -> bool:
+    from captain_claw.llm.model_switch import bare_model
+
+    wanted = bare_model(model_name).lower()
+    return bool(wanted) and any(bare_model(m).lower() == wanted for m in team_models)
+
+
+async def _team_model_refusal(model: dict, env: dict[str, str]) -> HTTPException | None:
+    """403 when a non-admin's change would run a model the team didn't pick on
+    the team's key (None when it's fine)."""
+    name = str(model.get("model") or "").strip()
+    if not name or not await _rides_team_key(model, env):
+        return None
+    provider = str(model.get("provider") or "").strip().lower()
+    team = await _team_tier_models(provider, str(model.get("base_url") or "").strip())
+    if _is_team_model(name, team):
+        return None
+    offer = (f"the team's key runs {', '.join(team)} here" if team
+             else "the team's tiers don't run any model here")
+    return HTTPException(403, (
+        f"Not saved: {name} isn't one of your team's models — {offer}. Ask an admin, or add "
+        "your own API key for it."))
+
+
+async def team_model_limit(slug: str, owner: str) -> list[str] | None:
+    """The models agent ``slug`` may switch to: its team's tier models at its
+    endpoint while a non-admin owns it and it runs on the team's key. None when
+    it isn't held to them (an admin's agent, one on its own key, a deck without
+    accounts, an owner nobody recorded)."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    if not _fd_auth_enabled() or not owner or _owner_is_admin(owner):
+        return None
+    loaded = _agent_config_model(slug)
+    if loaded is None:
+        return None
+    model, provider_keys = loaded
+    from captain_claw.config import Config
+
+    try:
+        dotenv = Config._read_dotenv_file(DATA_DIR / slug / ".env")
+    except Exception:
+        dotenv = {}
+    if not await _rides_team_key(model, dotenv, provider_keys):
+        return None
+    return await _team_tier_models(str(model.get("provider") or "").strip().lower(),
+                                   str(model.get("base_url") or "").strip())
+
+
 async def _resolve_spawn_provider_key(config: AgentConfig, *, inherits_fd_env: bool = True) -> None:
     """`_resolve_spawn_key`, then: a team key the agent would hold — resolved
     there, or one its env vars carry (a flow spawn copies its origin agent's
@@ -4992,16 +5086,25 @@ async def update_agent_config(
         from captain_claw.config import Config
 
         kept = Config._read_dotenv_file(env_file)
-        model = (_agent_config_model(agent_dir.name) or ({}, {}))[0]
+        was = (_agent_config_model(agent_dir.name) or ({}, {}))[0]
+        model = was
         if config_yaml is not None:
             try:
                 data = yaml.safe_load(config_yaml)
             except yaml.YAMLError:
                 data = None
             model = data.get("model") if isinstance(data, dict) and isinstance(data.get("model"), dict) else {}
-        blockers = await _team_key_blockers(model, kept if env is None else _dotenv_values(env), kept=kept)
+        new_env = kept if env is None else _dotenv_values(env)
+        blockers = await _team_key_blockers(model, new_env, kept=kept)
         if blockers:
             raise _team_key_refusal(blockers)
+        # A model changed here is held to the team's, as in Agent settings (an
+        # agent already on another model can still have the rest edited).
+        if any(str(model.get(k) or "").strip() != str(was.get(k) or "").strip()
+               for k in ("provider", "model", "base_url")):
+            refusal = await _team_model_refusal(model, new_env)
+            if refusal:
+                raise refusal
     if env is not None and _confine_agents() and not _owner_is_admin(user_id):
         # A non-admin's agent takes these from Flight Deck at every start
         # (`_pin_confinement`): one set here would never apply — say so.
@@ -5145,6 +5248,10 @@ async def update_agent_model(
         blockers = [f"the team's key in {n} would go to {where[n]}" for n, k in rekey.items() if not k]
         if blockers:
             raise _team_key_refusal(blockers)
+        # …and on the team's key, only a model the team's tiers run.
+        refusal = await _team_model_refusal(after, {**dotenv, **{k: v for k, v in rekey.items() if v}})
+        if refusal:
+            raise refusal
 
     updated_count = 0
     for cfg_path in _agent_config_paths(agent_dir):

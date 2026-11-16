@@ -17,6 +17,10 @@ are not touched. The models it can pick:
   ``~/.captain-claw/model_choices.json``;
 * the agent's own ``model.allowed`` entries on that endpoint.
 
+A non-admin's agent on the team's key is held to the team's tier models at its
+endpoint: Flight Deck sends them as ``limit`` with the list above, and only
+those (and the configured model) are choices — the team pays for that key.
+
 Whether the agent may switch on its own — to a cheaper model for simple work,
 a smarter one for a hard task — is ``~/.captain-claw/model_switch.txt``
 ("on"/"off", off by default), which Flight Deck's agent settings write. When
@@ -258,12 +262,45 @@ def custom_models(provider: str, base_url: str) -> list[dict[str, str]]:
     return _clean_models(data.get("models"))
 
 
-def save_custom(provider: str, base_url: str, models: Any) -> None:
-    """Keep the admin's list for this endpoint (survives a restart while
-    Flight Deck can't be reached)."""
+def team_limit(provider: str, base_url: str) -> list[str] | None:
+    """The only models this agent may run at this endpoint — its team's tier
+    models, while it is a non-admin's on the team's key (as last fetched).
+    None when it isn't held to any."""
+    data = _read_custom()
+    if not data or not same_endpoint(data.get("provider"), data.get("base_url"), provider, base_url):
+        return None
+    limit = data.get("limit")
+    if not isinstance(limit, list):
+        return None
+    return [str(m).strip() for m in limit if str(m or "").strip()]
+
+
+def in_limit(model: str, limit: list[str] | None) -> bool:
+    if limit is None:
+        return True
+    wanted = bare_model(model).lower()
+    return any(bare_model(m).lower() == wanted for m in limit)
+
+
+def fetched_recently(provider: str, base_url: str) -> bool:
+    """Whether Flight Deck's answer for this endpoint is under REFRESH_EVERY old."""
+    data = _read_custom()
+    if not data or not same_endpoint(data.get("provider"), data.get("base_url"), provider, base_url):
+        return False
+    try:
+        return time.time() - float(data.get("fetched_at") or 0) < REFRESH_EVERY
+    except (TypeError, ValueError):
+        return False
+
+
+def save_custom(provider: str, base_url: str, models: Any, limit: Any = None) -> None:
+    """Keep the admin's list for this endpoint, and the team's ``limit`` when
+    there is one (survives a restart while Flight Deck can't be reached)."""
     CHOICES_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {"provider": provider, "base_url": base_url, "models": _clean_models(models),
                "fetched_at": time.time()}
+    if isinstance(limit, list):
+        payload["limit"] = [str(m).strip() for m in limit if str(m or "").strip()]
     tmp = CHOICES_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(CHOICES_PATH)
@@ -300,8 +337,9 @@ async def refresh_custom(provider: str, base_url: str) -> bool:
     except ValueError:
         return False
     models = data.get("models") if isinstance(data, dict) else None
+    limit = data.get("limit") if isinstance(data, dict) else None
     try:
-        save_custom(provider, base_url, models if isinstance(models, list) else [])
+        save_custom(provider, base_url, models if isinstance(models, list) else [], limit)
     except OSError as exc:
         log.warning("Model choices: couldn't keep the list", error=str(exc))
         return False
@@ -350,13 +388,17 @@ def choices(provider: str, model: str, base_url: str,
     (smartest → cheapest), then the admin's, then its own ``model.allowed``
     ones — each ``{model, name, role, label, note, source, default, price,
     max_context, max_output}``. Its configured model is always there (marked
-    ``default``)."""
+    ``default``); held to the team's models (:func:`team_limit`), the others
+    are only those."""
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
+    limit = team_limit(provider, base_url)
 
     def add(entry: dict[str, Any]) -> None:
         key = bare_model(entry["model"]).lower()
         if not key or key in seen:
+            return
+        if not _same_model(entry["model"], model) and not in_limit(entry["model"], limit):
             return
         seen.add(key)
         name = entry["model"]
