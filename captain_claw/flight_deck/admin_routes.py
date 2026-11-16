@@ -70,9 +70,12 @@ async def list_users(
     total = await db.count_users()
     from captain_claw.flight_deck import crew_access
 
-    # Whether this deck offers Crew at all (FD_CREW, FD_CREW_TERMINAL): approving
-    # someone for it means nothing while it's off.
-    crew = {"offered": crew_access.offered(), "terminal": crew_access.terminal_offered()}
+    # Whether this deck offers Crew at all (FD_CREW, FD_CREW_TERMINAL, FD_CREW_APPS):
+    # approving someone for it means nothing while it's off.
+    limits = crew_access.app_limits()
+    crew = {"offered": crew_access.offered(), "terminal": crew_access.terminal_offered(),
+            "apps": crew_access.apps_offered(),
+            "app_limits": {"per_user": limits.per_user, "memory_mb": limits.memory_mb, "hours": limits.hours}}
     return {"users": users, "total": total, "crew": crew}
 
 

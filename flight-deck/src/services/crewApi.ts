@@ -58,11 +58,22 @@ export interface CrewModelChoices {
   tier_set: string
 }
 
+/** What one approved non-admin's hosted apps may take; 0 is no limit. */
+export interface CrewAppLimits {
+  per_user: number
+  memory_mb: number
+  hours: number
+}
+
 export interface CrewMe {
   offered: boolean
   allowed: boolean
   trusted?: boolean
   terminal?: boolean
+  /** May run a hosted app: an admin, or approved for hosted apps. */
+  apps?: boolean
+  /** Only for someone who isn't an admin: admins' apps have no such limits. */
+  app_limits?: CrewAppLimits | null
   max_parallel?: number
   harnesses?: CrewHarness[]
   logins?: Record<string, { hint: string; saved_at: string }>
@@ -99,12 +110,26 @@ export interface CrewLink {
   name: string
   url: string
   stopped?: boolean
+  /** Only an app says so: a link without it is a page. */
+  kind?: 'app'
+  /** An app just made: whether it came up, and if not, why and its last output. */
+  started?: boolean
+  message?: string
+  log?: string
 }
 
 export interface CrewFiles extends CrewResults {
   uncommitted: number
   landed: boolean
   project_path: string
+  apps?: boolean
+}
+
+/** A page, or the whole copy run as an app with a start command. */
+export interface CrewLinkAs {
+  name?: string
+  kind?: 'static' | 'app'
+  start_cmd?: string
 }
 
 export interface CrewFile {
@@ -380,7 +405,10 @@ export const crewApi = {
   diff: (id: string) => api<{ committed: string; uncommitted: string; note?: string }>(`/fd/crew/tasks/${id}/diff`),
   files: (id: string, whole = false) => post<CrewFiles>(`/fd/crew/tasks/${id}/files?whole=${whole}`),
   file: (id: string, path: string) => api<CrewFile>(`/fd/crew/tasks/${id}/file?path=${encodeURIComponent(path)}`),
-  link: (id: string, name = '') => post<CrewLink>(`/fd/crew/tasks/${id}/link`, name ? { name } : undefined),
+  link: (id: string, name = '', as: CrewLinkAs = {}) => {
+    const body = { ...(name ? { name } : {}), ...as }
+    return post<CrewLink>(`/fd/crew/tasks/${id}/link`, Object.keys(body).length ? body : undefined)
+  },
   newProject: (name: string) => post<{ project: string; key: string; path: string }>('/fd/crew/projects', { name }),
   tidy: (key: string) => post<{ cleared: number; kept: number }>('/fd/crew/projects/tidy', { key }),
   dispatch: (body: CrewDispatch) => post<CrewTask>('/fd/crew/tasks', body),

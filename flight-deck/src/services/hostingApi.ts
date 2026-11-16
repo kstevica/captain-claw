@@ -36,6 +36,8 @@ export const hostingApi = {
   publish: (body: SitePublish) => api<HostedSite>('/fd/hosting', { method: 'POST', body: JSON.stringify(body) }),
   start: (name: string) => api<{ ok: boolean; message: string }>(path(name, '/start'), { method: 'POST' }),
   stop: (name: string) => api<{ ok: boolean; message: string }>(path(name, '/stop'), { method: 'POST' }),
+  /** An app: stopped and started again, to pick up changed files. */
+  restart: (name: string) => api<{ ok: boolean; message: string }>(path(name, '/restart'), { method: 'POST' }),
   remove: (name: string) => api<{ ok: boolean }>(path(name), { method: 'DELETE' }),
   folders: (project: string) => api<{ folders: string[] }>(`/fd/hosting/folders?project=${encodeURIComponent(project)}`),
   projects: () => api<{ projects: { name: string }[] }>('/fd/vfs/projects'),

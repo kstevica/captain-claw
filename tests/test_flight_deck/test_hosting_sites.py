@@ -2,8 +2,8 @@
 
 A static site used to have no such thing: `stop` said "stopped" and went on serving.
 Now a stopped page answers 404 to the public, keeps its address and its place in the
-owner's list, and comes back on `start`. Running an app stays an admin's; a page is
-anyone's own.
+owner's list, and comes back on `start`. Running an app is its owner's approval
+(test_hosting_crew_apps.py); a page is anyone's own.
 """
 
 from __future__ import annotations
@@ -92,9 +92,9 @@ async def test_someone_elses_site_stays_theirs(deck):
         assert (await _listed(owner))["running"] is True
 
 
-async def test_starting_an_app_stays_an_admins_and_a_page_is_anyones_own(deck, monkeypatch):
+async def test_an_app_without_an_approved_owner_starts_for_nobody_and_a_page_is_anyones_own(deck, monkeypatch):
     started: list[str] = []
-    monkeypatch.setattr(vfs_hosting, "start_app", lambda name: (started.append(name), (True, "started"))[1])
+    monkeypatch.setattr(vfs_hosting, "start_app", lambda name, **_: (started.append(name), (True, "started"))[1])
     registry = {
         "page": {"kind": "static", "owner": OWNER["id"], "project": "site", "stopped": True},
         "tool": {"kind": "app", "owner": OWNER["id"], "project": "site", "start_cmd": "x", "stopped": True},
@@ -102,11 +102,11 @@ async def test_starting_an_app_stays_an_admins_and_a_page_is_anyones_own(deck, m
     vfs_hosting.save_registry(registry)
     async with _client(OWNER) as owner, _client(ADMIN) as admin:
         assert (await owner.post("/fd/hosting/page/start")).status_code == 200
-        refused = await owner.post("/fd/hosting/tool/start")
-        assert refused.status_code == 403 and "reserved for admins" in refused.json()["detail"]
-        assert started == ["page"]
-        assert (await admin.post("/fd/hosting/tool/start")).status_code == 200
-    assert started == ["page", "tool"]
+        # Its owner has no approval on record here: it would run as an admin's say-so.
+        for client in (owner, admin):
+            refused = await client.post("/fd/hosting/tool/start")
+            assert refused.status_code == 403 and "Hosted apps" in refused.json()["detail"]
+    assert started == ["page"]
 
 
 async def test_publishing_over_a_stopped_page_brings_it_back(deck):

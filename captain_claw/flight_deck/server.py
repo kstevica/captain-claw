@@ -1215,6 +1215,10 @@ async def lifespan(app: FastAPI):
     taskboard.start()
     # ── Crew: coding CLIs running for approved users, watched from disk. ──
     crew_runner.start()
+    # ── Hosted apps outlive a restart: each one's owner, against their approval now. ──
+    from captain_claw.flight_deck import hosting_routes as _hosting_routes
+
+    app.state.hosted_apps_check = asyncio.create_task(_hosting_routes.enforce_app_owners())
     # ── Payments loop (FD_PAYMENTS): expiry, bank statement syncs (Phase 4). ──
     if payments_routes.enabled():
         from captain_claw.flight_deck.payments_jobs import payments_loop as _pay_loop

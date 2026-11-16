@@ -8,6 +8,13 @@ sign-in off, may always use it: they already have a shell on this computer.
 A worker has a shell of its own, as the deck's OS user, and no OS sandbox holds
 it to its worktree yet (docs/agent-os-sandbox-plan.md). So approving someone
 trusts them with this computer, which is what the approval dialog says.
+
+Hosted apps (a published folder whose start command runs as a server, at
+``/vfs-apps/<name>/``) are a second tick on the same approval. Their reach is the
+worker's: the same OS user, home and short list of variables, never the deck's
+secrets. What they add is time and an audience: an app keeps running, and anyone
+with its address can send it requests, so the dialog says that too. See
+:func:`app_reach`.
 """
 
 from __future__ import annotations
@@ -27,17 +34,54 @@ _DECK_MAX_RUNNING = 8
 NOT_APPROVED = ("Crew isn't approved for this account. An admin can approve it on the Users page.")
 NOT_OFFERED = "Crew is turned off on this Flight Deck."
 
+_OFF = ("off", "0", "false", "no")
+
+# A non-admin's hosted apps, unless the deck's environment says otherwise.
+_APPS_PER_USER = 2
+_DECK_MAX_APPS = 6
+_APP_MEMORY_MB = 1024
+
 
 def offered() -> bool:
     """``FD_CREW=off`` turns Crew off for the whole deck. It also needs POSIX
     process groups, so a worker can outlive a Flight Deck restart."""
-    return (os.environ.get("FD_CREW", "").strip().lower() not in ("off", "0", "false", "no")
+    return (os.environ.get("FD_CREW", "").strip().lower() not in _OFF
             and os.name == "posix")
 
 
 def terminal_offered() -> bool:
     """``FD_CREW_TERMINAL=off`` takes the browser terminal away from everyone on this deck."""
-    return offered() and os.environ.get("FD_CREW_TERMINAL", "").strip().lower() not in ("off", "0", "false", "no")
+    return offered() and os.environ.get("FD_CREW_TERMINAL", "").strip().lower() not in _OFF
+
+
+def apps_offered() -> bool:
+    """``FD_CREW_APPS=off`` takes hosted apps away from every non-admin on this deck."""
+    return offered() and os.environ.get("FD_CREW_APPS", "").strip().lower() not in _OFF
+
+
+def _env_int(name: str, default: int, *, least: int = 0) -> int:
+    try:
+        return max(least, int(os.environ.get(name, default)))
+    except ValueError:
+        return default
+
+
+@dataclass(frozen=True)
+class AppLimits:
+    """What one approved non-admin's apps may take. Admins' apps have none of these."""
+    per_user: int  # running at once, for one person
+    deck: int  # running at once, for every approved non-admin together
+    memory_mb: int  # one app with everything it started; 0 = no limit
+    hours: int  # how long one runs before it's stopped; 0 = no limit
+
+
+def app_limits() -> AppLimits:
+    return AppLimits(
+        per_user=_env_int("FD_CREW_APPS_PER_USER", _APPS_PER_USER, least=1),
+        deck=_env_int("FD_CREW_APPS_MAX_RUNNING", _DECK_MAX_APPS, least=1),
+        memory_mb=_env_int("FD_CREW_APP_MEMORY_MB", _APP_MEMORY_MB),
+        hours=_env_int("FD_CREW_APP_HOURS", 0),
+    )
 
 
 def deck_max_running() -> int:
@@ -54,6 +98,7 @@ class Grant:
     harnesses: tuple[str, ...] = ()
     max_parallel: int = 0
     terminal: bool = False  # may open a shell in their projects from the browser
+    apps: bool = False  # may run a hosted app of theirs here, with a worker's reach
 
     @property
     def trusted(self) -> bool:
@@ -87,9 +132,9 @@ def grant_of(user: dict | None) -> Grant:
     if not offered() or not user:
         return Grant(False)
     if not _auth_enabled():
-        return Grant(True, "local", HARNESS_IDS, _TRUSTED_PARALLEL, terminal_offered())
+        return Grant(True, "local", HARNESS_IDS, _TRUSTED_PARALLEL, terminal_offered(), True)
     if user.get("role") == "admin":
-        return Grant(True, "admin", HARNESS_IDS, _TRUSTED_PARALLEL, terminal_offered())
+        return Grant(True, "admin", HARNESS_IDS, _TRUSTED_PARALLEL, terminal_offered(), True)
     entry = stored(user)
     if entry.get("approved") is not True:
         return Grant(False)
@@ -101,7 +146,23 @@ def grant_of(user: dict | None) -> Grant:
     except (TypeError, ValueError):
         parallel = DEFAULT_PARALLEL
     return Grant(True, "approved", harnesses, max(1, min(parallel, MAX_PARALLEL)),
-                 entry.get("terminal") is True and terminal_offered())
+                 entry.get("terminal") is True and terminal_offered(),
+                 entry.get("apps") is True and apps_offered())
+
+
+def app_reach(user: dict | None) -> str:
+    """How *user*'s hosted apps run, decided by the app's owner, never by who
+    pressed Start: ``"deck"`` as Flight Deck's own processes do (an admin, or a
+    deck with sign-in off, as before), ``"crew"`` with what their Crew worker has
+    (an approved non-admin with hosted apps ticked), ``""`` not at all."""
+    if not _auth_enabled():
+        return "deck"
+    if not user:
+        return ""
+    if user.get("role") == "admin":
+        return "deck"
+    grant = grant_of(user)
+    return "crew" if grant.allowed and grant.apps else ""
 
 
 def clean_entry(body: dict, *, admin_id: str, previous: dict | None = None) -> dict | None:
@@ -121,6 +182,7 @@ def clean_entry(body: dict, *, admin_id: str, previous: dict | None = None) -> d
     return {
         "approved": True, "harnesses": harnesses, "max_parallel": max(1, min(parallel, MAX_PARALLEL)),
         "terminal": body.get("terminal") is True,
+        "apps": body.get("apps") is True,
         "by": admin_id if first else previous.get("by", admin_id),
         "at": datetime.now(UTC).isoformat() if first else previous.get("at", ""),
     }

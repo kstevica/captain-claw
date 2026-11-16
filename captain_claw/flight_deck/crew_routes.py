@@ -130,6 +130,8 @@ class DispatchBody(BaseModel):
 
 class LinkBody(BaseModel):
     name: str = ""
+    kind: str = "static"  # "app": run the copy, with start_cmd
+    start_cmd: str = ""
 
 
 class SteerBody(BaseModel):
@@ -242,8 +244,13 @@ async def _me(user: dict, *, ask_for_models: bool = True) -> dict[str, Any]:
                 "default_model": crew_logins.effective_model(defaults, own, harness),
                 "models": _with_own(own, harness, listed)}
 
+    limits = crew_access.app_limits()
     out.update(
         trusted=grant.trusted, max_parallel=grant.max_parallel, terminal=grant.terminal,
+        # Hosted apps, by the hosting rule (crew_access.app_reach); limits only bind a non-admin's.
+        apps=bool(crew_access.app_reach(row)),
+        app_limits=None if grant.trusted else {"per_user": limits.per_user, "memory_mb": limits.memory_mb,
+                                               "hours": limits.hours},
         harnesses=await asyncio.gather(*(one(h) for h in grant.harnesses)),
         logins=await crew_logins.read_meta(db, row["id"]),
         login_names=list(crew_logins.LOGIN_NAMES), free_terms_url=crew_runner.FREE_TERMS_URL,
@@ -569,7 +576,7 @@ async def task_diff(task_id: str, user: dict = Depends(get_current_user)) -> dic
 @router.post("/tasks/{task_id}/files")
 async def task_files(task_id: str, whole: bool = False, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, _ = await _approved(user)
-    return await crew_runner.files(row["id"], task_id, whole=whole)
+    return {**await crew_runner.files(row["id"], task_id, whole=whole), "apps": bool(crew_access.app_reach(row))}
 
 
 @router.get("/tasks/{task_id}/file")
@@ -581,7 +588,8 @@ async def task_file(task_id: str, path: str, user: dict = Depends(get_current_us
 @router.post("/tasks/{task_id}/link")
 async def task_link(task_id: str, body: LinkBody | None = None, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, _ = await _approved(user)
-    return await crew_runner.link(row["id"], task_id, body.name if body else "")
+    body = body or LinkBody()
+    return await crew_runner.link(row["id"], task_id, body.name, kind=body.kind, start_cmd=body.start_cmd)
 
 
 @router.post("/tasks/{task_id}/steer")
@@ -808,7 +816,7 @@ async def agent_clone(body: AgentCloneBody, request: Request) -> dict[str, Any]:
 @router.post("/agent/files")
 async def agent_files(body: AgentTaskBody, request: Request) -> dict[str, Any]:
     row, _, _ = await _agent_caller(request)
-    return await crew_runner.files(row["id"], body.task_id, whole=body.whole)
+    return {**await crew_runner.files(row["id"], body.task_id, whole=body.whole), "apps": bool(crew_access.app_reach(row))}
 
 
 @router.get("/agent/tasks")
