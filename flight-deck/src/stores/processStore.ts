@@ -3,6 +3,7 @@ import type { ProcessActionResult, ProcessInfo } from '../services/docker'
 import * as dockerApi from '../services/docker'
 import { queueSave, registerHydrator } from '../services/settingsSync'
 import { useAuthStore } from './authStore'
+import { useGroupStore } from './groupStore'
 
 const DESC_KEY = 'fd:process-descriptions'
 const NAME_KEY = 'fd:process-names'
@@ -130,6 +131,9 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
         }
       }
       set(next === cur ? { processes: merged } : { processes: merged, fleetInstructionsOverrides: next })
+      // Agents the deck asks to group (First Mate's): into their group, once.
+      const asked = processes.filter((p) => p.group).map((p) => ({ id: `proc-${p.slug}`, group: p.group as string }))
+      if (asked.length) useGroupStore.getState().autoPlace(asked)
     } catch {
       set({ processes: [] })
     }
