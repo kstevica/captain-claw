@@ -41,6 +41,15 @@ def _no_register(monkeypatch):
     monkeypatch.setattr(tool_audit_routes, "_store", None)
 
 
+@pytest.fixture(autouse=True)
+def registry(tmp_path, monkeypatch):
+    """Making an agent labels it in the process registry: a test's own, never the deck's."""
+    path = tmp_path / ".processes.json"
+    path.write_text(json.dumps({"first-mate": {"name": "First Mate", "owner": BOB}}))
+    monkeypatch.setattr(server, "PROCESS_REGISTRY_FILE", path)
+    return path
+
+
 @pytest.fixture
 async def db(tmp_path: Path):
     prev = fd_auth._db
@@ -100,7 +109,8 @@ def test_current_and_picking(store, agents):
         mate.check_pick(BOB, "carol-bot")
 
 
-async def test_making_one(store, monkeypatch):
+async def test_making_one(store, monkeypatch, registry):
+    registry_file = registry
     from captain_claw.flight_deck import agent_forge
     asked: list[dict] = []
 
@@ -115,6 +125,7 @@ async def test_making_one(store, monkeypatch):
     [a] = asked
     assert a["archetype"] == "concierge@balanced" and a["name"] == "First Mate"
     assert "first_mate tool" in a["instructions"] and "never approve" in a["instructions"]
+    assert json.loads(registry_file.read_text())["first-mate"]["group"] == "First Mate"  # beside its workers
 
     async def broken(user, **kw):
         return SimpleNamespace(ok=False, slug="", message="no free port"), kw["name"]

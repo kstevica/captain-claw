@@ -15,6 +15,8 @@ export interface AgentGroup {
   pinned?: boolean
   /** Agents at the top of this group, in the order they were pinned. */
   pinnedAgentIds?: string[]
+  /** Agents the deck put here on its own (autoPlace): never put back once moved out. */
+  autoPlaced?: string[]
 }
 
 const STORAGE_KEY = 'fd:agent-groups'
@@ -99,7 +101,15 @@ interface GroupStore {
   toggleCollapsed: (id: string) => void
   expand: (id: string) => void
   getGroupsForAgent: (agentId: string) => AgentGroup[]
+  /** Agents the deck asks to sit in a named group (First Mate's workers): each
+   *  one placed there once, the group made if it isn't there. Not before the
+   *  owner's groups are read (signed in: from the server), so nothing is written over them. */
+  autoPlace: (items: { id: string; group: string }[]) => void
 }
+
+// Whether the groups shown are the owner's: read from the server once signed
+// in, or this browser's own without sign-in. autoPlace waits for it.
+let groupsRead = false
 
 export const useGroupStore = create<GroupStore>((set, get) => {
   const commit = (groups: AgentGroup[]) => {
@@ -217,6 +227,29 @@ export const useGroupStore = create<GroupStore>((set, get) => {
     getGroupsForAgent: (agentId) => {
       return get().groups.filter((g) => g.agentIds.includes(agentId))
     },
+
+    autoPlace: (items) => {
+      if (!items.length || (useAuthStore.getState().authEnabled && !groupsRead)) return
+      let groups = get().groups
+      let changed = false
+      for (const { id, group } of items) {
+        const name = group.trim()
+        if (!name) continue
+        if (groups.some((g) => isFolder(g) && g.agentIds.includes(id))) continue  // the owner already placed it
+        let target = groups.find((g) => isFolder(g) && g.name.trim().toLowerCase() === name.toLowerCase())
+        if (target?.autoPlaced?.includes(id)) continue  // placed once and moved out: theirs to keep out
+        if (!target) {
+          target = { id: `grp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, name, color: nextGroupColor(groups),
+            type: 'group', agentIds: [] }
+          groups = [...groups, target]
+        }
+        const tid = target.id
+        groups = groups.map((g) => g.id !== tid ? g
+          : { ...g, agentIds: [...g.agentIds, id], autoPlaced: [...(g.autoPlaced || []), id].slice(-200) })
+        changed = true
+      }
+      if (changed) commit(groups)
+    },
   }
 })
 
@@ -232,6 +265,7 @@ function adopt(raw: string | undefined) {
 // live in this browser only.
 registerHydrator((settings) => {
   if (useAuthStore.getState().authEnabled) adopt(settings[STORAGE_KEY])
+  groupsRead = true
 })
 
 // A phone or a tab left open keeps its groups for days, and the next change
