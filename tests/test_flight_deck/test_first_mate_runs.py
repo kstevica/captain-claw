@@ -35,6 +35,7 @@ class FakeBat:
     def __init__(self) -> None:
         self.runs: dict[str, dict] = {}
         self.events: list[tuple[str, str, str]] = []
+        self.asks: list[dict] = []
         self.fail_create = False
 
     async def create_run(self, *, run_id, owner_id, title, task, config=None, origin=None,
@@ -60,6 +61,19 @@ class FakeBat:
 
     async def set_status(self, run_id, status, **kw):
         self.runs[run_id].update(status=status, **kw)
+
+    # the asks bat_routes.release_factory_ask answers
+    async def latest_open_ask(self, run_id):
+        return next((dict(a) for a in reversed(self.asks) if a["run_id"] == run_id and a["status"] == "open"),
+                    None)
+
+    async def get_ask(self, ask_id):
+        return next((dict(a) for a in self.asks if a["id"] == ask_id), None)
+
+    async def answer_ask(self, ask_id, answer, *, via=""):
+        a = next(a for a in self.asks if a["id"] == ask_id)
+        a.update(status="answered", answer=answer, via=via)
+        return True
 
 
 @pytest.fixture(autouse=True)
@@ -215,9 +229,18 @@ async def test_refresh_follows_bat(store, bat):
     b.update(status="running", cumulative_tokens=40_000, cumulative_usd=0.02)
     r = await runs.refresh(run["id"])
     assert r["status"] == "running" and r["tokens"] == 40_000 and not r["waiting"]
-    b["status"] = "awaiting_human"
+    # An ask left open on it (from before factory runs stopped asking): First Mate
+    # answers it and the run carries on, not waiting for anyone.
+    b["status"] = "awaiting_plan"
+    bat.asks.append({"id": "ask1", "run_id": run["child_id"], "kind": "plan_approval", "status": "open",
+                     "secret": False, "step_key": ""})
+    kicked = len(bat.kicks)
     r = await runs.refresh(run["id"])
-    assert r["status"] == "running" and r["waiting"] and "Bat page" in r["note"]
+    assert r["status"] == "running" and not r["waiting"]
+    assert (bat.asks[0]["status"], bat.asks[0]["answer"], bat.asks[0]["via"]) == ("answered", "approve", "first_mate")
+    assert len(bat.kicks) == kicked + 1
+    r = await runs.refresh(run["id"])  # answered, not yet picked up again: still nobody to ask
+    assert r["waiting"] and "Bat page" in r["note"]
     b.update(status="done", truth="## Week\nAll quiet.", cumulative_tokens=90_000)
     r = await runs.refresh(run["id"])
     assert (r["status"], r["verdict"], r["result"], r["tokens"]) == ("done", "pass", "## Week\nAll quiet.", 90_000)

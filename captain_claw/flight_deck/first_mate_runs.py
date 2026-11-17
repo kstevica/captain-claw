@@ -151,9 +151,11 @@ def bat_config(factory: dict[str, Any], version: dict[str, Any], run: dict[str, 
                *, token_cap: int) -> dict[str, Any]:
     """A factory run's Bat config.
 
-    It carries no grants: Bat's own start gate asks the owner before anything
-    would send mail, spend, open an account or organize mail. Carry-outs with
-    the charter's grants come in Phase 3. Its LLM cap is in tokens, never
+    It carries no grants (a carry-out adds the charter's mail grants), and it
+    never stops to ask: ``factory_id`` tells Bat it is a factory's run, so its
+    start gate lets it through and nothing is asked of the owner while it runs.
+    What it isn't granted is refused as it happens: the workers' mail guard
+    refuses mail, the spend policy spending. Its LLM cap is in tokens, never
     dollars (``llm_usd_cap`` stays 0 on the run).
     """
     rc = version.get("runner_config") or {}
@@ -237,7 +239,11 @@ class BatRunner:
                "result": "", "verdict": "", "note": ""}
         status = b["status"]
         if status in ("awaiting_plan", "awaiting_human"):
-            out.update(waiting=True, note="waiting for you on the Bat page")
+            # A factory run never waits on its owner: an ask left open from before
+            # is answered for it, and it carries on.
+            from captain_claw.flight_deck import bat_routes
+            if not await bat_routes.release_factory_ask(self._store(), b):
+                out.update(waiting=True, note="waiting on the Bat page")
         elif status == "done":
             out.update(status="done", verdict="pass", result=b.get("truth") or "")
         elif status == "error":
@@ -395,8 +401,8 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
 
 # ── proposals and carry-outs (Phase 3) ─────────────────────────────────
 
-# Grants a carry-out takes from the charter. Spending and new accounts stay
-# with Bat's own gate in Phase 3: its spend path hasn't been tried live.
+# Grants a carry-out takes from the charter. A factory's run never spends or
+# opens accounts: Bat's spend path hasn't been tried live.
 CARRY_GRANTS = {"email": "email_allowed", "organize": "organize_allowed"}
 _DETAIL_KEYS = ("to", "cc", "subject", "body", "text", "message", "summary", "start", "end", "chat", "url",
                 "query", "label", "folder")
@@ -440,7 +446,8 @@ def carry_out_brief(factory: dict[str, Any], version: dict[str, Any], intents: l
 
 def carry_out_config(version: dict[str, Any], brief: str) -> dict[str, Any]:
     """The Bat config a carry-out adds: the owner already approved this plan, for
-    exactly the charter's grants. Anything else it would do still asks."""
+    exactly the charter's grants. Anything else it would do is refused, never
+    asked about (a factory's run doesn't wait on its owner)."""
     grants = version.get("grants") or {}
     cfg: dict[str, Any] = {"plan_approved": True,
                            "contract": [

@@ -2,8 +2,8 @@
 
 See docs/first-mate-plan.md §4. A template only fills in a new factory's
 first draft. The owner edits it and approves it like any other, and the
-store checks it like any other. No template grants anything: Bat's start gate
-asks before a run would send, spend or sign up, until Phase 3 adds carry-outs.
+store checks it like any other. No template grants anything: a factory's run
+never sends, spends or signs up unless its charter grants it.
 """
 
 from __future__ import annotations
