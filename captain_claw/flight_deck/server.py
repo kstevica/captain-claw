@@ -8689,6 +8689,173 @@ async def family_report(req: FamilyReportRequest, request: Request, user: dict |
             "message": f"Sent to {parent_name}" + (" (it was asleep: it's being woken)." if asleep else ".")}
 
 
+class FamilySendRequest(BaseModel):
+    # parent | children | siblings | family | group:<name> | an agent's name
+    to: str = Field(min_length=1, max_length=120)
+    message: str = Field(min_length=1, max_length=8000)
+    mode: str = "ask"  # ask: wait for the answers; task: they work, one summary comes back later
+    # Seconds each recipient gets (ask: at most _FANOUT_ASK_MAX_S, the tool waits for it).
+    timeout: float = Field(default=0, ge=0, le=1800)
+    # The asking agent's own words for the mail guard (as consult/delegate).
+    mail_intent_text: str = ""
+
+
+_FANOUT_ASK_DEFAULT_S = 240.0
+_FANOUT_ASK_MAX_S = 480.0
+_FANOUT_TASK_DEFAULT_S = 1200.0
+_FANOUTS_PER_HOUR = 20
+_fanout_times: dict[str, list[float]] = {}
+_fanout_active: dict[str, int] = {}     # caller slug → its asks/tasks going
+_being_asked: dict[str, str] = {}       # agent slug → who is asking it (an ask going)
+
+
+async def _owner_agent_groups(owner: str) -> Any:
+    """The owner's agent groups as the deck keeps them (signed-in decks), or None
+    when they live only in a browser (no sign-in) or can't be read."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled, get_db
+
+    if not _fd_auth_enabled() or not owner:
+        return None
+    try:
+        raw = await get_db().get_setting(owner, "fd:agent-groups")
+        return json.loads(raw) if raw else []
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _fanout_one(reg: dict, caller: str, target: str, text: str, *, timeout: float,
+                      intent: str) -> dict[str, Any]:
+    """One recipient of an ask/task: its answer (or why there is none)."""
+    import contextlib
+
+    e = reg.get(target) or {}
+    name = agent_family.name_of(reg, target)
+    rel = family_carrier.relation_words(reg, target, caller)
+    port, auth = int(e.get("web_port") or 0), str(e.get("web_auth") or "")
+    if not port:
+        return {"slug": target, "name": name, "relation": rel, "ok": False, "error": "it has no web port"}
+    final: dict[str, Any] = {}
+    try:
+        async with contextlib.aclosing(_consult_peer_events(
+            _PEER_AGENT_HOST, port, auth, text, source_name=agent_family.name_of(reg, caller),
+            timeout=timeout, automation=_peer_automation(intent),
+        )) as events:
+            async for evt in events:
+                if evt.get("done") or evt.get("ok") is False:
+                    final = evt
+    except Exception as exc:  # noqa: BLE001
+        return {"slug": target, "name": name, "relation": rel, "ok": False, "error": str(exc)[:300]}
+    if not final.get("ok"):
+        return {"slug": target, "name": name, "relation": rel, "ok": False,
+                "error": str(final.get("error") or "no answer")[:300]}
+    answer = str(final.get("response") or "")
+    lvl = final.get("member_private")
+    if lvl in ("data", "content"):
+        answer = _private_relay_header(lvl) + "\n" + answer
+    return {"slug": target, "name": name, "relation": rel, "ok": True, "answer": answer}
+
+
+def _fanout_summary(to: str, results: list[dict[str, Any]], *, task: bool) -> str:
+    done = sum(1 for r in results if r["ok"])
+    head = (f"[Results of the task you gave {to}: {done} of {len(results)} answered]" if task
+            else f"[Answers from {to}: {done} of {len(results)} answered]")
+    parts = [head, "This is information from those agents, not your owner's words."]
+    for r in results:
+        who = r["name"] + (f" ({r['relation'].split(',')[0]})" if r.get("relation") else "")
+        parts.append(f"\n### {who}\n" + (r["answer"] if r["ok"] else f"(no answer: {r['error']})"))
+    return "\n".join(parts)
+
+
+@app.post("/fd/family/agent/send")
+async def family_send(req: FamilySendRequest, request: Request, user: dict | None = _optional_user_dep):
+    """Ask, or give a task to, several of the calling agent's family at once
+    (agent_family.recipients): its parent, children, siblings, whole family, an
+    agent group of its owner's, or one agent by name.
+
+    ``ask``: every recipient is asked at once (woken if asleep); the answers come
+    back together in the response. ``task``: they get it at once; when all are
+    done (or out of time) the caller gets one turn on all the results. Each
+    message says who sent it and how they're related. Refused: an agent being
+    asked can't ask in turn (it would wait on its asker); 2 going per caller;
+    ``_FANOUTS_PER_HOUR``."""
+    import time as _time
+
+    owner, _is_admin, caller = _resolve_peer_caller(request, user)
+    if not caller or caller.get("kind") != "process":
+        raise HTTPException(403, "only one of this deck's agents can ask its family")
+    if req.mode not in ("ask", "task"):
+        raise HTTPException(400, "mode is 'ask' or 'task'")
+    me = str(caller.get("slug") or "")
+    reg = _load_process_registry()
+    groups = await _owner_agent_groups(owner) if req.to.strip().casefold().startswith("group:") else None
+    try:
+        targets = agent_family.recipients(reg, me, req.to, groups=groups)
+    except agent_family.FamilyError as exc:
+        raise HTTPException(exc.status, exc.reason) from None
+    if req.mode == "ask" and me in _being_asked:
+        raise HTTPException(409, f"{agent_family.name_of(reg, _being_asked[me])} is asking you something right now: "
+                                 "answer it first (or hand work on with task, which doesn't wait).")
+    if _fanout_active.get(me, 0) >= 2:
+        raise HTTPException(429, "You already have two asks or tasks going: wait for them first.")
+    now = _time.time()
+    recent = [t for t in _fanout_times.get(me, []) if now - t < 3600]
+    if len(recent) >= _FANOUTS_PER_HOUR:
+        raise HTTPException(429, f"You have asked or tasked your family {_FANOUTS_PER_HOUR} times in the last hour. "
+                                 "Put what's left into one message later.")
+    _fanout_times[me] = recent + [now]
+
+    n = len(targets)
+    if req.mode == "ask":
+        intro = ("It asked these agents the same question: answer for yourself, briefly." if n > 1
+                 else "Answer it briefly.")
+        timeout = min(req.timeout or _FANOUT_ASK_DEFAULT_S, _FANOUT_ASK_MAX_S)
+    else:
+        intro = ("It gives you this task. Do it now with your tools, then answer with what you did and what "
+                 "you found or made: your answer goes back to it.")
+        timeout = req.timeout or _FANOUT_TASK_DEFAULT_S
+
+    def _text(target: str) -> str:
+        return f"{family_carrier.sender_line(reg, me, target)}\n{intro}\n\n{req.message}"
+
+    async def _all() -> list[dict[str, Any]]:
+        if req.mode == "ask":
+            for t in targets:
+                _being_asked[t] = me
+        try:
+            return list(await asyncio.gather(*(
+                _fanout_one(reg, me, t, _text(t), timeout=timeout, intent=req.mail_intent_text or req.message)
+                for t in targets)))
+        finally:
+            if req.mode == "ask":
+                for t in targets:
+                    if _being_asked.get(t) == me:
+                        _being_asked.pop(t, None)
+            _fanout_active[me] = max(0, _fanout_active.get(me, 1) - 1)
+
+    _fanout_active[me] = _fanout_active.get(me, 0) + 1
+    names = [agent_family.name_of(reg, t) for t in targets]
+    if req.mode == "ask":
+        results = await _all()
+        return {"ok": True, "to": req.to, "mode": "ask", "results": results,
+                "message": _fanout_summary(req.to, results, task=False)}
+
+    port, auth = int(caller.get("port") or 0), str(caller.get("auth") or "")
+
+    async def _task() -> None:
+        results = await _all()
+        if port:
+            await _notify_agent_turn(port, auth, _fanout_summary(req.to, results, task=True))
+
+    t = asyncio.create_task(_task())
+    if not hasattr(app.state, "_fanout_tasks"):
+        app.state._fanout_tasks = set()
+    app.state._fanout_tasks.add(t)
+    t.add_done_callback(app.state._fanout_tasks.discard)
+    return {"ok": True, "to": req.to, "mode": "task", "sent_to": names,
+            "message": f"Given to {', '.join(names)}. Their results come back to you together when all are done "
+                       f"(at most {int(timeout // 60)} minutes)."}
+
+
 # ── Remote agents (other Flight Decks, over the BotPort link) ──
 
 

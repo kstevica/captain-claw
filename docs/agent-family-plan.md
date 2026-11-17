@@ -413,3 +413,33 @@ on the phone, Undo restores.
   Working · 2 workers" and opens First Mate. (The Agents page doesn't show them.)
 - Tests: `test_agent_family_life.py` (9); e2e `groups` family scenario now 19
   checks (power-off sheet, remove dialog choice, Info → Family).
+
+## 16. Asking the family at once (after P5, 2026-11-17)
+
+Asked for after P5: "ask_parent / ask_siblings / ask_family / ask_group". Built
+as two actions of the `flight_deck` tool rather than four tools (a smaller
+prompt):
+
+- **`ask`** with `to` = `parent`, `children`, `siblings`, `family` (all three),
+  `group:<name>` (one of the owner's agent groups) or one agent's name: every
+  recipient is asked at once (woken if asleep), each told who's asking and how
+  they're related and that the others got the same question; the answers come
+  back together in the tool result ("[Answers from siblings: 2 of 3
+  answered]", one section each, and why one didn't answer). Each gets up to 4
+  minutes (at most 8).
+- **`task`**: the same recipients get the task at once and the asker is free;
+  when all are done (20 minutes by default, at most 30) the asker gets ONE turn
+  on all the results ("[Results of the task you gave family: …]"), not one per
+  recipient.
+- **Route**: `POST /fd/family/agent/send {to, message, mode, timeout?}` (the
+  peer routes' caller identity). Recipients: `agent_family.recipients` — only
+  the owner's standing agents, never the asker, never a run's worker, at most
+  12 (`FANOUT_MAX`).
+- **Guards**: an agent being asked can't `ask` in turn (it would wait on its
+  asker; `task` doesn't wait, so it may); two asks/tasks going per agent; 20
+  an hour. Recipients never get more permission than the asker (they're peer
+  messages, under the mail guard's `peer` marker, as consult/delegate).
+- **Groups**: read from the owner's settings, so only on decks with sign-in;
+  without sign-in groups live in the browser and `group:` says so.
+- The family block in each agent's prompt says how to use them.
+- Tests: `test_agent_family_ask.py` (11).
