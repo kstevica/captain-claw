@@ -32,6 +32,11 @@ export interface HomeAgent {
   reachable: boolean
   asleep?: boolean
   ownerName?: string
+  /** Flight Deck runs it for a run (a worker, a being's body): not one of the person's agents to show. */
+  managed?: boolean
+  /** Its family (agent_family): the id of the agent it sits under, and why it was made. */
+  parent?: string
+  madeFor?: string
 }
 
 const isUp = (a: HomeAgent) => a.state === 'running' || a.state === 'starting' || !!a.asleep
@@ -123,7 +128,9 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
   const [busy, setBusy] = useState<{ key: string; which: 'yes' | 'no' } | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
 
-  const shown = useMemo(() => agents.filter(isUp), [agents])
+  // A run's workers aren't agents to greet (their names still name what they did, below).
+  const own = useMemo(() => agents.filter((a) => !a.managed), [agents])
+  const shown = useMemo(() => own.filter(isUp), [own])
 
   // An agent's name by its slug (a process agent's id is `proc-<slug>`).
   const nameOf = useMemo(() => {
@@ -175,7 +182,7 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
     return out.sort((a, b) => b.at - a.at).slice(0, 8)
   }, [data.runs.data, data.done.data])
 
-  if (agents.length === 0) return <>{empty}</>
+  if (own.length === 0) return <>{empty}</>
 
   const firstName = (user?.display_name || '').trim().split(/\s+/)[0]
   // A section shows what it has (or that it's empty) once every one of its
@@ -340,7 +347,7 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
     )
   }
 
-  const off = agents.length - shown.length
+  const off = own.length - shown.length
 
   return (
     <div className="h-full overflow-y-auto bg-zinc-950/80">

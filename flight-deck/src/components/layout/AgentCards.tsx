@@ -1,9 +1,11 @@
-import { useMemo, type ReactNode } from 'react'
-import { ArrowRight, Compass, Moon, Pin, Store } from 'lucide-react'
+import { useMemo, useState, type DragEvent, type ReactNode } from 'react'
+import { ArrowRight, Compass, CornerDownRight, Moon, Pin, Store, Workflow } from 'lucide-react'
 import { AgentPicture } from '../agents/AgentPicture'
 import { useAgentAvatarStore } from '../../stores/agentAvatarStore'
 import { useGroupStore } from '../../stores/groupStore'
 import { agentSections, groupTone, isFolder } from '../../utils/agentGroups'
+import type { WorkerLineItem } from '../../utils/agentFamily'
+import { AGENT_DRAG_TYPE } from './KioskAgentGroups'
 import type { HomeAgent } from './AgentHome'
 
 // ── Centre: Agents — the agents that are up, as cards ──
@@ -13,6 +15,15 @@ import type { HomeAgent } from './AgentHome'
 // it is right now (ready, working, a new reply, asleep, starting). One click
 // opens its chat — an asleep one wakes. Agents that are off stay in the list
 // on the left; with none up, the caller's empty card shows instead.
+//
+// A family (agent_family) is one card across the row: the agent, and beside it
+// a tray of the agents under it (theirs too, indented) and its runs' workers
+// as a line ("Inbox triage · Working · 2 workers"). Pointing at a family dims
+// the rest. Hold a card over another for a moment and it goes under that one;
+// a child dropped on the page around the cards is one of the person's own again.
+
+// How long a card is held over another before it would go under it (as the column's rows).
+const ADOPT_HOLD_MS = 450
 
 type Tone = 'emerald' | 'amber' | 'sky' | 'indigo'
 
@@ -41,6 +52,18 @@ function hueOf(id: string): string {
 
 const isUp = (a: HomeAgent) => a.state === 'running' || a.state === 'starting' || !!a.asleep
 
+/** The top of ``id``'s family among ``all`` (itself when it sits under nobody; a loop stops the walk). */
+function rootOf(all: HomeAgent[], id: string): string {
+  const byId = new Map(all.map((a) => [a.id, a]))
+  const seen = new Set<string>()
+  let cur = byId.get(id)
+  while (cur?.parent && byId.has(cur.parent) && !seen.has(cur.parent)) {
+    seen.add(cur.id)
+    cur = byId.get(cur.parent)
+  }
+  return cur?.id ?? id
+}
+
 function statusOf(a: HomeAgent, info: { busy: boolean; unread: boolean } | undefined, starting: boolean): { label: string; tone: Tone; pulse?: boolean; title: string } {
   if (starting || a.state === 'starting') return { label: 'Starting', tone: 'amber', pulse: true, title: 'Starting up — it opens in a moment' }
   if (info?.busy) return { label: 'Working', tone: 'amber', pulse: true, title: 'Working on something for you' }
@@ -50,7 +73,10 @@ function statusOf(a: HomeAgent, info: { busy: boolean; unread: boolean } | undef
   return { label: 'Ready', tone: 'emerald', title: 'Running — ready to chat' }
 }
 
-export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, switching, onOpen, onGuide, empty, onStore }: {
+export function AgentCards<A extends HomeAgent>({
+  agents: every, sessionInfo, booting, switching, onOpen, onGuide, empty, onStore,
+  workerLines, adoptRefusal, onAdopt, onDetach,
+}: {
   agents: A[]
   sessionInfo: Map<string, { busy: boolean; unread: boolean }>
   booting: Set<string>
@@ -63,18 +89,72 @@ export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, 
   empty: ReactNode
   /** Open the Agent store over the layout (New agent's window). */
   onStore?: () => void
+  /** The family (AgentFamily): an agent's runs' workers, as lines. */
+  workerLines?: (a: A) => WorkerLineItem[]
+  adoptRefusal?: (childId: string, parentId: string) => string | null
+  onAdopt?: (childId: string, parentId: string) => void
+  onDetach?: (childId: string) => void
 }) {
   const groups = useGroupStore((s) => s.groups)
   const avatars = useAgentAvatarStore((s) => s.avatars)
 
+  // The person's agents: a run's workers show in their starter's line, not as cards.
+  const agents = useMemo(() => every.filter((a) => !a.managed), [every])
+  // The family: who sits under whom among them (a loop in the data makes each one a top).
+  const { tops, kidsOf, childIds } = useMemo(() => {
+    const byId = new Map(agents.map((a) => [a.id, a]))
+    const up = (a: A) => (a.parent && a.parent !== a.id ? byId.get(a.parent) : undefined)
+    const isChild = (a: A) => {
+      const seen = new Set([a.id])
+      for (let p = up(a); p; p = up(p)) {
+        if (seen.has(p.id)) return false
+        seen.add(p.id)
+      }
+      return !!up(a)
+    }
+    const kids = new Map<string, A[]>()
+    const child = new Set<string>()
+    for (const a of agents) {
+      if (!isChild(a)) continue
+      child.add(a.id)
+      kids.set(a.parent!, [...(kids.get(a.parent!) ?? []), a])
+    }
+    return { tops: agents.filter((a) => !child.has(a.id)), kidsOf: kids, childIds: child }
+  }, [agents])
+  const below = (id: string): { a: A; depth: number }[] => {
+    const out: { a: A; depth: number }[] = []
+    const seen = new Set([id])
+    const walk = (pid: string, depth: number) => {
+      for (const k of kidsOf.get(pid) ?? []) {
+        if (seen.has(k.id)) continue
+        seen.add(k.id)
+        out.push({ a: k, depth })
+        walk(k.id, depth + 1)
+      }
+    }
+    walk(id, 1)
+    return out
+  }
+
   // As the list on the left has them: the pinned group first, the others in
   // their order, those pinned in a group at its top, then the agents in none.
-  const shown = useMemo(() => agents.filter(isUp), [agents])
+  // A family shows while any of it is up.
+  const upIds = useMemo(() => new Set(agents.filter(isUp).map((a) => a.id)), [agents])
+  const shownTops = useMemo(() => tops.filter((t) => upIds.has(t.id)
+    || [...childIds].some((c) => upIds.has(c) && rootOf(agents, c) === t.id)), [tops, upIds, childIds, agents])
   const grouped = groups.some(isFolder)
-  const sections = useMemo(() => agentSections(shown, groups).filter((sec) => sec.agents.length > 0), [shown, groups])
+  const sections = useMemo(() => agentSections(shownTops, groups).filter((sec) => sec.agents.length > 0), [shownTops, groups])
 
-  if (shown.length === 0) return <>{empty}</>
+  // Dragging a card: which, which card it's held over (and since when), and the family pointed at.
+  const [dragging, setDragging] = useState<string | null>(null)
+  const [hold, setHold] = useState<{ id: string; since: number } | null>(null)
+  const [adoptOver, setAdoptOver] = useState<string | null>(null)
+  const [focus, setFocus] = useState<string | null>(null)
+  const canDrag = !!onAdopt && !!adoptRefusal
 
+  if (upIds.size === 0) return <>{empty}</>
+
+  const shown = agents.filter(isUp)
   const asleep = shown.filter((a) => a.asleep).length
   const working = shown.filter((a) => sessionInfo.get(a.id)?.busy).length
   const awake = shown.length - asleep
@@ -84,6 +164,135 @@ export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, 
     working ? `${working} working` : '',
     asleep ? `${asleep} asleep` : '',
   ].filter(Boolean).join(' · ')
+
+  const endDrag = () => { setDragging(null); setHold(null); setAdoptOver(null) }
+  const draggedName = dragging ? agents.find((x) => x.id === dragging)?.name ?? '' : ''
+  const refusal = (child: string, parent: string) => (adoptRefusal ? adoptRefusal(child, parent) : null)
+  // A card that can be dragged, and held over to take the dragged one under it.
+  const dragProps = (a: A) => (canDrag ? {
+    draggable: true,
+    onDragStart: (e: DragEvent<HTMLElement>) => {
+      e.stopPropagation()
+      e.dataTransfer.setData(AGENT_DRAG_TYPE, a.id)
+      e.dataTransfer.effectAllowed = 'move'
+      setTimeout(() => setDragging(a.id), 0)
+    },
+    onDragEnd: endDrag,
+    onDragOver: (e: DragEvent<HTMLElement>) => {
+      if (!dragging || dragging === a.id) return
+      const why = refusal(dragging, a.id)
+      if (why === null) return
+      e.stopPropagation()
+      const now = Date.now()
+      if (hold?.id !== a.id) {
+        setHold({ id: a.id, since: now })
+        return
+      }
+      if (adoptOver !== a.id && now - hold.since < ADOPT_HOLD_MS) return
+      e.preventDefault()
+      e.dataTransfer.dropEffect = why ? 'none' : 'move'
+      setAdoptOver(a.id)
+    },
+    onDragLeave: (e: DragEvent<HTMLElement>) => {
+      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+      if (hold?.id === a.id) setHold(null)
+      setAdoptOver((o) => (o === a.id ? null : o))
+    },
+    onDrop: (e: DragEvent<HTMLElement>) => {
+      if (!dragging || adoptOver !== a.id) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (refusal(dragging, a.id) === '') onAdopt?.(dragging, a.id)
+      endDrag()
+    },
+  } : {})
+  // While a card is held over this one: what letting go would do.
+  const adoptNote = (a: A) => {
+    if (adoptOver !== a.id || !dragging) return null
+    const why = refusal(dragging, a.id) ?? ''
+    return (
+      <span className={`pointer-events-none absolute inset-x-2 bottom-2 z-[1] rounded-lg px-2 py-1 text-center text-[11px] font-medium shadow ${why
+        ? 'bg-red-500/15 text-red-700 ring-1 ring-red-500/40 dark:text-red-300'
+        : 'bg-violet-500/20 text-violet-800 ring-1 ring-violet-500/50 dark:text-violet-200'}`}>
+        {why || `Put ${draggedName} under ${a.name}`}
+      </span>
+    )
+  }
+
+  // An agent under another, in its family's tray.
+  const trayCard = (a: A, depth: number, parentName: string) => {
+    const info = sessionInfo.get(a.id)
+    const starting = booting.has(a.id) && a.state !== 'stopped'
+    const openable = !switching.has(a.id) && ((a.reachable && !starting) || sessionInfo.has(a.id))
+    const st = isUp(a) ? statusOf(a, info, starting) : { label: 'Off', tone: 'indigo' as Tone, title: 'Off — switch it on from the list on the left' }
+    return (
+      <li key={a.id} className="relative" style={depth > 1 ? { marginLeft: (depth - 1) * 12 } : undefined} {...dragProps(a)}>
+        <button
+          onClick={() => onOpen(a)}
+          disabled={!openable}
+          title={openable ? `Chat with ${a.name}` : `${a.name} — ${st.title}`}
+          className={`flex h-full w-full items-start gap-2.5 rounded-xl border p-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/50 ${
+            adoptOver === a.id ? 'border-violet-500/60' : info?.busy ? 'border-amber-500/30 bg-amber-500/[0.04]' : 'border-zinc-800 bg-zinc-900/40'
+          } ${openable ? 'hover:border-violet-500/40 hover:bg-zinc-900' : 'cursor-default opacity-60'}`}
+        >
+          <span className={`flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-xl text-[11px] font-semibold text-white ${avatars[a.id] ? '' : `bg-gradient-to-br ${hueOf(a.id)}`} ${isUp(a) ? '' : 'saturate-0'}`}>
+            <AgentPicture agentId={a.id} name={a.name} />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[13px] font-medium text-zinc-200">{a.name}</span>
+            <span className="block truncate text-[11px] text-zinc-500">
+              {depth > 1 ? `Under ${parentName}` : a.madeFor ? `For: ${a.madeFor}` : a.description || st.label}
+            </span>
+            <span className={`mt-1 inline-flex items-center gap-1 rounded-full px-1.5 text-[10px] font-medium ring-1 ring-inset ${PILL[st.tone].pill}`}>
+              <span className={`h-1 w-1 rounded-full ${PILL[st.tone].dot} ${'pulse' in st && st.pulse ? 'animate-pulse' : ''}`} />{st.label}
+            </span>
+          </span>
+        </button>
+        {adoptNote(a)}
+      </li>
+    )
+  }
+
+  // What sits beside a family's agent: the agents under it, and its runs' workers.
+  const tray = (a: A) => {
+    const kids = below(a.id)
+    const lines = workerLines?.(a) ?? []
+    if (!kids.length && !lines.length) return null
+    const nameOf = (id: string | undefined) => agents.find((x) => x.id === id)?.name ?? ''
+    return (
+      <div className="min-w-0 flex-1">
+        {kids.length > 0 && (
+          <>
+            <div className="mb-2 flex items-center gap-1.5 text-[11px] font-medium text-zinc-500">
+              <CornerDownRight className="h-3.5 w-3.5" />
+              {kids.length === 1 ? 'One agent under it' : `${kids.length} agents under it`}
+            </div>
+            <ul className="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-2">
+              {kids.map(({ a: k, depth }) => trayCard(k, depth, nameOf(k.parent)))}
+            </ul>
+          </>
+        )}
+        {lines.length > 0 && (
+          <ul className={`${kids.length ? 'mt-2.5' : ''} space-y-1`}>
+            {lines.map((line, i) => {
+              const body = (
+                <>
+                  <Workflow className="h-3.5 w-3.5 shrink-0 animate-pulse motion-reduce:animate-none" />
+                  <span className="min-w-0 truncate">{line.label}</span>
+                </>
+              )
+              const cls = 'flex w-full items-center gap-2 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-2.5 py-1.5 text-left text-xs font-medium text-amber-700 dark:text-amber-300'
+              return (
+                <li key={`${a.id}-line-${i}`} data-workers-of={a.id} title={line.names.join(', ')}>
+                  {line.onOpen ? <button onClick={line.onOpen} className={`${cls} hover:bg-amber-500/10`}>{body}</button> : <span className={cls}>{body}</span>}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+      </div>
+    )
+  }
 
   // One agent's card. `pinned`: at the top of its group.
   const card = (a: A, key: string, i: number, pinned: boolean) => {
@@ -96,8 +305,9 @@ export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, 
     const avatar = avatars[a.id]
     const fade = a.asleep ? 'opacity-75 saturate-[0.6]' : ''
     const about = a.description || (a.kind === 'shared' ? `Shared by ${a.ownerName || 'another user'}` : '')
-    return (
-      <li key={key} className="fd-rise" style={{ animationDelay: `${Math.min(i, 8) * 35}ms` }}>
+    const family = tray(a)
+    const dimmed = focus !== null && focus !== a.id
+    const button = (
         <button
           onClick={() => onOpen(a)}
           disabled={!openable}
@@ -152,6 +362,30 @@ export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, 
             )}
           </div>
         </button>
+    )
+    const common = {
+      style: { animationDelay: `${Math.min(i, 8) * 35}ms` },
+      onMouseEnter: family ? () => setFocus(a.id) : undefined,
+      onMouseLeave: family ? () => setFocus((f) => (f === a.id ? null : f)) : undefined,
+    }
+    if (!family) {
+      return (
+        <li key={key} className={`fd-rise relative transition-opacity duration-200 ${dimmed ? 'opacity-50' : ''}`} {...common} {...dragProps(a)}>
+          {button}
+          {adoptNote(a)}
+        </li>
+      )
+    }
+    // A family: across the row, its agent beside the tray of the ones under it.
+    return (
+      <li key={key} data-family={a.id} className={`fd-rise col-span-full transition-opacity duration-200 ${dimmed ? 'opacity-50' : ''}`} {...common}>
+        <div className="flex flex-col gap-3 rounded-[1.25rem] border border-zinc-800/80 bg-zinc-900/25 p-2 sm:flex-row">
+          <div className="relative sm:w-60 sm:shrink-0" {...dragProps(a)}>
+            {button}
+            {adoptNote(a)}
+          </div>
+          <div className="min-w-0 flex-1 px-1 pb-1 sm:py-2 sm:pr-2">{family}</div>
+        </div>
       </li>
     )
   }
@@ -159,8 +393,16 @@ export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, 
   // Cards arrive one after another, across the sections.
   let n = 0
 
+  // A child dropped on the page around the cards: one of the person's own again.
+  const detaching = !!dragging && childIds.has(dragging) && !!onDetach
   return (
-    <div className="h-full overflow-y-auto bg-zinc-950/80">
+    <div
+      className="h-full overflow-y-auto bg-zinc-950/80"
+      {...(detaching ? {
+        onDragOver: (e: DragEvent<HTMLElement>) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' },
+        onDrop: (e: DragEvent<HTMLElement>) => { e.preventDefault(); onDetach?.(dragging!); endDrag() },
+      } : {})}
+    >
       <div className="mx-auto w-full max-w-5xl px-6 pb-10 pt-10 wide:px-10 wide:pt-14">
         <header className="fd-rise mb-7 flex flex-wrap items-end justify-between gap-3">
           <div className="min-w-0">
@@ -189,7 +431,7 @@ export function AgentCards<A extends HomeAgent>({ agents, sessionInfo, booting, 
                   <h2 className="fd-rise mb-3 flex items-center gap-2 text-sm font-semibold text-zinc-300">
                     <span className={`h-2 w-2 shrink-0 rounded-full ${gTone ? gTone.dot : 'bg-zinc-500'}`} />
                     <span className="truncate">{sec.name}</span>
-                    <span className="rounded-full bg-zinc-800 px-1.5 py-0.5 text-[11px] font-medium leading-none text-zinc-500">{sec.agents.length}</span>
+                    <span className="rounded-full bg-zinc-800 px-1.5 py-0.5 text-[11px] font-medium leading-none text-zinc-500">{sec.agents.length + sec.agents.reduce((n, t) => n + below(t.id).length, 0)}</span>
                     {sec.group?.pinned && <Pin className="h-3.5 w-3.5 shrink-0 fill-current text-violet-600 dark:text-violet-400" aria-label="Pinned to the top" />}
                   </h2>
                 )}
