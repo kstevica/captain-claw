@@ -244,13 +244,16 @@ _WATCHERS: dict[str, asyncio.Task] = {}
 
 async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind: str = "run",
                 note: str = "", context: list[dict[str, Any]] | None = None,
-                watch: bool = True) -> dict[str, Any]:
+                watch: bool = True, max_tokens: int | None = None) -> dict[str, Any]:
     """Start one run of a factory's live version through its runner.
 
     Refused (FirstMateError) when the factory isn't the owner's, has no
     approved version, can't start this run (see ``FirstMateStore.start_run``),
     its runner isn't wired, or the runner has no free slot. A runner that
-    fails to start its child leaves the run failed, with why."""
+    fails to start its child leaves the run failed, with why.
+
+    ``max_tokens`` lowers the run's token cap (the loop passes what is left of
+    the factory's share this week); it never raises it."""
     store = fms.get_store()
     factory = store.get_owned(factory_id, owner_id)
     if factory is None:
@@ -265,6 +268,8 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
     refs = [str(c.get("id")) for c in (context or []) if c.get("id")]
     brief = compose_brief(factory, version, note=note, context=context)
     token_cap = token_cap_for(store, factory, version)
+    if max_tokens is not None:
+        token_cap = max(1, min(token_cap, int(max_tokens)))
     run = store.start_run(factory_id, trigger=trigger, kind=kind, trigger_ref=refs)
     try:
         child = await runner.start(factory, version, run, brief, token_cap=token_cap)

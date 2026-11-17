@@ -332,6 +332,23 @@ async def test_run_now_when_the_list_finishes_a_run(deck):
         assert cards[0]["last_run"]["status"] == "done" and cards[0]["last_run"]["result"] == "One page."
 
 
+async def test_the_owners_switch_pauses_and_resumes(deck):
+    _open()
+    bat = deck
+    async with _client() as cl:
+        await cl.put("/fd/first-mate/prefs", headers=_hdr(BOB), json={"on": True})
+        f = await _approved(cl)
+        run = (await cl.post(f"/fd/first-mate/factories/{f['id']}/run", headers=_hdr(BOB), json={})).json()
+        r = await cl.put("/fd/first-mate/prefs", headers=_hdr(BOB), json={"on": False})
+        assert r.status_code == 200 and r.json()["on"] is False
+        g = (await cl.get(f"/fd/first-mate/factories/{f['id']}", headers=_hdr(BOB))).json()
+        assert g["state"] == "paused" and g["state_reason"] == "First Mate is off"
+        assert g["runs"][0]["status"] == "cancelled" and bat.runs[run["child_id"]]["status"] == "cancelled"
+        await cl.put("/fd/first-mate/prefs", headers=_hdr(BOB), json={"on": True})
+        g = (await cl.get(f"/fd/first-mate/factories/{f['id']}", headers=_hdr(BOB))).json()
+        assert g["state"] == "running"
+
+
 async def test_run_now_refusals(deck):
     _open()
     bat = deck

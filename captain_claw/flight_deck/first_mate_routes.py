@@ -148,10 +148,23 @@ async def status(user: dict = Depends(get_current_user)):
 
 @router.put("/fd/first-mate/prefs")
 async def put_prefs(body: Any = Body(...), user: dict = Depends(allowed_user)):
+    """The caller's preferences. Turning ``on`` off pauses their running
+    factories and stops their going runs; turning it on again resumes the
+    ones the switch paused."""
+    from captain_claw.flight_deck import first_mate_loop
+
+    store = fms.get_store()
+    uid = _uid(user)
+    was_on = store.prefs(uid)["on"]
     try:
-        return fms.get_store().set_prefs(_uid(user), _object(body))
+        saved = store.set_prefs(uid, _object(body))
     except FirstMateError as exc:
         raise _err(exc) from None
+    if was_on and not saved["on"]:
+        await first_mate_loop.switch_off(uid)
+    elif saved["on"] and not was_on:
+        await first_mate_loop.switch_on(uid)
+    return saved
 
 
 @router.get("/fd/first-mate/templates")
