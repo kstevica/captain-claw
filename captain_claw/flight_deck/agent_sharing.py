@@ -381,12 +381,14 @@ def _docker_record(slug: str, instance: str, containers) -> AgentRecord | None:
 
 # Exact port of flight-deck/src/components/layout/SimpleLayout.tsx MANAGED_AGENT
 # (JS `$` = end of input → `\Z`).
+# Bat's workers are ``bat-<run id's first 8>-<step>``, the run id ``bat_<hex>``.
 _MANAGED_AGENT_RE = re.compile(
-    r"^(?:(?:basna|vatra)-[0-9a-f]{8}-|council-[0-9a-f]{6}-|iskra-.+-[0-9a-f]{4}\Z)")
+    r"^(?:(?:basna|vatra)-[0-9a-f]{8}-|council-[0-9a-f]{6}-|bat-bat-[0-9a-f]{4}-|iskra-.+-[0-9a-f]{4}\Z)")
 
 
 def is_managed_agent(slug: str, description: str) -> bool:
-    """FD spawns and stops these itself (a run's worker, a being's body)."""
+    """FD spawns and stops these itself (a run's worker, a being's body).
+    A registry entry's ``role`` says it too (agent_family.role_of)."""
     slug = slug or ""
     return bool(_MANAGED_AGENT_RE.match(slug)) or (
         slug.startswith("dubina-") and (description or "").startswith("Dubina ephemeral"))

@@ -36,7 +36,7 @@ import { useScheduledStore } from '../../stores/scheduledStore'
 import { Switch } from '../console/parts'
 import { SchedulePicker } from './SchedulePicker'
 import { useSchedulePreview } from './schedulePreview'
-import { isManagedAgent } from '../../utils/managedAgents'
+import { isManagedProcess } from '../../utils/managedAgents'
 import {
   agentJobKey,
   buildSchedule,
@@ -136,7 +136,7 @@ export function ScheduledTasks({
   const notify = useNotificationStore((s) => s.add)
 
   const agents: AgentChoice[] = useMemo(() => processes
-    .filter((p) => !isManagedAgent(p.slug, p.description || ''))
+    .filter((p) => !isManagedProcess(p))
     // Asleep is on: it wakes for its runs.
     .map((p) => ({ slug: p.slug, name: p.name || p.slug, running: p.status === 'running' || !!p.asleep }))
     .sort((a, b) => Number(b.running) - Number(a.running) || a.name.localeCompare(b.name)), [processes])
@@ -146,7 +146,7 @@ export function ScheduledTasks({
   // Not the deck's own workers' and beings' machinery.
   const agentJobs = useMemo(() => allAgentJobs.filter((j) => {
     const p = processes.find((x) => x.slug === j.agent_slug)
-    return !p || !isManagedAgent(p.slug, p.description || '')
+    return !p || !isManagedProcess(p)
   }), [allAgentJobs, processes])
 
   const [view, setView] = useState<View>(() =>

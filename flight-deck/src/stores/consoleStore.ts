@@ -7,7 +7,7 @@ import { ADMIN_TAB_KEY } from '../services/sharedIntegrations'
 import { isAppShell } from '../services/desktopShell'
 import { hasTierSets } from '../services/tierConfig'
 import { listProcesses, listContainers } from '../services/docker'
-import { isManagedAgent } from '../utils/managedAgents'
+import { isManagedProcess } from '../utils/managedAgents'
 
 // The Admin console (layoutMode 'console'): the deck's admin work on pages of
 // its own — no chat, no agent desktop. Each page has an address,
@@ -124,7 +124,7 @@ async function ownAgentCount(): Promise<number> {
   const within = (p: Promise<number>) =>
     Promise.race([p.catch(() => 0), new Promise<number>((resolve) => setTimeout(() => resolve(0), 4000))])
   const [p, c] = await Promise.all([
-    within(listProcesses().then((ps) => ps.filter((x) => !isManagedAgent(x.slug, x.description || '')).length)),
+    within(listProcesses().then((ps) => ps.filter((x) => !isManagedProcess(x)).length)),
     within(listContainers().then((cs) => cs.length)),
   ])
   return p + c
