@@ -784,9 +784,112 @@ def no_sign_in(browser):
     ctx.close()
 
 
+def put_parent(page, slug, parent):
+    """Move one of the signed-in person's agents under another (agent_family), through the deck."""
+    return page.evaluate(
+        """async ([slug, parent]) => {
+            const token = await fetch('/fd/auth/refresh', {method:'POST', credentials:'include'}).then(r => r.json()).then(d => d.access_token)
+            const r = await fetch('/fd/processes/' + slug + '/parent', {method: 'PUT', credentials: 'include',
+                headers: {Authorization: 'Bearer ' + token, 'Content-Type': 'application/json'}, body: JSON.stringify({parent})})
+            return r.status
+        }""",
+        [slug, parent],
+    )
+
+
+def level(page, name):
+    li = row(page, name)
+    return li.get_attribute("aria-level") if li.count() else None
+
+
+def hold_drag(page, source, target, hold_ms=700):
+    """Drag ``source`` to the middle of ``target`` and hold it there: a row takes it under itself.
+    ``source`` must be a running agent: a stopped one's row is a disabled button, which starts no drag."""
+    s, t = source.bounding_box(), target.bounding_box()
+    page.mouse.move(s["x"] + s["width"] / 2, s["y"] + s["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(s["x"] + s["width"] / 2 + 5, s["y"] + s["height"] / 2 + 5, steps=3)
+    page.wait_for_timeout(120)
+    page.mouse.move(t["x"] + t["width"] / 2, t["y"] + t["height"] / 2, steps=12)
+    for _ in range(hold_ms // 100):
+        page.wait_for_timeout(100)
+        page.mouse.move(t["x"] + t["width"] / 2 + 1, t["y"] + t["height"] / 2, steps=1)
+    page.wait_for_timeout(150)
+
+
+def family(browser):
+    """The agent family in the column (docs/agent-family-plan.md, P3): agents under
+    others, folding, holding one over another's row, refusals, Undo and ⋯ → Put under."""
+    ctx = browser.new_context(viewport={"width": 1280, "height": 860})
+    ctx.add_init_script("try{localStorage.setItem('fd:theme','dark')}catch{}")
+    page = ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    sign_in(page, "maya@example.com")
+    page.wait_for_selector("aside li")
+    close_guide(page)
+    # One plain list, whatever groups the scenarios before left.
+    put_groups(page, [])
+    page.evaluate("() => localStorage.removeItem('fd:agent-tree-folded')")
+    try:
+        check("family: moved through the deck", put_parent(page, "report-writer", "research-assistant") == 200)
+        page.reload()
+        page.wait_for_selector("aside li")
+        close_guide(page)
+        writer = row(page, "Report Writer")
+        check("family: shows under its parent", level(page, "Report Writer") == "2"
+              and writer.get_attribute("data-parent") == "proc-research-assistant")
+        names = page.locator("aside li span.font-medium").all_text_contents()
+        check("family: right after it", names.index("Report Writer") == names.index("Research Assistant") + 1, str(names))
+        shot(page, "60-family")
+
+        page.get_by_role("button", name="Fold the agents under Research Assistant").click()
+        page.wait_for_timeout(300)
+        check("family: folds", "Report Writer" not in page.locator("aside li span.font-medium").all_text_contents()
+              and row(page, "Research Assistant").locator("text=+1").count() == 1)
+        page.get_by_role("button", name="Show the agents under Research Assistant").click()
+        page.wait_for_timeout(300)
+
+        hold_drag(page, row(page, "Inbox Helper"), row(page, "Research Assistant"))
+        check("family: held over a row, it says so", "Put Inbox Helper under Research Assistant" in row(page, "Research Assistant").inner_text())
+        page.mouse.up()
+        page.wait_for_timeout(1200)
+        check("family: dropped, it's under it", level(page, "Inbox Helper") == "2")
+        bar = page.locator("aside [role=status]")
+        check("family: says what moved", "Inbox Helper is now under Research Assistant" in bar.inner_text(), bar.inner_text())
+        shot(page, "61-family-adopted")
+        bar.get_by_role("button", name="Undo").click()
+        page.wait_for_timeout(1200)
+        check("family: Undo puts it back", level(page, "Inbox Helper") in (None, "1"), str(level(page, "Inbox Helper")))
+
+        hold_drag(page, row(page, "Research Assistant"), row(page, "Report Writer"))
+        check("family: a loop is refused, with why", "would make a loop" in row(page, "Report Writer").inner_text())
+        shot(page, "62-family-refused")
+        page.mouse.up()
+        page.wait_for_timeout(800)
+        check("family: nothing moved", level(page, "Research Assistant") in (None, "1") and level(page, "Report Writer") == "2")
+
+        row(page, "Home Admin").hover()
+        page.get_by_role("button", name="More for Home Admin").click()
+        menu = page.get_by_role("dialog", name="Home Admin")
+        menu.get_by_role("button", name="Put under").click()
+        picker = page.get_by_role("dialog", name="Put Home Admin under another agent")
+        expect(picker).to_be_visible()
+        check("family: picker, none ticked first", picker.get_by_role("radio", name="None — one of your own").get_attribute("aria-checked") == "true")
+        shot(page, "63-family-picker")
+        picker.get_by_role("radio", name="Research Assistant").click()
+        page.wait_for_timeout(1200)
+        check("family: picked, it's under it", level(page, "Home Admin") == "2" and row(page, "Home Admin").get_attribute("data-parent") == "proc-research-assistant")
+        check("family: no page errors", not errors, "; ".join(errors[:3]))
+    finally:
+        for slug in ("report-writer", "home-admin", "inbox-helper"):
+            put_parent(page, slug, "")
+        ctx.close()
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch()
-    which = sys.argv[1:] or ["kiosk", "phone", "pins", "admin", "no-sign-in"]
+    which = sys.argv[1:] or ["kiosk", "phone", "pins", "admin", "no-sign-in", "family"]
     try:
         if "kiosk" in which:
             kiosk_user(browser)
@@ -798,6 +901,8 @@ with sync_playwright() as p:
             admin(browser)
         if "no-sign-in" in which:
             no_sign_in(browser)
+        if "family" in which:
+            family(browser)
     finally:
         browser.close()
 
