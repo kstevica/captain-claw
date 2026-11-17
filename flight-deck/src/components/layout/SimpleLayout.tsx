@@ -147,7 +147,7 @@ import {
   type AgentMenuItem,
 } from './KioskAgentDialogs'
 import { AGENT_DRAG_TYPE, AgentGroupDialog, AgentGroupPicker, AgentSections, RailGroupMark, type RowParts } from './KioskAgentGroups'
-import { AgentParentPicker, FamilyUndoBar } from './AgentFamily'
+import { AgentParentPicker, FamilyUndoBar, PowerOffFamilyDialog } from './AgentFamily'
 import { adoptRefusal, inFamily, slugOf, workerLines, type FamilyMove, type WorkerLineItem } from '../../utils/agentFamily'
 import { setProcessParent } from '../../services/docker'
 import { SimpleNav } from './SimpleNav'
@@ -199,6 +199,8 @@ interface SimpleAgent {
   role?: string
   madeFor?: string
   factory?: string
+  /** Who made it: an agent's slug, `first_mate`, or "" (its owner). */
+  madeBy?: string
 }
 
 /** The agent family in the column: what the sections and rows need (AgentFamily.tsx). */
@@ -209,6 +211,8 @@ interface FamilyHooks {
   adopt: (childId: string, parentId: string) => void
   detach: (childId: string) => void
   lines: (a: SimpleAgent) => WorkerLineItem[]
+  /** First Mate's workers when no agent of the person's is its own: lines at the foot of the list. */
+  firstMateLines: WorkerLineItem[]
   move: FamilyMove | null
   clearMove: () => void
 }
@@ -589,7 +593,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         startKey: p.slug, managed: isManagedProcess(p),
         asleep: !!p.asleep,
         parent: p.parent ? `proc-${p.parent}` : undefined,
-        role: p.role, madeFor: p.made_for || undefined, factory: p.factory || undefined,
+        role: p.role, madeFor: p.made_for || undefined, factory: p.factory || undefined, madeBy: p.made_by || undefined,
       })
     }
     for (const a of localAgents) {
@@ -628,10 +632,16 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [parentPickerId, setParentPickerId] = useState<string | null>(null)
   const [familyMove, setFamilyMove] = useState<FamilyMove | null>(null)
   const clearFamilyMove = useCallback(() => setFamilyMove(null), [])
+  // First Mate's workers with no agent of the person's over them (none picked for First Mate).
+  const fmLoose = useMemo(() => {
+    const ids = new Set(agents.map((a) => a.id))
+    return agents.filter((a) => a.role === 'worker' && a.madeBy === 'first_mate' && !(a.parent && ids.has(a.parent)))
+  }, [agents])
   const familyListed = useMemo(() => {
     const ids = new Set(agents.map((a) => a.id))
-    return agents.filter((a) => !(a.role === 'worker' && a.parent && ids.has(a.parent)))
-  }, [agents])
+    const loose = new Set(fmLoose.map((a) => a.id))
+    return agents.filter((a) => !(a.role === 'worker' && a.parent && ids.has(a.parent)) && !loose.has(a.id))
+  }, [agents, fmLoose])
   const workersOf = useMemo(() => {
     const ids = new Set(agents.map((a) => a.id))
     const out = new Map<string, SimpleAgent[]>()
@@ -669,9 +679,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     adopt: (c: string, p: string) => { void moveUnder(c, p) },
     detach: (c: string) => { void moveUnder(c, '') },
     lines: (a: SimpleAgent) => workerLines(workersOf.get(a.id) ?? [], () => window.dispatchEvent(new Event(OPEN_FIRST_MATE_EVENT))),
+    firstMateLines: workerLines(fmLoose.filter((a) => a.state === 'running'), () => window.dispatchEvent(new Event(OPEN_FIRST_MATE_EVENT)))
+      .map((l) => ({ ...l, label: `First Mate · ${l.label}` })),
     move: familyMove,
     clearMove: clearFamilyMove,
-  }), [agents, familyListed, workersOf, moveUnder, familyMove, clearFamilyMove])
+  }), [agents, familyListed, workersOf, fmLoose, moveUnder, familyMove, clearFamilyMove])
 
   // Per-agent chat state, folded across lanes: busy if any lane is, unread if
   // any lane finished something while the user looked elsewhere.
@@ -755,9 +767,34 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // Power an agent on or off — the one switch a kiosk user has over an agent
   // of theirs (Flight Deck only lets them act on their own). A local agent
   // isn't ours to start or stop: "on" just checks whether it's back.
-  const handlePower = async (a: SimpleAgent, on: boolean) => {
+  // The agents under one (agent_family), deepest last: the ones of the person's own that stay.
+  const descendantsOf = (id: string): SimpleAgent[] => {
+    const out: SimpleAgent[] = []
+    const seen = new Set([id])
+    const walk = (pid: string) => {
+      for (const k of agents) {
+        if (k.parent !== pid || seen.has(k.id) || k.role === 'worker' || k.managed) continue
+        seen.add(k.id)
+        out.push(k)
+        walk(k.id)
+      }
+    }
+    walk(id)
+    return out
+  }
+  const [powerFamily, setPowerFamily] = useState<{ agent: SimpleAgent; kids: SimpleAgent[] } | null>(null)
+
+  const handlePower = async (a: SimpleAgent, on: boolean, opts?: { confirmed?: boolean }) => {
     if (!on && a.kind === 'local') return
-    if (!on) {
+    if (!on && !opts?.confirmed) {
+      // Agents under it that are on: off with it, or not? (They keep working otherwise.)
+      const kidsOn = a.kind === 'process' ? descendantsOf(a.id).filter((k) => k.state === 'running' || k.asleep) : []
+      if (kidsOn.length) {
+        setPowerFamily({ agent: a, kids: kidsOn })
+        return
+      }
+    }
+    if (!on && !opts?.confirmed) {
       // This tab only knows what ITS open chats show — an agent can be at
       // work with none of them open — so powering off is always confirmed.
       const chat = useChatStore.getState()
@@ -827,18 +864,25 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // Remove an agent for good: Flight Deck stops it and deletes it with its
   // folder, its chat log and the scheduled tasks that run it; here its chats
   // close and their queues go, so nothing of it comes back under its name.
-  const handleRemove = async (a: SimpleAgent) => {
+  const handleRemove = async (a: SimpleAgent, family: 'up' | 'remove' = 'up') => {
     if (a.kind !== 'docker' && a.kind !== 'process') return
+    // "Remove them too": the agents under it go with it (agent_family).
+    const gone = [a, ...(a.kind === 'process' && family === 'remove' ? descendantsOf(a.id) : [])]
     setSwitching((prev) => new Set(prev).add(a.id))
     try {
-      endBoot(a.id)
-      releaseChats(a.id)
-      const result = a.kind === 'docker' ? await removeContainer(a.startKey, true) : await removeProcess(a.startKey, true)
-      clearAgentSlices(a.id)
-      forgetAgent(a.id)
-      forgetAvatar(a.id)
+      for (const g of gone) {
+        endBoot(g.id)
+        releaseChats(g.id)
+      }
+      const result = a.kind === 'docker' ? await removeContainer(a.startKey, true) : await removeProcess(a.startKey, true, family)
+      for (const g of gone) {
+        clearAgentSlices(g.id)
+        forgetAgent(g.id)
+        forgetAvatar(g.id)
+      }
       setAgentRemoveId(null)
-      if (result.ok) useNotificationStore.getState().add('info', 'Agent removed', `${a.name} and its folder are gone.`)
+      if (result.ok) useNotificationStore.getState().add('info', gone.length > 1 ? 'Agents removed' : 'Agent removed',
+        gone.length > 1 ? `${a.name} and the ${gone.length - 1} under it are gone, with their folders.` : `${a.name} and its folder are gone.`)
       else useNotificationStore.getState().add('warning', 'Agent removed — not everything went', result.message)
       fetchScheduled()
     } catch (e) {
@@ -948,9 +992,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       ]
     }
     const up = a.reachable && !a.asleep && !booting.has(a.id) && !switching.has(a.id)
+    // Its family is the deck's to say: Info opens on it for one of your agents that is off.
+    const familyInfo = a.kind === 'process' && !a.managed
     const items: AgentMenuItem[] = [{
-      icon: Info, label: 'Info', hint: up ? 'Its intentions and topics' : 'Power it on to see its intentions and topics',
-      tone: 'sky', group: 'work', onSelect: () => setAgentInfoId(a.id), disabled: !up,
+      icon: Info, label: 'Info',
+      hint: up ? (familyInfo ? 'Its intentions, topics and family' : 'Its intentions and topics')
+        : familyInfo ? 'Its family; power it on for its intentions and topics' : 'Power it on to see its intentions and topics',
+      tone: 'sky', group: 'work', onSelect: () => setAgentInfoId(a.id), disabled: !up && !familyInfo,
     }]
     items.push(...filesDataMenuItems(a))
     if (a.kind === 'docker' || a.kind === 'process') {
@@ -1486,7 +1534,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         <KioskRemoveAgentDialog
           agent={agentRemove}
           busy={!!sessionInfo.get(agentRemove.id)?.busy}
-          onRemove={() => handleRemove(agentRemove)}
+          under={(() => {
+            const kids = descendantsOf(agentRemove.id)
+            if (!kids.length) return undefined
+            const up = agentRemove.parent ? agents.find((x) => x.id === agentRemove.parent)?.name : ''
+            return { names: kids.map((k) => k.name), upTo: up || 'your own agents' }
+          })()}
+          onRemove={(family) => handleRemove(agentRemove, family)}
           onOpenLibrary={inLibraries(agentRemove)
             ? () => { setAgentRemoveId(null); openLibrary(agentRemove.startKey) }
             : undefined}
@@ -1512,6 +1566,20 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       )}
       {agentPicture && (
         <KioskAgentPictureDialog agentId={agentPicture.id} agentName={agentPicture.name} onClose={() => setAgentPictureId(null)} />
+      )}
+      {powerFamily && (
+        <PowerOffFamilyDialog
+          agent={powerFamily.agent}
+          kids={powerFamily.kids}
+          phone={isMobile}
+          onClose={() => setPowerFamily(null)}
+          onPick={(withKids) => {
+            const { agent, kids } = powerFamily
+            setPowerFamily(null)
+            void handlePower(agent, false, { confirmed: true })
+            if (withKids) for (const k of kids) void handlePower(k, false, { confirmed: true })
+          }}
+        />
       )}
       {parentPickerId && agents.some((a) => a.id === parentPickerId) && (
         <AgentParentPicker
@@ -2539,6 +2607,18 @@ function AgentsColumn({
             )
           }}
         />
+        {family && family.firstMateLines.length > 0 && (
+          <ul aria-label="First Mate at work" className="mt-1 flex flex-col gap-px">
+            {family.firstMateLines.map((line, i) => (
+              <li key={`fm-${i}`} title={line.names.join(', ')}>
+                <button onClick={line.onOpen} className="flex w-full min-w-0 items-center gap-2 rounded-[var(--fd-radius-control)] px-1.5 py-1 text-left text-[11px] text-amber-700 hover:bg-[var(--fd-hover)] dark:text-amber-400">
+                  <Workflow className="h-3.5 w-3.5 shrink-0 animate-pulse motion-reduce:animate-none" />
+                  <span className="min-w-0 truncate">{line.label}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         {family && <FamilyUndoBar move={family.move} onDone={family.clearMove} />}
       </div>
 

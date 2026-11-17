@@ -66,7 +66,7 @@ interface ProcessStore {
   restartProcess: (slug: string) => Promise<void>
   /** `purge`: removed for good — its folder, chat log and scheduled tasks
    *  go on the server, its labels and switches here. */
-  removeProcess: (slug: string, purge?: boolean) => Promise<ProcessActionResult>
+  removeProcess: (slug: string, purge?: boolean, family?: 'up' | 'remove') => Promise<ProcessActionResult>
   cloneProcess: (slug: string, newName: string) => Promise<void>
   setDescription: (slug: string, description: string) => void
   setNameOverride: (slug: string, name: string) => void
@@ -155,8 +155,8 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
     get().fetchProcesses()
   },
 
-  removeProcess: async (slug, purge = false) => {
-    const result = await dockerApi.removeProcess(slug, undefined, purge)
+  removeProcess: async (slug, purge = false, family = 'up') => {
+    const result = await dockerApi.removeProcess(slug, undefined, purge, family)
     if (purge) {
       // A later agent of the same name starts with none of this one's.
       const s = get()

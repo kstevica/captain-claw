@@ -4,7 +4,8 @@ Drives the kiosk's agent groups on a real deck: creating, dragging, the picker, 
 search, reordering, editing, deleting, pins, the collapsed rail, a change from another device,
 the phone layout, an admin in the desktop app's user view and in the web's simple layout,
 a deck without sign-in, and the agent family (agents under others: folding, holding one over
-another's row, a refused loop, Undo, ⋯ → Put under).
+another's row, a refused loop, Undo, ⋯ → Put under, power off and remove with agents under it,
+Info → Family).
 
 ```bash
 cd flight-deck && npm run build && cd ..

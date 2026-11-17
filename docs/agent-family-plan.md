@@ -7,7 +7,7 @@ sidebar and on the Agents page, and you can move an existing agent under
 another agent by dragging it there. First Mate is a parent too: its factories'
 work hangs under it.
 
-Status: decisions taken 2026-11-17; Phases 1–4 (data, talk, sidebar, Agents page) built, see §11–§14.
+Status: decisions taken 2026-11-17; all five phases built, see §11–§15.
 
 ## User decisions (2026-11-17)
 
@@ -381,3 +381,35 @@ on the phone, Undo restores.
   No e2e covers the Agents page yet.
 - **Not done**: no virtual First Mate card when no First Mate agent is picked;
   Basna/Vatra/Council worker parents (P5).
+
+## 15. As built (P5, 2026-11-17)
+
+- **Removing an agent** (`DELETE /fd/processes/{slug}?family=up|remove`): the
+  agents under it move up a level (default), or with `family=remove` go too,
+  deepest first, each the same way (`agent_family.removal_order`; a run's
+  workers are never among them). The kiosk's Remove dialog lists them and asks:
+  "Keep them: they move up to …" (default) or "Remove all N too", and the
+  button says how many go.
+- **Powering off an agent** with agents under it that are on: a sheet asks
+  "Just <it>" or "<it> and the N under it" (instead of the plain confirm);
+  they keep working otherwise.
+- **Clone**: the clone sits under its source's parent when there's room
+  (else top-level), is made by its owner, carries `made_for`, and its history
+  says "Cloned from …".
+- **Bundles**: export carries `made_for`; an import lands top-level with it.
+- **History** (`family_log` on the registry entry, newest 12): made by …,
+  put under … / made one of its owner's own (by its owner), moved up when its
+  parent was removed, cloned from …. `GET /fd/processes/{slug}/family` serves
+  it with where the agent sits, who made it and why, and the agents under it.
+  The kiosk's Info has a **Family** tab (and opens on it for an agent that's
+  off, whose Info used to be greyed out).
+- **Run workers under the agent that started the run**: Basna and Vatra runs an
+  agent starts note the agent (by its port, same owner) in
+  `agent_family.note_run_starter` (in memory, a day); their workers are spawned
+  under it (`vatra:<session>`, `basna:<session[:8]>` from the worker's name).
+  Council runs aren't started by agents: unchanged.
+- **First Mate without an agent of its own**: its factory workers no longer show
+  as rows; one line under the agent list says "First Mate · Inbox triage ·
+  Working · 2 workers" and opens First Mate. (The Agents page doesn't show them.)
+- Tests: `test_agent_family_life.py` (9); e2e `groups` family scenario now 19
+  checks (power-off sheet, remove dialog choice, Info → Family).

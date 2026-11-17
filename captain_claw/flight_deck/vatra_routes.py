@@ -5940,4 +5940,8 @@ async def agent_start(body: AgentStartReq):
         user, session_id, title, exec_req, body.source_host, body.source_port, origin))
     _track_run_task(session_id, t)
     await bat_nested.adopt("vatra", session_id, owner, port=body.source_port)
+    # Its workers sit under the agent that started it (agent_family).
+    from captain_claw.flight_deck import agent_family
+    from captain_claw.flight_deck.server import _load_process_registry
+    agent_family.note_run_starter(f"vatra:{session_id}", _load_process_registry(), port=int(body.source_port or 0), owner=owner)
     return {"status": "running", "session_id": session_id, "title": title}

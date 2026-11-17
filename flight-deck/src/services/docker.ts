@@ -302,6 +302,24 @@ export const spawnOldMan = (config: OldManSpawnRequest) =>
 export const listProcesses = (asUser?: string) =>
   fdFetch<ProcessInfo[]>('/processes', undefined, asUser)
 
+/** One of the owner's agents' family (agent_family): where it sits, who made
+ *  it and why, the agents under it, and its family history. */
+export interface ProcessFamily {
+  parent: string
+  parent_name: string
+  made_by: string
+  made_by_name: string
+  made_for: string
+  made_at: string
+  role: string
+  children: { slug: string; name: string }[]
+  workers: number
+  log: { at: string; text: string }[]
+}
+
+export const getProcessFamily = (slug: string) =>
+  fdFetch<ProcessFamily>(`/processes/${encodeURIComponent(slug)}/family`)
+
 /** Move one of the owner's agents under another of theirs (``parent`` its
  *  slug), or back to their own ("") — with everything under it (agent_family).
  *  A refusal throws with the deck's reason (a loop, too deep, too many). */
@@ -466,9 +484,12 @@ export const startProcess = (slug: string, asUser?: string) =>
 export const restartProcess = (slug: string, asUser?: string) =>
   fdFetch<ProcessActionResult>(`/processes/${slug}/restart`, { method: 'POST' }, asUser)
 
-/** `purge` also deletes the agent's folder, chat log and scheduled tasks. */
-export const removeProcess = (slug: string, asUser?: string, purge = false) =>
-  fdFetch<ProcessActionResult>(`/processes/${slug}${purge ? '?purge=true' : ''}`, { method: 'DELETE' }, asUser)
+/** `purge` also deletes the agent's folder, chat log and scheduled tasks.
+ *  `family`: the agents under it move up a level (default), or go too (agent_family). */
+export const removeProcess = (slug: string, asUser?: string, purge = false, family: 'up' | 'remove' = 'up') => {
+  const qs = [purge ? 'purge=true' : '', family === 'remove' ? 'family=remove' : ''].filter(Boolean).join('&')
+  return fdFetch<ProcessActionResult>(`/processes/${slug}${qs ? `?${qs}` : ''}`, { method: 'DELETE' }, asUser)
+}
 
 export const getProcessLogs = async (slug: string, tail = 200, sinceByte = 0): Promise<LogResult> => {
   const qs = sinceByte > 0

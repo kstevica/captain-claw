@@ -1321,6 +1321,10 @@ async def agent_start(body: AgentStartReq):
 
     t.add_done_callback(_on_done)
     await bat_nested.adopt("basna", session_id, owner, port=body.source_port)
+    # Its workers sit under the agent that started it (agent_family).
+    from captain_claw.flight_deck import agent_family
+    from captain_claw.flight_deck.server import _load_process_registry
+    agent_family.note_run_starter(f"basna:{session_id[:8]}", _load_process_registry(), port=int(body.source_port or 0), owner=owner)
 
     return {"status": "running", "session_id": session_id, "title": title,
             "n_agents": len(selected)}
