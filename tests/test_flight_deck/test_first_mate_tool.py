@@ -237,7 +237,8 @@ async def test_the_tool_refuses_inside_a_run_and_without_a_factory(monkeypatch):
     assert not (await tool.execute(action="approve", factory="x")).success
     got = await tool.execute(action="list")
     assert got.success and got.content == "You have 1 factory."
-    assert sent == [{"action": "list", "factory": "", "note": "", "week": "last"}]
+    assert sent == [{"action": "list", "factory": "", "note": "", "week": "last", "words": ""}]
+    assert not (await tool.execute(action="draft", words="hm")).success  # the owner's words, please
 
     async def no(fd_url, payload):
         return {"ok": False, "why": 'no factory called "x"'}

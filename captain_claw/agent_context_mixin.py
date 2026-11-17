@@ -232,7 +232,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
     "bat": "start/inspect a Bat run (stubborn finisher: works a goal until an independent judge says it's done)",
     "captain_swarm": "propose/follow a Captain Swarm run (keeps improving a measured number; waits for the owner's Go)",
-    "first_mate": "the owner's standing jobs (factories): list/status/run/pause/resume, the week's report; approvals and trust stay the owner's",
+    "first_mate": "the owner's standing jobs (factories): list/status/run/pause/resume, the week's report, draft a new one from their words; approvals and trust stay the owner's",
     "spend": "Bat-run only: pre-authorize a real-money purchase (capped; owner approves over the per-item limit), then settle it",
     "ask_human": "Bat-run only: pause and ask the owner for a code/credential/CAPTCHA you can't get yourself (secret kind for private values)",
     "insights": "persistent cross-session insights (facts, contacts, decisions, deadlines)",

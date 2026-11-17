@@ -6,6 +6,7 @@ import {
 import {
   createFactory,
   deleteFactory,
+  draftFactory,
   getReport,
   getStatus,
   getTemplates,
@@ -28,6 +29,7 @@ import {
   type Template,
   type WeekReport,
 } from '../services/firstMate'
+import { getCourse } from '../services/course'
 import { useFirstMateStore } from '../stores/firstMateStore'
 import { QueueMenu, type MenuEntry } from '../components/agents/queue/QueueMenu'
 import { FactoryDrawer } from '../components/firstMate/FactoryDrawer'
@@ -125,6 +127,22 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
   const streak = (f: FactoryCard) => f.state === 'paused' && /failed runs in a row/.test(f.state_reason)
   const needs = useMemo(() => factories.filter((f) => f.proposal || f.draft || f.state === 'paused_budget' || streak(f)
     || f.last_run?.waiting), [factories])
+
+  const [draftError, setDraftError] = useState<string | null>(null)
+  const describe = async (words: string, goalId: string) => {
+    setBusy('draft'); setDraftError(null)
+    try {
+      const f = await draftFactory(goalId ? { words, goal_id: goalId } : { words })
+      setPicking(false)
+      setNotice(`Drafted “${f.title}”. Look it over and approve it.`)
+      await load()
+      openAt(f.id)
+    } catch (e) {
+      setDraftError(errText(e))
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const create = async (body: { template?: string; title?: string; charter?: string }) => {
     setBusy('create'); setError(null)
@@ -237,7 +255,9 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                   </button>
                 ) : undefined}>
                 {picking && (
-                  <NewFactory busy={busy === 'create'} onCreate={(b) => void create(b)} onCancel={() => setPicking(false)} />
+                  <NewFactory busy={busy === 'create'} drafting={busy === 'draft'} draftError={draftError}
+                    onCreate={(b) => void create(b)} onDescribe={(w, g) => void describe(w, g)}
+                    onCancel={() => { setPicking(false); setDraftError(null) }} />
                 )}
                 {factories.length === 0 && !picking ? (
                   <EmptyBand text="Set up your first standing job" onAdd={() => setPicking(true)} />
@@ -581,16 +601,26 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete
   )
 }
 
-function NewFactory({ busy, onCreate, onCancel }: {
+function NewFactory({ busy, drafting, draftError, onCreate, onDescribe, onCancel }: {
   busy: boolean
+  drafting: boolean
+  draftError: string | null
   onCreate: (body: { template?: string; title?: string; charter?: string }) => void
+  onDescribe: (words: string, goalId: string) => void
   onCancel: () => void
 }) {
   const [templates, setTemplates] = useState<Template[] | null>(null)
   const [scratch, setScratch] = useState(false)
   const [title, setTitle] = useState('')
   const [charter, setCharter] = useState('')
+  const [words, setWords] = useState('')
+  const [goalId, setGoalId] = useState('')
+  const [goals, setGoals] = useState<{ id: string; title: string }[]>([])
   useEffect(() => { void getTemplates().then(setTemplates).catch(() => setTemplates([])) }, [])
+  useEffect(() => {
+    void getCourse().then((c) => setGoals([...c.goals.mine, ...c.goals.deck]
+      .filter((g) => g.status === 'active').map((g) => ({ id: g.id, title: g.title })))).catch(() => setGoals([]))
+  }, [])
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || e.defaultPrevented) return
@@ -605,12 +635,41 @@ function NewFactory({ busy, onCreate, onCancel }: {
   return (
     <div className="fd-card space-y-4 p-4">
       <div className="flex items-center gap-2">
-        <h4 className="flex-1 text-sm font-semibold text-zinc-100">Start from</h4>
+        <h4 className="flex-1 text-sm font-semibold text-zinc-100">New factory</h4>
         <button onClick={onCancel} aria-label="Cancel"
           className="flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
           <X className="h-4 w-4" />
         </button>
       </div>
+      <form className="space-y-2.5 rounded-xl border border-violet-500/30 bg-[var(--fd-accent-soft)] p-3.5"
+        onSubmit={(e) => { e.preventDefault(); if (words.trim().length >= 8 || goalId) onDescribe(words.trim(), goalId) }}>
+        <label htmlFor="fm-describe" className="block text-sm font-medium text-zinc-100">Describe it</label>
+        <textarea id="fm-describe" className={`${input} resize-y leading-relaxed`} rows={3} value={words}
+          onChange={(e) => setWords(e.target.value)} disabled={drafting}
+          placeholder="Every weekday morning, draft replies to clients waiting on an invoice question. Never send anything." />
+        <div className="flex flex-wrap items-center gap-2">
+          {goals.length > 0 && (
+            <>
+              <label htmlFor="fm-goal" className="sr-only">For a Course goal</label>
+              <select id="fm-goal" value={goalId} onChange={(e) => setGoalId(e.target.value)} disabled={drafting}
+                className="h-8 max-w-[16rem] rounded-full border border-[var(--fd-line)] bg-zinc-950 px-3 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
+                <option value="">Not for a goal</option>
+                {goals.map((g) => <option key={g.id} value={g.id}>For: {g.title}</option>)}
+              </select>
+            </>
+          )}
+          <span className="flex-1" />
+          <button type="submit" disabled={drafting || busy || (words.trim().length < 8 && !goalId)}
+            className="inline-flex h-8 items-center gap-1.5 rounded-full bg-violet-600 px-3.5 text-xs font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60">
+            {drafting ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Drafting…</> : 'Draft it'}
+          </button>
+        </div>
+        {draftError && <p role="alert" className="text-xs text-red-700 dark:text-red-300">{draftError}</p>}
+        <p className="text-[11px] text-zinc-500">
+          First Mate writes the charter, when it starts, what a good run does and a few sealed test cases. You approve it before anything runs.
+        </p>
+      </form>
+      <h4 className="text-xs font-semibold text-zinc-400">Or start from a template</h4>
       {templates === null ? (
         <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />
       ) : (

@@ -23,7 +23,7 @@ from captain_claw.tools.registry import Tool, ToolResult
 
 log = structlog.get_logger(__name__)
 
-ACTIONS = ("list", "status", "run", "pause", "resume", "report")
+ACTIONS = ("list", "status", "run", "pause", "resume", "report", "draft")
 _NEEDS_FACTORY = ("status", "run", "pause", "resume")
 
 
@@ -35,7 +35,9 @@ class FirstMateTool(Tool):
         "and what waits for the owner), 'status' (factory — its charter, health, this week, trust, cases, last "
         "run and what it would do), 'run' (factory[, note] — like pressing Run now; a factory that asks first "
         "only rehearses), 'pause' (factory[, note as the reason]), 'resume' (factory), 'report' (week: 'last' "
-        "or 'this'). Name a factory by its name; part of it is enough when only one fits. You can't approve "
+        "or 'this'), 'draft' (words — set up a new factory from what the owner wants, in their words: it waits "
+        "for their approval and never runs before it). Name a factory by its name; part of it is enough when "
+        "only one fits. You can't approve "
         "what a factory would do, carry it out or change its trust: tell the owner to do that on First Mate "
         "or the Line."
     )
@@ -47,6 +49,8 @@ class FirstMateTool(Tool):
             "factory": {"type": "string", "description": "For status, run, pause, resume: the factory's name."},
             "note": {"type": "string", "description": "For run: a note for this run. For pause: why."},
             "week": {"type": "string", "enum": ["last", "this"], "description": "For report: which week."},
+            "words": {"type": "string", "description": "For draft: what the owner wants the new factory to do, "
+                      "with every limit they gave."},
         },
         "required": ["action"],
     }
@@ -97,11 +101,14 @@ class FirstMateTool(Tool):
         factory = str(kwargs.get("factory") or "").strip()
         if action in _NEEDS_FACTORY and not factory:
             return ToolResult(success=False, error="Say which factory (its name). 'list' shows them.")
+        words = str(kwargs.get("words") or "").strip()
+        if action == "draft" and len(words) < 8:
+            return ToolResult(success=False, error="Give the owner's words: what the new factory should do.")
         fd_url = self._get_fd_url(**kwargs)
         if not fd_url:
             return ToolResult(success=False, error="Flight Deck URL unavailable; cannot reach First Mate.")
         payload = {"action": action, "factory": factory, "note": str(kwargs.get("note") or "")[:500],
-                   "week": str(kwargs.get("week") or "last")}
+                   "week": str(kwargs.get("week") or "last"), "words": words[:2000]}
         try:
             got = await self._post(fd_url, payload)
         except Exception as e:  # noqa: BLE001

@@ -234,6 +234,27 @@ async def put_prefs(body: Any = Body(...), user: dict = Depends(allowed_user)):
     return saved
 
 
+@router.post("/fd/first-mate/draft")
+async def draft_factory(body: Any = Body(...), user: dict = Depends(allowed_user)):
+    """A new factory drafted by a model from the owner's words, or from one of
+    their Course goals. It waits for their approval, with a card on the Line."""
+    from captain_claw.flight_deck import first_mate_drafting
+    body = _object(body)
+    _only(body, ("words", "goal_id"))
+    words = body.get("words") or ""
+    if not isinstance(words, str):
+        raise HTTPException(400, "words must be text")
+    goal = None
+    if body.get("goal_id"):
+        _check_goal(body["goal_id"], user)
+        from captain_claw.flight_deck import course
+        goal = course.get_store().get(str(body["goal_id"]))
+    try:
+        return await first_mate_drafting.draft(fms.get_store(), _uid(user), words, goal=goal, by="owner")
+    except FirstMateError as exc:
+        raise _err(exc) from None
+
+
 @router.get("/fd/first-mate/templates")
 async def list_templates(user: dict = Depends(allowed_user)):
     return {"templates": templates.listing()}
@@ -343,11 +364,16 @@ async def new_draft(factory_id: str, body: Any = Body(default={}), user: dict = 
 async def edit_draft(factory_id: str, body: Any = Body(...), user: dict = Depends(allowed_user)):
     body = _object(body)
     _only(body, (*_VERSION_FIELDS, "note"))
-    _mine(factory_id, user)
+    view = _mine(factory_id, user)
+    before = (view.get("draft") or {}).get("sha", "")
     try:
-        return fms.get_store().edit_draft(factory_id, "owner", **body)
+        after = fms.get_store().edit_draft(factory_id, "owner", **body)
     except FirstMateError as exc:
         raise _err(exc) from None
+    if before and (after.get("draft") or {}).get("sha") != before:
+        from captain_claw.flight_deck import first_mate_line
+        await first_mate_line.charter_settled(_uid(user), factory_id, before)  # its card shows the old draft
+    return after
 
 
 @router.post("/fd/first-mate/factories/{factory_id}/submit")
@@ -378,28 +404,37 @@ async def approve(factory_id: str, body: Any = Body(...), user: dict = Depends(a
     gated = (view["version"] and not body.get("skip_check") and draft is not None
              and draft["status"] in fms.OPEN_VERSION and version == view["draft_version"] and sha == draft["sha"]
              and view["state"] != "retired" and first_mate_cases.cases(store, factory_id))
+    from captain_claw.flight_deck import first_mate_line
     try:
         if gated:
             check = first_mate_cases.start_check(store, factory_id, version=version, purpose="approve")
+            await first_mate_line.charter_settled(_uid(user), factory_id, sha)
             return {**store.view(factory_id), "check": check}
-        return store.approve(factory_id, version, sha, _uid(user))
+        approved = store.approve(factory_id, version, sha, _uid(user))
     except FirstMateError as exc:
         raise _err(exc) from None
+    await first_mate_line.charter_settled(_uid(user), factory_id, sha)
+    return approved
 
 
 @router.post("/fd/first-mate/factories/{factory_id}/decline")
 async def decline(factory_id: str, body: Any = Body(...), user: dict = Depends(allowed_user)):
     body = _object(body)
     _only(body, ("version", "reason"))
-    _mine(factory_id, user)
+    view = _mine(factory_id, user)
     try:
         version = int(body.get("version") or 0)
     except (TypeError, ValueError):
         raise HTTPException(400, "version must be a number") from None
+    sha = (view.get("draft") or {}).get("sha", "")
     try:
-        return fms.get_store().decline(factory_id, version, _uid(user), str(body.get("reason") or ""))
+        declined = fms.get_store().decline(factory_id, version, _uid(user), str(body.get("reason") or ""))
     except FirstMateError as exc:
         raise _err(exc) from None
+    if sha:
+        from captain_claw.flight_deck import first_mate_line
+        await first_mate_line.charter_settled(_uid(user), factory_id, sha)
+    return declined
 
 
 # ── state and trust ────────────────────────────────────────────────────
@@ -685,7 +720,7 @@ async def agent_intent(body: AgentIntentReq) -> dict:
 
 # ── the first_mate tool (an agent's turn for its owner) ─────────────────
 
-AGENT_ACTIONS = ("list", "status", "run", "pause", "resume", "report")
+AGENT_ACTIONS = ("list", "status", "run", "pause", "resume", "report", "draft")
 _STATE_WORDS = {"draft": "a draft", "awaiting_charter": "waiting for your approval", "running": "running",
                 "paused": "paused", "paused_budget": "over budget", "stopped": "stopped"}
 
@@ -698,6 +733,7 @@ class AgentToolReq(BaseModel):
     factory: str = Field("", max_length=200)
     note: str = Field("", max_length=500)
     week: str = Field("last", max_length=10)
+    words: str = Field("", max_length=2000)
 
 
 def find_factory(store: fms.FirstMateStore, owner: str, name: str) -> dict[str, Any]:
@@ -810,6 +846,17 @@ async def agent_tool(body: AgentToolReq) -> dict:
             rep = first_mate_report.build(store, owner, *first_mate_report.period(now, week), now)
             title, text = first_mate_report.text(rep)
             return {"ok": True, "text": f"{title}\n\n{text}"}
+        if body.action == "draft":
+            from captain_claw.flight_deck import first_mate_drafting
+            made = await first_mate_drafting.draft(store, owner, body.words or body.note, by="first_mate")
+            d = made.get("draft") or {}
+            starts = ", ".join([t["schedule"] for t in d.get("triggers") or [] if t.get("kind") == "schedule"]
+                               + ["on new mail" for t in d.get("triggers") or [] if t.get("kind") == "events"])
+            return {"ok": True, "id": made["id"],
+                    "text": (f"Drafted \"{made['title']}\". It waits for your approval on the Line and on First Mate; "
+                             f"nothing runs before that.\nWhat it does: {d.get('charter', '')[:600]}\n"
+                             f"Starts: {starts or 'only when you press Run now'}."
+                             + (f"\nIt came with {made['cases']} sealed test cases." if made.get("cases") else ""))}
         week = _week(store, owner, now)
         if body.action == "list":
             cards = [_card(store, f, week, now) for f in store.list_factories(owner)]
