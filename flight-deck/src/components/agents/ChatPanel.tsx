@@ -1128,16 +1128,16 @@ function ChatContent({
         </div>
       </div>
 
-      {/* Attachments strip */}
-      {attachments.length > 0 && !shared && (
-        <div className="border-t border-zinc-800/50 px-3 py-2">
+      {/* Attachments strip (the simple composer holds its files in the box) */}
+      {attachments.length > 0 && !shared && !simple && (
+        <div className="border-t border-zinc-800/50 px-3 pb-1 pt-3">
           <div className="flex flex-wrap gap-2">
             {attachments.map((att) => (
               <AttachmentChip key={att.id} attachment={att} onRemove={removeAttachment} />
             ))}
           </div>
           {hasErrors && (
-            <p className="mt-1 text-[10px] text-red-400">Some files failed to upload. Remove and retry.</p>
+            <p className="mt-1.5 text-[11px] text-red-500 dark:text-red-400">Some files failed to upload. Remove them and try again.</p>
           )}
         </div>
       )}
@@ -1186,6 +1186,18 @@ function ChatContent({
            of attach · paste · "What can I do?" … send. */
         <div className="px-3 pb-3 pt-2 wide:px-6 wide:pb-4">
           <div className="relative mx-auto w-full max-w-4xl rounded-2xl border border-zinc-700 bg-zinc-900 shadow-sm transition-colors focus-within:border-violet-500/50">
+            {attachments.length > 0 && !shared && (
+              <div className="px-3 pt-3">
+                <div className="flex flex-wrap gap-2">
+                  {attachments.map((att) => (
+                    <AttachmentChip key={att.id} attachment={att} onRemove={removeAttachment} />
+                  ))}
+                </div>
+                {hasErrors && (
+                  <p className="mt-1.5 text-xs text-red-500 dark:text-red-400">Some files failed to upload. Remove them and try again.</p>
+                )}
+              </div>
+            )}
             <textarea
               ref={inputRef}
               data-fd-chat-input
