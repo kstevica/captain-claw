@@ -226,6 +226,9 @@ export interface ProcessInfo {
   /** Stopped for being idle (Flight Deck's agent controller), not by its
    *  owner: status is "stopped", but it is still on — opening its chat wakes it. */
   asleep?: boolean
+  /** The agent group the deck asks for it ("First Mate" for a factory's
+   *  workers): placed there once, never again once the owner moves it out. */
+  group?: string
 }
 
 // ── Free OpenRouter ("Freebie") agents ──
