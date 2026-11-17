@@ -48,6 +48,7 @@ import {
   Pin,
   PinOff,
   Target,
+  Anchor,
   LayoutGrid,
   Network,
   Flame,
@@ -91,6 +92,8 @@ import { useRoomsStore } from '../../stores/roomsStore'
 import { RoomsPage } from '../rooms/RoomsPage'
 import { useCaptainSwarmStore, useCanSwarm } from '../../stores/captainSwarmStore'
 import { CaptainSwarmPage } from '../../pages/CaptainSwarmPage'
+import { FirstMatePage } from '../../pages/FirstMatePage'
+import { useFirstMateStore, useFirstMateVisible } from '../../stores/firstMateStore'
 import { useTeamWorkStore } from '../../stores/teamWorkStore'
 import { BasnaPage } from '../../pages/BasnaPage'
 import { CouncilPage } from '../../pages/CouncilPage'
@@ -465,6 +468,10 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const swarmOpen = useCaptainSwarmStore((s) => s.open)
   const closeSwarm = useCaptainSwarmStore((s) => s.close)
   const canSwarm = useCanSwarm()
+  // First Mate: standing jobs that run for the user, each on a charter they approved.
+  const firstMateOpen = useFirstMateStore((s) => s.open)
+  const closeFirstMate = useFirstMateStore((s) => s.close)
+  const firstMateVisible = useFirstMateVisible()
   // Vatra, Basna, Council: agents working as a team, opened from More.
   const teamWork = useTeamWorkStore((s) => s.open)
   const closeTeamWork = useTeamWorkStore((s) => s.close)
@@ -979,12 +986,12 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     return !!a && a.reachable && !a.asleep && !booting.has(a.id) && !switching.has(a.id)
   }
   // What a phone's Back closes before it leaves a chat (or Flight Deck).
-  const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen || toolsOpen
+  const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen || toolsOpen || firstMateOpen
     || anonOpen || roomsOpen || !!teamWork || !!filesData || peopleOpen
   const closePhoneOverlays = () => {
     if (taskboardOpen && peopleOpen) { closeTaskboard(); return }
     closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null); closeAnon(); closeRooms()
-    closeTeamWork(); setPeopleOpen(false)
+    closeTeamWork(); setPeopleOpen(false); closeFirstMate()
   }
 
   // The outcome nav. Each destination opens the view it always did (the
@@ -1316,6 +1323,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           </div>
         </KioskWideDialog>
       )}
+      {firstMateOpen && firstMateVisible && (
+        <KioskWideDialog label="First Mate" phone={isMobile} widest onClose={closeFirstMate}>
+          <FirstMatePage onClose={closeFirstMate} />
+        </KioskWideDialog>
+      )}
       {dataOpen && (
         <KioskWideDialog label="Data library" phone={isMobile} onClose={closeData} widest>
           <DataLibrary
@@ -1574,6 +1586,8 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
   const openTools = useCustomToolsStore((s) => s.openTools)
   const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
   const canSwarm = useCanSwarm()
+  const openFirstMate = useFirstMateStore((s) => s.openFirstMate)
+  const firstMateVisible = useFirstMateVisible()
   const openAnonymize = useAnonymizeStore((s) => s.openAnonymize)
   const openRooms = useRoomsStore((s) => s.openRooms)
   const openTeamWork = useTeamWorkStore((s) => s.openTeamWork)
@@ -1595,6 +1609,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
         ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: () => { onClose(); openCrew() }, tone: 'teal' as const }] : []),
         ...(toolsOn ? [{ icon: Wrench, label: 'Custom tools', hint: 'Programs your agents run, yours and ones offered to you', onSelect: () => { onClose(); openTools() }, tone: 'violet' as const }] : []),
         ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: () => { onClose(); openSwarm() }, tone: 'amber' as const }] : []),
+        ...(firstMateVisible ? [{ icon: Anchor, label: 'First Mate', hint: 'Standing jobs that run for you, each on a charter you approved', onSelect: () => { onClose(); openFirstMate() }, tone: 'violet' as const }] : []),
         { icon: AlarmClock, label: 'Automations', hint: 'Scheduled tasks: on a timer, results by chat or email', onSelect: onScheduled, tone: 'amber' },
         { icon: Archive, label: 'Agent backups', hint: 'Your agents backed up on a schedule, and restored', onSelect: onBackups, tone: 'teal' },
         { icon: Activity, label: 'Activity', hint: 'Every tool they used, and how it went', onSelect: onActivity, tone: 'emerald' },
@@ -1833,6 +1848,8 @@ function MoreToolsDialog({ onLibrary, onData, onFolders, onPicked, onClose }: {
   const openCrew = useCrewStore((s) => s.openCrew)
   const canSwarm = useCanSwarm()
   const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
+  const firstMateVisible = useFirstMateVisible()
+  const openFirstMate = useFirstMateStore((s) => s.openFirstMate)
   const openAnonymize = useAnonymizeStore((s) => s.openAnonymize)
   const openRooms = useRoomsStore((s) => s.openRooms)
   const openTeamWork = useTeamWorkStore((s) => s.openTeamWork)
@@ -1841,6 +1858,7 @@ function MoreToolsDialog({ onLibrary, onData, onFolders, onPicked, onClose }: {
   const atWork: MenuSection['items'] = [
     ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: pick(openCrew), tone: 'teal' as const }] : []),
     ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: pick(openSwarm), tone: 'amber' as const }] : []),
+    ...(firstMateVisible ? [{ icon: Anchor, label: 'First Mate', hint: 'Standing jobs that run for you, each on a charter you approved', onSelect: pick(openFirstMate), tone: 'violet' as const }] : []),
   ]
   const sections: MenuSection[] = [
     ...(atWork.length ? [{ title: 'Your agents at work', items: atWork }] : []),

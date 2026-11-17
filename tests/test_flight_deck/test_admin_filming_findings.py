@@ -107,7 +107,8 @@ async def test_deleting_a_user_removes_their_agents(db, monkeypatch):
     monkeypatch.setattr(server, "remove_agents_of", fake_remove)
     # The route's other clean-ups use deck-wide stores: kept out of a test.
     from captain_claw.flight_deck import (
-        context_packs, course, crew_runner, payments_routes, profile_sources, taskboard, tenant_profile,
+        context_packs, course, crew_runner, first_mate_store, payments_routes, profile_sources, taskboard,
+        tenant_profile,
     )
 
     async def anull(*_a, **_kw):
@@ -116,6 +117,7 @@ async def test_deleting_a_user_removes_their_agents(db, monkeypatch):
     monkeypatch.setattr(payments_routes, "forget_user", anull)
     monkeypatch.setattr(taskboard, "forget_user", lambda *_a, **_kw: None)
     monkeypatch.setattr(course, "forget_user", lambda *_a, **_kw: None)
+    monkeypatch.setattr(first_mate_store, "forget_user", lambda *_a, **_kw: 0)
     monkeypatch.setattr(crew_runner, "forget_user", anull)
     monkeypatch.setattr(tenant_profile, "refresh_agents", anull)
     monkeypatch.setattr(profile_sources, "remove_all", lambda *_a, **_kw: None)

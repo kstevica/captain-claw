@@ -53,6 +53,7 @@ import { ObservatoryPage } from './pages/ObservatoryPage'
 import { AutonomousWorkPage } from './pages/AutonomousWorkPage'
 import { LinePage } from './pages/LinePage'
 import { CoursePage } from './pages/CoursePage'
+import { FirstMatePage } from './pages/FirstMatePage'
 import { useLineStore } from './stores/lineStore'
 import { VFSPage } from './pages/VFSPage'
 import { DeepMemoryPage } from './pages/DeepMemoryPage'
@@ -399,6 +400,7 @@ function AppContent() {
       {view === 'autonomous-work' && <AutonomousWorkPage />}
       {view === 'line' && <LinePage />}
       {view === 'course' && <CoursePage />}
+      {view === 'first-mate' && <FirstMatePage />}
       {view === 'skills' && <SkillsPage />}
       {view === 'games' && <GamesPage />}
       {view === 'spawner' && <SpawnerPage />}

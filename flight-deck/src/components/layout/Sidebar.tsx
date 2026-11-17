@@ -44,6 +44,7 @@ import {
   Waypoints,
   Compass,
   Wrench,
+  Anchor,
 } from 'lucide-react'
 import { useCrewAllowed } from '../../stores/crewStore'
 import { useCustomToolsOn, useCustomToolsStore } from '../../stores/customToolsStore'
@@ -52,6 +53,7 @@ import { useUIStore } from '../../stores/uiStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useCanSwarm } from '../../stores/captainSwarmStore'
+import { useFirstMateVisible } from '../../stores/firstMateStore'
 import { useConnectionStore } from '../../stores/connectionStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useOnboardingStore } from '../../stores/onboardingStore'
@@ -62,7 +64,7 @@ import { BrandMark } from '../common/BrandMark'
 import type { ViewMode } from '../../types'
 
 // adminOnly needs sign-in on; adminOrLocal is also shown on a deck with sign-in off (its one user is the admin).
-type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean; adminOrLocal?: boolean; needsPayments?: boolean; needsCrew?: boolean; needsSwarm?: boolean; needsCustomTools?: boolean }
+type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean; adminOrLocal?: boolean; needsPayments?: boolean; needsCrew?: boolean; needsSwarm?: boolean; needsCustomTools?: boolean; needsFirstMate?: boolean }
 
 const navSections: { title: string; items: NavItem[] }[] = [
   {
@@ -110,6 +112,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
   {
     title: 'Automation',
     items: [
+      { id: 'first-mate', icon: Anchor, label: 'First Mate', needsFirstMate: true },
       { id: 'flows', icon: Workflow, label: 'Flows' },
       { id: 'autonomous-work', icon: Cpu, label: 'Autonomous Work' },
       { id: 'scheduler', icon: AlarmClock, label: 'Scheduler' },
@@ -164,6 +167,7 @@ export function Sidebar() {
   const { instances, wsConnected, selectInstance, selectedInstanceId, fetchInstances, fetchStats, fetchConcerns } = useAgentStore()
   const { authEnabled, user: authUser } = useAuthStore()
   const canSwarm = useCanSwarm()
+  const firstMateOn = useFirstMateVisible()
   const paymentsOn = usePaymentsEnabled()
   const crewOn = useCrewAllowed()
   // Custom tools: shown while the deck has them on (Admin → Settings).
@@ -269,6 +273,7 @@ export function Sidebar() {
         {navSections.map((section, sectionIndex) => {
           const items = section.items.filter((item) => {
             if (item.needsSwarm) return canSwarm
+            if (item.needsFirstMate) return firstMateOn
             if (item.adminOnly) return authEnabled && authUser?.role === 'admin'
             if (item.adminOrLocal) return authEnabled === false || authUser?.role === 'admin'
             if (item.needsPayments) return paymentsOn
