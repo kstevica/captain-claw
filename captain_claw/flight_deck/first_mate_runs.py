@@ -257,6 +257,61 @@ class BatRunner:
         from captain_claw.flight_deck import bat_loop
         return bool(await bat_loop.cancel_run(self._store(), child_id))
 
+    async def progress(self, child_id: str, since: int = 0) -> dict[str, Any] | None:
+        """The Bat run's steps, its events from ``since`` (the newest
+        :data:`PROGRESS_EVENTS` at most), and the workers it has right now
+        (Bat removes each one when its step ends). None when the run is gone."""
+        from captain_claw.flight_deck import bat_routes
+        from captain_claw.flight_deck.captain_swarm_outcome import worker_prefix
+        store = self._store()
+        b = await store.get_run(child_id)
+        if b is None:
+            return None
+        start = max(int(since), await store.last_event_i(child_id) - PROGRESS_EVENTS + 1, 0)
+        events = [bat_routes._ui_event(e) for e in await store.list_events(child_id, since=start,
+                                                                           limit=PROGRESS_EVENTS)]
+        steps = [{"key": s["step_key"], "title": s.get("title") or s["step_key"], "status": s.get("status") or "",
+                  "attempt": int(s.get("attempt") or 0), "error": str(s.get("error") or "")[:300]}
+                 for s in await store.list_steps(child_id)]
+        return {"status": b["status"], "steps": steps, "events": events,
+                "next": (events[-1]["i"] + 1) if events else max(int(since), start),
+                "workers": _workers(worker_prefix(child_id)), "files": bat_routes._project_of(b)}
+
+
+PROGRESS_EVENTS = 300
+
+
+def _workers(prefix: str) -> list[dict[str, Any]]:
+    """The agents a Bat run has right now: each step's worker, by the name First
+    Mate gave it. Never raises."""
+    try:
+        from captain_claw.flight_deck import server as srv
+        reg = srv._load_process_registry()
+        return [{"slug": slug, "name": str(entry.get("name") or slug), "step": slug[len(prefix):],
+                 "running": bool(srv._process_is_alive(slug))}
+                for slug, entry in sorted(reg.items()) if slug.startswith(prefix) and isinstance(entry, dict)]
+    except Exception:  # noqa: BLE001 — the steps and events still show
+        log.debug("first mate: couldn't read a run's workers", exc_info=True)
+        return []
+
+
+async def progress(run: dict[str, Any], *, since: int = 0) -> dict[str, Any]:
+    """What a run's runner is doing: ``{available, status, steps, events, next,
+    workers, files}``. ``available`` is False before it has a child, or when its
+    runner can't say (Bat not running, the child gone)."""
+    out: dict[str, Any] = {"available": False, "status": "", "steps": [], "events": [], "next": max(0, since),
+                           "workers": [], "files": ""}
+    if not run.get("child_id"):
+        return out
+    reader = getattr(runner_for(run["runner"]), "progress", None)
+    if reader is None:
+        return out
+    try:
+        got = await reader(run["child_id"], max(0, since))
+    except FirstMateError:
+        return out
+    return {**out, **got, "available": True} if got else out
+
 
 RUNNERS: dict[str, Runner] = {"bat": BatRunner()}
 

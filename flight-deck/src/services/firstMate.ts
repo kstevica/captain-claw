@@ -7,6 +7,7 @@
 // signed-in user's own.
 
 import { fdFetch } from './notifications'
+import type { ProgressEvent } from '../stores/basnaStore'
 
 export type FactoryState = 'draft' | 'awaiting_charter' | 'running' | 'paused' | 'paused_budget' | 'stopped' | 'retired'
 export type VersionStatus = 'draft' | 'awaiting' | 'live' | 'replaced' | 'declined'
@@ -405,6 +406,23 @@ export const rateRun = (runId: string, kind: 'up' | 'down' | '') =>
   call<{ thumbs: string; satisfaction: number | null }>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/thumbs`, json('POST', { kind }))
 export const stopRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/stop`, { method: 'POST' })
+
+/** What a run is doing: its runner's steps, events and the agents working for it. */
+export interface RunProgress {
+  /** False before it has a runner run, or when its runner can't say. */
+  available: boolean
+  status: string
+  steps: { key: string; title: string; status: string; attempt: number; error: string }[]
+  /** Events from the asked index; `next` is where the following read starts. */
+  events: ProgressEvent[]
+  next: number
+  /** Agents working for it right now (Bat removes each when its step ends). */
+  workers: { slug: string; name: string; step: string; running: boolean }[]
+  /** Its shared files' folder. */
+  files: string
+}
+export const getRunProgress = (runId: string, since = 0) =>
+  call<RunProgress>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/progress?since=${since}`)
 /** A factory's improvement run: Captain Swarm trying better charters on its cases. */
 export interface ImprovementRun {
   id: string

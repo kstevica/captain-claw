@@ -540,6 +540,14 @@ class BatStore:
         await db.commit()
         return i
 
+    async def last_event_i(self, run_id: str) -> int:
+        """The newest event's index, -1 when the run has none."""
+        db = await self._ensure_db()
+        async with db.execute("SELECT COALESCE(MAX(i), -1) AS last FROM bat_events WHERE run_id = ?",
+                              (run_id,)) as cur:
+            row = await cur.fetchone()
+        return int(row["last"]) if row else -1
+
     async def list_events(self, run_id: str, since: int = 0, limit: int = 2000) -> list[dict]:
         db = await self._ensure_db()
         async with db.execute(
