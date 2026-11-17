@@ -104,7 +104,9 @@ class FlightDeckTool(Tool):
         "Actions: 'list_agents' to discover peers, 'consult' for quick synchronous Q&A, "
         "'delegate' for tasks the peer should do independently, "
         "'spawn_agent' to create a new agent in the fleet (it becomes your child), "
-        "'report' to send the agent you sit under (your parent) a report. "
+        "'report' to send the agent you sit under (your parent) a report, "
+        "'ask' / 'task' to ask, or give a task to, several agents at once by how they're related to you "
+        "(to='parent', 'children', 'siblings', 'family', 'group:<name>') or one by name. "
         "Agents on OTHER Flight Decks (connected through BotPort) appear in list_agents as "
         "'Agent@deck' — consult/delegate them by that full name, exactly like local peers. "
         "IMPORTANT: When the user says 'delegate', or the task is large/long-running "
@@ -118,7 +120,7 @@ class FlightDeckTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list_agents", "consult", "delegate", "spawn_agent", "report"],
+                "enum": ["list_agents", "consult", "delegate", "spawn_agent", "report", "ask", "task"],
                 "description": (
                     "'list_agents' — get all agents currently in the fleet. "
                     "'consult' — ONLY for quick questions where you need the answer right now to continue your work (synchronous, blocks until response). "
@@ -131,6 +133,9 @@ class FlightDeckTool(Tool):
                     "`env` map ({\"BRAVE_API_KEY\": \"...\"}) to give the new agent extra credentials, via the "
                     "message field as JSON. Without an archetype it uses your own provider/model/key/base_url as defaults "
                     "(your key only together with your own provider and base_url — for another one pass its api_key). "
+                    "'ask' — ask the agents in `to` the question in `message`, all at once, and wait for their "
+                    "answers (they come back together). 'task' — give the agents in `to` the task in `message`; "
+                    "you're free at once, and their results come back to you together when all are done. "
                     "'report' — send your parent (the agent you sit under, named in your family block) a report "
                     "in `message`: when you finish work it asked for, or it should know something. It reaches "
                     "your parent even when it's asleep. "
@@ -156,6 +161,13 @@ class FlightDeckTool(Tool):
                     "own key and endpoint) is used when the owner's tier set defines "
                     "it; otherwise the new agent runs on your own model. Explicit "
                     "tools/description overrides in the message JSON still take precedence."
+                ),
+            },
+            "to": {
+                "type": "string",
+                "description": (
+                    "For 'ask' and 'task': who — 'parent', 'children', 'siblings', 'family' (all of them), "
+                    "'group:<name>' (one of your owner's agent groups), or one agent's name. At most 12 agents."
                 ),
             },
             "made_for": {
@@ -857,8 +869,38 @@ class FlightDeckTool(Tool):
             if not message.strip():
                 return ToolResult(success=False, error="message is required for report action.")
             return await self._report(fd_url, message)
+        elif action in ("ask", "task"):
+            to = str(kwargs.get("to") or "").strip()
+            if not to:
+                return ToolResult(success=False, error=f"to is required for {action}: parent, children, siblings, "
+                                                       "family, group:<name>, or an agent's name.")
+            if not message.strip():
+                return ToolResult(success=False, error=f"message is required for {action} action.")
+            return await self._family_send(fd_url, action, to, message)
         else:
-            return ToolResult(success=False, error=f"Unknown action: {action}. Use 'list_agents', 'consult', 'delegate', 'spawn_agent' or 'report'.")
+            return ToolResult(success=False, error=f"Unknown action: {action}. Use 'list_agents', 'consult', 'delegate', 'spawn_agent', 'report', 'ask' or 'task'.")
+
+    async def _family_send(self, fd_url: str, mode: str, to: str, message: str) -> ToolResult:
+        """Ask, or give a task to, several agents of this one's family (or a group) at once."""
+        try:
+            import httpx
+        except ImportError:
+            return ToolResult(success=False, error="httpx is required")
+        from captain_claw.fd_client import refusal_detail
+
+        # An ask waits for every answer (the deck caps each at 8 minutes); a task returns at once.
+        wait = 560.0 if mode == "ask" else 30.0
+        try:
+            async with httpx.AsyncClient(timeout=wait) as client:
+                resp = await client.post(f"{fd_url}/fd/family/agent/send", headers=_fd_agent_headers(fd_url),
+                                         json={"to": to, "message": message[:8000], "mode": mode,
+                                               "mail_intent_text": message[:4000]})
+                if resp.status_code != 200:
+                    return ToolResult(success=False, error=await refusal_detail(resp))
+                result = resp.json()
+        except Exception as e:
+            return ToolResult(success=False, error=f"Failed to {mode}: {e}")
+        return ToolResult(success=True, content=str(result.get("message") or "Sent."))
 
     async def _report(self, fd_url: str, message: str) -> ToolResult:
         """Send the agent this one sits under (its parent) a report: Flight Deck

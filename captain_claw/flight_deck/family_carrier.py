@@ -86,6 +86,9 @@ def compose(reg: dict, slug: str) -> str:
     if kids:
         out += ["", "Your children, agents you made or that your owner put under you:"]
         out += [_line(reg, s) for s in kids]
+    out += ["", "To ask them something or give them a task, all at once: the `flight_deck` tool's `ask` (waits for "
+            "their answers) or `task` (their results come back later), with `to` set to parent, siblings, children "
+            "or family."]
     return "\n".join(out) + "\n"
 
 

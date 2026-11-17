@@ -380,3 +380,81 @@ def for_spawn(config: Any, *, prior: dict | None, caller: str) -> dict[str, str]
     out["made_for"] = made_for
     out["made_at"] = made_at
     return {k: v for k, v in out.items() if k in FIELDS and v}
+
+
+# ── Asking or tasking several of the family at once (the flight_deck tool's ask / task) ──
+
+# Agents one ask or task may reach.
+FANOUT_MAX = 12
+RELATIONS = ("parent", "children", "siblings", "family")
+
+
+def _member_slugs(groups: Any, name: str) -> list[str] | None:
+    """The process agents in the owner's group called ``name`` (folders only), or
+    None when there is no such group. ``groups`` is the stored ``fd:agent-groups``."""
+    want = name.strip().casefold()
+    for g in groups if isinstance(groups, list) else []:
+        if not isinstance(g, dict) or g.get("type", "group") != "group":
+            continue
+        if str(g.get("name") or "").strip().casefold() == want:
+            ids = [str(x) for x in g.get("agentIds") or []]
+            return [x[5:] for x in ids if x.startswith("proc-")]
+    return None
+
+
+def recipients(registry: dict, slug: str, to: str, *, groups: Any = None) -> list[str]:
+    """Who ``slug``'s ask or task addressed ``to`` reaches: ``parent``, ``children``,
+    ``siblings``, ``family`` (all three), ``group:<name>`` (the owner's agent
+    group; ``groups`` None = groups can't be read on this deck), or one agent's
+    name or slug. Only the owner's standing agents, never ``slug`` itself, at
+    most ``FANOUT_MAX``. Raises FamilyError with what to do instead."""
+    me = _entry(registry, slug)
+    if me is None:
+        raise FamilyError("You aren't one of this deck's agents.", 403)
+    to = " ".join(str(to or "").split())
+    low = to.casefold()
+    parent = parent_of(registry, slug)
+    sibs = [c for c in children(registry, parent) if c != slug] if parent else []
+    kids = children(registry, slug)
+    if low == "parent":
+        if not parent:
+            raise FamilyError("You have no parent agent: you are one of your owner's own.")
+        out = [parent]
+    elif low == "children":
+        if not kids:
+            raise FamilyError("No agents sit under you.")
+        out = kids
+    elif low == "siblings":
+        if not sibs:
+            raise FamilyError("You have no siblings." if parent else "You have no siblings: you sit under nobody.")
+        out = sibs
+    elif low == "family":
+        out = ([parent] if parent else []) + sibs + kids
+        if not out:
+            raise FamilyError("You have no family: no parent and no agents under you.")
+    elif low.startswith("group:"):
+        if groups is None:
+            raise FamilyError("Agent groups live in the browser on this deck (no sign-in): ask agents by name.")
+        members = _member_slugs(groups, to.split(":", 1)[1])
+        if members is None:
+            raise FamilyError(f"Your owner has no agent group called {to.split(':', 1)[1].strip()!r}.", 404)
+        out = members
+    else:
+        out = [s for s, e in registry.items() if isinstance(e, dict) and (s.casefold() == low
+               or str(e.get("name") or "").strip().casefold() == low)]
+        if not out:
+            raise FamilyError(f"Your owner has no agent called {to!r}.", 404)
+        out = out[:1]
+    seen: set[str] = set()
+    clean = []
+    for s in out:
+        e = _entry(registry, s)
+        if s == slug or s in seen or e is None or role_of(s, e) != STANDING or not _same_owner(e, me):
+            continue
+        seen.add(s)
+        clean.append(s)
+    if not clean:
+        raise FamilyError("Nobody to ask there but you." if out else "Nobody to ask there.")
+    if len(clean) > FANOUT_MAX:
+        raise FamilyError(f"That's {len(clean)} agents: ask at most {FANOUT_MAX} at once.")
+    return clean
