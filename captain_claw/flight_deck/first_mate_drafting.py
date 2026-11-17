@@ -13,8 +13,9 @@ they saw. Nothing runs before that.
   (Run now only). A schedule it can't use is dropped, not guessed.
 * **Cases:** sealed, like the owner's own; one that doesn't pass the checks
   (a secret in it, no good-result lines) is left out.
-* **Model:** the owner's own tiers, the best one first; no answer means no
-  draft, with why.
+* **Model:** the owner's First Mate agent's model when they picked one
+  (``first_mate_agent``), else their own tiers, the best one first; no answer
+  means no draft, with why.
 """
 
 from __future__ import annotations
@@ -104,7 +105,12 @@ def fields_of(data: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _ask_model(owner: str, system: str, user: str) -> str:
-    """One call on the owner's own model, the best tier first."""
+    """One call on the owner's First Mate agent's model when they picked one
+    (first_mate_agent), else on their own tier set, the best tier first."""
+    from captain_claw.flight_deck import first_mate_agent
+    got = await first_mate_agent.ask(fms.get_store(), owner, system, user)
+    if got is not None:
+        return got
     from captain_claw.flight_deck.auth import get_db
     from captain_claw.flight_deck.basna_routes import _load_owner_tiers, _provider_call
     from captain_claw.flight_deck.bat_routes import _creds_for

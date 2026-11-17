@@ -223,8 +223,12 @@ async def put_prefs(body: Any = Body(...), user: dict = Depends(allowed_user)):
     store = fms.get_store()
     uid = _uid(user)
     was_on = store.prefs(uid)["on"]
+    body = _object(body)
     try:
-        saved = store.set_prefs(uid, _object(body))
+        if body.get("agent"):
+            from captain_claw.flight_deck import first_mate_agent
+            first_mate_agent.check_pick(uid, str(body["agent"]))
+        saved = store.set_prefs(uid, body)
     except FirstMateError as exc:
         raise _err(exc) from None
     if was_on and not saved["on"]:
@@ -232,6 +236,25 @@ async def put_prefs(body: Any = Body(...), user: dict = Depends(allowed_user)):
     elif saved["on"] and not was_on:
         await first_mate_loop.switch_on(uid)
     return saved
+
+
+@router.get("/fd/first-mate/my-agent")
+async def my_agent(user: dict = Depends(allowed_user)):
+    """The agent that is the caller's First Mate, and the agents they may pick."""
+    from captain_claw.flight_deck import first_mate_agent
+    uid = _uid(user)
+    return {"current": first_mate_agent.current(fms.get_store(), uid), "agents": first_mate_agent.mine(uid)}
+
+
+@router.post("/fd/first-mate/my-agent")
+async def make_my_agent(user: dict = Depends(allowed_user)):
+    """Make the caller an agent called First Mate and point First Mate at it."""
+    from captain_claw.flight_deck import first_mate_agent
+    try:
+        made = await first_mate_agent.create(fms.get_store(), user)
+    except FirstMateError as exc:
+        raise _err(exc) from None
+    return {**made, "current": first_mate_agent.current(fms.get_store(), _uid(user))}
 
 
 @router.post("/fd/first-mate/draft")

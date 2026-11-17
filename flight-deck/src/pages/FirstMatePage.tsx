@@ -7,7 +7,9 @@ import {
   createFactory,
   deleteFactory,
   draftFactory,
+  getMyAgent,
   getReport,
+  makeMyAgent,
   getStatus,
   getTemplates,
   listFactories,
@@ -26,6 +28,7 @@ import {
   type FactoryCard,
   type OwnerState,
   type Status,
+  type MyAgent,
   type Template,
   type WeekReport,
 } from '../services/firstMate'
@@ -244,7 +247,8 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                 hint={status.prefs.on ? 'Schedules and new mail start your factories’ runs.' : 'Off: your factories run only when you press Run now.'}>
                 <YourFirstMate status={status} busy={busy === 'prefs'}
                   onChange={(change) => void act('prefs', () => savePrefs(change),
-                    change.on === undefined ? 'Weekly budget saved' : change.on ? 'First Mate is on' : 'First Mate is off: running factories paused')} />
+                    change.on === undefined ? 'Weekly budget saved' : change.on ? 'First Mate is on' : 'First Mate is off: running factories paused')}
+                  onNotice={setNotice} />
               </Section>
 
               <Section icon={FactoryIcon} title="Factories"
@@ -302,6 +306,68 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
         <FactoryDrawer factoryId={opened} initialTab={openedTab} onClose={() => setOpened(null)}
           onChanged={() => { void listFactories().then(setFactories).catch(() => {}) }}
           onNotice={setNotice} />
+      )}
+    </div>
+  )
+}
+
+/** Which agent is First Mate: picked from the owner's agents, or made for it. Its model drafts charters. */
+function MateAgent({ row, onNotice }: { row: string; onNotice: (text: string) => void }) {
+  const [data, setData] = useState<MyAgent | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => { void getMyAgent().then(setData).catch((e) => setError(errText(e))) }, [])
+  const pick = async (slug: string) => {
+    setBusy(true); setError(null)
+    try {
+      await savePrefs({ agent: slug })
+      setData(await getMyAgent())
+      onNotice(slug ? 'First Mate now thinks on that agent’s model' : 'First Mate drafts on your tier set')
+    } catch (e) {
+      setError(errText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const make = async () => {
+    setBusy(true); setError(null)
+    try {
+      const made = await makeMyAgent()
+      setData({ current: made.current, agents: made.agents ?? (await getMyAgent()).agents })
+      onNotice(`Made “${made.name}”. Talk to it like any agent; it uses the first_mate tool.`)
+    } catch (e) {
+      setError(errText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const cur = data?.current
+  return (
+    <div className={row}>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium text-zinc-200">Its agent</div>
+        <div className="text-xs text-zinc-500">
+          {!data ? 'Loading…'
+            : !cur?.slug ? 'None yet: drafting uses your tier set. Pick an agent, or make one, to talk to First Mate and draft on its model.'
+              : !cur.exists ? `${cur.name} is gone. Drafting uses your tier set until you pick another.`
+                : `${cur.name} ${cur.running ? 'is running' : 'is asleep'}: talk to it in its chat, and it drafts on its own model.`}
+        </div>
+        {error && <div role="alert" className="mt-1 text-xs text-red-700 dark:text-red-300">{error}</div>}
+      </div>
+      {data && (
+        <>
+          <label className="sr-only" htmlFor="fm-agent">First Mate's agent</label>
+          <select id="fm-agent" value={cur?.exists ? cur.slug : ''} disabled={busy} onChange={(e) => void pick(e.target.value)}
+            className="h-8 max-w-[11rem] rounded-full border border-[var(--fd-line)] bg-zinc-950 px-3 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
+            <option value="">None</option>
+            {data.agents.map((a) => <option key={a.slug} value={a.slug}>{a.name}</option>)}
+          </select>
+          {!cur?.exists && (
+            <button onClick={() => void make()} disabled={busy} className="fd-btn-quiet h-8 shrink-0 px-3 text-xs">
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} Make one
+            </button>
+          )}
+        </>
       )}
     </div>
   )
@@ -397,10 +463,11 @@ function Week({ onOpen }: { onOpen: (id: string) => void }) {
 
 const BUDGETS = [5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000]
 
-function YourFirstMate({ status, busy, onChange }: {
+function YourFirstMate({ status, busy, onChange, onNotice }: {
   status: Status
   busy: boolean
   onChange: (change: { on?: boolean; weekly_tokens?: number }) => void
+  onNotice: (text: string) => void
 }) {
   const { on } = status.prefs
   const { used, budget } = status.week
@@ -438,6 +505,7 @@ function YourFirstMate({ status, busy, onChange }: {
           <div className={`h-full rounded-full ${pct >= 100 ? 'bg-amber-500' : 'bg-violet-500'}`} style={{ width: `${pct}%` }} />
         </div>
       </div>
+      <MateAgent row={row} onNotice={onNotice} />
       {status.calibration && (
         <div className={row}>
           <div className="min-w-0 flex-1">
