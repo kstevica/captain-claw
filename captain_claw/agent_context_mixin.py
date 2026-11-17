@@ -143,6 +143,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "basna": "Read your past Basna multi-agent sessions like a datastore — list/search sessions and pull the compiled truth, cross-agent analysis, per-agent outputs, and generated files (read-only).",
     "bat": "Bat — the stubborn finisher: start a long-running autonomous run that keeps working a goal across retries and strategy changes until an independent judge says it's genuinely done (survives restarts, reports back when finished); also status/get/list/cancel.",
     "captain_swarm": "Captain Swarm — propose a run that keeps improving one measured number (it tries ideas one at a time, measures each on open and held-out cases, keeps only real gains, hands the owner the best branch); a run you propose waits for the owner's Go; also status/get/list/cancel.",
+    "first_mate": "First Mate — your owner's standing jobs (factories), each on a charter they approved: list them, read one (status), run, pause or resume one, read the week's report. You never approve what a factory would do, carry it out or change its trust: the owner does that on First Mate or the Line.",
     "spend": "Inside a Bat run only: declare a real-money purchase for pre-authorization (auto-approved under the owner's per-item limit, else paused for the owner), then settle it with the actual amount. Never pay without an 'approved' id.",
     "ask_human": "Inside a Bat run only: pause the run to ask the owner for something only they can give (a verification code, 2FA/OTP, a CAPTCHA, a credential). Use kind='secret' for codes/passwords. Stop after calling; the step re-runs with their answer.",
     "insights": "Search and manage persistent cross-session insights — facts, contacts, decisions, preferences, deadlines auto-extracted from conversations. Actions: search, list, add, update, delete.",
@@ -231,6 +232,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
     "bat": "start/inspect a Bat run (stubborn finisher: works a goal until an independent judge says it's done)",
     "captain_swarm": "propose/follow a Captain Swarm run (keeps improving a measured number; waits for the owner's Go)",
+    "first_mate": "the owner's standing jobs (factories): list/status/run/pause/resume, the week's report; approvals and trust stay the owner's",
     "spend": "Bat-run only: pre-authorize a real-money purchase (capped; owner approves over the per-item limit), then settle it",
     "ask_human": "Bat-run only: pause and ask the owner for a code/credential/CAPTCHA you can't get yourself (secret kind for private values)",
     "insights": "persistent cross-session insights (facts, contacts, decisions, deadlines)",
@@ -2964,6 +2966,12 @@ class AgentContextMixin:
             if not in_desktop_app():
                 from captain_claw.tools.captain_swarm import CaptainSwarmTool
                 self.tools.register(CaptainSwarmTool())
+            # First Mate — the owner's standing jobs: list, status, run, pause,
+            # resume, the week's report. Offered under a deck and not on a shared
+            # agent's member turn (like `line`); the deck checks First Mate's own
+            # switch and who may use it, and the tool refuses inside any run.
+            from captain_claw.tools.first_mate import FirstMateTool
+            self.tools.register(FirstMateTool(), metadata={"requires_line": True})
             # Bat worker's capped real-money spend. Always registered; refuses
             # outside a Bat run (CLAW_BAT_SESSION unset), so it's inert elsewhere.
             from captain_claw.tools.bat_spend import SpendTool

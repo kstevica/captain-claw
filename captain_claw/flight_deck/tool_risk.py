@@ -57,7 +57,7 @@ _TOOL_RISK: dict[str, str] = {
     # run
     "shell": "exec", "terminal": "exec", "desktop_action": "exec", "scripts": "exec",
     "app_runner": "exec", "code": "exec", "termux": "exec", "pinchtab": "exec", "browser": "exec",
-    "vatra": "exec", "basna": "exec", "bat": "exec", "crew": "exec", "captain_swarm": "exec",
+    "vatra": "exec", "basna": "exec", "bat": "exec", "crew": "exec", "captain_swarm": "exec", "first_mate": "exec",
     # out
     "send_mail": "send", "google_mail": "write", "microsoft_mail": "write", "imap_mail": "write",
     "whatsapp_send_file": "send", "whatsapp_web": "send", "linked_system": "send",

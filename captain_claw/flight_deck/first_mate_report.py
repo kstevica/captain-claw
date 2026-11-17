@@ -92,6 +92,9 @@ def factory_week(store: fms.FirstMateStore, f: dict[str, Any], start: datetime, 
             what = {"paused": "Paused", "paused_budget": "Paused over budget", "stopped": "Stopped"}[d["to"]]
             reason = str(d.get("reason") or "").strip().rstrip(".")
             moved.append(f"{what}: {reason}." if reason else f"{what}.")
+        elif e["event"] == "state" and d.get("to") == "running" and d.get("from") in ("paused", "paused_budget",
+                                                                                         "stopped"):
+            moved.append("Resumed.")
     look: list[str] = []
     title = f["title"]
     if f["state"] in ("paused", "paused_budget", "stopped"):

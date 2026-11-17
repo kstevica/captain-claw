@@ -171,6 +171,10 @@ def test_what_moved_and_whats_worth_a_look(store):
     assert "You set its trust to: acts within its grants." in by["Inbox replies"]["moved"]
     assert any("didn't go live" in m for m in by["Inbox replies"]["moved"])
     assert by["Calendar tidy"]["moved"] == ["Paused: 3 failed runs in a row."]
+    store.set_state(g["id"], "running", "owner")
+    again = report.build(store, BOB, *report.period(fm._utcnow(), "this"), fm._utcnow())
+    assert [x["moved"] for x in again["factories"] if x["title"] == "Calendar tidy"] == [
+        ["Paused: 3 failed runs in a row.", "Resumed."]]
     assert "Calendar tidy is paused: 3 failed runs in a row." in rep["look"]
     assert "Inbox replies has 1 proposal waiting for you." in rep["look"]
     assert "Inbox replies: version 2 waits for you after scoring 40% on its cases." in rep["look"]

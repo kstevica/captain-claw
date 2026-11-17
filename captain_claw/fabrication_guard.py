@@ -1837,7 +1837,7 @@ WHATSAPP_BACKSTOP = "Note: no WhatsApp message was sent."
 # agent's work is real only when a hand-off answered in this turn, or the
 # turn carries that agent's message or result.
 
-DELEGATION_TOOLS = frozenset({"flight_deck", "consult_peer", "captain_swarm"})
+DELEGATION_TOOLS = frozenset({"flight_deck", "consult_peer", "captain_swarm", "first_mate"})
 
 # The agent nouns names of agents end in ("Development Lead", "Quality
 # Reviewer", "Deep Researcher"), and plain words for other agents.

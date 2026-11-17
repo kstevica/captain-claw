@@ -683,6 +683,163 @@ async def agent_intent(body: AgentIntentReq) -> dict:
     return {"ok": True, "id": iid}
 
 
+# ── the first_mate tool (an agent's turn for its owner) ─────────────────
+
+AGENT_ACTIONS = ("list", "status", "run", "pause", "resume", "report")
+_STATE_WORDS = {"draft": "a draft", "awaiting_charter": "waiting for your approval", "running": "running",
+                "paused": "paused", "paused_budget": "over budget", "stopped": "stopped"}
+
+
+class AgentToolReq(BaseModel):
+    source_port: int = 0
+    web_auth: str = ""
+    owner_id: str = ""
+    action: str = Field("", max_length=20)
+    factory: str = Field("", max_length=200)
+    note: str = Field("", max_length=500)
+    week: str = Field("last", max_length=10)
+
+
+def find_factory(store: fms.FirstMateStore, owner: str, name: str) -> dict[str, Any]:
+    """One of the owner's factories by id or by name: exact, then the only one
+    whose name holds it. Refused with the names when it isn't one."""
+    mine = store.list_factories(owner)
+    want = (name or "").strip()
+    if not want:
+        raise FirstMateError("say which factory")
+    for f in mine:
+        if f["id"] == want or f["title"].casefold() == want.casefold():
+            return f
+    hits = [f for f in mine if want.casefold() in f["title"].casefold()]
+    if len(hits) == 1:
+        return hits[0]
+    names = ", ".join(f["title"] for f in (hits or mine)) or "none yet"
+    if hits:
+        raise FirstMateError(f"more than one factory fits \"{want}\": {names}")
+    raise FirstMateError(f"no factory called \"{want}\"; yours: {names}")
+
+
+def _line_of(store: fms.FirstMateStore, card: dict[str, Any]) -> str:
+    from captain_claw.flight_deck import first_mate_report as report
+    bits = [_STATE_WORDS.get(card["state"], card["state"].replace("_", " ")),
+            report._TRUST_WORDS.get(card["trust"], card["trust"]),
+            report._HEALTH_WORDS.get(card["health"], card["health"])]
+    last = card.get("last_run")
+    if last:
+        bits.append(f"last run {last['status']} {str(last['created_at'])[:16].replace('T', ' ')} UTC")
+    if card.get("next_at"):
+        bits.append(f"next {str(card['next_at'])[:16].replace('T', ' ')} UTC")
+    if card.get("proposal"):
+        n = card["proposal"]["count"]
+        bits.append(f"{n} {'action' if n == 1 else 'actions'} waiting for your yes")
+    return f"- {card['title']}: " + " · ".join(bits)
+
+
+def _status_text(store: fms.FirstMateStore, card: dict[str, Any], now: datetime) -> str:
+    from captain_claw.flight_deck import (
+        first_mate_cases,
+        first_mate_report,
+        first_mate_score,
+        first_mate_trust,
+    )
+    f = store.view(card["id"])
+    live = f.get("live") or {}
+    sc = first_mate_score.scorecard(store, f, now)
+    lines = [f"{f['title']} (version {f['version'] or 'none yet'}, {f['state'].replace('_', ' ')}, "
+             f"{first_mate_report._TRUST_WORDS.get(f['trust'], f['trust'])})"]
+    if f["state_reason"]:
+        lines.append(f"Why: {f['state_reason']}")
+    if live:
+        lines.append("Charter: " + live["charter"][:600])
+        sched = [t["schedule"] for t in live.get("triggers") or [] if t.get("kind") == "schedule"]
+        evs = [t.get("source", "") for t in live.get("triggers") or [] if t.get("kind") == "events"]
+        lines.append("Starts: " + (", ".join(sched + [f"on new {e}" for e in evs]) or "only when you press Run now"))
+    if f.get("draft"):
+        lines.append(f"Draft version {f['draft']['version']} waits for your approval on First Mate.")
+    why = sc["health_why"].rstrip(".")
+    lines.append(f"Health: {first_mate_report._HEALTH_WORDS.get(sc['health'], sc['health'])}"
+                 + (f" ({why[:1].lower() + why[1:]})" if why else "") + ".")
+    w = sc["week"]
+    lines.append(f"This week: {w['runs']} runs, {w['done']} done, {first_mate_report.tokens_text(card['week_tokens'])} "
+                 f"of its {first_mate_report.tokens_text(card['share_tokens'])} share."
+                 + (f" Satisfaction {sc['satisfaction']:.0%} ({sc['signals']} signals)." if sc["satisfaction"] is not None
+                    else ""))
+    rec = first_mate_trust.record(store, f, first_mate_trust.calibration(store, f["owner_id"]))
+    if rec["why"]:
+        lines.append(f"Trust: {rec['why']}")
+    n = len(first_mate_cases.cases(store, f["id"]))
+    if n:
+        k = sc.get("check")
+        lines.append(f"Cases: {n}" + (f"; latest check {k['score']:.0%} ({k['purpose']})" if k and k.get("score") is not None
+                                      else "") + ".")
+    last = card.get("last_run")
+    if last:
+        lines.append(f"Last run: {last['status']} at {str(last['created_at'])[:16].replace('T', ' ')} UTC"
+                     + (f". {str(last.get('result') or last.get('error') or '')[:400]}" if last.get("result") or last.get("error")
+                        else "."))
+    for rid in store.open_proposals(f["id"])[:3]:
+        waiting = [i["what"] for i in store.intents(rid) if i["status"] == "open"]
+        lines.append("Waiting for your yes on First Mate or the Line: " + "; ".join(waiting[:6])
+                     + (f"; and {len(waiting) - 6} more" if len(waiting) > 6 else ""))
+    return "\n".join(lines)
+
+
+@router.post("/fd/first-mate/agent/tool")
+async def agent_tool(body: AgentToolReq) -> dict:
+    """The ``first_mate`` tool: an agent, for its own owner, lists their
+    factories, reads one, runs, pauses or resumes it, or reads the week. It
+    never approves, carries out or raises trust: those are the owner's own."""
+    from captain_claw.flight_deck import crew_runner
+    from captain_claw.flight_deck.basna_routes import _AgentReq, _resolve_owner
+    owner = fms.norm_user(_resolve_owner(_AgentReq(source_port=body.source_port, web_auth=body.web_auth,
+                                                   owner_id=body.owner_id)) or "local")
+    user = await crew_runner._user_of(owner)
+    if not user:
+        raise HTTPException(403, "this agent's owner could not be resolved")
+    ok, why = access(user)
+    if not ok:
+        raise HTTPException(403, why)
+    if body.action not in AGENT_ACTIONS:
+        raise HTTPException(400, f"action is one of: {', '.join(AGENT_ACTIONS)}")
+    store = fms.get_store()
+    now = fms._utcnow()
+    try:
+        if body.action == "report":
+            from captain_claw.flight_deck import first_mate_report
+            week = body.week if body.week in ("last", "this") else "last"
+            rep = first_mate_report.build(store, owner, *first_mate_report.period(now, week), now)
+            title, text = first_mate_report.text(rep)
+            return {"ok": True, "text": f"{title}\n\n{text}"}
+        week = _week(store, owner, now)
+        if body.action == "list":
+            cards = [_card(store, f, week, now) for f in store.list_factories(owner)]
+            if not cards:
+                return {"ok": True, "text": "You have no factories yet. Set one up on First Mate.", "factories": []}
+            on = store.prefs(owner)["on"]
+            head = (f"You have {len(cards)} {'factory' if len(cards) == 1 else 'factories'}. Running on their own: "
+                    f"{'on' if on else 'off (they run only when you press Run now)'}.")
+            return {"ok": True, "text": "\n".join([head] + [_line_of(store, c) for c in cards]),
+                    "factories": [{"id": c["id"], "title": c["title"], "state": c["state"]} for c in cards]}
+        f = find_factory(store, owner, body.factory)
+        if body.action == "status":
+            return {"ok": True, "text": _status_text(store, _card(store, f, week, now), now), "id": f["id"]}
+        if body.action == "run":
+            run = await runs.start(f["id"], owner, trigger="manual", note=body.note)
+            how = ("a rehearsal: nothing outside happens until you approve what it would do"
+                   if run["kind"] == "rehearsal" else "it acts directly")
+            return {"ok": True, "text": f"Started a run of {f['title']} ({how}). It shows on First Mate.",
+                    "run_id": run["id"]}
+        if body.action == "pause":
+            store.set_state(f["id"], "paused", "owner", body.note or "paused by you, through your agent")
+            return {"ok": True, "text": f"Paused {f['title']}. It won't start on its own until you resume it."}
+        store.set_state(f["id"], "running", "owner", body.note)
+        from captain_claw.flight_deck import first_mate_line
+        await first_mate_line.factory_resumed(owner, f["id"])
+        return {"ok": True, "text": f"{f['title']} is running again."}
+    except FirstMateError as exc:
+        return {"ok": False, "why": str(exc)}
+
+
 # ── the deck's settings (admins) ───────────────────────────────────────
 
 @router.get("/fd/admin/first-mate/settings")
