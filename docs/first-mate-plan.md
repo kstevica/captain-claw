@@ -182,9 +182,12 @@ Each factory has a trust level:
 
 **Moving up.** Every factory starts at `propose`. It moves up one level when
 its last 10 carried-out runs have satisfaction ≥ 0.9 and no proof doubt. One
-proof doubt or one undo drops it back one level. The user can pin a level.
-This is the action catalog's trust ladder (0.85 over 3 runs), made stricter
-because one run does more than one action.
+proof doubt or one undo drops it back one level. The user can pin a level:
+a pin stops the record from moving it up, but a doubt or an undo still drops
+it and removes the pin. A version that adds a grant sets trust back to
+`propose`, because trust was earned for the old grants. This is the action
+catalog's trust ladder (0.85 over 3 runs), made stricter because one run does
+more than one action.
 
 **Carrying out.** A carry-out is one normal Bat run, created with
 `plan_approved: true` and exactly the grant flags the charter lists
@@ -316,8 +319,12 @@ Actions:
 **A new factory** starts from a template, from a Course goal or from the
 user's words. First Mate drafts the charter, the run checks and the first
 sealed cases. The user sees an approval card with fields they can edit, like
-Vatra's Group 0 plan editor, and approves or cancels. Adding a grant, raising
-a limit or moving trust up by hand is a new version and needs approval again.
+Vatra's Group 0 plan editor, and approves or cancels. Adding a grant or
+raising a limit is a new version and needs approval again. The approval is
+checked against the version's content hash, so a draft changed after the user
+looked at it can't be approved without another look. Moving trust up by hand
+is the owner's own act: only the owner can do it, and it's recorded in the
+factory's history.
 
 **The weekly report** is one Line item, "First Mate's week": a scorecard line
 per factory, spend against budget, and what it proposes (pause a red factory,
@@ -487,7 +494,8 @@ real factory.
 3. One run per factory at a time; First Mate leaves one Bat slot free for the
    user.
 4. Trust starts at `propose`; moving up takes 10 carried-out runs at ≥ 0.9
-   satisfaction with no proof doubt; one doubt or undo drops a level.
+   satisfaction with no proof doubt; one doubt or undo drops a level and
+   removes a pin; a version that adds a grant sets it back to `propose`.
 5. Satisfaction is good ÷ (good + bad) over the last 20 known signals;
    silence for 7 days isn't counted.
 6. Trust moves on its own only after kappa ≥ 0.6 on 30+ of the user's labels.
