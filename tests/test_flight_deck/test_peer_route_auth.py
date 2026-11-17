@@ -194,7 +194,9 @@ async def test_consult_streams_from_a_real_peer_with_its_recorded_token(deck, mo
     lines = [json.loads(x) for x in r.text.splitlines() if x.strip()]
     assert r.status_code == 200
     assert seen["path"] == "/ws?token=tok-live"
-    assert seen["chat"] == {"type": "chat", "content": "ping", "no_flow": True,
+    # The peer is told who's asking (agent_family, family_carrier.sender_line).
+    assert seen["chat"] == {"type": "chat", "content": "[From alice-agent, another of your owner's agents]\n\nping",
+                            "no_flow": True,
                             "automation": {"kind": "peer", "job_text": "", "mail_write": "intent"}}
     assert lines[0]["event"] == "status"
     assert lines[-1]["ok"] is True and lines[-1]["response"] == "pong"

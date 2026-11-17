@@ -145,6 +145,21 @@ def _load_pair(full_name: str, compact_name: str, compact: bool) -> str:
     return ""
 
 
+# Family (flight_deck/family_carrier.py): who made whom among the owner's
+# agents — this agent's parent, siblings and children. Owner's turns only;
+# Flight Deck rewrites it when the family changes and deletes it when there is none.
+FAMILY_FILENAME = "family_context.md"
+
+
+def load_family_context() -> str:
+    """The owner's-turn family block ("" when none)."""
+    try:
+        base = Path.home() / ".captain-claw"
+    except RuntimeError:  # no resolvable home directory
+        return ""
+    return _read_cached(base / FAMILY_FILENAME)
+
+
 def load_course_context(compact: bool) -> str:
     """The owner's-turn Course block ("" when none)."""
     return _load_pair(COURSE_FULL_FILENAME, COURSE_COMPACT_FILENAME, compact)

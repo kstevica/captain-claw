@@ -28,6 +28,7 @@ _WELCOME_S = 10.0
 async def identity_frame(owner_id: str, slug: str, *, instructions: str = "") -> dict[str, Any] | None:
     """The frame a chat would send, from what Flight Deck has: the agent's name and
     instructions, and its owner's other running agents as peers."""
+    from captain_claw.flight_deck import agent_family
     from captain_claw.flight_deck.server import (
         _load_process_registry,
         _owner_agent_instructions,
@@ -46,6 +47,8 @@ async def identity_frame(owner_id: str, slug: str, *, instructions: str = "") ->
             continue
         if not _process_is_alive(other):
             continue
+        if agent_family.role_of(other, entry) == agent_family.WORKER:
+            continue  # a run's worker: its run talks to it
         peers.append({"name": entry.get("name") or other, "description": entry.get("description") or "",
                       "forwardingTask": "", "host": "localhost", "port": port, "auth": "", "requireApproval": False})
     return {"type": "peer_agents", "agents": peers,

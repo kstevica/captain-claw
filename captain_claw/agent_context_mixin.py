@@ -3985,6 +3985,13 @@ class AgentContextMixin:
                 ))
                 if _course_block:
                     base_prompt = insert_tenant_block(base_prompt, _course_block)
+                # Family: who made whom — this agent's parent, siblings and
+                # children (flight_deck/family_carrier.py).
+                from captain_claw.tenant_context import load_family_context
+
+                _family_block = load_family_context()
+                if _family_block:
+                    base_prompt = insert_tenant_block(base_prompt, _family_block)
                 if _shared:
                     base_prompt = insert_tenant_block(base_prompt, _shared)
                 # PR D: who this agent is shared with — owner instances only.
