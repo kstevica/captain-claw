@@ -1642,7 +1642,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       <main className="fd-main-panel my-2 mr-2 flex min-w-0 flex-1 flex-col overflow-hidden" style={{ minWidth: 320 }}>
         {hasActiveSession
           ? <ChatPanel variant="simple" />
-          : homeView === 'agents' ? <AgentCards {...homeProps} /> : <AgentHome {...homeProps} />}
+          : homeView === 'agents'
+            ? <AgentCards {...homeProps} workerLines={family.lines} adoptRefusal={family.refusal} onAdopt={family.adopt} onDetach={family.detach} />
+            : <AgentHome {...homeProps} />}
       </main>
 
       {dialogs}

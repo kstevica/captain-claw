@@ -7,7 +7,7 @@ sidebar and on the Agents page, and you can move an existing agent under
 another agent by dragging it there. First Mate is a parent too: its factories'
 work hangs under it.
 
-Status: decisions taken 2026-11-17; Phases 1–3 (data, talk, sidebar) built, see §11–§13.
+Status: decisions taken 2026-11-17; Phases 1–4 (data, talk, sidebar, Agents page) built, see §11–§14.
 
 ## User decisions (2026-11-17)
 
@@ -227,7 +227,7 @@ on the phone, Undo restores.
 | P1 Data | Registry fields, spawn paths record the parent, `bat-` treated as managed, `PUT /fd/processes/{slug}/parent` with the limits, `ProcessInfo` fields, First Mate labels → `parent`/`factory` |
 | P2 Talk | "Your family" prompt block (a file the deck keeps), sender named in consult/delegate/hand-over, `report` to the parent, refresh on change, workers out of the peer lists |
 | P3 Sidebar | Tree rows, fold, worker line, drag onto a row to adopt, drag out to make top-level, ⋯ "Put under another agent…" picker, Undo toast, e2e |
-| P4 Agents page | Trays, hover family highlight, draggable cards, First Mate's factory tray, footer count without workers |
+| P4 Agents page | Family cards with trays, hover dimming, hold-to-adopt cards, First Mate's worker lines, workers off Today and the counts |
 | P5 Lifecycle | Remove and power dialogs, clone/export rules, info-panel family history, Basna/Vatra/Council workers under whoever started their run |
 
 ## 10. Not in this plan
@@ -356,3 +356,28 @@ on the phone, Undo restores.
 - **Not done**: Basna/Vatra/Council workers still don't know who started
   their run (moved to P5); no virtual First Mate row when no First Mate agent
   is picked; the Today home still shows running workers as awake agents (P4).
+
+## 14. As built (P4, 2026-11-17)
+
+- **Family cards** (`AgentCards.tsx`): an agent with agents under it, or with
+  its runs' workers going, is one card across the row: its own card on the
+  left, a tray beside it ("3 agents under it") of small cards for every agent
+  under it (deeper ones indented, "Under <parent>"), each with what it's for and
+  its state (off ones dimmed, "Off"), and its worker lines under them. A family
+  shows while any of it is up; the section count is the whole tree.
+- **Pointing at a family** dims the other cards (the trays already put parent,
+  siblings and children together, so this replaces the planned
+  parent-and-sibling highlight).
+- **Hold to adopt on cards**: as in the column — hold a card over another for
+  450 ms, "Put X under Y" (or the refusal in red); a child dropped on the page
+  around the cards is one of the person's own again. Undo is the column's bar.
+- **Workers off the person's lists**: Today's agent chips, its empty state and
+  its "N more agents are off", and the Agents page's cards and counts leave out
+  agents the deck runs itself (`managed`: run workers, beings' bodies). Their
+  names still name what they did in Today's lists.
+- Checked on a throwaway deck (sign-in off, seeded registry, live stand-in
+  First Mate workers): family cards, tray, worker line, hover dimming,
+  hold-to-adopt and its refusal, detach to the page, Today's chips and count.
+  No e2e covers the Agents page yet.
+- **Not done**: no virtual First Mate card when no First Mate agent is picked;
+  Basna/Vatra/Council worker parents (P5).
