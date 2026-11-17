@@ -606,6 +606,10 @@ class FirstMateStore:
                 );
                 """
             )
+            # Phase 3: a carry-out's proof (what the register and the source showed).
+            cols = {r["name"] for r in self._c().execute("PRAGMA table_info(fm_runs)")}
+            if "proof" not in cols:
+                self._c().execute("ALTER TABLE fm_runs ADD COLUMN proof TEXT NOT NULL DEFAULT '{}'")
             self._c().commit()
 
     # ── rows ───────────────────────────────────────────────────────────
@@ -639,6 +643,10 @@ class FirstMateStore:
             d["trigger_ref"] = json.loads(d.get("trigger_ref") or "[]")
         except (TypeError, ValueError):
             d["trigger_ref"] = []
+        try:
+            d["proof"] = json.loads(d.get("proof") or "{}")
+        except (TypeError, ValueError):
+            d["proof"] = {}
         return d
 
     def _event(self, conn: sqlite3.Connection, factory_id: str, actor: str, event: str,
@@ -1171,6 +1179,14 @@ class FirstMateStore:
         with self._lock:
             return [self._run(r) for r in self._c().execute(sql + " ORDER BY created_at", args).fetchall()]
 
+    def set_proof(self, run_id: str, proof: dict[str, Any]) -> dict[str, Any]:
+        """A finished carry-out's proof (Phase 3): ``{state, note, ...}``."""
+        with self._tx() as conn:
+            if conn.execute("SELECT 1 FROM fm_runs WHERE id = ?", (run_id,)).fetchone() is None:
+                raise FirstMateError("no such run")
+            conn.execute("UPDATE fm_runs SET proof = ? WHERE id = ?", (_sized("proof", proof), run_id))
+        return self.get_run(run_id)
+
     def tokens_since(self, factory_id: str, since: datetime) -> int:
         """Tokens a factory's runs started since ``since`` have used."""
         with self._lock:
@@ -1296,6 +1312,14 @@ class FirstMateStore:
         with self._tx() as conn:
             n = conn.execute(sql, args).rowcount
         return int(n)
+
+    def open_proposals(self, factory_id: str) -> list[str]:
+        """A factory's rehearsals with intents still waiting for the owner, newest first."""
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT r.id FROM fm_runs r WHERE r.factory_id = ? AND EXISTS (SELECT 1 FROM fm_intents i"
+                " WHERE i.run_id = r.id AND i.status = 'open') ORDER BY r.created_at DESC", (factory_id,)).fetchall()
+        return [r["id"] for r in rows]
 
     # ── signals (Phase 4) ──────────────────────────────────────────────
 

@@ -44,6 +44,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck import first_mate_runs as runs
 from captain_claw.flight_deck import first_mate_store as fms
@@ -154,9 +155,22 @@ def _next_at(store: fms.FirstMateStore, view: dict[str, Any], now: datetime) -> 
     return datetime.fromtimestamp(min(times), UTC).isoformat() if times else None
 
 
+def _with_intents(store: fms.FirstMateStore, runs_: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Runs, each rehearsal with what it would have done (the words, not the arguments)."""
+    return [{**r, "intents": [{**{k: i[k] for k in ("id", "kind", "tool", "what", "status")},
+                               "detail": runs.intent_detail(i)}
+                              for i in store.intents(r["id"])] if r["kind"] == "rehearsal" else []}
+            for r in runs_]
+
+
 def _card(store: fms.FirstMateStore, view: dict[str, Any], week: dict[str, Any], now: datetime) -> dict[str, Any]:
     latest = store.list_runs(view["id"], limit=1)
-    return {**view, "last_run": latest[0] if latest else None,
+    waiting = store.open_proposals(view["id"])
+    proposal = None
+    if waiting:
+        count = sum(1 for i in store.intents(waiting[0]) if i["status"] == "open")
+        proposal = {"run_id": waiting[0], "count": count}
+    return {**view, "last_run": latest[0] if latest else None, "proposal": proposal,
             "next_at": _next_at(store, view, now),
             "week_tokens": store.tokens_since(view["id"], week["start"]),
             "share_tokens": week["shares"].get(view["id"], 0),
@@ -257,7 +271,7 @@ async def get_factory(factory_id: str, user: dict = Depends(allowed_user)):
             await runs.refresh(run["id"])
     return {**view,
             "versions": store.versions(factory_id),
-            "runs": store.list_runs(factory_id, limit=20),
+            "runs": _with_intents(store, store.list_runs(factory_id, limit=20)),
             "events": store.events(factory_id, limit=50),
             "satisfaction": store.satisfaction(factory_id)}
 
@@ -375,10 +389,17 @@ async def set_trust(factory_id: str, body: Any = Body(...), user: dict = Depends
     pin = body.get("pin")
     if pin is not None and not isinstance(pin, bool):
         raise HTTPException(400, "pin must be true or false")
+    store = fms.get_store()
     try:
-        return fms.get_store().set_trust(factory_id, str(body.get("level") or ""), "owner", pin=pin)
+        view = store.set_trust(factory_id, str(body.get("level") or ""), "owner", pin=pin)
     except FirstMateError as exc:
         raise _err(exc) from None
+    # Setting trust by hand is the owner's answer to a doubtful carry-out.
+    from captain_claw.flight_deck import first_mate_line
+    doubted = [r["id"] for r in store.list_runs(factory_id, limit=100)
+               if r["kind"] == "carry_out" and (r.get("proof") or {}).get("state") == "doubt"]
+    await first_mate_line.proofs_seen(_uid(user), doubted)
+    return view
 
 
 # ── runs ───────────────────────────────────────────────────────────────
@@ -404,7 +425,30 @@ async def list_runs(factory_id: str, limit: int = 50, user: dict = Depends(allow
     for run in store.list_runs(factory_id, limit=max(1, min(limit, 200))):
         if run["status"] in fms.ACTIVE_RUN:
             await runs.refresh(run["id"])
-    return {"runs": store.list_runs(factory_id, limit=max(1, min(limit, 200)))}
+    return {"runs": _with_intents(store, store.list_runs(factory_id, limit=max(1, min(limit, 200))))}
+
+
+@router.post("/fd/first-mate/runs/{run_id}/approve")
+async def approve_run(run_id: str, body: Any = Body(default={}), user: dict = Depends(allowed_user)):
+    """Carry out what a rehearsal would have done: all of it, or ``ids``. One
+    carry-out run, with exactly the charter's grants; the rest is rejected."""
+    body = _object(body)
+    _only(body, ("ids",))
+    ids = body.get("ids")
+    if ids is not None and (not isinstance(ids, list) or not all(isinstance(i, int) for i in ids)):
+        raise HTTPException(400, "ids must be a list of intent ids")
+    try:
+        return await runs.carry_out(run_id, _uid(user), ids)
+    except FirstMateError as exc:
+        raise _err(exc) from None
+
+
+@router.post("/fd/first-mate/runs/{run_id}/reject")
+async def reject_run(run_id: str, user: dict = Depends(allowed_user)):
+    try:
+        return await runs.reject(run_id, _uid(user))
+    except FirstMateError as exc:
+        raise _err(exc) from None
 
 
 @router.post("/fd/first-mate/runs/{run_id}/stop")
@@ -413,6 +457,50 @@ async def stop_run(run_id: str, user: dict = Depends(allowed_user)):
         return await runs.stop(run_id, _uid(user))
     except FirstMateError as exc:
         raise _err(exc) from None
+
+
+# ── a rehearsal's intents (the worker's guard calls this) ─────────────
+
+INTENTS_PER_RUN = 300
+
+
+class AgentIntentReq(BaseModel):
+    source_port: int = 0
+    web_auth: str = ""
+    owner_id: str = ""
+    tag: str = Field("", max_length=80)
+    kind: str = Field("intent", max_length=10)
+    tool: str = Field("", max_length=80)
+    what: str = Field("", max_length=500)
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/fd/first-mate/agent/intent")
+async def agent_intent(body: AgentIntentReq) -> dict:
+    """A rehearsing worker's intent or commit point (rehearsal_turn): kept with
+    its run. Only the run's own owner's agents can add to it, only while the
+    run goes, only for a rehearsal. The guard has already refused the call
+    itself; this only keeps what it would have been."""
+    from captain_claw.flight_deck.basna_routes import _AgentReq, _resolve_owner
+    from captain_claw.flight_deck.captain_swarm_routes import _agent_slug
+    if body.kind not in ("intent", "commit"):
+        return {"ok": False, "why": "not an intent"}
+    owner = fms.norm_user(_resolve_owner(_AgentReq(source_port=body.source_port, web_auth=body.web_auth,
+                                                   owner_id=body.owner_id)) or "local")
+    store = fms.get_store()
+    run = store.get_run(body.tag)
+    if run is None or run["owner_id"] != owner or run["kind"] != "rehearsal":
+        return {"ok": False, "why": "no such rehearsal"}
+    if run["status"] not in fms.ACTIVE_RUN:
+        return {"ok": False, "why": "that run is over"}
+    if len(store.intents(run["id"])) >= INTENTS_PER_RUN:
+        return {"ok": False, "why": "too many intents for one run"}
+    try:
+        iid = store.add_intent(run["id"], kind=body.kind, tool=body.tool, what=body.what, args=body.args,
+                               agent=_agent_slug(body.source_port))
+    except FirstMateError as exc:
+        return {"ok": False, "why": str(exc)}
+    return {"ok": True, "id": iid}
 
 
 # ── the deck's settings (admins) ───────────────────────────────────────

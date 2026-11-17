@@ -1062,8 +1062,8 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
     bat_env = _bat_env(sid, key, owner)
     rehearsal = str((run.get("config") or {}).get("rehearsal") or "")
     if rehearsal:
-        from captain_claw.flight_deck import captain_swarm_rehearsal
-        if captain_swarm_rehearsal.parse_tag(rehearsal) is None:
+        from captain_claw import rehearsal_turn
+        if not rehearsal_turn.valid_tag(rehearsal):  # Captain Swarm's or First Mate's
             return {"ok": False, "error": "a rehearsal run with no valid tag", "spawn_refused": True}
         # Every turn this worker takes is a rehearsal: nothing in the world changes.
         bat_env.append({"key": "CLAW_REHEARSAL", "value": rehearsal})

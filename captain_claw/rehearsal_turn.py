@@ -1,8 +1,10 @@
-"""A rehearsal — a Captain Swarm lane acts on nothing in the world.
+"""A rehearsal — a Captain Swarm lane or a First Mate factory run acts on nothing in the world.
 
-docs/captain-swarm-plan.md §4.1–4.2. A worker spawned for a Captain Swarm
-attempt (a Bat run in rehearsal) carries ``CLAW_REHEARSAL=<run>:<experiment>``
-in its environment, and every turn it takes is a rehearsal:
+docs/captain-swarm-plan.md §4.1–4.2, docs/first-mate-plan.md §6. A worker
+spawned for a Captain Swarm attempt (a Bat run in rehearsal) carries
+``CLAW_REHEARSAL=<run>:<experiment>`` in its environment; one spawned for a
+First Mate factory run that rehearses carries ``CLAW_REHEARSAL=<fmr_ run id>``.
+Every turn either takes is a rehearsal:
 
 * **Reads run:** files, the web, mailboxes and calendars, the browser looking
   at pages.
@@ -21,10 +23,14 @@ in its environment, and every turn it takes is a rehearsal:
   fields, but a click or key that would submit, buy, pay, send, delete,
   confirm, sign, publish, book or accept is recorded and not done. When it
   can't tell, it's a commit point.
-* **One attempt per site and per account.** Before the browser opens a page or
-  signs in with stored credentials, Flight Deck is asked whether another
-  attempt is on that site or account right now; if one is, or if it can't be
-  asked, the browser doesn't go there.
+* **One attempt per site and per account** (Captain Swarm only: its attempts
+  run side by side). Before the browser opens a page or signs in with stored
+  credentials, Flight Deck is asked whether another attempt is on that site or
+  account right now; if one is, or if it can't be asked, the browser doesn't
+  go there. A First Mate factory runs once at a time and isn't held.
+
+Intents go to the Flight Deck route of whoever the tag names:
+``/fd/captain-swarm/agent/intent`` or ``/fd/first-mate/agent/intent``.
 
 Fails closed: a tool this module doesn't know is an intent, never a call. The
 decision is made here, from the tool's name and arguments, never from what the
@@ -40,6 +46,7 @@ from typing import Any
 
 ENV = "CLAW_REHEARSAL"
 _TAG_RE = re.compile(r"^cs_[0-9a-f]{6,32}:exp_[0-9a-f]{6,32}$")
+_FM_TAG_RE = re.compile(r"^fmr_[0-9a-f]{6,32}$")  # a First Mate factory run's id
 
 # Writes that stay in the worker's own workspace.
 LOCAL_WRITES = frozenset({"write", "edit", "workspace_write", "docx", "xlsx", "pptx", "visualize", "image_gen",
@@ -73,15 +80,36 @@ COMMIT = ("Stopped at the commit point, not done: {what}. This is a rehearsal �
           "buy, pay, send, book or confirm is recorded instead. Note the page and what you filled in, and finish "
           "your result: the owner can have it carried out once if this attempt wins.")
 REFUSED = "{what} isn't available in a rehearsal: {why}"
+FM_INTENT = ("Recorded as an intent, not done: {what}. This run is a rehearsal — nothing outside is changed. "
+             "Your owner sees what you would do and can have it carried out once. Carry on as if it will be, and "
+             "list in your result exactly what you would do.")
+FM_COMMIT = ("Stopped at the commit point, not done: {what}. This run is a rehearsal — a click or key that would "
+             "submit, buy, pay, send, book or confirm is recorded instead. Note the page and what you filled in, and "
+             "finish your result: your owner can have it carried out once.")
 SITE_BUSY = ("Not now: {why}. Attempts run at the same time, and only one at a time may use a site or an account "
              "in its browser, so the site doesn't see a crowd. Use another source for now, or read the page with "
              "web_fetch; come back to it later if you still need its browser.")
 
 
+def valid_tag(tag: str) -> bool:
+    """A Captain Swarm ``<run>:<experiment>`` or a First Mate run id."""
+    tag = str(tag or "").strip()
+    return bool(_TAG_RE.match(tag) or _FM_TAG_RE.match(tag))
+
+
+def is_first_mate(tag: str) -> bool:
+    return bool(_FM_TAG_RE.match(str(tag or "").strip()))
+
+
+def route_for(tag: str) -> str:
+    """Whose agent route a tag's intents go to."""
+    return "first-mate" if is_first_mate(tag) else "captain-swarm"
+
+
 def active() -> str:
-    """The ``<run>:<experiment>`` this process rehearses for, or "" when it doesn't."""
+    """The tag this process rehearses for, or "" when it doesn't."""
     tag = os.environ.get(ENV, "").strip()
-    return tag if _TAG_RE.match(tag) else ""
+    return tag if valid_tag(tag) else ""
 
 
 def _browser(args: dict) -> tuple[str, str]:
@@ -157,9 +185,9 @@ def safe_args(arguments: Any) -> dict:
     return out
 
 
-async def _post(path: str, body: dict, agent: Any) -> dict | None:
-    """POST *body* to Flight Deck's Captain Swarm agent route: its JSON answer, or
-    None when it can't be asked."""
+async def _post(path: str, body: dict, agent: Any, tag: str = "") -> dict | None:
+    """POST *body* to the agent route of whoever *tag* names (First Mate or
+    Captain Swarm): its JSON answer, or None when it can't be asked."""
     try:
         import httpx
 
@@ -177,7 +205,7 @@ async def _post(path: str, body: dict, agent: Any) -> dict | None:
         body = {"web_auth": auth if _fd_url_pinned(fd_url) else "", "source_port": port,
                 "owner_id": os.environ.get("FD_OWNER_ID", ""), **body}
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(f"{fd_url}/fd/captain-swarm/agent/{path}", json=body,
+            r = await client.post(f"{fd_url}/fd/{route_for(tag)}/agent/{path}", json=body,
                                   headers=_agent_secret_headers(fd_url))
         return r.json() if r.status_code == 200 else None
     except Exception:
@@ -186,8 +214,9 @@ async def _post(path: str, body: dict, agent: Any) -> dict | None:
 
 async def _record(tag: str, kind: str, name: str, arguments: Any, what: str, agent: Any) -> bool:
     """Hand the intent to Flight Deck. Best effort: not recorded is still not done."""
-    got = await _post("intent", {"tag": tag, "kind": kind, "tool": str(name), "args": safe_args(arguments),
-                                 "what": what[:500]}, agent)
+    body = {"tag": tag, "kind": kind, "tool": str(name), "args": safe_args(arguments), "what": what[:500]}
+    # Captain Swarm's call is unchanged; a First Mate tag names its own route.
+    got = await (_post("intent", body, agent, tag) if is_first_mate(tag) else _post("intent", body, agent))
     return got is not None
 
 
@@ -206,7 +235,7 @@ def browser_place(name: str, arguments: Any) -> dict:
 
 async def _site_check(tag: str, place: dict, agent: Any) -> str:
     """"" when this attempt may use *place* now, else why not. Fails closed."""
-    got = await _post("site", {"tag": tag, **place}, agent)
+    got = await _post("site", {"tag": tag, **place}, agent)  # Captain Swarm only
     if got is None:
         return "Flight Deck couldn't be asked whether another attempt is on that site"
     return "" if got.get("ok") else str(got.get("why") or "another attempt is on that site")
@@ -219,7 +248,7 @@ async def tool_block(name: str, arguments: Any, agent: Any) -> str | None:
         return None
     verdict, what = classify(name, arguments)
     if verdict == "allow":
-        place = browser_place(name, arguments)
+        place = browser_place(name, arguments) if not is_first_mate(tag) else {}
         if place:
             why = await _site_check(tag, place, agent)
             if why:
@@ -228,4 +257,6 @@ async def tool_block(name: str, arguments: Any, agent: Any) -> str | None:
     if verdict == "refuse":
         return REFUSED.format(what=what, why=_why(what))
     await _record(tag, verdict, name, arguments, what, agent)
+    if is_first_mate(tag):
+        return (FM_COMMIT if verdict == "commit" else FM_INTENT).format(what=what)
     return (COMMIT if verdict == "commit" else INTENT).format(what=what)

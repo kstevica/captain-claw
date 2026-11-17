@@ -1690,7 +1690,8 @@ def _lockdown_enabled() -> bool:
     return os.environ.get("FD_LOCKDOWN", "").lower() in ("true", "1", "yes")
 
 
-_AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/", "/fd/bat/agent/", "/fd/captain-swarm/agent/")
+_AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/", "/fd/bat/agent/", "/fd/captain-swarm/agent/",
+                         "/fd/first-mate/agent/")
 
 # Agent routes whose handlers treat a verified bearer as authoritative (caller
 # may act only as itself). A valid bearer is an accepted caller here in

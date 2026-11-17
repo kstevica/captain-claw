@@ -176,7 +176,8 @@ class Supervisor:
     async def _streak(self, store: fms.FirstMateStore, f: dict[str, Any], out: dict[str, int]) -> None:
         if f["state"] != "running":
             return
-        finished = [r for r in store.runs_since(f["id"], store.resumed_at(f["id"]))
+        finished = [r for r in store.runs_since(f["id"], store.resumed_at(f["id"]),
+                                                kinds=("run", "rehearsal", "carry_out"))
                     if r["status"] in ("done", "failed")]
         last = finished[:FAILURE_STREAK]
         if len(last) == FAILURE_STREAK and all(r["status"] == "failed" for r in last):

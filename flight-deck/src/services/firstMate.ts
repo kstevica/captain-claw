@@ -80,6 +80,17 @@ export interface Version {
   decided_at: string | null
 }
 
+export interface Intent {
+  id: number
+  /** intent: an outward call recorded; commit: the browser stopped before submitting. */
+  kind: 'intent' | 'commit'
+  tool: string
+  what: string
+  status: 'open' | 'approved' | 'rejected' | 'carried_out' | 'dropped'
+  /** What it would have sent or changed, from its arguments. */
+  detail: string
+}
+
 export interface Run {
   id: string
   factory_id: string
@@ -100,6 +111,10 @@ export interface Run {
   /** Set while it waits on the owner (a Bat plan or question). */
   waiting?: boolean
   note?: string
+  /** A rehearsal's: what it would have done. */
+  intents?: Intent[]
+  /** A carry-out's: what the register and Gmail/Calendar showed it did. */
+  proof?: { state?: 'confirmed' | 'nothing' | 'doubt' | 'unknown'; note?: string; sent?: number; approved?: number; actions?: string[] }
 }
 
 export interface Factory {
@@ -131,6 +146,8 @@ export interface FactoryCard extends Factory {
   share_tokens: number
   /** Events claimed for it, waiting for their batch. */
   pending_events: number
+  /** The newest rehearsal whose intents wait for the owner's yes. */
+  proposal: { run_id: string; count: number } | null
 }
 
 export interface FactoryEvent {
@@ -226,6 +243,10 @@ export const setTrust = (id: string, level: Trust, pin?: boolean) =>
   call<Factory>(`${f(id)}/trust`, json('POST', pin === undefined ? { level } : { level, pin }))
 export const runNow = (id: string, note = '') => call<Run>(`${f(id)}/run`, json('POST', { note }))
 export const listRuns = (id: string) => call<{ runs: Run[] }>(`${f(id)}/runs`).then((r) => r.runs)
+export const approveRun = (runId: string, ids?: number[]) =>
+  call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/approve`, json('POST', ids ? { ids } : {}))
+export const rejectRun = (runId: string) =>
+  call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/reject`, { method: 'POST' })
 export const stopRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/stop`, { method: 'POST' })
 
