@@ -6,6 +6,7 @@ import {
   approveRun,
   decline,
   rejectRun,
+  setTrust,
   editDraft,
   getFactory,
   newDraft,
@@ -26,6 +27,7 @@ import {
   type Intent,
   type Run,
   type Trigger,
+  type Trust,
   type Version,
 } from '../../services/firstMate'
 import { ErrorBox, Pill, errText, type PillTone } from './ui'
@@ -259,9 +261,11 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
               )}
 
               {f.live ? (
-                <LiveVersion version={f.live} trust={f.trust} approvedAt={f.live.decided_at}
+                <LiveVersion version={f.live} trust={f.trust} pinned={f.trust_pinned} approvedAt={f.live.decided_at}
                   onChange={draft ? undefined : () => void act('draft', () => newDraft(factoryId))}
-                  busy={busy === 'draft'} />
+                  busy={busy === 'draft'} trustBusy={busy === 'trust'}
+                  onTrust={(level, pin) => void act('trust', () => setTrust(factoryId, level, pin),
+                    pin === undefined ? `Trust: ${TRUST_LABELS[level]}` : pin ? 'Trust pinned' : 'Trust unpinned')} />
               ) : !draft ? (
                 <p className="text-zinc-500">This factory has no draft. Start one to write its charter again.</p>
               ) : null}
@@ -318,13 +322,19 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
   )
 }
 
-function LiveVersion({ version: v, trust, approvedAt, onChange, busy }: {
+const TRUST_ORDER: Trust[] = ['propose', 'commit', 'direct']
+
+function LiveVersion({ version: v, trust, pinned, approvedAt, onChange, busy, trustBusy, onTrust }: {
   version: Version
   trust: FactoryDetail['trust']
+  pinned: boolean
   approvedAt: string | null
   onChange?: () => void
   busy: boolean
+  trustBusy: boolean
+  onTrust: (level: Trust, pin?: boolean) => void
 }) {
+  const outward = v.grants.email || v.grants.spend || v.grants.accounts
   const grants = (['email', 'organize', 'spend', 'accounts'] as const).filter((g) => v.grants[g])
   const row = 'flex gap-3 py-2'
   const key = 'w-28 shrink-0 text-xs text-zinc-500'
@@ -364,8 +374,27 @@ function LiveVersion({ version: v, trust, approvedAt, onChange, busy }: {
         <div className={row}>
           <span className={key}>Trust</span>
           <span className="min-w-0 flex-1 text-zinc-300">
-            {TRUST_LABELS[trust]}
-            <span className="block text-xs text-zinc-500">{TRUST_HINTS[trust]}</span>
+            <span role="radiogroup" aria-label="Trust" className="inline-flex flex-wrap gap-1">
+              {TRUST_ORDER.map((level) => {
+                const blocked = level === 'direct' && outward
+                return (
+                  <button key={level} role="radio" aria-checked={trust === level} aria-label={TRUST_LABELS[level]}
+                    disabled={trustBusy || blocked || trust === level}
+                    title={blocked ? 'A factory that may send email, spend or open accounts always rehearses first' : TRUST_HINTS[level]}
+                    onClick={() => onTrust(level)}
+                    className={`rounded-full px-2.5 py-1 text-xs transition-colors disabled:cursor-default ${
+                      trust === level ? 'bg-violet-600 text-white' : blocked ? 'text-zinc-600' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100'}`}>
+                    {TRUST_LABELS[level]}
+                  </button>
+                )
+              })}
+            </span>
+            <span className="mt-1 block text-xs text-zinc-500">{TRUST_HINTS[trust]}</span>
+            <label className="mt-1.5 flex items-center gap-2 text-xs text-zinc-500">
+              <input type="checkbox" checked={pinned} disabled={trustBusy} onChange={(e) => onTrust(trust, e.target.checked)}
+                className="h-3.5 w-3.5 accent-violet-600" />
+              Pin it: its record won’t raise it (a doubtful carry-out still lowers it)
+            </label>
           </span>
         </div>
         {approvedAt && <div className={row}><span className={key}>Approved</span><span className="text-zinc-300">{whenText(approvedAt)}</span></div>}
@@ -406,6 +435,12 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject }: {
         <Pill tone={r.waiting ? 'amber' : RUN_TONE[r.status]}>{r.waiting ? 'Waiting for you' : RUN_LABELS[r.status]}</Pill>
         {r.kind === 'rehearsal' && <Pill tone="zinc" title="Anything outward was recorded, not done">Rehearsal</Pill>}
         {r.kind === 'carry_out' && <Pill tone="violet" title="Did what you approved, once">Carry-out</Pill>}
+        {r.kind === 'carry_out' && r.proof?.state && (
+          <Pill tone={r.proof.state === 'confirmed' ? 'green' : r.proof.state === 'doubt' ? 'red' : 'zinc'}
+            title="What the tool-call register and Gmail/Calendar showed it did">
+            {{ confirmed: 'Confirmed', doubt: 'Check it', nothing: 'Did nothing outside', unknown: 'Not checked' }[r.proof.state]}
+          </Pill>
+        )}
         {r.verdict === 'leak' && <Pill tone="red" title="The tool-call register shows an outward call that ran">Reached outside</Pill>}
         <span className="text-xs text-zinc-500">{whenText(r.created_at)}</span>
         {r.tokens > 0 && <span className="text-xs text-zinc-500">· {tokensText(r.tokens)}</span>}
@@ -419,6 +454,16 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject }: {
         )}
       </div>
       {r.waiting && r.note && <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">{r.note}</p>}
+      {r.kind === 'carry_out' && r.proof?.state && (r.proof.note || (r.proof.actions?.length ?? 0) > 0) && (
+        <div className={`mt-2 rounded-xl px-3 py-2 text-xs ${r.proof.state === 'doubt' ? 'bg-red-500/[0.07] text-red-700 dark:text-red-300' : 'bg-[var(--fd-hover)] text-zinc-400'}`}>
+          {r.proof.note && <p>{r.proof.note}</p>}
+          {(r.proof.actions?.length ?? 0) > 0 && (
+            <ul className={`${r.proof.note ? 'mt-1.5' : ''} space-y-0.5 text-zinc-400`}>
+              {r.proof.actions!.map((a, n) => <li key={n}>• {a}</li>)}
+            </ul>
+          )}
+        </div>
+      )}
       {r.kind === 'rehearsal' && !going && r.intents && (
         r.intents.length ? (
           <div className={`mt-2 rounded-xl px-3 py-2 ${waiting.length ? 'border border-amber-500/30 bg-amber-500/[0.06]' : 'bg-[var(--fd-hover)]'}`}>

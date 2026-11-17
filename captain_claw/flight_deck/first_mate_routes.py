@@ -389,10 +389,17 @@ async def set_trust(factory_id: str, body: Any = Body(...), user: dict = Depends
     pin = body.get("pin")
     if pin is not None and not isinstance(pin, bool):
         raise HTTPException(400, "pin must be true or false")
+    store = fms.get_store()
     try:
-        return fms.get_store().set_trust(factory_id, str(body.get("level") or ""), "owner", pin=pin)
+        view = store.set_trust(factory_id, str(body.get("level") or ""), "owner", pin=pin)
     except FirstMateError as exc:
         raise _err(exc) from None
+    # Setting trust by hand is the owner's answer to a doubtful carry-out.
+    from captain_claw.flight_deck import first_mate_line
+    doubted = [r["id"] for r in store.list_runs(factory_id, limit=100)
+               if r["kind"] == "carry_out" and (r.get("proof") or {}).get("state") == "doubt"]
+    await first_mate_line.proofs_seen(_uid(user), doubted)
+    return view
 
 
 # ── runs ───────────────────────────────────────────────────────────────

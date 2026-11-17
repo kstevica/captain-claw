@@ -113,6 +113,8 @@ export interface Run {
   note?: string
   /** A rehearsal's: what it would have done. */
   intents?: Intent[]
+  /** A carry-out's: what the register and Gmail/Calendar showed it did. */
+  proof?: { state?: 'confirmed' | 'nothing' | 'doubt' | 'unknown'; note?: string; sent?: number; approved?: number; actions?: string[] }
 }
 
 export interface Factory {

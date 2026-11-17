@@ -78,6 +78,30 @@ async def run_finished(run: dict[str, Any]) -> None:
         log.debug("first mate: run post failed", exc_info=True)
 
 
+async def proof_doubt(factory: dict[str, Any], run: dict[str, Any], note: str) -> None:
+    """A carry-out the record doesn't bear out: "needs you", to phones."""
+    try:
+        from captain_claw.flight_deck import line
+        trust = {"propose": "asks first", "commit": "acts within its grants", "direct": "acts directly"}
+        body = (f"{note}\n\nIts trust is now: {trust.get(factory['trust'], factory['trust'])}. "
+                "Open First Mate to see what the carry-out did.")
+        await line.post(factory["owner_id"], "run", f"{factory['title']}: check its carry-out", body,
+                        bell_type="first_mate_proof", source=SOURCE, needs_you=True, ref_type="first_mate_proof",
+                        ref_id=run["id"], to_phones=True, thread_id=thread_of(factory["id"]))
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: proof post failed", exc_info=True)
+
+
+async def proofs_seen(owner_id: str, run_ids: list[str]) -> None:
+    """The owner looked at their factory's trust again: its doubts leave Needs you."""
+    try:
+        from captain_claw.flight_deck import line
+        for rid in run_ids:
+            await line.settle(fms.norm_user(owner_id), "first_mate_proof", rid)
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: proof settle failed", exc_info=True)
+
+
 async def proposal_settled(run: dict[str, Any] | None) -> None:
     """A proposal answered (approved, rejected) or replaced by a newer
     rehearsal: it leaves Needs you."""

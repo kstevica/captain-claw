@@ -261,7 +261,8 @@ def kind_for(factory: dict[str, Any]) -> str:
 async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind: str | None = None,
                 note: str = "", context: list[dict[str, Any]] | None = None,
                 watch: bool = True, max_tokens: int | None = None, parent_run: str = "",
-                brief: str | None = None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+                brief: str | None = None, extra: dict[str, Any] | None = None,
+                refs: list[str] | None = None) -> dict[str, Any]:
     """Start one run of a factory's live version through its runner.
 
     Refused (FirstMateError) when the factory isn't the owner's, has no
@@ -284,7 +285,8 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
     if await runner.capacity(factory["owner_id"]) <= 0:
         raise FirstMateError("no free slot for another run right now: one is kept for your own runs. "
                              "Try again when one of your runs finishes")
-    refs = [str(c.get("id")) for c in (context or []) if c.get("id")]
+    if refs is None:
+        refs = [str(c.get("id")) for c in (context or []) if c.get("id")]
     kind = kind or kind_for(factory)
     if brief is None:
         brief = compose_brief(factory, version, note=note, context=context, rehearsal=kind == "rehearsal")
@@ -334,7 +336,9 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
                                     result=state.get("result", ""), error=state.get("note", ""),
                                     tokens=state["tokens"], usd=state["usd"])
         _settle_carry_out(store, finished)
-        from captain_claw.flight_deck import first_mate_line
+        from captain_claw.flight_deck import first_mate_line, first_mate_proof
+        await first_mate_proof.prove(store, finished)
+        finished = store.get_run(run_id)
         await first_mate_line.run_finished(finished)
         return finished
     if run["kind"] == "rehearsal":
@@ -353,6 +357,7 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
     if finished["kind"] == "rehearsal":
         if finished["status"] == "done":
             await _supersede(store, finished)
+            await _auto_carry(store, finished)
         else:
             store.decide_intents(run_id, "dropped")  # a rehearsal that didn't finish proposes nothing
     from captain_claw.flight_deck import first_mate_line
@@ -423,10 +428,14 @@ def carry_out_config(version: dict[str, Any], brief: str) -> dict[str, Any]:
     return cfg
 
 
-async def carry_out(rehearsal_id: str, owner_id: str, ids: list[int] | None = None) -> dict[str, Any]:
+async def carry_out(rehearsal_id: str, owner_id: str, ids: list[int] | None = None, *,
+                    rest: str = "reject", by_owner: bool = True) -> dict[str, Any]:
     """Carry out a rehearsal's open intents (all, or ``ids``), once. The others
-    are rejected. Refused when the run isn't the owner's finished rehearsal,
-    nothing is waiting, or the charter changed since (rehearse again)."""
+    are rejected (``rest="keep"``: they stay open for the owner). Refused when
+    the run isn't the owner's finished rehearsal, nothing is waiting, or the
+    charter changed since (rehearse again). ``by_owner=False``: trust
+    ``commit`` carrying out by itself, so no approval is recorded for the owner
+    and the proposal stays while anything is left in it."""
     store = fms.get_store()
     run = store.get_run(rehearsal_id)
     if run is None or run["owner_id"] != fms.norm_user(owner_id) or run["kind"] != "rehearsal":
@@ -443,13 +452,34 @@ async def carry_out(rehearsal_id: str, owner_id: str, ids: list[int] | None = No
         raise FirstMateError("the charter changed since this rehearsal; let it rehearse again")
     brief = carry_out_brief(factory, version, chosen)
     carry = await start(factory["id"], owner_id, trigger="approval", kind="carry_out", parent_run=rehearsal_id,
-                        brief=brief, extra=carry_out_config(version, brief))
+                        brief=brief, extra=carry_out_config(version, brief), refs=[str(i["id"]) for i in chosen])
     store.decide_intents(rehearsal_id, "approved", ids=[i["id"] for i in chosen])
-    store.decide_intents(rehearsal_id, "rejected")  # the ones not chosen
-    store.add_signal(factory["id"], "approved", run_id=rehearsal_id, source="first_mate")
-    from captain_claw.flight_deck import first_mate_line
-    await first_mate_line.proposal_settled(run)
+    if rest == "reject":
+        store.decide_intents(rehearsal_id, "rejected")  # the ones not chosen
+    if by_owner:
+        store.add_signal(factory["id"], "approved", run_id=rehearsal_id, source="first_mate")
+    if by_owner or not any(i["status"] == "open" for i in store.intents(rehearsal_id)):
+        from captain_claw.flight_deck import first_mate_line
+        await first_mate_line.proposal_settled(run)
     return carry
+
+
+async def _auto_carry(store: fms.FirstMateStore, run: dict[str, Any]) -> None:
+    """Trust ``commit``: what a rehearsal would do within the charter's grants
+    is carried out by itself; the rest waits for the owner. When it can't start
+    now (no slot), everything waits for the owner instead."""
+    from captain_claw.flight_deck import first_mate_proof
+    factory = store.get(run["factory_id"])
+    version = store.live(run["factory_id"])
+    if not factory or factory["trust"] != "commit" or not version or version["version"] != run["version"]:
+        return
+    ids = first_mate_proof.covered(store.intents(run["id"]), version.get("grants") or {})
+    if not ids:
+        return
+    try:
+        await carry_out(run["id"], run["owner_id"], ids, rest="keep", by_owner=False)
+    except FirstMateError:
+        log.info("first mate: a commit carry-out didn't start; the owner decides", extra={"run": run["id"]})
 
 
 async def reject(rehearsal_id: str, owner_id: str) -> dict[str, Any]:
