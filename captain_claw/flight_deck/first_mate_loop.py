@@ -119,7 +119,7 @@ class Supervisor:
             return await self._scan(now or fms._utcnow())
 
     async def _scan(self, now: datetime) -> dict[str, int]:
-        out = {"refreshed": 0, "started": 0, "paused": 0, "resumed": 0, "skipped": 0, "waiting": 0}
+        out = {"refreshed": 0, "started": 0, "paused": 0, "resumed": 0, "skipped": 0, "waiting": 0, "trusted": 0}
         if fms._STORE is None and not fms._db_path().exists():
             return out  # First Mate never used on this deck: nothing to do, and no file made
         store = fms.get_store()
@@ -151,6 +151,11 @@ class Supervisor:
         prefs = store.prefs(owner)
         factories = store.list_factories(owner)
         share = shares(prefs, factories)
+        try:
+            from captain_claw.flight_deck import first_mate_trust
+            out["trusted"] += await first_mate_trust.consider_owner(store, owner, now)  # trust raised by the record
+        except Exception:  # noqa: BLE001
+            log.warning("first mate: weighing trust failed", extra={"owner": owner}, exc_info=True)
         if prefs["on"]:
             from captain_claw.flight_deck import first_mate_cases
             for f in factories:

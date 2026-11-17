@@ -203,7 +203,14 @@ async def status(user: dict = Depends(get_current_user)):
                    "runs_going": len(store.active_runs(uid)) if ok else 0},
         "week": {"start": start.isoformat(), "budget": prefs["weekly_tokens"],
                  "used": sum(store.tokens_since(f["id"], start) for f in factories)},
+        "calibration": _calibration(store, uid) if ok else None,
     }
+
+
+def _calibration(store: fms.FirstMateStore, uid: str) -> dict[str, Any]:
+    from captain_claw.flight_deck import first_mate_trust
+    cal = first_mate_trust.calibration(store, uid)
+    return {k: cal[k] for k in ("n", "kappa", "agreement", "ready", "why", "labels_bar", "kappa_bar")}
 
 
 @router.put("/fd/first-mate/prefs")
@@ -281,9 +288,20 @@ async def get_factory(factory_id: str, user: dict = Depends(allowed_user)):
             "events": store.events(factory_id, limit=50),
             "satisfaction": store.satisfaction(factory_id),
             "scorecard": first_mate_score.scorecard(store, view, fms._utcnow()),
+            "ladder": _ladder(store, view),
             "signals": store.signals(factory_id, limit=20),
             "drafts": [{k: d[k] for k in ("id", "run_id", "subject", "status", "similarity", "created_at")}
                        for d in store.drafts(factory_id, limit=20)]}
+
+
+def _ladder(store: fms.FirstMateStore, view: dict[str, Any]) -> dict[str, Any]:
+    """The factory's record at its trust level, and the owner's calibration."""
+    from captain_claw.flight_deck import first_mate_trust
+    cal = first_mate_trust.calibration(store, view["owner_id"])
+    rec = first_mate_trust.record(store, view, cal)
+    return {**{k: rec[k] for k in ("level", "next", "counted", "needed", "value", "bar", "doubts", "pinned",
+                                   "eligible", "why")},
+            "calibration": {k: cal[k] for k in ("n", "kappa", "ready", "why", "labels_bar", "kappa_bar")}}
 
 
 @router.patch("/fd/first-mate/factories/{factory_id}")

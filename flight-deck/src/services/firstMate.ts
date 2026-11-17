@@ -240,6 +240,34 @@ export interface FactoryDetail extends Factory {
   drafts: { id: number; run_id: string; subject: string; status: string; similarity: number | null; created_at: string }[]
   /** The check going, if any. */
   check: Check | null
+  ladder: Ladder
+}
+
+/** How well the deck's own verdict on a result agrees with the owner's labels (👍/👎, approve/reject, drafts). */
+export interface Calibration {
+  n: number
+  kappa: number | null
+  agreement?: number | null
+  /** Calibrated: trust may move on its own. */
+  ready: boolean
+  why: string
+  labels_bar: number
+  kappa_bar: number
+}
+
+/** A factory's record at its trust level, and whether it moves up on its own. */
+export interface Ladder {
+  level: Trust
+  next: Trust | null
+  counted: number
+  needed: number
+  value: number | null
+  bar: number
+  doubts: number
+  pinned: boolean
+  eligible: boolean
+  why: string
+  calibration: Calibration
 }
 
 export interface DeckSettings { enabled: boolean; admins_only: boolean; max_factories: number; runs_per_day: number }
@@ -253,6 +281,7 @@ export interface Status {
   prefs: Prefs
   counts: { factories: number; running: number; runs_going: number }
   week: { start: string; budget: number; used: number }
+  calibration: Calibration | null
 }
 
 /** Fired to open First Mate: the kiosk opens its dialog, the full layout its page. */

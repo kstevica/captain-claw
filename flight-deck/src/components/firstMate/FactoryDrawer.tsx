@@ -58,7 +58,7 @@ function eventText(e: FactoryEvent): string {
     case 'approved': return `Version ${String(d.version ?? '')} approved${d.grants_added ? ` (grants added: ${(d.grants_added as string[]).join(', ')})` : ''}`
     case 'declined': return `Draft v${String(d.version ?? '')} declined${d.reason ? `: ${String(d.reason)}` : ''}`
     case 'state': return `${STATE_LABELS[d.to as keyof typeof STATE_LABELS] ?? String(d.to ?? '')}${d.reason ? `: ${String(d.reason)}` : ''}`
-    case 'trust': return `Trust: ${TRUST_LABELS[d.to as keyof typeof TRUST_LABELS] ?? String(d.to ?? '')}`
+    case 'trust': return `${e.actor === 'record' ? 'Its record raised trust to' : e.actor === 'deck' ? 'Trust lowered to' : 'Trust:'} ${TRUST_LABELS[d.to as keyof typeof TRUST_LABELS] ?? String(d.to ?? '')}${d.pinned ? ' (pinned)' : ''}`
     case 'updated': return `Changed ${Object.keys(d).join(', ').replace(/_/g, ' ')}`
     case 'run_started': return 'Run started'
     case 'run_finished': return `Run ${RUN_LABELS[d.status as Run['status']]?.toLowerCase() ?? String(d.status ?? '')}`
@@ -469,6 +469,7 @@ const HEALTH_TONE: Record<FactoryDetail['scorecard']['health'], PillTone> = {
 
 function Record({ detail: d }: { detail: FactoryDetail }) {
   const s = d.scorecard
+  const l = d.ladder
   const pct = (x: number | null) => (x == null ? '—' : `${Math.round(x * 100)}%`)
   const cell = 'rounded-xl bg-[var(--fd-hover)] px-3 py-2.5'
   const big = 'text-lg font-semibold text-zinc-100'
@@ -489,6 +490,34 @@ function Record({ detail: d }: { detail: FactoryDetail }) {
           <div className={small}>Tokens per run{s.week.median_minutes == null ? ''
             : s.week.median_minutes < 1 ? ' · under a minute' : ` · ${Math.round(s.week.median_minutes)} min`}</div></div>
       </section>
+      {l && (
+        <section>
+          <h3 className="mb-1.5 text-xs font-semibold text-zinc-400">Trust</h3>
+          <div className="rounded-xl bg-[var(--fd-hover)] px-3 py-2.5 text-[13px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <Pill tone="violet">{TRUST_LABELS[l.level]}</Pill>
+              {l.next && <span className="text-zinc-400">→ {TRUST_LABELS[l.next]} after {l.needed} settled results at {pct(l.bar)}</span>}
+              {l.pinned && <Pill tone="zinc">Pinned</Pill>}
+            </div>
+            {l.next && (
+              <div className="mt-2 flex items-center gap-2">
+                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-800" role="progressbar"
+                  aria-valuenow={l.counted} aria-valuemin={0} aria-valuemax={l.needed} aria-label="Settled results at this level">
+                  <div className={`h-full rounded-full ${l.value != null && l.value < l.bar ? 'bg-amber-500' : 'bg-violet-500'}`}
+                    style={{ width: `${Math.round((Math.min(l.counted, l.needed) / l.needed) * 100)}%` }} />
+                </div>
+                <span className="shrink-0 text-xs text-zinc-500">{l.counted}/{l.needed} · {pct(l.value)}</span>
+              </div>
+            )}
+            {l.why && <p className="mt-1.5 text-xs text-zinc-500">{l.why}</p>}
+            {!l.calibration.ready && l.next && !l.why.includes('agree with you') && (
+              <p className="mt-1 text-xs text-zinc-500">
+                Trust moves on its own only once its checks agree with your labels: {l.calibration.why}.
+              </p>
+            )}
+          </div>
+        </section>
+      )}
       {d.drafts.length > 0 && (
         <section>
           <h3 className="mb-1.5 text-xs font-semibold text-zinc-400">Its drafts in your mailbox</h3>

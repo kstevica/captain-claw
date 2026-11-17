@@ -321,6 +321,21 @@ function YourFirstMate({ status, busy, onChange }: {
           <div className={`h-full rounded-full ${pct >= 100 ? 'bg-amber-500' : 'bg-violet-500'}`} style={{ width: `${pct}%` }} />
         </div>
       </div>
+      {status.calibration && (
+        <div className={row}>
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-zinc-200">Its checks against your labels</div>
+            <div className="text-xs text-zinc-500">
+              {status.calibration.ready
+                ? `They agree with you (kappa ${status.calibration.kappa?.toFixed(2)} on ${status.calibration.n} results), so a factory's record can raise its trust on its own.`
+                : `Trust moves only by hand until they agree with you: ${status.calibration.why}. Your 👍/👎, approvals and what you do with its drafts are the labels.`}
+            </div>
+          </div>
+          <Pill tone={status.calibration.ready ? 'green' : 'zinc'}>
+            {status.calibration.ready ? 'Calibrated' : `${Math.min(status.calibration.n, status.calibration.labels_bar)}/${status.calibration.labels_bar}`}
+          </Pill>
+        </div>
+      )}
     </div>
   )
 }

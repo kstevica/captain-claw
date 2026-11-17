@@ -282,6 +282,19 @@ is checked against the user's own labels with `label_eval`: kappa ≥ 0.6 on at
 least 30 labels, the same bar Captain Swarm uses. Until then trust moves only
 by hand.
 
+As built (P4): every finished run gets the deck's own verdict with no word
+from the user (failed, a leak or a doubtful proof is bad; finished is good).
+The user's label for the same run is their 👍/👎, else approving or rejecting
+what it would do, else what became of its drafts (sent with 70% or more kept
+is good). Kappa runs over the user's latest 200 labelled runs across their
+factories. When the user and the deck called every run good, kappa can't be
+worked out, and that doesn't count as calibrated. The record behind a move is
+the last 10 carry-outs and outright rejections since trust last moved: a
+carry-out counts what the user did with its result, else the deck's verdict,
+times the share of its proposal they approved; a rejection counts 0. The
+supervisor raises a running, unpinned factory one level when they average
+≥ 0.9 with no doubt and the user is calibrated, and says so on the Line.
+
 ## 9. Triggers and events
 
 - **Schedule**: the same schedule strings scheduled tasks use, with the next

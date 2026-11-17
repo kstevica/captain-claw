@@ -126,6 +126,27 @@ async def check_dropped(factory: dict[str, Any], score: float, previous: float) 
                       f"This week it scored {score:.0%} on its cases, down from {previous:.0%}.", needs_you=False)
 
 
+_TRUST_WORDS = {"commit": "acts within its grants", "direct": "acts directly"}
+_TRUST_HOW = {"commit": "It will carry out what its grants allow without asking you first, and ask about the rest.",
+              "direct": "It won't rehearse any more: it does its work itself."}
+
+
+async def trust_raised(factory: dict[str, Any], record: dict[str, Any], calibration: dict[str, Any]) -> None:
+    """The record moved a factory up a level: the owner hears it, with why."""
+    level = factory["trust"]
+    body = (f"Its last {record['counted']} results scored {record['value']:.0%}, with no doubtful carry-out, and "
+            f"its own checks agree with your labels (kappa {calibration['kappa']:.2f} on {calibration['n']}). "
+            f"{_TRUST_HOW.get(level, '')}\n\nTo keep it asking first, set its trust back on First Mate and pin it.")
+    try:
+        from captain_claw.flight_deck import line
+        await line.post(factory["owner_id"], "run", f"{factory['title']} now {_TRUST_WORDS.get(level, level)}", body,
+                        bell_type="first_mate_trust", source=SOURCE, needs_you=False,
+                        ref_type="first_mate_factory", ref_id=factory["id"], to_phones=True,
+                        thread_id=thread_of(factory["id"]))
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: trust post failed", exc_info=True)
+
+
 async def proposal_settled(run: dict[str, Any] | None) -> None:
     """A proposal answered (approved, rejected) or replaced by a newer
     rehearsal: it leaves Needs you."""
