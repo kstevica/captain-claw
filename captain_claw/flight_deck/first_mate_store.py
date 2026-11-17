@@ -105,6 +105,27 @@ SIGNAL_VALUES: dict[str, float | None] = {
 }
 SATISFACTION_WINDOW = 20
 
+# A limit that isn't there: no weekly budget, or no cap per run. Fine for a
+# model that costs nothing per token (a local one); on a paid API a run can
+# then spend as much as it takes.
+UNLIMITED = -1
+
+
+def unlimited(n: Any) -> bool:
+    """Is this token limit "no limit"?"""
+    try:
+        return not isinstance(n, bool) and int(n) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _limit(name: str, value: Any, lo: int, hi: int) -> int:
+    """A token limit: within lo-hi, or UNLIMITED."""
+    if not isinstance(value, bool) and value == UNLIMITED:
+        return UNLIMITED
+    return _int(name, value, lo, hi)
+
+
 DEFAULT_DECK: dict[str, Any] = {"enabled": False, "admins_only": True,
                                 "max_factories": 8, "runs_per_day": 24}
 DEFAULT_PREFS: dict[str, Any] = {"on": False, "weekly_tokens": 25_000_000,
@@ -405,9 +426,9 @@ def check_prefs(value: Any) -> dict[str, Any]:
     if "on" in p:
         out["on"] = _bool("on", p["on"])
     if "weekly_tokens" in p:
-        out["weekly_tokens"] = _int("weekly_tokens", p["weekly_tokens"], 1_000_000, 1_000_000_000)
+        out["weekly_tokens"] = _limit("weekly_tokens", p["weekly_tokens"], 1_000_000, 1_000_000_000)
     if "run_tokens" in p:
-        out["run_tokens"] = _int("run_tokens", p["run_tokens"], 100_000, 50_000_000)
+        out["run_tokens"] = _limit("run_tokens", p["run_tokens"], 100_000, 50_000_000)
     if "batch_minutes" in p:
         out["batch_minutes"] = _int("batch_minutes", p["batch_minutes"], 1, 1440)
     if "agent" in p:
@@ -873,11 +894,11 @@ class FirstMateStore:
                        share: int | None = None, priority: int | None = None,
                        goal_id: str | None = None, run_tokens: int | None = None) -> dict[str, Any]:
         """What isn't part of a version: the name, the budget share, the
-        priority, the Course goal, the cap per run (``run_tokens``, 0 = not set
-        here). Changing these needs no approval."""
+        priority, the Course goal, the cap per run (``run_tokens``: 0 = not set
+        here, UNLIMITED = no cap). Changing these needs no approval."""
         updates: dict[str, Any] = {}
         if run_tokens is not None:
-            updates["run_tokens"] = 0 if run_tokens == 0 else _int("run_tokens", run_tokens, 100_000, 50_000_000)
+            updates["run_tokens"] = 0 if run_tokens == 0 else _limit("run_tokens", run_tokens, 100_000, 50_000_000)
         if title is not None:
             updates["title"] = _text("title", title, TITLE_MAX, required=True)
         if share is not None:

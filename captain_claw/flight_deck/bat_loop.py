@@ -289,21 +289,22 @@ async def why_not_reopen(store: BatStore, run_id: str) -> str:
 async def reopen_run(store: BatStore, run_id: str, *, token_cap: int | None = None) -> dict:
     """Let a run its cap or its owner stopped go on where it stopped: its finished
     steps stay finished, the step it was on runs again, and ``token_cap`` (the
-    run's whole cap in tokens, what it used included) replaces its old one.
+    run's whole cap in tokens, what it used included; 0 = no cap) replaces its
+    old one; None keeps it.
     Raises ValueError with why when it can't (:func:`why_not_reopen`)."""
     why = await why_not_reopen(store, run_id)
     if why:
         raise ValueError(why)
     run = await store.get_run(run_id)
     cfg = dict(run.get("config") or {})
-    if token_cap:
-        cfg["token_cap"] = int(token_cap)
+    if token_cap is not None:
+        cfg["token_cap"] = max(0, int(token_cap))
     await store.set_config(run_id, cfg)
     demoted = await store.demote_running_steps(run_id)
     await store.set_status(run_id, "running", stopped_reason="")
     note = "continued where it stopped"
-    if token_cap:
-        note += f", with a cap of {int(token_cap):,} tokens"
+    if token_cap is not None:
+        note += f", with a cap of {int(token_cap):,} tokens" if token_cap > 0 else ", with no token cap"
     await store.append_event(run_id, "note", note + (f" (re-queued {demoted} step(s))" if demoted else ""))
     try:
         await kick()

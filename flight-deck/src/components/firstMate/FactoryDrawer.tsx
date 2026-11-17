@@ -167,7 +167,8 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
     }
   }
   const setCap = (tokens: number) => void act('cap', () => patchFactory(factoryId, { run_tokens: tokens }),
-    tokens ? `Each run may now use ${tokensText(tokens)}` : 'Each run uses the cap it inherits')
+    tokens < 0 ? 'No cap: each run goes until it’s done or stopped'
+      : tokens ? `Each run may now use ${tokensText(tokens)}` : 'Each run uses the cap it inherits')
 
   const f = data
   const draft = f?.draft ?? null
@@ -343,7 +344,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                   <div className="flex w-full flex-wrap items-center gap-2 text-xs text-zinc-500">
                     <label htmlFor="fm-cap-runs">Each run may use</label>
                     <CapPicker id="fm-cap-runs" cap={f.run_cap} own={f.run_tokens ?? 0} busy={busy === 'cap'} onPick={setCap} />
-                    <span>Continue gives a stopped run this much more.</span>
+                    <span>{f.run_cap.tokens < 0 ? 'Continue lets a stopped run go on with no cap.' : 'Continue gives a stopped run this much more.'}</span>
                   </div>
                 )}
               </div>
@@ -439,7 +440,7 @@ function LiveVersion({ version: v, cap, trust, pinned, approvedAt, onChange, bus
           <label className={key} htmlFor="fm-cap">Cap per run</label>
           <span className="min-w-0 flex-1">
             {cap}
-            <span className="mt-1 block text-[11px] text-zinc-500">Tokens one run may use before it stops. Changing it needs no approval; the next run, or Continue, uses it.</span>
+            <span className="mt-1 block text-[11px] text-zinc-500">Tokens one run may use before it stops. Changing it needs no approval; the next run, or Continue, uses it. No cap suits a local model; on a paid API a run can cost a lot.</span>
           </span>
         </div>
         <div className={row}>

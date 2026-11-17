@@ -166,7 +166,7 @@ def bat_config(factory: dict[str, Any], version: dict[str, Any], run: dict[str, 
         "fm_version": version["version"],
         "worker_mode": rc.get("worker_mode", "plain"),
         "steps": list(rc.get("steps") or []),
-        "token_cap": int(token_cap),
+        "token_cap": 0 if fms.unlimited(token_cap) else int(token_cap),  # 0: Bat has no cap
         "real_usd_cap": 0.0,
         "per_item_usd": 0.0,
     }
@@ -185,7 +185,7 @@ def token_cap_for(store: fms.FirstMateStore, factory: dict[str, Any], version: d
 
 
 def run_cap(store: fms.FirstMateStore, factory: dict[str, Any], version: dict[str, Any] | None) -> dict[str, Any]:
-    """The cap per run as the page shows it: ``tokens`` in force, where they come
+    """The cap per run as the page shows it: ``tokens`` in force (UNLIMITED: no cap), where they come
     from (``factory`` | ``charter`` | ``default``), and what applies when the
     factory sets none (``inherited``, ``inherited_from``)."""
     charter = int(((version or {}).get("budget") or {}).get("run_tokens") or 0)
@@ -275,13 +275,14 @@ class BatRunner:
 
     async def reopen(self, child_id: str, token_cap: int) -> None:
         """Its Bat run goes on where it stopped, with ``token_cap`` more tokens
-        than it has used."""
+        than it has used (UNLIMITED: no cap)."""
         from captain_claw.flight_deck import bat_loop
         store = self._store()
         b = await store.get_run(child_id)
         used = int((b or {}).get("cumulative_tokens") or 0)
         try:
-            await bat_loop.reopen_run(store, child_id, token_cap=used + int(token_cap))
+            await bat_loop.reopen_run(store, child_id,
+                                      token_cap=0 if fms.unlimited(token_cap) else used + int(token_cap))
         except ValueError as exc:
             raise FirstMateError(str(exc)) from None
 
@@ -407,8 +408,8 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
         brief = compose_brief(factory, version, note=note, context=context, rehearsal=kind in ("rehearsal", "check"),
                               examples=examples)
     token_cap = token_cap_for(store, factory, version)
-    if max_tokens is not None:
-        token_cap = max(1, min(token_cap, int(max_tokens)))
+    if max_tokens is not None and not fms.unlimited(max_tokens):
+        token_cap = int(max_tokens) if fms.unlimited(token_cap) else max(1, min(token_cap, int(max_tokens)))
     run = store.start_run(factory_id, trigger=trigger, kind=kind, trigger_ref=refs, parent_run=parent_run,
                           version=run_version)
     try:

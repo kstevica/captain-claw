@@ -124,7 +124,7 @@ async def weekly(store: fms.FirstMateStore, owner_id: str, report: dict[str, Any
                       rationale=f"It's in trouble: {x['health_why'].rstrip('.')}. Pausing stops it starting "
                                 "on its own until you look at it.",
                       payload={"factory_id": f["id"]})
-        used_all = x["share"] and x["tokens"] >= 0.95 * x["share"]
+        used_all = x["share"] > 0 and x["tokens"] >= 0.95 * x["share"]  # no weekly limit: nothing to use up
         if (f["state"] == "paused_budget" or used_all) and f["share"] < SHARE_MAX and x["health"] != "red":
             await add(op="share", title=f"Give {f['title']} a bigger share",
                       rationale=f"It used its whole share last week ({x['tokens']:,} tokens). A share of "
