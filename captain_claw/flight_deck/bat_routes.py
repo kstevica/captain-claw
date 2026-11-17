@@ -1370,6 +1370,8 @@ async def _bat_on_finish(run: dict) -> None:
     await _log_own_cost(run)
     if (run.get("config") or {}).get("rehearsal"):
         return  # a Captain Swarm attempt: its run reads the result; nobody is told
+    if (run.get("config") or {}).get("source") == "first_mate":
+        return  # a factory's run: First Mate tells the owner, on that factory's Line thread
     status = run.get("status")
     ok = status == "done"
     truth = (run.get("truth") or "").strip()

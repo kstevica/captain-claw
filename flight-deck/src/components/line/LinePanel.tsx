@@ -11,6 +11,7 @@ import {
   markThreadRead, type LineItem,
 } from '../../services/line'
 import { dismissConflict, goalAction, OPEN_COURSE_EVENT } from '../../services/course'
+import { OPEN_FIRST_MATE_EVENT } from '../../services/firstMate'
 import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '../../services/notifications'
 import { useLineStore } from '../../stores/lineStore'
 import { useNotificationStore } from '../../stores/notificationStore'
@@ -693,6 +694,7 @@ function ThreadStart({ item, proposal, onAnswered }: { item: LineItem; proposal?
       <h3 className="mt-4 text-base font-semibold leading-snug text-zinc-100">{heading}</h3>
       <ProposalCard item={item} proposal={proposal} onAnswered={onAnswered} />
       <CourseReviewCard item={item} onAnswered={onAnswered} />
+      <FirstMateCard item={item} />
       {body && (
         <article className={`mt-3 ${PROSE}`}>
           <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={LINE_MD}>{keepBreaks(body)}</Markdown>
@@ -758,6 +760,7 @@ function ThreadEntry({ item, proposal, onAnswered }: { item: LineItem; proposal?
       <h4 className="mt-2.5 text-sm font-semibold leading-snug text-zinc-100">{heading}</h4>
       <ProposalCard item={item} proposal={proposal} onAnswered={onAnswered} />
       <CourseReviewCard item={item} onAnswered={onAnswered} />
+      <FirstMateCard item={item} />
       {rest && (
         <article className={`mt-1.5 ${PROSE}`}>
           <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={LINE_MD}>{keepBreaks(rest)}</Markdown>
@@ -866,6 +869,24 @@ function CourseReviewCard({ item, onAnswered }: { item: LineItem; onAnswered: ()
         className="rounded-md bg-amber-600 px-3 py-1 text-xs text-white hover:bg-amber-500"
       >
         Open Course
+      </button>
+    </div>
+  )
+}
+
+/** A First Mate item (a factory's run, a pause): opened on First Mate. */
+function FirstMateCard({ item }: { item: LineItem }) {
+  if (!item.ref_type?.startsWith('first_mate')) return null
+  const waiting = item.needs_you && !item.resolved
+  return (
+    <div className={`mt-3 flex flex-wrap items-center gap-2 rounded-xl border px-3.5 py-3 ${
+      waiting ? 'border-amber-500/30 bg-amber-500/10' : 'border-[var(--fd-line)]'}`}>
+      <span className={`flex-1 text-xs ${waiting ? 'text-amber-800 dark:text-amber-200' : 'text-zinc-400'}`}>
+        {waiting ? 'This factory waits for you.' : 'From one of your First Mate factories.'}
+      </span>
+      <button onClick={() => window.dispatchEvent(new CustomEvent(OPEN_FIRST_MATE_EVENT))}
+        className="rounded-md bg-violet-600 px-3 py-1 text-xs text-white hover:bg-violet-500">
+        Open First Mate
       </button>
     </div>
   )

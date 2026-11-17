@@ -39,6 +39,8 @@ starting and following runs in :mod:`first_mate_runs`.
 
 from __future__ import annotations
 
+from collections import Counter
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
@@ -121,9 +123,44 @@ def _check_goal(goal_id: Any, user: dict) -> None:
         raise HTTPException(400, "that Course goal isn't one of yours")
 
 
-def _card(store: fms.FirstMateStore, view: dict[str, Any]) -> dict[str, Any]:
+def _week(store: fms.FirstMateStore, owner: str, now: datetime) -> dict[str, Any]:
+    """What a card needs from the owner's whole week: when it started, each
+    factory's share, and the events waiting in each factory's batch."""
+    from captain_claw.flight_deck import first_mate_events, first_mate_loop
+    factories = store.list_factories(owner)
+    evs = first_mate_events._events_store()
+    pending = Counter(str((e.get("metadata") or {}).get("fm_factory") or "")
+                      for e in (evs.list_claimed(owner) if evs is not None else []))
+    return {"start": first_mate_loop.week_start(now),
+            "shares": first_mate_loop.shares(store.prefs(owner), factories),
+            "pending": pending}
+
+
+def _next_at(store: fms.FirstMateStore, view: dict[str, Any], now: datetime) -> str | None:
+    """When its schedules next fire (the loop's saved time, or worked out for
+    one it hasn't seen yet). Past = due now."""
+    from captain_claw.flight_deck import first_mate_loop
+    live = view.get("live")
+    schedules = [t for t in (live or {}).get("triggers", []) if t.get("kind") == "schedule"]
+    if not schedules:
+        return None
+    saved = store.trigger_state(view["id"])
+    times = []
+    for t in schedules:
+        st = saved.get(first_mate_loop.trigger_key(t))
+        nxt = st["next_at"] if st else first_mate_loop.next_fire(t["schedule"], t.get("tz", ""), now)
+        if nxt:
+            times.append(nxt)
+    return datetime.fromtimestamp(min(times), UTC).isoformat() if times else None
+
+
+def _card(store: fms.FirstMateStore, view: dict[str, Any], week: dict[str, Any], now: datetime) -> dict[str, Any]:
     latest = store.list_runs(view["id"], limit=1)
-    return {**view, "last_run": latest[0] if latest else None}
+    return {**view, "last_run": latest[0] if latest else None,
+            "next_at": _next_at(store, view, now),
+            "week_tokens": store.tokens_since(view["id"], week["start"]),
+            "share_tokens": week["shares"].get(view["id"], 0),
+            "pending_events": week["pending"].get(view["id"], 0)}
 
 
 # ── status and preferences ─────────────────────────────────────────────
@@ -134,15 +171,20 @@ async def status(user: dict = Depends(get_current_user)):
     ok, why = access(user)
     uid = _uid(user)
     factories = store.list_factories(uid) if ok else []
+    from captain_claw.flight_deck import first_mate_loop
+    start = first_mate_loop.week_start(fms._utcnow())
+    prefs = store.prefs(uid)
     return {
         "available": ok,
         "reason": why,
         "is_admin": _is_admin(user),
         "settings": store.settings(),
-        "prefs": store.prefs(uid),
+        "prefs": prefs,
         "counts": {"factories": len(factories),
                    "running": sum(1 for f in factories if f["state"] == "running"),
                    "runs_going": len(store.active_runs(uid)) if ok else 0},
+        "week": {"start": start.isoformat(), "budget": prefs["weekly_tokens"],
+                 "used": sum(store.tokens_since(f["id"], start) for f in factories)},
     }
 
 
@@ -179,7 +221,9 @@ async def list_factories(include_retired: bool = False, user: dict = Depends(all
     uid = _uid(user)
     await runs.refresh_owner(uid)
     store = fms.get_store()
-    return {"factories": [_card(store, store.view(f["id"]))
+    now = fms._utcnow()
+    week = _week(store, uid, now)
+    return {"factories": [_card(store, store.view(f["id"]), week, now)
                           for f in store.list_factories(uid, include_retired=include_retired)]}
 
 
@@ -314,9 +358,13 @@ async def set_state(factory_id: str, body: Any = Body(...), user: dict = Depends
     if state not in OWNER_STATES:
         raise HTTPException(400, f"state must be one of: {', '.join(OWNER_STATES)}")
     try:
-        return fms.get_store().set_state(factory_id, state, "owner", str(body.get("reason") or ""))
+        view = fms.get_store().set_state(factory_id, state, "owner", str(body.get("reason") or ""))
     except FirstMateError as exc:
         raise _err(exc) from None
+    if state == "running":
+        from captain_claw.flight_deck import first_mate_line
+        await first_mate_line.factory_resumed(_uid(user), factory_id)  # its "paused" item leaves Needs you
+    return view
 
 
 @router.post("/fd/first-mate/factories/{factory_id}/trust")

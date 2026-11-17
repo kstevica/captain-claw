@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Anchor, BellDot, Factory as FactoryIcon, Loader2, MoreHorizontal, PanelRightOpen, Pause, Play, Plus,
-  RefreshCw, Square, Trash2, Archive, X, ShieldCheck,
+  RefreshCw, Square, Trash2, Archive, X, ShieldCheck, Ship,
 } from 'lucide-react'
 import {
   createFactory,
@@ -11,6 +11,7 @@ import {
   listFactories,
   runNow,
   saveDeckSettings,
+  savePrefs,
   setState,
   tokensText,
   triggersText,
@@ -116,7 +117,9 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
     void reloadNav()
   }
 
-  const needs = useMemo(() => factories.filter((f) => f.draft || f.state === 'paused_budget' || f.last_run?.waiting), [factories])
+  const streak = (f: FactoryCard) => f.state === 'paused' && /failed runs in a row/.test(f.state_reason)
+  const needs = useMemo(() => factories.filter((f) => f.draft || f.state === 'paused_budget' || streak(f)
+    || f.last_run?.waiting), [factories])
 
   const create = async (body: { template?: string; title?: string; charter?: string }) => {
     setBusy('create'); setError(null)
@@ -200,7 +203,8 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                               <span className="block text-xs text-zinc-500">
                                 {f.draft ? (f.version ? `Draft v${f.draft.version} waits for your approval` : 'Its charter waits for your approval')
                                   : f.state === 'paused_budget' ? 'Used its share of this week’s tokens'
-                                    : 'A run waits for you on the Bat page'}
+                                    : streak(f) ? `Paused after ${f.state_reason}: see why, then resume it`
+                                      : 'A run waits for you on the Bat page'}
                               </span>
                             </span>
                             <PanelRightOpen className="h-4 w-4 shrink-0 text-zinc-500" />
@@ -211,6 +215,13 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                   </div>
                 </Section>
               )}
+
+              <Section icon={Ship} title="Your First Mate"
+                hint={status.prefs.on ? 'Schedules and new mail start your factories’ runs.' : 'Off: your factories run only when you press Run now.'}>
+                <YourFirstMate status={status} busy={busy === 'prefs'}
+                  onChange={(change) => void act('prefs', () => savePrefs(change),
+                    change.on === undefined ? 'Weekly budget saved' : change.on ? 'First Mate is on' : 'First Mate is off: running factories paused')} />
+              </Section>
 
               <Section icon={FactoryIcon} title="Factories"
                 hint={`${factories.length} of ${max}. Each run is a Bat run: its checks, its reviewers, its questions to you.`}
@@ -228,7 +239,7 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                   <div className={`fd-card overflow-hidden ${picking ? 'mt-4' : ''}`}>
                     <ul className="divide-y divide-[var(--fd-line)]">
                       {factories.map((f) => (
-                        <FactoryRow key={f.id} factory={f} busy={busy === f.id}
+                        <FactoryRow key={f.id} factory={f} busy={busy === f.id} autoOn={status.prefs.on}
                           onOpen={() => setOpened(f.id)}
                           onRun={() => void act(f.id, () => runNow(f.id), `${f.title}: run started`)}
                           onState={(s) => void act(f.id, () => setState(f.id, s), `${f.title}: ${STATE_LABELS[s].toLowerCase()}`)}
@@ -263,6 +274,53 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
   )
 }
 
+const BUDGETS = [5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000]
+
+function YourFirstMate({ status, busy, onChange }: {
+  status: Status
+  busy: boolean
+  onChange: (change: { on?: boolean; weekly_tokens?: number }) => void
+}) {
+  const { on } = status.prefs
+  const { used, budget } = status.week
+  const pct = budget > 0 ? Math.min(100, Math.round((used / budget) * 100)) : 0
+  const options = BUDGETS.includes(budget) ? BUDGETS : [...BUDGETS, budget].sort((a, b) => a - b)
+  const row = 'flex items-center gap-4 py-2.5'
+  return (
+    <div className="fd-card divide-y divide-[var(--fd-line)] px-4 py-1.5">
+      <div className={row}>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-medium text-zinc-200">Run my factories on their own</div>
+          <div className="text-xs text-zinc-500">
+            {on ? 'On their schedules and when new mail comes in. Turning it off pauses them and stops their runs.'
+              : 'Turn it on and running factories start on their schedules and on new mail.'}
+          </div>
+        </div>
+        <Switch on={on} disabled={busy} label="Run my factories on their own" onChange={(v) => onChange({ on: v })} />
+      </div>
+      <div className="py-2.5">
+        <div className="flex items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium text-zinc-200">This week</div>
+            <div className="text-xs text-zinc-500">
+              {tokensText(used)} of {tokensText(budget)}, shared between your factories by their share. The week starts Monday.
+            </div>
+          </div>
+          <label className="sr-only" htmlFor="fm-budget">Weekly budget</label>
+          <select id="fm-budget" value={budget} disabled={busy}
+            onChange={(e) => onChange({ weekly_tokens: Number(e.target.value) })}
+            className="h-8 rounded-full border border-[var(--fd-line)] bg-zinc-950 px-3 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
+            {options.map((n) => <option key={n} value={n}>{tokensText(n).replace(' tokens', '')} a week</option>)}
+          </select>
+        </div>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-zinc-800" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="This week's tokens">
+          <div className={`h-full rounded-full ${pct >= 100 ? 'bg-amber-500' : 'bg-violet-500'}`} style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function DeckSettings({ status, busy, onChange, className = '' }: {
   status: Status
   busy: boolean
@@ -291,9 +349,11 @@ function DeckSettings({ status, busy, onChange, className = '' }: {
   )
 }
 
-function FactoryRow({ factory: f, busy, onOpen, onRun, onState, onDelete }: {
+function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete }: {
   factory: FactoryCard
   busy: boolean
+  /** The owner's switch: off, nothing starts on its own, so no "next run". */
+  autoOn: boolean
   onOpen: () => void
   onRun: () => void
   onState: (s: OwnerState) => void
@@ -322,6 +382,13 @@ function FactoryRow({ factory: f, busy, onOpen, onRun, onState, onDelete }: {
 
   const meta: React.ReactNode[] = []
   if (f.live) meta.push(<span key="t">{triggersText(f.live.triggers)}</span>)
+  if (f.live && autoOn && f.state === 'running' && f.next_at && !going) {
+    const due = new Date(f.next_at).getTime() <= Date.now()
+    meta.push(<span key="n" className="text-zinc-400">{due ? 'Due now' : `Next ${whenText(f.next_at)}`}</span>)
+  }
+  if (f.pending_events > 0) {
+    meta.push(<span key="e" className="text-zinc-400">{f.pending_events} {f.pending_events === 1 ? 'event waits' : 'events wait'} for the next run</span>)
+  }
   if (run) {
     meta.push(
       <span key="r" className={run.waiting ? 'text-amber-700 dark:text-amber-300' : 'text-zinc-400'}>
@@ -329,9 +396,16 @@ function FactoryRow({ factory: f, busy, onOpen, onRun, onState, onDelete }: {
         {!going && run.ended_at ? ` · ${whenText(run.ended_at)}` : ''}
       </span>,
     )
-    if (run.tokens > 0) meta.push(<span key="k">{tokensText(run.tokens)}</span>)
   } else if (f.live) {
     meta.push(<span key="none">No runs yet</span>)
+  }
+  if (f.live && f.share_tokens > 0) {
+    meta.push(
+      <span key="w" title="Its tokens this week, of its share of your weekly budget"
+        className={f.week_tokens >= f.share_tokens ? 'text-amber-700 dark:text-amber-300' : ''}>
+        {tokensText(f.week_tokens).replace(' tokens', '')} of {tokensText(f.share_tokens)} this week
+      </span>,
+    )
   }
 
   return (

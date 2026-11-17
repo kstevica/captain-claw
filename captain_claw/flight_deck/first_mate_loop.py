@@ -45,6 +45,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from captain_claw.flight_deck import first_mate_events as fme
+from captain_claw.flight_deck import first_mate_line as fml
 from captain_claw.flight_deck import first_mate_runs as runs
 from captain_claw.flight_deck import first_mate_store as fms
 from captain_claw.flight_deck.first_mate_store import FirstMateError
@@ -146,8 +147,8 @@ class Supervisor:
         due: list[dict[str, Any]] = []
         lefts: dict[str, int] = {}
         for f in factories:
-            self._streak(store, f, out)
-            left = lefts[f["id"]] = self._budget(store, store.get(f["id"]), share.get(f["id"], 0), week, out)
+            await self._streak(store, f, out)
+            left = lefts[f["id"]] = await self._budget(store, store.get(f["id"]), share.get(f["id"], 0), week, out)
             f = store.get(f["id"])
             if not prefs["on"] or f["state"] != "running":
                 continue
@@ -172,7 +173,7 @@ class Supervisor:
 
     # ── a failure streak ───────────────────────────────────────────────
 
-    def _streak(self, store: fms.FirstMateStore, f: dict[str, Any], out: dict[str, int]) -> None:
+    async def _streak(self, store: fms.FirstMateStore, f: dict[str, Any], out: dict[str, int]) -> None:
         if f["state"] != "running":
             return
         finished = [r for r in store.runs_since(f["id"], store.resumed_at(f["id"]))
@@ -181,11 +182,12 @@ class Supervisor:
         if len(last) == FAILURE_STREAK and all(r["status"] == "failed" for r in last):
             store.set_state(f["id"], "paused", ACTOR, STREAK_REASON)
             out["paused"] += 1
+            await fml.factory_paused(f, STREAK_REASON, needs_you=True)
 
     # ── the budget ─────────────────────────────────────────────────────
 
-    def _budget(self, store: fms.FirstMateStore, f: dict[str, Any], share: int, week: datetime,
-                out: dict[str, int]) -> int:
+    async def _budget(self, store: fms.FirstMateStore, f: dict[str, Any], share: int, week: datetime,
+                      out: dict[str, int]) -> int:
         """Tokens the factory has left this week; parks or frees it."""
         if not f["version"] or f["state"] == "retired":
             return 0
@@ -193,9 +195,11 @@ class Supervisor:
         if f["state"] == "running" and left <= 0:
             store.set_state(f["id"], "paused_budget", ACTOR, BUDGET_REASON)
             out["paused"] += 1
+            await fml.factory_paused(f, BUDGET_REASON, needs_you=False)
         elif f["state"] == "paused_budget" and left > 0:
             store.set_state(f["id"], "running", ACTOR, "it has tokens left this week")
             out["resumed"] += 1
+            await fml.factory_resumed(f["owner_id"], f["id"])
         return left
 
     # ── schedules ──────────────────────────────────────────────────────

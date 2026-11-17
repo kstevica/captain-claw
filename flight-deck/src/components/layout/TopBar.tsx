@@ -10,6 +10,7 @@ import { useEffect } from 'react'
 import { NotificationBell } from '../common/NotificationCenter'
 import { OPEN_LINE_EVENT } from '../../services/line'
 import { OPEN_COURSE_EVENT } from '../../services/course'
+import { OPEN_FIRST_MATE_EVENT } from '../../services/firstMate'
 
 interface TopBarProps {
   directorOpen?: boolean
@@ -56,6 +57,12 @@ export function TopBar({
     const open = () => setView('course')
     window.addEventListener(OPEN_COURSE_EVENT, open)
     return () => window.removeEventListener(OPEN_COURSE_EVENT, open)
+  }, [setView])
+  // …and to First Mate (a factory's item on the Line).
+  useEffect(() => {
+    const open = () => setView('first-mate')
+    window.addEventListener(OPEN_FIRST_MATE_EVENT, open)
+    return () => window.removeEventListener(OPEN_FIRST_MATE_EVENT, open)
   }, [setView])
 
   const refresh = () => {

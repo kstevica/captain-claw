@@ -80,6 +80,8 @@ async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rate_limiter, "_api_limiter", rate_limiter._SlidingWindow())
     monkeypatch.setattr(fm, "_STORE", fm.FirstMateStore(tmp_path / "first_mate.db"))
     monkeypatch.setattr(c, "_STORE", c.CourseStore(tmp_path / "course.db"))
+    from captain_claw.flight_deck import events
+    monkeypatch.setattr(events, "_STORE", events.EventsStore(tmp_path / "events.db"))  # never the real one
     bat = FakeBat()
 
     async def kick():
@@ -347,6 +349,26 @@ async def test_the_owners_switch_pauses_and_resumes(deck):
         await cl.put("/fd/first-mate/prefs", headers=_hdr(BOB), json={"on": True})
         g = (await cl.get(f"/fd/first-mate/factories/{f['id']}", headers=_hdr(BOB))).json()
         assert g["state"] == "running"
+
+
+async def test_the_week_and_each_cards_numbers(deck):
+    _open()
+    from captain_claw.flight_deck import events
+    async with _client() as cl:
+        await cl.put("/fd/first-mate/prefs", headers=_hdr(BOB), json={"on": True, "weekly_tokens": 10_000_000})
+        a = await _approved(cl, template="price-watch", share=1)
+        b = await _approved(cl, share=4)
+        run = fm.get_store().start_run(a["id"])
+        fm.get_store().finish_run(run["id"], "done", tokens=1_500_000)
+        ev = events.get_store().add_event(BOB, source="gmail", event_type="new_email", summary="Email from x: y")
+        events.get_store().claim_for(ev["id"], {"fm_factory": b["id"], "fm_trigger": "k"})
+        status = (await cl.get("/fd/first-mate", headers=_hdr(BOB))).json()
+        assert status["week"]["budget"] == 10_000_000 and status["week"]["used"] == 1_500_000
+        cards = {c["id"]: c for c in (await cl.get("/fd/first-mate/factories", headers=_hdr(BOB))).json()["factories"]}
+        assert (cards[a["id"]]["share_tokens"], cards[a["id"]]["week_tokens"]) == (2_000_000, 1_500_000)
+        assert cards[b["id"]]["share_tokens"] == 8_000_000 and cards[b["id"]]["pending_events"] == 1
+        assert cards[a["id"]]["next_at"]  # daily 09:00, worked out before the loop saw it
+        assert cards[b["id"]]["next_at"]  # weekly mon 07:30
 
 
 async def test_run_now_refusals(deck):

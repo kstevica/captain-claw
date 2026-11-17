@@ -122,7 +122,16 @@ export interface Factory {
   draft: Version | null
 }
 
-export interface FactoryCard extends Factory { last_run: Run | null }
+export interface FactoryCard extends Factory {
+  last_run: Run | null
+  /** When its schedules next fire (ISO); past = due now. */
+  next_at: string | null
+  /** Tokens its runs used this week, and its share of the owner's weekly budget. */
+  week_tokens: number
+  share_tokens: number
+  /** Events claimed for it, waiting for their batch. */
+  pending_events: number
+}
 
 export interface FactoryEvent {
   id: number
@@ -149,7 +158,11 @@ export interface Status {
   settings: DeckSettings
   prefs: Prefs
   counts: { factories: number; running: number; runs_going: number }
+  week: { start: string; budget: number; used: number }
 }
+
+/** Fired to open First Mate: the kiosk opens its dialog, the full layout its page. */
+export const OPEN_FIRST_MATE_EVENT = 'fd:open-first-mate'
 
 export interface Template {
   id: string
@@ -248,7 +261,7 @@ export function triggersText(triggers: Trigger[] | undefined): string {
 
 /** "1.2M tokens", "34k tokens". */
 export function tokensText(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M tokens`
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1).replace(/\.0$/, '')}M tokens`
   if (n >= 1_000) return `${Math.round(n / 1_000)}k tokens`
   return `${n} tokens`
 }
