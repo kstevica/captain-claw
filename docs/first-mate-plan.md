@@ -358,6 +358,18 @@ per factory, spend against budget, and what it proposes (pause a red factory,
 change a share, a new factory for a stalled goal, an improvement run, §12).
 Each proposal can be accepted from the item.
 
+As built (P4): read from the store with no model call. It covers Monday to
+Monday UTC, the budget's week, and goes out on the first scan after 07:00 UTC
+on the Monday that ends it, once (a mark per user, and the Line item is keyed
+by the week). Totals (runs, done, carry-outs and doubtful ones, tokens against
+the budget, drafts' fate), a line per factory (health, trust, runs, tokens
+against its share, the week's satisfaction, its cases' score, what moved),
+and "Worth a look": a paused or red factory, proposals waiting, a held draft,
+more trust waiting on calibration, a budget 90% used. A week with no run and
+nothing worth a look sends nothing. It reaches the phone only when something
+is worth a look. The First Mate page shows last week and this week so far.
+Accepting proposals from the item comes with P5's weekly proposals.
+
 ## 12. Factories get better
 
 A factory below its satisfaction target for two weeks leads to a proposal for

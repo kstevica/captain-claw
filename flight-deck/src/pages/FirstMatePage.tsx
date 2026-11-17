@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Anchor, BellDot, Factory as FactoryIcon, Loader2, MoreHorizontal, PanelRightOpen, Pause, Play, Plus,
+  Anchor, BellDot, CalendarDays, Factory as FactoryIcon, Loader2, MoreHorizontal, PanelRightOpen, Pause, Play, Plus,
   RefreshCw, Square, Trash2, Archive, X, ShieldCheck, Ship,
 } from 'lucide-react'
 import {
   createFactory,
   deleteFactory,
+  getReport,
   getStatus,
   getTemplates,
   listFactories,
@@ -25,6 +26,7 @@ import {
   type OwnerState,
   type Status,
   type Template,
+  type WeekReport,
 } from '../services/firstMate'
 import { useFirstMateStore } from '../stores/firstMateStore'
 import { QueueMenu, type MenuEntry } from '../components/agents/queue/QueueMenu'
@@ -258,6 +260,13 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                 )}
               </Section>
 
+              {factories.some((f) => f.version > 0) && (
+                <Section icon={CalendarDays} title="The week"
+                  hint="Each Monday morning First Mate sends last week's report to your Line.">
+                  <Week onOpen={(id) => openAt(id)} />
+                </Section>
+              )}
+
               {status.is_admin && (
                 <Section icon={ShieldCheck} title="This deck" hint="Only admins see this.">
                   <div className="fd-card px-4 py-1.5"><DeckSettings status={status} busy={busy === 'deck'} onChange={(c) => void deckSwitch(c)} /></div>
@@ -273,6 +282,94 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
         <FactoryDrawer factoryId={opened} initialTab={openedTab} onClose={() => setOpened(null)}
           onChanged={() => { void listFactories().then(setFactories).catch(() => {}) }}
           onNotice={setNotice} />
+      )}
+    </div>
+  )
+}
+
+const HEALTH_TONE_WEEK: Record<WeekReport['factories'][number]['health'], PillTone> = {
+  green: 'green', amber: 'amber', red: 'red', new: 'zinc',
+}
+
+/** Last week (what Monday's report said) or this week so far: totals, a row per factory, what's worth a look. */
+function Week({ onOpen }: { onOpen: (id: string) => void }) {
+  const [which, setWhich] = useState<'last' | 'this'>('last')
+  const [data, setData] = useState<WeekReport | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  useEffect(() => {
+    let live = true
+    setData(null)
+    getReport(which).then((r) => { if (live) { setData(r); setError(null) } })
+      .catch((e) => { if (live) setError(errText(e)) })
+    return () => { live = false }
+  }, [which])
+  const pct = (x: number | null) => (x == null ? '—' : `${Math.round(x * 100)}%`)
+  const tab = (w: 'last' | 'this') => `rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+    which === w ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:bg-[var(--fd-hover)] hover:text-zinc-200'}`
+  const t = data?.totals
+  return (
+    <div className="fd-card space-y-3 p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <div role="tablist" className="flex gap-1">
+          <button role="tab" aria-selected={which === 'last'} className={tab('last')} onClick={() => setWhich('last')}>Last week</button>
+          <button role="tab" aria-selected={which === 'this'} className={tab('this')} onClick={() => setWhich('this')}>This week so far</button>
+        </div>
+        <span className="flex-1" />
+        {data && <span className="text-xs text-zinc-500">{data.title.replace("First Mate's week: ", '')}</span>}
+      </div>
+      {error && <ErrorBox text={error} onDismiss={() => setError(null)} />}
+      {!data && !error && <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />}
+      {data && t && (
+        <>
+          <p className="text-[13px] text-zinc-300">
+            {t.runs} {t.runs === 1 ? 'run' : 'runs'}, {t.done} done
+            {t.carry_outs > 0 && <> · {t.carry_outs} carried out{t.doubts > 0 && <span className="text-red-600 dark:text-red-300">, {t.doubts} doubtful</span>}</>}
+            {' '}· {tokensText(t.tokens).replace(' tokens', '')} of {tokensText(t.budget)}
+            {(t.drafts.sent + t.drafts.edited + t.drafts.deleted) > 0 && (
+              <span className="block text-xs text-zinc-500">
+                Drafts: {t.drafts.sent} sent as written, {t.drafts.edited} after edits, {t.drafts.deleted} deleted
+              </span>
+            )}
+          </p>
+          <ul className="divide-y divide-[var(--fd-line)] rounded-xl border border-[var(--fd-line)]">
+            {data.factories.map((x) => (
+              <li key={x.id}>
+                <button onClick={() => onOpen(x.id)} className="w-full px-3 py-2.5 text-left transition-colors hover:bg-[var(--fd-hover)]">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-zinc-100">{x.title}</span>
+                    <Pill tone={HEALTH_TONE_WEEK[x.health]}>{HEALTH_LABELS[x.health]}</Pill>
+                    <Pill tone="zinc">{TRUST_LABELS[x.trust]}</Pill>
+                  </div>
+                  <div className="mt-0.5 text-xs text-zinc-500">
+                    {x.runs} {x.runs === 1 ? 'run' : 'runs'}, {x.done} done · {tokensText(x.tokens).replace(' tokens', '')} of its {tokensText(x.share).replace(' tokens', '')} share
+                    {x.satisfaction != null && <> · {pct(x.satisfaction)} satisfied</>}
+                    {x.cases_score != null && <> · {pct(x.cases_score)} on its cases</>}
+                  </div>
+                  {x.moved.length > 0 && (
+                    <ul className="mt-1 space-y-0.5 text-xs text-zinc-400">
+                      {x.moved.map((m, n) => <li key={n}>• {m}</li>)}
+                    </ul>
+                  )}
+                </button>
+              </li>
+            ))}
+          </ul>
+          {data.look.length > 0 && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2">
+              <p className="text-[11px] font-semibold text-amber-800 dark:text-amber-200">Worth a look</p>
+              <ul className="mt-1 space-y-0.5 text-xs text-zinc-300">
+                {data.look.map((m, n) => <li key={n}>• {m}</li>)}
+              </ul>
+            </div>
+          )}
+          {which === 'last' && (
+            <p className="text-[11px] text-zinc-500">
+              {data.sent.week !== data.end.slice(0, 10) ? 'It goes to your Line on Monday morning.'
+                : data.sent.sent ? `Sent to your Line ${whenText(data.sent.at)}.`
+                  : 'Nothing happened that week, so no report went out.'}
+            </p>
+          )}
+        </>
       )}
     </div>
   )

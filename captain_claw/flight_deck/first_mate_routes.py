@@ -459,6 +459,22 @@ async def run_now(factory_id: str, body: Any = Body(default={}), user: dict = De
         raise _err(exc) from None
 
 
+# ── the weekly report ──────────────────────────────────────────────────
+
+@router.get("/fd/first-mate/report")
+async def week_report(week: str = "last", user: dict = Depends(allowed_user)):
+    """The owner's week: ``last`` (the one the Monday report is about) or ``this`` so far."""
+    from captain_claw.flight_deck import first_mate_report
+    if week not in ("last", "this"):
+        raise HTTPException(400, "week is last or this")
+    store = fms.get_store()
+    now = fms._utcnow()
+    start, end = first_mate_report.period(now, week)
+    report = first_mate_report.build(store, _uid(user), start, end, now)
+    title, text = first_mate_report.text(report)
+    return {**report, "title": title, "text": text, "sent": first_mate_report.last_sent(store, _uid(user))}
+
+
 # ── cases and checks ───────────────────────────────────────────────────
 
 _CASE_FIELDS = ("title", "input", "expect", "sealed")

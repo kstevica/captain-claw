@@ -284,6 +284,41 @@ export interface Status {
   calibration: Calibration | null
 }
 
+/** One factory's week in the report. */
+export interface WeekLine {
+  id: string
+  title: string
+  state: FactoryState
+  trust: Trust
+  health: Health
+  health_why: string
+  runs: number
+  done: number
+  carry_outs: number
+  doubts: number
+  tokens: number
+  share: number
+  signals: number
+  satisfaction: number | null
+  drafts: { sent: number; edited: number; deleted: number }
+  cases_score: number | null
+  moved: string[]
+  look: string[]
+}
+
+/** "First Mate's week": last week (what Monday's Line item is about) or this week so far. */
+export interface WeekReport {
+  start: string
+  end: string
+  title: string
+  text: string
+  totals: { runs: number; done: number; carry_outs: number; doubts: number; tokens: number; budget: number
+    drafts: { sent: number; edited: number; deleted: number } }
+  factories: WeekLine[]
+  look: string[]
+  sent: { week?: string; at?: string; sent?: boolean }
+}
+
 /** Fired to open First Mate: the kiosk opens its dialog, the full layout its page. */
 export const OPEN_FIRST_MATE_EVENT = 'fd:open-first-mate'
 
@@ -358,6 +393,7 @@ export const rateRun = (runId: string, kind: 'up' | 'down' | '') =>
   call<{ thumbs: string; satisfaction: number | null }>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/thumbs`, json('POST', { kind }))
 export const stopRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/stop`, { method: 'POST' })
+export const getReport = (week: 'last' | 'this') => call<WeekReport>(`/fd/first-mate/report?week=${week}`)
 export const listCases = (id: string) => call<{ cases: Case[]; checks: Check[]; max: number }>(`${f(id)}/cases`)
 export const addCase = (id: string, body: CaseFields & { from_run?: string }) =>
   call<Case>(`${f(id)}/cases`, json('POST', body))

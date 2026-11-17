@@ -156,6 +156,11 @@ class Supervisor:
             out["trusted"] += await first_mate_trust.consider_owner(store, owner, now)  # trust raised by the record
         except Exception:  # noqa: BLE001
             log.warning("first mate: weighing trust failed", extra={"owner": owner}, exc_info=True)
+        try:
+            from captain_claw.flight_deck import first_mate_report
+            await first_mate_report.maybe_send(store, owner, now)  # Monday: the week that ended
+        except Exception:  # noqa: BLE001
+            log.warning("first mate: the weekly report failed", extra={"owner": owner}, exc_info=True)
         if prefs["on"]:
             from captain_claw.flight_deck import first_mate_cases
             for f in factories:

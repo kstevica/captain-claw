@@ -1572,7 +1572,7 @@ class FirstMateStore:
         with self._tx() as conn:
             ids = [r["id"] for r in conn.execute("SELECT id FROM fm_factories WHERE owner_id = ?", (owner,))]
             conn.execute("DELETE FROM fm_factories WHERE owner_id = ?", (owner,))
-            conn.execute("DELETE FROM fm_settings WHERE key = ?", (f"prefs:{owner}",))
+            conn.execute("DELETE FROM fm_settings WHERE key IN (?, ?)", (f"prefs:{owner}", f"report:{owner}"))
         for fid in ids:
             shutil.rmtree(self.sealed_dir(fid), ignore_errors=True)
         return len(ids)
