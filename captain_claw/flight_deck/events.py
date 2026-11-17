@@ -19,7 +19,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-EVENT_STATUSES = ("new", "surfaced", "acted", "ignored")
+# ``claimed``: taken by one of First Mate's factories (first_mate_events), waiting
+# for its batch; the Arbiter reads only ``new``, so it never sees one.
+EVENT_STATUSES = ("new", "surfaced", "acted", "ignored", "claimed")
 
 # A row ``claim_handled`` wrote for a signal its source hasn't ingested yet:
 # only the key (no type, no summary), so the source's later ``add_event`` is
@@ -315,6 +317,71 @@ class EventsStore:
                 [(status, now, eid, status) for eid in event_ids],
             )
             conn.commit()
+
+    # ── First Mate's claims (first_mate_events) ───────────────────────
+
+    def claim_for(self, event_id: str, meta: dict[str, Any]) -> bool:
+        """Take a ``new`` event for a First Mate factory: status ``claimed``,
+        ``meta`` merged into its metadata, ``processed_at`` = when. False when
+        it isn't ``new`` any more (the Arbiter or another claim got it first)."""
+        now = _utcnow_iso()
+        with self._lock:
+            conn = self._c()
+            row = conn.execute("SELECT metadata FROM external_events WHERE id = ? AND status = 'new'",
+                               (event_id,)).fetchone()
+            if row is None:
+                return False
+            try:
+                merged = {**json.loads(row["metadata"] or "{}"), **meta}
+            except (ValueError, TypeError):
+                merged = dict(meta)
+            cur = conn.execute(
+                "UPDATE external_events SET status = 'claimed', metadata = ?, processed_at = ?"
+                " WHERE id = ? AND status = 'new'", (json.dumps(merged), now, event_id))
+            conn.commit()
+            return cur.rowcount > 0
+
+    def list_claimed(self, user_id: str, limit: int = 500) -> list[dict[str, Any]]:
+        """A user's claimed events, oldest claim first."""
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT * FROM external_events WHERE user_id = ? AND status = 'claimed'"
+                " ORDER BY processed_at ASC, ingested_at ASC LIMIT ?",
+                (_norm_user(user_id), max(1, min(1000, limit)))).fetchall()
+        return [self._row(r) for r in rows]
+
+    def settle_claimed(self, event_ids: list[str], meta: dict[str, Any]) -> int:
+        """Claimed events a run took: status ``acted``, ``meta`` (the run)
+        merged into their metadata."""
+        return self._move_claimed(event_ids, "acted", lambda m: {**m, **meta})
+
+    def unclaim(self, event_ids: list[str]) -> int:
+        """Claimed events back to ``new`` for the Arbiter, without First Mate's keys."""
+        return self._move_claimed(event_ids, "new",
+                                  lambda m: {k: v for k, v in m.items() if not k.startswith("fm_")})
+
+    def _move_claimed(self, event_ids: list[str], status: str, change) -> int:
+        if not event_ids:
+            return 0
+        now = None if status == "new" else _utcnow_iso()
+        moved = 0
+        with self._lock:
+            conn = self._c()
+            for eid in event_ids:
+                row = conn.execute("SELECT metadata FROM external_events WHERE id = ? AND status = 'claimed'",
+                                   (eid,)).fetchone()
+                if row is None:
+                    continue
+                try:
+                    meta = json.loads(row["metadata"] or "{}")
+                except (ValueError, TypeError):
+                    meta = {}
+                moved += conn.execute(
+                    "UPDATE external_events SET status = ?, metadata = ?, processed_at = ?"
+                    " WHERE id = ? AND status = 'claimed'",
+                    (status, json.dumps(change(meta)), now, eid)).rowcount
+            conn.commit()
+        return moved
 
     def defer(self, event_ids: list[str], max_attempts: int = 4) -> list[str]:
         """A pass saw these events but produced no action. Bump their attempt

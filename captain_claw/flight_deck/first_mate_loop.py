@@ -44,6 +44,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from captain_claw.flight_deck import first_mate_events as fme
 from captain_claw.flight_deck import first_mate_runs as runs
 from captain_claw.flight_deck import first_mate_store as fms
 from captain_claw.flight_deck.first_mate_store import FirstMateError
@@ -143,15 +144,27 @@ class Supervisor:
         factories = store.list_factories(owner)
         share = shares(prefs, factories)
         due: list[dict[str, Any]] = []
+        lefts: dict[str, int] = {}
         for f in factories:
             self._streak(store, f, out)
-            left = self._budget(store, store.get(f["id"]), share.get(f["id"], 0), week, out)
+            left = lefts[f["id"]] = self._budget(store, store.get(f["id"]), share.get(f["id"], 0), week, out)
             f = store.get(f["id"])
             if not prefs["on"] or f["state"] != "running":
                 continue
             live = store.live(f["id"])
             if live is not None:
                 due += self._due(store, f, live, now, out, left)
+        # Events: claim the new ones, give back what no factory listens for any
+        # more, then each factory's batch once its window has passed.
+        fme.release_orphans(store, owner)
+        if prefs["on"]:
+            fme.route(owner)
+            for b in fme.batches(store, owner, now):
+                f = store.get(b["factory_id"])
+                if f is None or f["state"] != "running":
+                    continue  # they wait for it to run again
+                due.append({"kind": "events", "factory": f, "live": store.live(f["id"]), "events": b["events"],
+                            "next_at": b["oldest"].timestamp(), "left": lefts.get(f["id"], 0)})
         due.sort(key=lambda d: (d["factory"]["priority"], d["next_at"]))
         started: set[str] = set()
         for d in due:
@@ -211,12 +224,16 @@ class Supervisor:
                 store.set_trigger(f["id"], key, next_at=next_fire(t["schedule"], t.get("tz", ""), now))
                 out["skipped"] += 1
                 continue
-            due.append({"factory": f, "live": live, "key": key, "trigger": t, "next_at": nxt, "left": left})
+            due.append({"kind": "schedule", "factory": f, "live": live, "key": key, "trigger": t,
+                        "next_at": nxt, "left": left})
         store.keep_triggers(f["id"], keys)
         return due
 
     async def _fire(self, store: fms.FirstMateStore, owner: str, d: dict[str, Any], now: datetime,
                     out: dict[str, int], started: set[str]) -> None:
+        if d["kind"] == "events":
+            await self._fire_batch(store, owner, d, out, started)
+            return
         f, t = d["factory"], d["trigger"]
 
         def advance(fired: bool, why: str = "") -> None:
@@ -251,6 +268,41 @@ class Supervisor:
             advance(False, str(exc))
             return
         advance(True)
+        started.add(f["id"])
+        out["started"] += 1
+
+    async def _fire_batch(self, store: fms.FirstMateStore, owner: str, d: dict[str, Any],
+                          out: dict[str, int], started: set[str]) -> None:
+        """One run for a factory's batch of events. A batch is never skipped:
+        when it can't start now (a run going, no slot, Bat down, the day's cap)
+        its events stay claimed and wait. A runner that isn't wired gives them
+        back to the Arbiter."""
+        f = d["factory"]
+        ids = [e["id"] for e in d["events"]]
+        if f["id"] in started or any(r["factory_id"] == f["id"] for r in store.active_runs(owner)):
+            out["waiting"] += 1
+            return
+        try:
+            runner = runs.runner_for(d["live"]["runner"])
+        except FirstMateError:
+            from captain_claw.flight_deck import events
+            events.get_store().unclaim(ids)
+            return
+        try:
+            free = await runner.capacity(f["owner_id"])
+        except FirstMateError:
+            free = 0
+        if free <= 0:
+            out["waiting"] += 1
+            return
+        try:
+            run = await runs.start(f["id"], owner, trigger="events", watch=False,
+                                   context=[fme.context_of(e) for e in d["events"]],
+                                   max_tokens=d["left"] or None)
+        except FirstMateError:
+            out["waiting"] += 1
+            return
+        fme.settle(ids, run["id"])
         started.add(f["id"])
         out["started"] += 1
 

@@ -527,6 +527,10 @@ async def maybe_run_arbiter(
         try:
             from captain_claw.flight_deck.events import get_store as _events_store
             evstore = _events_store()
+            # First Mate's factories claim the events they listen for first: a
+            # claimed event isn't ``new`` any more, so it never becomes a candidate here.
+            from captain_claw.flight_deck import first_mate_events as _fm_events
+            _fm_events.route(user_id)
             new_events = evstore.list_new(user_id, limit=5)
             # Newest email of each thread first: within one poll ingested_at is
             # nearly identical, so order the batch's Gmail events by when they

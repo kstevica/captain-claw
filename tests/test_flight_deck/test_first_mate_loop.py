@@ -61,6 +61,8 @@ class FakeBat:
 
 @pytest.fixture
 def store(tmp_path, monkeypatch):
+    from captain_claw.flight_deck import events
+    monkeypatch.setattr(events, "_STORE", events.EventsStore(tmp_path / "events.db"))  # never the real one
     s = fm.FirstMateStore(tmp_path / "first_mate.db")
     monkeypatch.setattr(fm, "_STORE", s)
     s.set_settings({"enabled": True})
@@ -304,6 +306,8 @@ async def test_overlapping_scans_start_nothing_twice(store, bat, sup):
 
 
 async def test_a_deck_that_never_used_first_mate_gets_no_file(tmp_path, monkeypatch):
+    from captain_claw.flight_deck import events
+    monkeypatch.setattr(events, "_STORE", None)
     monkeypatch.setattr(fm, "_STORE", None)
     monkeypatch.setenv("FD_DATA_DIR", str(tmp_path))
     out = await loop.Supervisor().tick()
