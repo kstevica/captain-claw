@@ -143,7 +143,7 @@ def build(store: fms.FirstMateStore, owner_id: str, start: datetime, end: dateti
     used = sum(x["tokens"] for x in lines)
     budget = int(prefs["weekly_tokens"])
     look = [item for x in lines for item in x["look"]]
-    if budget and used >= 0.9 * budget:
+    if budget > 0 and used >= 0.9 * budget:
         look.append(f"Your factories used {used / budget:.0%} of the week's {tokens_text(budget)} tokens.")
     return {
         "start": start.isoformat(), "end": end.isoformat(), "owner": owner,
@@ -170,7 +170,8 @@ def text(report: dict[str, Any]) -> tuple[str, str]:
     parts = [f"{t['runs']} {'run' if t['runs'] == 1 else 'runs'}, {t['done']} done"
              + (f" · {t['carry_outs']} carried out" + (f", {t['doubts']} doubtful" if t["doubts"] else "")
                 if t["carry_outs"] else "")
-             + f" · {tokens_text(t['tokens'])} of {tokens_text(t['budget'])} tokens"]
+             + f" · {tokens_text(t['tokens'])}"
+             + (f" of {tokens_text(t['budget'])} tokens" if t["budget"] > 0 else " tokens (no weekly limit)")]
     d = t["drafts"]
     if any(d.values()):
         parts.append(f"Drafts: {d['sent']} sent as written, {d['edited']} after edits, {d['deleted']} deleted.")
@@ -178,7 +179,8 @@ def text(report: dict[str, Any]) -> tuple[str, str]:
         parts += ["", f"**{x['title']}** · {_HEALTH_WORDS.get(x['health'], x['health'])} · "
                       f"{_TRUST_WORDS.get(x['trust'], x['trust'])}"]
         bits = [f"{x['runs']} {'run' if x['runs'] == 1 else 'runs'}, {x['done']} done",
-                f"{tokens_text(x['tokens'])} of its {tokens_text(x['share'])} share"]
+                f"{tokens_text(x['tokens'])}"
+                + (f" of its {tokens_text(x['share'])} share" if x["share"] > 0 else " tokens")]
         parts.append("- " + " · ".join(bits))
         sat = []
         if x["satisfaction"] is not None:

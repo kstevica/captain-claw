@@ -410,7 +410,7 @@ function Week({ onOpen }: { onOpen: (id: string) => void }) {
           <p className="text-[13px] text-zinc-300">
             {t.runs} {t.runs === 1 ? 'run' : 'runs'}, {t.done} done
             {t.carry_outs > 0 && <> · {t.carry_outs} carried out{t.doubts > 0 && <span className="text-red-600 dark:text-red-300">, {t.doubts} doubtful</span>}</>}
-            {' '}· {tokensText(t.tokens).replace(' tokens', '')} of {tokensText(t.budget)}
+            {' '}· {t.budget > 0 ? <>{tokensText(t.tokens).replace(' tokens', '')} of {tokensText(t.budget)}</> : <>{tokensText(t.tokens)} (no weekly limit)</>}
             {(t.drafts.sent + t.drafts.edited + t.drafts.deleted) > 0 && (
               <span className="block text-xs text-zinc-500">
                 Drafts: {t.drafts.sent} sent as written, {t.drafts.edited} after edits, {t.drafts.deleted} deleted
@@ -472,7 +472,8 @@ function YourFirstMate({ status, busy, onChange, onNotice }: {
   const { on } = status.prefs
   const { used, budget } = status.week
   const pct = budget > 0 ? Math.min(100, Math.round((used / budget) * 100)) : 0
-  const options = BUDGETS.includes(budget) ? BUDGETS : [...BUDGETS, budget].sort((a, b) => a - b)
+  const unlimited = budget < 0
+  const options = unlimited || BUDGETS.includes(budget) ? BUDGETS : [...BUDGETS, budget].sort((a, b) => a - b)
   const row = 'flex items-center gap-4 py-2.5'
   return (
     <div className="fd-card divide-y divide-[var(--fd-line)] px-4 py-1.5">
@@ -491,7 +492,9 @@ function YourFirstMate({ status, busy, onChange, onNotice }: {
           <div className="min-w-0 flex-1">
             <div className="text-sm font-medium text-zinc-200">This week</div>
             <div className="text-xs text-zinc-500">
-              {tokensText(used)} of {tokensText(budget)}, shared between your factories by their share. The week starts Monday.
+              {unlimited
+                ? `${tokensText(used)} so far. No weekly limit: your factories run as long as their cap per run lets them. Fine on a local model; on a paid API it can cost a lot.`
+                : `${tokensText(used)} of ${tokensText(budget)}, shared between your factories by their share. The week starts Monday.`}
             </div>
           </div>
           <label className="sr-only" htmlFor="fm-budget">Weekly budget</label>
@@ -499,11 +502,12 @@ function YourFirstMate({ status, busy, onChange, onNotice }: {
             onChange={(e) => onChange({ weekly_tokens: Number(e.target.value) })}
             className="h-8 rounded-full border border-[var(--fd-line)] bg-zinc-950 px-3 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
             {options.map((n) => <option key={n} value={n}>{tokensText(n).replace(' tokens', '')} a week</option>)}
+            <option value={-1}>No weekly limit</option>
           </select>
         </div>
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-zinc-800" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="This week's tokens">
+        {!unlimited && <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-zinc-800" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="This week's tokens">
           <div className={`h-full rounded-full ${pct >= 100 ? 'bg-amber-500' : 'bg-violet-500'}`} style={{ width: `${pct}%` }} />
-        </div>
+        </div>}
       </div>
       <MateAgent row={row} onNotice={onNotice} />
       {status.calibration && (
@@ -611,7 +615,9 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete
   if (f.satisfaction != null) {
     meta.push(<span key="s" title="The average of what you did with its last results">{Math.round(f.satisfaction * 100)}% satisfied</span>)
   }
-  if (f.live && f.share_tokens > 0) {
+  if (f.live && f.share_tokens < 0 && f.week_tokens > 0) {
+    meta.push(<span key="w" title="Its tokens this week; your week has no limit">{tokensText(f.week_tokens)} this week</span>)
+  } else if (f.live && f.share_tokens > 0) {
     meta.push(
       <span key="w" title="Its tokens this week, of its share of your weekly budget"
         className={f.week_tokens >= f.share_tokens ? 'text-amber-700 dark:text-amber-300' : ''}>

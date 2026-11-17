@@ -5,8 +5,10 @@ Pinned here:
 * the cap in force is the factory's own, else its charter's, else the owner's
   default, and the page is told which and what applies when none is set;
 * setting it changes no version and needs no approval; 0 clears it; it stays
-  within 100k–50M tokens;
-* a new run and a Continue both use it.
+  within 100k–50M tokens, or is no cap at all (-1);
+* a new run and a Continue both use it;
+* the week may have no limit either: no share to run out of, a factory parked
+  over budget runs again, and the report says so.
 """
 
 from __future__ import annotations
@@ -85,7 +87,7 @@ async def test_setting_it_needs_no_approval(store):
             await routes.patch_factory(f["id"], {"run_tokens": bad}, user=ME)
         assert no.value.status_code == 400
     with pytest.raises(FirstMateError):
-        store.update_factory(f["id"], "owner", run_tokens=-1)
+        store.update_factory(f["id"], "owner", run_tokens=-2)  # -1 is "no cap"; nothing else below 100k
 
 
 async def test_runs_and_continue_use_it(store, bat):
@@ -102,3 +104,62 @@ async def test_runs_and_continue_use_it(store, bat):
     await runs.continue_run(run["id"], BOB)
     runs._unwatch(run["id"])
     assert (await bat.get_run(run["child_id"]))["config"]["token_cap"] == 10_000_100 + 30_000_000
+
+
+# ── no limit ───────────────────────────────────────────────────────────
+
+def test_no_limit_is_a_choice_for_the_week_and_per_run(store):
+    store.set_prefs(BOB, {"weekly_tokens": fm.UNLIMITED, "run_tokens": fm.UNLIMITED})
+    assert store.prefs(BOB)["weekly_tokens"] == fm.UNLIMITED and store.prefs(BOB)["run_tokens"] == fm.UNLIMITED
+    for bad in ({"weekly_tokens": -2}, {"run_tokens": 5}):
+        with pytest.raises(FirstMateError):
+            store.set_prefs(BOB, bad)
+    f = _live(store)
+    cap = runs.run_cap(store, store.get(f["id"]), store.live(f["id"]))
+    assert cap["tokens"] == fm.UNLIMITED and cap["inherited"] == fm.UNLIMITED  # the owner's default: no cap
+    store.update_factory(f["id"], "owner", run_tokens=5_000_000)
+    assert runs.token_cap_for(store, store.get(f["id"]), store.live(f["id"])) == 5_000_000
+    store.update_factory(f["id"], "owner", run_tokens=fm.UNLIMITED)
+    assert store.get(f["id"])["run_tokens"] == fm.UNLIMITED
+
+
+async def test_a_run_with_no_cap(store, bat):
+    f = _live(store)
+    store.update_factory(f["id"], "owner", run_tokens=fm.UNLIMITED)
+    run = await runs.start(f["id"], BOB, watch=False)
+    assert (await bat.get_run(run["child_id"]))["config"]["token_cap"] == 0  # Bat: no cap
+    # a weekly share still lowers it to what's left
+    g = _live(store)
+    store.update_factory(g["id"], "owner", run_tokens=fm.UNLIMITED)
+    other = await runs.start(g["id"], BOB, watch=False, max_tokens=4_000_000)
+    assert (await bat.get_run(other["child_id"]))["config"]["token_cap"] == 4_000_000
+    # and Continue goes on with no cap
+    await bat.upsert_step(run["child_id"], "step-1", title="Collect", status="pending", seq=0)
+    await bat.set_status(run["child_id"], "cancelled", stopped_reason="owner_cancel")
+    await runs.refresh(run["id"])
+    await runs.continue_run(run["id"], BOB)
+    runs._unwatch(run["id"])
+    assert (await bat.get_run(run["child_id"]))["config"]["token_cap"] == 0
+
+
+async def test_a_week_with_no_limit(store, monkeypatch):
+    from captain_claw.flight_deck import first_mate_loop as loop
+    from captain_claw.flight_deck import first_mate_report as report
+    from captain_claw.flight_deck import line
+
+    async def fan_out(user_id, item, to_phones=True, rung=False):
+        return {}
+    monkeypatch.setattr(line, "fan_out", fan_out)
+    f = _live(store)
+    store.set_prefs(BOB, {"weekly_tokens": fm.UNLIMITED})
+    assert loop.shares(store.prefs(BOB), store.list_factories(BOB)) == {f["id"]: fm.UNLIMITED}
+    assert loop._lower_to(fm.UNLIMITED) is None and loop._lower_to(0) is None and loop._lower_to(7) == 7
+    # a factory parked over budget runs again once the week has no limit
+    store.set_state(f["id"], "paused_budget", "first_mate", "it used its share")
+    out = {"paused": 0, "resumed": 0}
+    now = fm._utcnow()
+    left = await loop.Supervisor()._budget(store, store.get(f["id"]), fm.UNLIMITED, loop.week_start(now), out)
+    assert left == fm.UNLIMITED and out["resumed"] == 1 and store.get(f["id"])["state"] == "running"
+    week = report.build(store, BOB, loop.week_start(now), now)
+    title, body = report.text(week)
+    assert "(no weekly limit)" in body and not any("of the week's" in x for x in week["look"])

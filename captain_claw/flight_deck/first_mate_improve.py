@@ -313,7 +313,7 @@ def _case_run_config(run: dict, factory: dict, live: dict, content: dict, tag: s
     cap = first_mate_runs.token_cap_for(fms.get_store(), factory, version)
     left = tokens_left(run)
     if left is not None:
-        cap = max(50_000, min(cap, int(left)))
+        cap = max(50_000, int(left) if fms.unlimited(cap) else min(cap, int(left)))
     cfg = first_mate_runs.bat_config(factory, version, {"id": "", "kind": "run"}, token_cap=cap)
     cfg.update(source="captain_swarm", rehearsal=tag, fm_run="")
     return cfg

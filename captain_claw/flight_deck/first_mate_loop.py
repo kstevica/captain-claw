@@ -84,12 +84,20 @@ def trigger_key(trigger: dict[str, Any]) -> str:
 
 def shares(prefs: dict[str, Any], factories: list[dict[str, Any]]) -> dict[str, int]:
     """Each approved factory's tokens for the week: the owner's weekly budget
-    split by share."""
+    split by share; UNLIMITED for each when the week has no limit."""
     eligible = [f for f in factories if f["version"] and f["state"] != "retired"]
     total = sum(int(f["share"]) for f in eligible)
     if not total:
         return {}
+    if fms.unlimited(prefs["weekly_tokens"]):
+        return {f["id"]: fms.UNLIMITED for f in eligible}
     return {f["id"]: int(prefs["weekly_tokens"] * int(f["share"]) / total) for f in eligible}
+
+
+def _lower_to(left: int) -> int | None:
+    """What a run's cap is lowered to: what the factory has left this week, or
+    nothing when the week has no limit."""
+    return None if not left or fms.unlimited(left) else int(left)
 
 
 def next_fire(schedule: str, tz: str, now: datetime) -> float | None:
@@ -214,9 +222,16 @@ class Supervisor:
 
     async def _budget(self, store: fms.FirstMateStore, f: dict[str, Any], share: int, week: datetime,
                       out: dict[str, int]) -> int:
-        """Tokens the factory has left this week; parks or frees it."""
+        """Tokens the factory has left this week; parks or frees it. UNLIMITED
+        when the week has no limit."""
         if not f["version"] or f["state"] == "retired":
             return 0
+        if fms.unlimited(share):
+            if f["state"] == "paused_budget":
+                store.set_state(f["id"], "running", ACTOR, "the week has no token limit now")
+                out["resumed"] += 1
+                await fml.factory_resumed(f["owner_id"], f["id"])
+            return fms.UNLIMITED
         left = max(0, share - store.tokens_since(f["id"], week))
         if f["state"] == "running" and left <= 0:
             store.set_state(f["id"], "paused_budget", ACTOR, BUDGET_REASON)
@@ -293,7 +308,7 @@ class Supervisor:
             out["waiting"] += 1  # no free slot: it stays due
             return
         try:
-            await runs.start(f["id"], owner, trigger="schedule", watch=False, max_tokens=d["left"] or None)
+            await runs.start(f["id"], owner, trigger="schedule", watch=False, max_tokens=_lower_to(d["left"]))
         except FirstMateError as exc:
             advance(False, str(exc))
             return
@@ -328,7 +343,7 @@ class Supervisor:
         try:
             run = await runs.start(f["id"], owner, trigger="events", watch=False,
                                    context=[fme.context_of(e) for e in d["events"]],
-                                   max_tokens=d["left"] or None)
+                                   max_tokens=_lower_to(d["left"]))
         except FirstMateError:
             out["waiting"] += 1
             return

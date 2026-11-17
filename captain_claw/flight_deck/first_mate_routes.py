@@ -934,8 +934,10 @@ def _status_text(store: fms.FirstMateStore, card: dict[str, Any], now: datetime)
     lines.append(f"Health: {first_mate_report._HEALTH_WORDS.get(sc['health'], sc['health'])}"
                  + (f" ({why[:1].lower() + why[1:]})" if why else "") + ".")
     w = sc["week"]
-    lines.append(f"This week: {w['runs']} runs, {w['done']} done, {first_mate_report.tokens_text(card['week_tokens'])} "
-                 f"of its {first_mate_report.tokens_text(card['share_tokens'])} share."
+    share = (f" of its {first_mate_report.tokens_text(card['share_tokens'])} share" if card["share_tokens"] > 0
+             else " (no weekly limit)" if fms.unlimited(card["share_tokens"]) else "")
+    lines.append(f"This week: {w['runs']} runs, {w['done']} done, {first_mate_report.tokens_text(card['week_tokens'])}"
+                 f"{share}."
                  + (f" Satisfaction {sc['satisfaction']:.0%} ({sc['signals']} signals)." if sc["satisfaction"] is not None
                     else ""))
     rec = first_mate_trust.record(store, f, first_mate_trust.calibration(store, f["owner_id"]))
