@@ -533,6 +533,30 @@ async def week_report(week: str = "last", user: dict = Depends(allowed_user)):
     return {**report, "title": title, "text": text, "sent": first_mate_report.last_sent(store, _uid(user))}
 
 
+# ── improvement runs (Captain Swarm) ───────────────────────────────────
+
+_IMPROVE_FIELDS = ("budget_tokens", "budget_hours", "budget_max_experiments", "per_round", "parallel", "repeat",
+                   "holdout_repeat")
+
+
+@router.post("/fd/first-mate/factories/{factory_id}/improve")
+async def improve_factory(factory_id: str, body: Any = Body(default={}), user: dict = Depends(allowed_user)):
+    """An improvement run of the factory: Captain Swarm tries better charters
+    and steps on its cases. Its best becomes a draft only on the owner's say."""
+    from captain_claw.flight_deck import captain_swarm_loop, first_mate_improve
+    from captain_claw.flight_deck.captain_swarm_objective import ObjectiveError
+    body = _object(body)
+    _only(body, _IMPROVE_FIELDS)
+    _mine(factory_id, user)
+    if captain_swarm_loop.get_store() is None:
+        raise HTTPException(503, "Captain Swarm isn't running on this deck.")
+    try:
+        run = await first_mate_improve.start(user, factory_id, body)
+    except ObjectiveError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {"run_id": run["id"], "status": run["status"], "title": run["title"]}
+
+
 # ── cases and checks ───────────────────────────────────────────────────
 
 _CASE_FIELDS = ("title", "input", "expect", "sealed")

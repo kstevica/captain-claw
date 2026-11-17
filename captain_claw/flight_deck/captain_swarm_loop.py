@@ -560,6 +560,11 @@ REVIEW_QUESTIONS = {
                  "lists, empty or repeated headings, filler); or if it answers a different question than the brief "
                  "asks. Gaps, thin parts and evidence it says is weak are NOT reasons to fail: the checklist grades "
                  "already count them, and a document honest about what it couldn't find passes."),
+    "factory": ("Is the new charter a better general way of doing this standing job, keeping every limit and "
+                "promise of the old one (what it must never do, what it finishes with)? Fail a charter that drops or "
+                "weakens a limit the owner set, special-cases particular inputs (a name, an address, a subject), "
+                "talks about tests or cases, or asks for anything outward the old one didn't. Clearer "
+                "instructions, better steps and better checks pass."),
 }
 
 
@@ -720,6 +725,9 @@ def parts_for(kind: str) -> dict[str, Any]:
     an idea beaten in its wave comes back on the new best (``carry``). ``code``
     (Phase 2), ``practice`` (Phase 3a), ``outcome`` (Phase 3b) or ``document``
     (writing and research)."""
+    if kind == "factory":  # a First Mate factory's charter and steps (first_mate_improve, Phase 6)
+        from captain_claw.flight_deck import first_mate_improve
+        return first_mate_improve.parts()
     if kind == "practice":
         from captain_claw.flight_deck import captain_swarm_rules as rules
         return {"lane": rules.RulesLane(), "propose": rules.propose, "measure": rules.measure, "seal": rules.seal,
