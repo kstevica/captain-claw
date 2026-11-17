@@ -10228,6 +10228,9 @@ class ProcessInfo(BaseModel):
     # Stopped for being idle (agent_idle), not by its owner: still on, and it
     # wakes when its chat is opened or something needs it. status is "stopped".
     asleep: bool = False
+    # The agent group the deck asks for it ("First Mate" for a factory's
+    # workers): the page puts it there once, and never again if it's moved out.
+    group: str = ""
     # Its family (agent_family): the agent it sits under ("" = one of the
     # owner's own), who made it, why, and whether it is a run's worker.
     parent: str = ""
@@ -10285,6 +10288,7 @@ async def list_processes(request: Request, user: dict | None = _agent_manager_de
             freebie=bool(entry.get("freebie", False)),
             agent_ref=agent_sharing.process_ref(slug, entry),
             asleep=not alive and bool(entry.get("asleep")) and not entry.get("stopped"),
+            group=str(entry.get("group") or "")[:60],
             **agent_family.view(registry, slug),
         ))
     return result

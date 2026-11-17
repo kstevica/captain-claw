@@ -42,6 +42,46 @@ INSTRUCTIONS = (
 MAX_TOKENS = 3000
 
 
+GROUP = "First Mate"
+
+
+async def label_agent(slug: str, *, name: str = "", description: str = "") -> None:
+    """Show an agent First Mate made under *name*, in the owner's First Mate
+    agent group. Only its registry entry changes: its slug stays (a Bat worker's
+    ``bat-<run>`` slug is how sends and the tool-call register are tied to its
+    run). Under the spawn lock, so it never races another spawn's write."""
+    from captain_claw.flight_deck import server as srv
+    async with srv._get_spawn_lock():
+        reg = srv._load_process_registry()
+        entry = reg.get(slug)
+        if not isinstance(entry, dict):
+            return
+        if name:
+            entry["name"] = name[:80]
+        if description:
+            entry["description"] = description[:200]
+        entry["group"] = GROUP
+        srv._save_process_registry(reg)
+
+
+async def label_worker(slug: str, run: dict[str, Any], step_key: str) -> None:
+    """A factory run's Bat worker: named for its factory and step, in the
+    First Mate group. Nothing for a Bat run that isn't a factory's. Never raises."""
+    fid = str(((run or {}).get("config") or {}).get("factory_id") or "")
+    if not fid or not slug:
+        return
+    try:
+        f = fms.get_store().get(fid)
+        if f is None:
+            return
+        step = step_key.replace("-", " ").strip()
+        what = "improving" if (run.get("config") or {}).get("source") == "captain_swarm" else ""
+        name = " · ".join(x for x in (f["title"], what, step) if x)
+        await label_agent(slug, name=name, description=f"First Mate · {f['title']}")
+    except Exception:  # noqa: BLE001 — a worker without its label still works
+        log.debug("first mate: couldn't label a worker", exc_info=True)
+
+
 def mine(owner_id: str) -> list[dict[str, str]]:
     """The agents the owner may pick: their own, by name."""
     from captain_claw.flight_deck import line
@@ -80,6 +120,10 @@ async def create(store: fms.FirstMateStore, user: dict[str, Any]) -> dict[str, A
     if not getattr(res, "ok", False):
         raise FirstMateError(getattr(res, "message", "") or "the agent didn't start")
     store.set_prefs(owner, {"agent": res.slug})
+    try:
+        await label_agent(res.slug)  # in the owner's First Mate group, beside its factories' workers
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: couldn't group its agent", exc_info=True)
     return {"slug": res.slug, "name": used}
 
 

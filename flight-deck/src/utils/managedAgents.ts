@@ -11,8 +11,11 @@ export function isManagedAgent(slug: string, description: string): boolean {
 }
 
 /** A process agent the deck runs for a run (its registry `role`, agent_family),
- *  or one named like a worker. */
-export function isManagedProcess(p: { slug: string; description?: string; role?: string }): boolean {
+ *  or one named like a worker. A First Mate factory's workers still show, in
+ *  the First Mate group the deck asks for (`group`), until the agent tree
+ *  shows them under First Mate (docs/agent-family-plan.md, P3). */
+export function isManagedProcess(p: { slug: string; description?: string; role?: string; factory?: string; group?: string }): boolean {
+  if (p.factory && p.group) return false
   return p.role === 'worker' || isManagedAgent(p.slug, p.description || '')
 }
 

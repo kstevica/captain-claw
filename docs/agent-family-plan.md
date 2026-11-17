@@ -199,10 +199,13 @@ on the phone, Undo restores.
   factories did (it already has the `first_mate` tool).
 - You can drag your own agents under First Mate (helpers it can ask), but not
   onto a factory line.
-- The uncommitted `feat/first-mate-worker-groups` work (`label_agent`,
-  `label_worker`, `ProcessInfo.group`, `groupStore.autoPlace`) is the flat
-  version of this; by decision 5 Phase 1 records `parent`/`factory` instead
-  (bat_routes `_label_worker`), and no "First Mate" group is made.
+- The `feat/first-mate-worker-groups` work (`label_agent`, `label_worker`,
+  `ProcessInfo.group`, `groupStore.autoPlace`) merged as #621 while Phase 1
+  was being built. Phase 1 keeps it: factory workers are still named for their
+  factory and shown in the "First Mate" group, and now also carry
+  `parent`/`made_by`/`factory` (bat_routes `_label_worker`). P3 replaces the
+  group with the tree (decision 5): the workers show under First Mate, and
+  `group`/`autoPlace` go.
 
 ## 8. Lifecycle
 
@@ -265,8 +268,9 @@ on the phone, Undo restores.
   with the worker line.
 - **Managed**: `bat-bat-<hex4>-…` joins the worker names (backend and
   frontend), and the SPA also treats `role === "worker"` as one
-  (`isManagedProcess`): Bat and factory workers no longer show as your agents
-  with power switches.
+  (`isManagedProcess`): Bat workers no longer show as your agents with power
+  switches. Until P3, a First Mate factory's workers are the exception: they
+  keep showing in the First Mate group (#621).
 - **Agent tool**: `spawn_agent` takes `made_for`; a 409 from
   `/fd/spawn-process` is said back, never retried through Docker.
 - **Not done in P1**: Forge-made agents get their mandate as `made_for` but stay

@@ -1128,7 +1128,10 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
             return {"ok": False, "error": f"could not spawn worker: {worker['message']}", "spawn_refused": True}
         port, auth, slug = worker["port"], worker["auth"], worker["slug"]
 
-    await _label_worker(slug, run, key)
+    if (run.get("config") or {}).get("factory_id"):
+        from captain_claw.flight_deck import first_mate_agent
+        await first_mate_agent.label_worker(slug, run, key)  # named for its factory, in the First Mate group
+    await _label_worker(slug, run, key)  # whose it is (agent_family)
     store = bat_loop.get_store()
     bat_nested.worker_started(sid, key, port=port, slug=slug)
     worker_model = (tiers.get(tier) or {}).get("model", "") if tiers else ""
