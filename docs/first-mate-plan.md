@@ -227,6 +227,20 @@ Three layers:
    - They run in rehearsal when a new version is proposed (a version that
      scores lower than the current one doesn't go live) and once a week (a
      drop turns the factory amber).
+   - As built (P4): up to 30 cases a factory, each an input and one to ten
+     lines saying what a good result does; graded full, partial or none per
+     line. A check runs one case at a time (`kind` `check`, a rehearsal that
+     proposes nothing), and its runs stay out of the run list and the day's
+     run count but count against the factory's share. Approving a draft of a
+     live factory that has cases starts a check of the draft; it goes live
+     when it scores within 5 points of the live version's last score, through
+     the same hash-pinned approval, so a draft edited during the check never
+     goes live. Otherwise it stays waiting, the owner is told on the Line, and
+     may approve it anyway. A weekly score 10 points or more under the one
+     before turns the factory amber. Open cases go into the brief as examples
+     (three at most, never the case being checked).
+   - A finished run that started on new mail can become a case: its emails
+     are the input, its contract the first guess at the lines.
 3. **Owner signals** (§8): the real satisfaction.
 
 Building the cases: reuse Captain Swarm's practice sets where a kind exists

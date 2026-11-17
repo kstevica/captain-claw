@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Loader2, Play, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
+import { FlaskConical, Loader2, Play, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
 import {
   approve,
   approveRun,
+  caseDraft,
   decline,
   rateRun,
   rejectRun,
@@ -34,13 +35,14 @@ import {
   type Version,
 } from '../../services/firstMate'
 import { ErrorBox, Pill, errText, type PillTone } from './ui'
+import { Checks, pct, type CaseSeed } from './Checks'
 
 // One factory, in a drawer over the page: its charter (the live version, and
 // the draft being written), its runs, and its history. Approving a draft is
 // the owner's own act, against the version they see: the server refuses an
 // approval once the draft changed under it.
 
-type Tab = 'charter' | 'runs' | 'record' | 'history'
+type Tab = 'charter' | 'runs' | 'record' | 'checks' | 'history'
 
 const RUN_TONE: Record<Run['status'], PillTone> = {
   queued: 'zinc', running: 'violet', done: 'green', failed: 'red', cancelled: 'zinc',
@@ -60,6 +62,12 @@ function eventText(e: FactoryEvent): string {
     case 'updated': return `Changed ${Object.keys(d).join(', ').replace(/_/g, ' ')}`
     case 'run_started': return 'Run started'
     case 'run_finished': return `Run ${RUN_LABELS[d.status as Run['status']]?.toLowerCase() ?? String(d.status ?? '')}`
+    case 'case_added': return 'Test case added'
+    case 'case_deleted': return 'Test case deleted'
+    case 'check_started': return `Check of v${String(d.version ?? '')} started (${String(d.cases ?? '')} cases)`
+    case 'check_finished': return d.status === 'done'
+      ? `Check of v${String(d.version ?? '')}: ${pct(d.score as number | null)}`
+      : `Check of v${String(d.version ?? '')} ${d.status === 'void' ? 'called off' : 'failed'}`
     default: return e.event.replace(/_/g, ' ')
   }
 }
@@ -106,6 +114,8 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
   const [busy, setBusy] = useState<string | null>(null)
   const [form, setForm] = useState<Form | null>(null)
   const [note, setNote] = useState('')
+  const [seed, setSeed] = useState<CaseSeed | null>(null)
+  const seedUsed = useCallback(() => setSeed(null), [])
 
   const load = useCallback(async () => {
     try {
@@ -131,13 +141,14 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
     return () => window.removeEventListener('keydown', onKey, true)
   }, [onClose])
 
-  // While a run is going, look again every few seconds.
+  // While a run or a check is going, look again every few seconds.
   const going = !!data?.runs.some((r) => r.status === 'queued' || r.status === 'running')
+  const checking = !!data?.check
   useEffect(() => {
-    if (!going) return
+    if (!going && !checking) return
     const t = setInterval(() => { void load() }, 5000)
     return () => clearInterval(t)
-  }, [going, load])
+  }, [going, checking, load])
 
   const act = async (key: string, fn: () => Promise<unknown>, done?: string) => {
     setBusy(key); setError(null)
@@ -158,11 +169,24 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
   const dirty = !!(draft && form && !same(form, formOf(draft)))
   const canRun = !!f?.live && ['running', 'paused', 'stopped'].includes(f.state) && !going
 
+  // A live factory with cases checks a new version before it goes live.
+  const gate = f?.check?.purpose === 'approve' && f.check.version === draft?.version ? f.check : null
+  const last = f?.scorecard.check
+  const held = !gate && !!draft && last?.purpose === 'approve' && last.version === draft.version
+    && last.version_sha === draft.sha && last.status === 'done' ? last : null  // edited since: approving checks again
+  const cases = f?.scorecard.cases ?? 0
+
   const saveDraft = () => act('save', () => editDraft(factoryId, fieldsOf(form!, draft!)), 'Draft saved')
-  const approveDraft = () => act('approve', async () => {
+  const approveDraft = (skipCheck = false) => act('approve', async () => {
     const latest = dirty ? (await editDraft(factoryId, fieldsOf(form!, draft!))).draft! : draft!
-    await approve(factoryId, latest.version, latest.sha)
-  }, f?.version ? `Version ${draft!.version} is live` : `${f!.title} is approved and running`)
+    const got = await approve(factoryId, latest.version, latest.sha, skipCheck)
+    onNotice(got.check ? `Checking version ${latest.version} on its ${got.check.cases.length} cases before it goes live`
+      : f?.version ? `Version ${latest.version} is live` : `${f!.title} is approved and running`)
+  })
+  const makeCase = (runId: string) => act(`case:${runId}`, async () => {
+    setSeed(await caseDraft(runId))
+    setTab('checks')
+  })
 
   const tabCls = (t: Tab) => `rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
     tab === t ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:bg-[var(--fd-hover)] hover:text-zinc-200'}`
@@ -203,6 +227,9 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
               Runs{f.runs.length ? ` · ${f.runs.length}` : ''}
             </button>
             <button role="tab" aria-selected={tab === 'record'} className={tabCls('record')} onClick={() => setTab('record')}>Record</button>
+            <button role="tab" aria-selected={tab === 'checks'} className={tabCls('checks')} onClick={() => setTab('checks')}>
+              Checks{cases ? ` · ${cases}` : ''}
+            </button>
             <button role="tab" aria-selected={tab === 'history'} className={tabCls('history')} onClick={() => setTab('history')}>History</button>
           </div>
         )}
@@ -247,7 +274,26 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                         onChange={(e) => setForm({ ...form, runTokens: e.target.value })} />
                     </div>
                   </div>
+                  {gate && (
+                    <div className="flex items-start gap-2 rounded-xl border border-violet-500/30 bg-violet-500/[0.06] px-3 py-2 text-xs text-zinc-300">
+                      <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-violet-500" />
+                      <span>
+                        Being checked on its cases: {Object.values(gate.results).filter((r) => r.score != null || r.note).length} of {gate.cases.length} graded.
+                        {' '}It goes live if it scores about as well as version {f.version}
+                        {gate.baseline != null ? ` (${pct(gate.baseline)})` : ''}. Changing it calls the check off.
+                      </span>
+                    </div>
+                  )}
+                  {held && (
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+                      {held.note || `It scored ${pct(held.score)} on its cases and stayed a draft.`}
+                      {' '}Look at its check on the Checks tab, change it, or approve it anyway.
+                    </div>
+                  )}
                   <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--fd-line)] pt-3">
+                    {f.version > 0 && cases > 0 && !gate && !held && (
+                      <span className="mr-auto text-[11px] text-zinc-500">It's checked on its {cases} {cases === 1 ? 'case' : 'cases'} before it goes live.</span>
+                    )}
                     <button onClick={() => void act('decline', () => decline(factoryId, draft.version), 'Draft discarded')}
                       disabled={!!busy} className="fd-btn-quiet h-8 px-3 text-xs">
                       {busy === 'decline' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Discard draft
@@ -255,10 +301,10 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                     <button onClick={() => void saveDraft()} disabled={!!busy || !dirty} className="fd-btn-quiet h-8 px-3 text-xs">
                       {busy === 'save' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Save
                     </button>
-                    <button onClick={() => void approveDraft()} disabled={!!busy || !form.charter.trim()}
+                    <button onClick={() => void approveDraft(!!held)} disabled={!!busy || !form.charter.trim() || !!gate}
                       className="inline-flex h-8 items-center gap-1.5 rounded-full bg-violet-600 px-3.5 text-xs font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60">
                       {busy === 'approve' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                      {f.version ? 'Approve this version' : 'Approve and start'}
+                      {!f.version ? 'Approve and start' : held ? 'Approve anyway' : gate ? 'Being checked' : 'Approve this version'}
                     </button>
                   </div>
                 </section>
@@ -303,7 +349,9 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                       onApprove={(ids, total) => void act(`decide:${r.id}`, () => approveRun(r.id, ids.length === total ? undefined : ids),
                         `Carrying out ${ids.length} ${ids.length === 1 ? 'action' : 'actions'}, once`)}
                       onReject={() => void act(`decide:${r.id}`, () => rejectRun(r.id), 'Rejected: nothing will be done')}
-                      onRate={(kind) => void act(`rate:${r.id}`, () => rateRun(r.id, kind))} />
+                      onRate={(kind) => void act(`rate:${r.id}`, () => rateRun(r.id, kind))}
+                      onMakeCase={r.trigger === 'events' && r.status === 'done' ? () => void makeCase(r.id) : undefined}
+                      making={busy === `case:${r.id}`} />
                   ))}
                 </ul>
               )}
@@ -311,6 +359,11 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
           )}
 
           {f && tab === 'record' && <Record detail={f} />}
+
+          {f && tab === 'checks' && (
+            <Checks factoryId={factoryId} live={f.version} seed={seed} onSeedUsed={seedUsed}
+              onChanged={() => { void load(); onChanged() }} onNotice={onNotice} />
+          )}
 
           {f && tab === 'history' && (
             <ol className="space-y-2">
@@ -483,7 +536,7 @@ const INTENT_DONE: Record<Exclude<Intent['status'], 'open'>, { tone: PillTone; l
   dropped: { tone: 'zinc', label: 'Not done' },
 }
 
-function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate }: {
+function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate, onMakeCase, making }: {
   run: Run
   busy: boolean
   deciding: boolean
@@ -491,6 +544,9 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate }
   onApprove: (ids: number[], total: number) => void
   onReject: () => void
   onRate: (kind: 'up' | 'down' | '') => void
+  /** A run started on fixed input (new mail) can become a test case. */
+  onMakeCase?: () => void
+  making: boolean
 }) {
   const [open, setOpen] = useState(false)
   const going = r.status === 'queued' || r.status === 'running'
@@ -520,6 +576,13 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate }
         {r.tokens > 0 && <span className="text-xs text-zinc-500">· {tokensText(r.tokens)}</span>}
         {r.trigger !== 'manual' && <span className="text-xs text-zinc-500">· {r.trigger}</span>}
         <span className="flex-1" />
+        {onMakeCase && (
+          <button onClick={onMakeCase} disabled={making} title="Make a test case from what this run got"
+            aria-label="Make a test case"
+            className="flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
+            {making ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FlaskConical className="h-3.5 w-3.5" />}
+          </button>
+        )}
         {(r.status === 'done' || r.status === 'failed') && (
           <span className="inline-flex items-center gap-0.5" aria-label="How was this run?">
             <button onClick={() => onRate(r.thumbs === 'thumbs_up' ? '' : 'up')} aria-pressed={r.thumbs === 'thumbs_up'}

@@ -170,7 +170,47 @@ export interface Scorecard {
   signals: number
   target: number
   drafts: Record<'waiting' | 'sent' | 'edited' | 'deleted' | 'expired', number>
+  cases: number
+  check: Pick<Check, 'id' | 'purpose' | 'version' | 'version_sha' | 'status' | 'score' | 'note' | 'created_at' | 'ended_at'> | null
 }
+
+/** An input the factory is tested on, and what a good result does. */
+export interface Case {
+  id: string
+  title: string
+  input: string
+  expect: string[]
+  /** Never shown to the factory, or to anything that rewrites its charter. */
+  sealed: boolean
+  origin: 'owner' | 'run'
+  from_run: string
+  created_at: string
+}
+
+export type CheckPurpose = 'approve' | 'baseline' | 'weekly' | 'manual'
+
+/** One version run on every case, graded by a reviewer on another model. */
+export interface Check {
+  id: string
+  factory_id: string
+  version: number
+  version_sha: string
+  purpose: CheckPurpose
+  status: 'running' | 'done' | 'void' | 'failed'
+  cases: string[]
+  results: Record<string, { run_id?: string; score: number | null; note?: string }>
+  baseline: number | null
+  score: number | null
+  note: string
+  created_at: string
+  ended_at: string | null
+}
+
+export const CHECK_PURPOSE_LABELS: Record<CheckPurpose, string> = {
+  approve: 'Before going live', baseline: 'First score', weekly: 'Weekly', manual: 'By you',
+}
+
+export interface CaseFields { title: string; input: string; expect: string[]; sealed: boolean }
 
 export interface Signal { id: number; run_id: string; kind: string; value: number; source: string; at: string }
 
@@ -198,6 +238,8 @@ export interface FactoryDetail extends Factory {
   scorecard: Scorecard
   signals: Signal[]
   drafts: { id: number; run_id: string; subject: string; status: string; similarity: number | null; created_at: string }[]
+  /** The check going, if any. */
+  check: Check | null
 }
 
 export interface DeckSettings { enabled: boolean; admins_only: boolean; max_factories: number; runs_per_day: number }
@@ -268,8 +310,9 @@ export const patchFactory = (id: string, body: { title?: string; share?: number;
 export const deleteFactory = (id: string) => call<{ ok: boolean }>(f(id), { method: 'DELETE' })
 export const newDraft = (id: string, body: DraftFields = {}) => call<Factory>(`${f(id)}/draft`, json('POST', body))
 export const editDraft = (id: string, body: DraftFields) => call<Factory>(`${f(id)}/draft`, json('PATCH', body))
-export const approve = (id: string, version: number, sha: string) =>
-  call<Factory>(`${f(id)}/approve`, json('POST', { version, sha }))
+/** A live factory with cases is checked first: the answer then carries the check, and the draft waits. */
+export const approve = (id: string, version: number, sha: string, skipCheck = false) =>
+  call<Factory & { check?: Check }>(`${f(id)}/approve`, json('POST', skipCheck ? { version, sha, skip_check: true } : { version, sha }))
 export const decline = (id: string, version: number, reason = '') =>
   call<Factory>(`${f(id)}/decline`, json('POST', { version, reason }))
 export const setState = (id: string, state: OwnerState, reason = '') =>
@@ -286,6 +329,18 @@ export const rateRun = (runId: string, kind: 'up' | 'down' | '') =>
   call<{ thumbs: string; satisfaction: number | null }>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/thumbs`, json('POST', { kind }))
 export const stopRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/stop`, { method: 'POST' })
+export const listCases = (id: string) => call<{ cases: Case[]; checks: Check[]; max: number }>(`${f(id)}/cases`)
+export const addCase = (id: string, body: CaseFields & { from_run?: string }) =>
+  call<Case>(`${f(id)}/cases`, json('POST', body))
+export const updateCase = (id: string, caseId: string, body: Partial<CaseFields>) =>
+  call<Case>(`${f(id)}/cases/${encodeURIComponent(caseId)}`, json('PATCH', body))
+export const deleteCase = (id: string, caseId: string) =>
+  call<{ ok: boolean }>(`${f(id)}/cases/${encodeURIComponent(caseId)}`, { method: 'DELETE' })
+export const caseDraft = (runId: string) =>
+  call<{ title: string; input: string; expect: string[]; from_run: string; has_input: boolean }>(
+    `/fd/first-mate/runs/${encodeURIComponent(runId)}/case-draft`)
+export const checkNow = (id: string) => call<Check>(`${f(id)}/check`, { method: 'POST' })
+export const stopCheck = (id: string) => call<Check>(`${f(id)}/check`, { method: 'DELETE' })
 
 // ── words ──────────────────────────────────────────────────────────────
 

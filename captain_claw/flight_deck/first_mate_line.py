@@ -42,8 +42,8 @@ def _excerpt(text: str) -> str:
 async def run_finished(run: dict[str, Any]) -> None:
     """A finished run on its factory's thread. A rehearsal that would do
     something is a proposal: "needs you", with Approve on First Mate."""
-    if run.get("status") not in ("done", "failed"):
-        return
+    if run.get("status") not in ("done", "failed") or (run.get("kind") == "check" and run.get("verdict") != "leak"):
+        return  # a test case is told once, when its check ends; one that reached outside, now
     try:
         from captain_claw.flight_deck import line
         store = fms.get_store()
@@ -100,6 +100,30 @@ async def proofs_seen(owner_id: str, run_ids: list[str]) -> None:
             await line.settle(fms.norm_user(owner_id), "first_mate_proof", rid)
     except Exception:  # noqa: BLE001
         log.debug("first mate: proof settle failed", exc_info=True)
+
+
+async def _check_post(factory: dict[str, Any], title: str, body: str, *, needs_you: bool) -> None:
+    try:
+        from captain_claw.flight_deck import line
+        await line.post(factory["owner_id"], "run", title, body + "\n\nOpen First Mate to see its cases.",
+                        bell_type="first_mate_check", source=SOURCE, needs_you=needs_you,
+                        ref_type="first_mate_factory", ref_id=factory["id"], to_phones=needs_you,
+                        thread_id=thread_of(factory["id"]))
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: check post failed", exc_info=True)
+
+
+async def check_passed(factory: dict[str, Any], version: int, note: str) -> None:
+    await _check_post(factory, f"{factory['title']}: version {version} is live", note, needs_you=False)
+
+
+async def check_held(factory: dict[str, Any], version: int, note: str) -> None:
+    await _check_post(factory, f"{factory['title']}: version {version} didn't go live", note, needs_you=True)
+
+
+async def check_dropped(factory: dict[str, Any], score: float, previous: float) -> None:
+    await _check_post(factory, f"{factory['title']} scores lower on its cases",
+                      f"This week it scored {score:.0%} on its cases, down from {previous:.0%}.", needs_you=False)
 
 
 async def proposal_settled(run: dict[str, Any] | None) -> None:

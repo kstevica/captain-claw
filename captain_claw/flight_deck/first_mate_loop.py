@@ -137,6 +137,8 @@ class Supervisor:
             await first_mate_drafts.check_due(store, now)  # what became of the drafts factories left
         except Exception:  # noqa: BLE001
             log.warning("first mate: checking drafts failed", exc_info=True)
+        from captain_claw.flight_deck import first_mate_cases
+        await first_mate_cases.drive(store, now)  # each running check one step on
         for owner in store.owners():
             try:
                 await self._owner(store, owner, now, week, out)
@@ -149,6 +151,14 @@ class Supervisor:
         prefs = store.prefs(owner)
         factories = store.list_factories(owner)
         share = shares(prefs, factories)
+        if prefs["on"]:
+            from captain_claw.flight_deck import first_mate_cases
+            for f in factories:
+                if first_mate_cases.weekly_due(store, f, now):
+                    try:
+                        first_mate_cases.start_check(store, f["id"], version=f["version"], purpose="weekly")
+                    except FirstMateError:
+                        pass
         due: list[dict[str, Any]] = []
         lefts: dict[str, int] = {}
         for f in factories:

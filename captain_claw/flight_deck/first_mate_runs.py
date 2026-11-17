@@ -79,8 +79,13 @@ REHEARSAL_NOTE = ("This run is a rehearsal. Read, look things up and work in you
                   "plain list of exactly what you would do, one line each.")
 
 
+EXAMPLES_MAX = 3
+EXAMPLE_INPUT_MAX = 1500
+
+
 def compose_brief(factory: dict[str, Any], version: dict[str, Any], *, note: str = "",
-                  context: list[dict[str, Any]] | None = None, rehearsal: bool = False) -> str:
+                  context: list[dict[str, Any]] | None = None, rehearsal: bool = False,
+                  examples: list[dict[str, Any]] | None = None) -> str:
     """What one run is asked to do.
 
     * The charter, quoted as the owner wrote it.
@@ -88,6 +93,8 @@ def compose_brief(factory: dict[str, Any], version: dict[str, Any], *, note: str
     * What started the run (mail, calendar changes), fenced and labelled as
       information, never as orders: the charter and the owner are the only
       ones who give orders.
+    * The factory's open cases as examples (``first_mate_cases``); sealed
+      ones never come here.
     """
     parts = [
         f'This is one run of "{factory["title"]}", a standing job its owner set up '
@@ -114,6 +121,14 @@ def compose_brief(factory: dict[str, Any], version: dict[str, Any], *, note: str
     contract = version.get("checks", {}).get("contract") or []
     if contract:
         parts += ["", "It's done when:"] + [f"- {rule}" for rule in contract]
+    shown = [e for e in (examples or []) if not e.get("sealed", True)][:EXAMPLES_MAX]
+    if shown:
+        parts += ["", "Examples the owner gave of what this job gets and what a good result does. They show "
+                      "the job; they aren't this run's work."]
+        for ex in shown:
+            parts += ["", f"Example: {str(ex.get('title') or '')[:120]}",
+                      _fence(str(ex.get("input") or "")[:EXAMPLE_INPUT_MAX]), "A good result:"]
+            parts += [f"- {line}" for line in ex.get("expect") or []]
     if rehearsal:
         parts += ["", REHEARSAL_NOTE]
     brief = "\n".join(parts)
@@ -153,7 +168,7 @@ def bat_config(factory: dict[str, Any], version: dict[str, Any], run: dict[str, 
         "real_usd_cap": 0.0,
         "per_item_usd": 0.0,
     }
-    if run.get("kind") == "rehearsal":
+    if run.get("kind") in ("rehearsal", "check"):
         cfg["rehearsal"] = run["id"]  # CLAW_REHEARSAL on every worker: outward calls become intents
     contract = bat_contract(version)
     if contract is not None:
@@ -262,7 +277,7 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
                 note: str = "", context: list[dict[str, Any]] | None = None,
                 watch: bool = True, max_tokens: int | None = None, parent_run: str = "",
                 brief: str | None = None, extra: dict[str, Any] | None = None,
-                refs: list[str] | None = None) -> dict[str, Any]:
+                refs: list[str] | None = None, version: int | None = None) -> dict[str, Any]:
     """Start one run of a factory's live version through its runner.
 
     Refused (FirstMateError) when the factory isn't the owner's, has no
@@ -278,9 +293,12 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
     factory = store.get_owned(factory_id, owner_id)
     if factory is None:
         raise FirstMateError("no such factory")
-    version = store.live(factory_id)
-    if version is None:
+    if store.live(factory_id) is None:
         raise FirstMateError("a factory runs only once its charter is approved")
+    run_version = version
+    version = store.version(factory_id, run_version) if run_version is not None else store.live(factory_id)
+    if version is None:
+        raise FirstMateError("no such version")
     runner = runner_for(version["runner"])
     if await runner.capacity(factory["owner_id"]) <= 0:
         raise FirstMateError("no free slot for another run right now: one is kept for your own runs. "
@@ -289,11 +307,15 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
         refs = [str(c.get("id")) for c in (context or []) if c.get("id")]
     kind = kind or kind_for(factory)
     if brief is None:
-        brief = compose_brief(factory, version, note=note, context=context, rehearsal=kind == "rehearsal")
+        from captain_claw.flight_deck import first_mate_cases
+        examples = [c for c in first_mate_cases.cases(store, factory_id) if not c["sealed"] and c["id"] not in refs]
+        brief = compose_brief(factory, version, note=note, context=context, rehearsal=kind in ("rehearsal", "check"),
+                              examples=examples)
     token_cap = token_cap_for(store, factory, version)
     if max_tokens is not None:
         token_cap = max(1, min(token_cap, int(max_tokens)))
-    run = store.start_run(factory_id, trigger=trigger, kind=kind, trigger_ref=refs, parent_run=parent_run)
+    run = store.start_run(factory_id, trigger=trigger, kind=kind, trigger_ref=refs, parent_run=parent_run,
+                          version=run_version)
     try:
         child = await runner.start(factory, version, run, brief, token_cap=token_cap, extra=extra)
     except Exception as exc:  # noqa: BLE001 — the run records why, the caller hears it
@@ -341,7 +363,7 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
         finished = store.get_run(run_id)
         await first_mate_line.run_finished(finished)
         return finished
-    if run["kind"] == "rehearsal":
+    if run["kind"] in ("rehearsal", "check"):
         leak = await _leak(run)
         if leak:
             finished = store.finish_run(run_id, "failed", verdict="leak", result=state.get("result", ""),
@@ -357,6 +379,9 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
     if finished["kind"] == "run" and finished["status"] == "done":
         from captain_claw.flight_deck import first_mate_drafts
         await first_mate_drafts.capture(store, finished)  # a direct run's drafts are watched too
+    if finished["kind"] == "check":
+        store.decide_intents(run_id, "dropped")  # a test case proposes nothing; its check grades it
+        return finished
     if finished["kind"] == "rehearsal":
         if finished["status"] == "done":
             await _supersede(store, finished)
@@ -575,7 +600,7 @@ async def stop(run_id: str, owner_id: str) -> dict[str, Any]:
     finished = store.finish_run(run_id, "cancelled", error="stopped by the owner")
     if finished["kind"] == "carry_out":
         _settle_carry_out(store, finished)
-    elif finished["kind"] == "rehearsal":
+    elif finished["kind"] in ("rehearsal", "check"):
         store.decide_intents(run_id, "dropped")
     return finished
 

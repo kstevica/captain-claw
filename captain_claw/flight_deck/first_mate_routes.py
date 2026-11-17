@@ -165,7 +165,7 @@ def _with_intents(store: fms.FirstMateStore, runs_: list[dict[str, Any]]) -> lis
 
 
 def _card(store: fms.FirstMateStore, view: dict[str, Any], week: dict[str, Any], now: datetime) -> dict[str, Any]:
-    latest = store.list_runs(view["id"], limit=1)
+    latest = store.list_runs(view["id"], limit=1, kinds=fms.WORK_KINDS)
     waiting = store.open_proposals(view["id"])
     proposal = None
     if waiting:
@@ -276,7 +276,8 @@ async def get_factory(factory_id: str, user: dict = Depends(allowed_user)):
             await runs.refresh(run["id"])
     return {**view,
             "versions": store.versions(factory_id),
-            "runs": _with_intents(store, store.list_runs(factory_id, limit=20)),
+            "runs": _with_intents(store, store.list_runs(factory_id, limit=20, kinds=fms.WORK_KINDS)),
+            "check": store.active_check(factory_id),
             "events": store.events(factory_id, limit=50),
             "satisfaction": store.satisfaction(factory_id),
             "scorecard": first_mate_score.scorecard(store, view, fms._utcnow()),
@@ -342,15 +343,28 @@ async def submit(factory_id: str, user: dict = Depends(allowed_user)):
 
 @router.post("/fd/first-mate/factories/{factory_id}/approve")
 async def approve(factory_id: str, body: Any = Body(...), user: dict = Depends(allowed_user)):
+    """Approve the waiting draft as the owner saw it (``sha``). A factory that
+    is live and has cases checks the draft on them first: it goes live when the
+    check passes (``check`` in the answer), unless ``skip_check``."""
+    from captain_claw.flight_deck import first_mate_cases
     body = _object(body)
-    _only(body, ("version", "sha"))
-    _mine(factory_id, user)
+    _only(body, ("version", "sha", "skip_check"))
+    view = _mine(factory_id, user)
     try:
         version = int(body.get("version") or 0)
     except (TypeError, ValueError):
         raise HTTPException(400, "version must be a number") from None
+    store = fms.get_store()
+    sha = str(body.get("sha") or "")
+    draft = store.version(factory_id, version)
+    gated = (view["version"] and not body.get("skip_check") and draft is not None
+             and draft["status"] in fms.OPEN_VERSION and version == view["draft_version"] and sha == draft["sha"]
+             and view["state"] != "retired" and first_mate_cases.cases(store, factory_id))
     try:
-        return fms.get_store().approve(factory_id, version, str(body.get("sha") or ""), _uid(user))
+        if gated:
+            check = first_mate_cases.start_check(store, factory_id, version=version, purpose="approve")
+            return {**store.view(factory_id), "check": check}
+        return store.approve(factory_id, version, sha, _uid(user))
     except FirstMateError as exc:
         raise _err(exc) from None
 
@@ -427,6 +441,106 @@ async def run_now(factory_id: str, body: Any = Body(default={}), user: dict = De
         raise _err(exc) from None
 
 
+# ── cases and checks ───────────────────────────────────────────────────
+
+_CASE_FIELDS = ("title", "input", "expect", "sealed")
+
+
+@router.get("/fd/first-mate/factories/{factory_id}/cases")
+async def list_cases(factory_id: str, user: dict = Depends(allowed_user)):
+    from captain_claw.flight_deck import first_mate_cases
+    _mine(factory_id, user)
+    store = fms.get_store()
+    return {"cases": first_mate_cases.cases(store, factory_id), "checks": store.checks(factory_id, limit=20),
+            "max": first_mate_cases.CASES_MAX}
+
+
+@router.post("/fd/first-mate/factories/{factory_id}/cases")
+async def add_case(factory_id: str, body: Any = Body(...), user: dict = Depends(allowed_user)):
+    from captain_claw.flight_deck import first_mate_cases
+    body = _object(body)
+    _only(body, (*_CASE_FIELDS, "from_run"))
+    _mine(factory_id, user)
+    store = fms.get_store()
+    from_run = str(body.get("from_run") or "")
+    if from_run:
+        run = store.get_run(from_run)
+        if run is None or run["factory_id"] != factory_id:
+            raise HTTPException(404, "no such run")
+    try:
+        return first_mate_cases.add_case(store, factory_id, title=body.get("title"), input=body.get("input"),
+                                         expect=body.get("expect"), sealed=body.get("sealed", True),
+                                         origin="run" if from_run else "owner", from_run=from_run)
+    except FirstMateError as exc:
+        raise _err(exc) from None
+
+
+@router.patch("/fd/first-mate/factories/{factory_id}/cases/{case_id}")
+async def update_case(factory_id: str, case_id: str, body: Any = Body(...), user: dict = Depends(allowed_user)):
+    from captain_claw.flight_deck import first_mate_cases
+    body = _object(body)
+    _only(body, _CASE_FIELDS)
+    _mine(factory_id, user)
+    try:
+        return first_mate_cases.update_case(fms.get_store(), factory_id, case_id, **body)
+    except FirstMateError as exc:
+        raise _err(exc) from None
+
+
+@router.delete("/fd/first-mate/factories/{factory_id}/cases/{case_id}")
+async def delete_case(factory_id: str, case_id: str, user: dict = Depends(allowed_user)):
+    from captain_claw.flight_deck import first_mate_cases
+    _mine(factory_id, user)
+    try:
+        first_mate_cases.delete_case(fms.get_store(), factory_id, case_id)
+    except FirstMateError as exc:
+        raise _err(exc) from None
+    return {"ok": True}
+
+
+@router.get("/fd/first-mate/runs/{run_id}/case-draft")
+async def case_draft(run_id: str, user: dict = Depends(allowed_user)):
+    """A case started from a past run: its fixed input and its contract."""
+    from captain_claw.flight_deck import first_mate_cases
+    store = fms.get_store()
+    run = store.get_run(run_id)
+    if run is None or run["owner_id"] != _uid(user) or run["kind"] == "check":
+        raise HTTPException(404, "no such run")
+    return first_mate_cases.case_draft(store, run)
+
+
+@router.post("/fd/first-mate/factories/{factory_id}/check")
+async def check_now(factory_id: str, user: dict = Depends(allowed_user)):
+    """Check the live version on every case now."""
+    from captain_claw.flight_deck import first_mate_cases
+    view = _mine(factory_id, user)
+    if not view["version"]:
+        raise HTTPException(400, "a factory is checked once its charter is approved")
+    try:
+        return first_mate_cases.start_check(fms.get_store(), factory_id, version=view["version"], purpose="manual")
+    except FirstMateError as exc:
+        raise _err(exc) from None
+
+
+@router.delete("/fd/first-mate/factories/{factory_id}/check")
+async def stop_check(factory_id: str, user: dict = Depends(allowed_user)):
+    """Stop the check going; a draft it was checking stays waiting."""
+    _mine(factory_id, user)
+    store = fms.get_store()
+    going = store.active_check(factory_id)
+    if going is None:
+        raise HTTPException(404, "nothing is being checked")
+    finished = store.finish_check(going["id"], "void", note="stopped by you")
+    for res in going["results"].values():
+        run = store.get_run(res.get("run_id") or "")
+        if run is not None and run["status"] in fms.ACTIVE_RUN:
+            try:
+                await runs.stop(run["id"], _uid(user))
+            except FirstMateError:
+                pass
+    return finished
+
+
 @router.get("/fd/first-mate/factories/{factory_id}/runs")
 async def list_runs(factory_id: str, limit: int = 50, user: dict = Depends(allowed_user)):
     _mine(factory_id, user)
@@ -434,7 +548,8 @@ async def list_runs(factory_id: str, limit: int = 50, user: dict = Depends(allow
     for run in store.list_runs(factory_id, limit=max(1, min(limit, 200))):
         if run["status"] in fms.ACTIVE_RUN:
             await runs.refresh(run["id"])
-    return {"runs": _with_intents(store, store.list_runs(factory_id, limit=max(1, min(limit, 200))))}
+    return {"runs": _with_intents(store, store.list_runs(factory_id, limit=max(1, min(limit, 200)),
+                                                         kinds=fms.WORK_KINDS))}
 
 
 @router.post("/fd/first-mate/runs/{run_id}/approve")
@@ -520,7 +635,7 @@ async def agent_intent(body: AgentIntentReq) -> dict:
                                                    owner_id=body.owner_id)) or "local")
     store = fms.get_store()
     run = store.get_run(body.tag)
-    if run is None or run["owner_id"] != owner or run["kind"] != "rehearsal":
+    if run is None or run["owner_id"] != owner or run["kind"] not in ("rehearsal", "check"):
         return {"ok": False, "why": "no such rehearsal"}
     if run["status"] not in fms.ACTIVE_RUN:
         return {"ok": False, "why": "that run is over"}
