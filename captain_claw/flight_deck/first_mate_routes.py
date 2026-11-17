@@ -157,9 +157,10 @@ def _next_at(store: fms.FirstMateStore, view: dict[str, Any], now: datetime) -> 
 
 def _with_intents(store: fms.FirstMateStore, runs_: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Runs, each rehearsal with what it would have done (the words, not the arguments)."""
-    return [{**r, "intents": [{**{k: i[k] for k in ("id", "kind", "tool", "what", "status")},
-                               "detail": runs.intent_detail(i)}
-                              for i in store.intents(r["id"])] if r["kind"] == "rehearsal" else []}
+    return [{**r, "thumbs": store.thumbs(r["id"]),
+             "intents": [{**{k: i[k] for k in ("id", "kind", "tool", "what", "status")},
+                          "detail": runs.intent_detail(i)}
+                         for i in store.intents(r["id"])] if r["kind"] == "rehearsal" else []}
             for r in runs_]
 
 
@@ -170,7 +171,10 @@ def _card(store: fms.FirstMateStore, view: dict[str, Any], week: dict[str, Any],
     if waiting:
         count = sum(1 for i in store.intents(waiting[0]) if i["status"] == "open")
         proposal = {"run_id": waiting[0], "count": count}
+    from captain_claw.flight_deck import first_mate_score
+    card = first_mate_score.scorecard(store, view, now)
     return {**view, "last_run": latest[0] if latest else None, "proposal": proposal,
+            "health": card["health"], "health_why": card["health_why"], "satisfaction": card["satisfaction"],
             "next_at": _next_at(store, view, now),
             "week_tokens": store.tokens_since(view["id"], week["start"]),
             "share_tokens": week["shares"].get(view["id"], 0),
@@ -264,6 +268,7 @@ async def create_factory(body: Any = Body(...), user: dict = Depends(allowed_use
 
 @router.get("/fd/first-mate/factories/{factory_id}")
 async def get_factory(factory_id: str, user: dict = Depends(allowed_user)):
+    from captain_claw.flight_deck import first_mate_score
     view = _mine(factory_id, user)
     store = fms.get_store()
     for run in store.list_runs(factory_id, limit=5):
@@ -273,7 +278,11 @@ async def get_factory(factory_id: str, user: dict = Depends(allowed_user)):
             "versions": store.versions(factory_id),
             "runs": _with_intents(store, store.list_runs(factory_id, limit=20)),
             "events": store.events(factory_id, limit=50),
-            "satisfaction": store.satisfaction(factory_id)}
+            "satisfaction": store.satisfaction(factory_id),
+            "scorecard": first_mate_score.scorecard(store, view, fms._utcnow()),
+            "signals": store.signals(factory_id, limit=20),
+            "drafts": [{k: d[k] for k in ("id", "run_id", "subject", "status", "similarity", "created_at")}
+                       for d in store.drafts(factory_id, limit=20)]}
 
 
 @router.patch("/fd/first-mate/factories/{factory_id}")
@@ -449,6 +458,28 @@ async def reject_run(run_id: str, user: dict = Depends(allowed_user)):
         return await runs.reject(run_id, _uid(user))
     except FirstMateError as exc:
         raise _err(exc) from None
+
+
+@router.post("/fd/first-mate/runs/{run_id}/thumbs")
+async def thumbs(run_id: str, body: Any = Body(...), user: dict = Depends(allowed_user)):
+    """The owner's 👍/👎 on a run's result (``{kind: up | down | ""}``): one per run."""
+    body = _object(body)
+    _only(body, ("kind",))
+    kinds = {"up": "thumbs_up", "down": "thumbs_down", "": ""}
+    kind = body.get("kind")
+    if kind not in kinds:
+        raise HTTPException(400, "kind must be up, down or empty")
+    store = fms.get_store()
+    run = store.get_run(run_id)
+    if run is None or run["owner_id"] != _uid(user):
+        raise HTTPException(404, "no such run")
+    if run["status"] not in fms.TERMINAL_RUN:
+        raise HTTPException(400, "a run is rated once it has finished")
+    try:
+        store.set_thumbs(run["factory_id"], run_id, kinds[kind])
+    except FirstMateError as exc:
+        raise _err(exc) from None
+    return {"thumbs": store.thumbs(run_id), "satisfaction": store.satisfaction(run["factory_id"])}
 
 
 @router.post("/fd/first-mate/runs/{run_id}/stop")

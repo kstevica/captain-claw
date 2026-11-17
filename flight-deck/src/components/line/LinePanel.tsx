@@ -11,7 +11,7 @@ import {
   markThreadRead, type LineItem,
 } from '../../services/line'
 import { dismissConflict, goalAction, OPEN_COURSE_EVENT } from '../../services/course'
-import { OPEN_FIRST_MATE_EVENT } from '../../services/firstMate'
+import { OPEN_FIRST_MATE_EVENT, rateRun } from '../../services/firstMate'
 import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '../../services/notifications'
 import { useLineStore } from '../../stores/lineStore'
 import { useNotificationStore } from '../../stores/notificationStore'
@@ -876,14 +876,27 @@ function CourseReviewCard({ item, onAnswered }: { item: LineItem; onAnswered: ()
 
 /** A First Mate item (a factory's run, a pause): opened on First Mate. */
 function FirstMateCard({ item }: { item: LineItem }) {
+  const [rated, setRated] = useState<'' | 'up' | 'down'>('')
   if (!item.ref_type?.startsWith('first_mate')) return null
   const waiting = item.needs_you && !item.resolved
+  const rate = (kind: 'up' | 'down') => {
+    const next = rated === kind ? '' : kind
+    rateRun(item.ref_id, next).then(() => setRated(next)).catch(() => {})
+  }
   return (
     <div className={`mt-3 flex flex-wrap items-center gap-2 rounded-xl border px-3.5 py-3 ${
       waiting ? 'border-amber-500/30 bg-amber-500/10' : 'border-[var(--fd-line)]'}`}>
       <span className={`flex-1 text-xs ${waiting ? 'text-amber-800 dark:text-amber-200' : 'text-zinc-400'}`}>
         {waiting ? 'This factory waits for you.' : 'From one of your First Mate factories.'}
       </span>
+      {item.ref_type === 'first_mate_run' && (
+        <span className="inline-flex gap-1">
+          <button onClick={() => rate('up')} aria-pressed={rated === 'up'} aria-label="Good result" title="Good result"
+            className={`rounded-md px-2 py-1 text-xs ${rated === 'up' ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300' : 'text-zinc-400 hover:bg-zinc-800'}`}>👍</button>
+          <button onClick={() => rate('down')} aria-pressed={rated === 'down'} aria-label="Bad result" title="Bad result"
+            className={`rounded-md px-2 py-1 text-xs ${rated === 'down' ? 'bg-red-500/10 text-red-700 dark:text-red-300' : 'text-zinc-400 hover:bg-zinc-800'}`}>👎</button>
+        </span>
+      )}
       <button onClick={() => window.dispatchEvent(new CustomEvent(OPEN_FIRST_MATE_EVENT))}
         className="rounded-md bg-violet-600 px-3 py-1 text-xs text-white hover:bg-violet-500">
         Open First Mate

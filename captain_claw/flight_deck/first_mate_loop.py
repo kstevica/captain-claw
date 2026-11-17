@@ -132,6 +132,11 @@ class Supervisor:
         if not store.settings()["enabled"]:
             return out
         week = week_start(now)
+        try:
+            from captain_claw.flight_deck import first_mate_drafts
+            await first_mate_drafts.check_due(store, now)  # what became of the drafts factories left
+        except Exception:  # noqa: BLE001
+            log.warning("first mate: checking drafts failed", exc_info=True)
         for owner in store.owners():
             try:
                 await self._owner(store, owner, now, week, out)

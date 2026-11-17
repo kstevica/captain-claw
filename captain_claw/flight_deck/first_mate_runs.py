@@ -354,6 +354,9 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
     finished = store.finish_run(run_id, state["status"], verdict=state.get("verdict", ""),
                                 result=state.get("result", ""), error=state.get("note", ""),
                                 tokens=state["tokens"], usd=state["usd"])
+    if finished["kind"] == "run" and finished["status"] == "done":
+        from captain_claw.flight_deck import first_mate_drafts
+        await first_mate_drafts.capture(store, finished)  # a direct run's drafts are watched too
     if finished["kind"] == "rehearsal":
         if finished["status"] == "done":
             await _supersede(store, finished)

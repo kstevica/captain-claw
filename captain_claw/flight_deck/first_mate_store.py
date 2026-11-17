@@ -597,6 +597,27 @@ class FirstMateStore:
                 -- When each schedule trigger of a factory is next due (Phase 2).
                 -- key = a hash of the trigger, so a version that changes it starts
                 -- afresh; kept here so a deck restart neither repeats nor loses one.
+                -- Drafts a factory's run left in the owner's mailbox (Phase 4), watched
+                -- until they're sent (as written or edited), deleted, or two weeks old.
+                CREATE TABLE IF NOT EXISTS fm_drafts (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    factory_id  TEXT NOT NULL REFERENCES fm_factories(id) ON DELETE CASCADE,
+                    run_id      TEXT NOT NULL DEFAULT '',
+                    owner_id    TEXT NOT NULL,
+                    draft_id    TEXT NOT NULL,
+                    message_id  TEXT NOT NULL DEFAULT '',
+                    thread_id   TEXT NOT NULL DEFAULT '',
+                    subject     TEXT NOT NULL DEFAULT '',
+                    body        TEXT NOT NULL DEFAULT '',
+                    partial     INTEGER NOT NULL DEFAULT 0,
+                    status      TEXT NOT NULL DEFAULT 'waiting',
+                    similarity  REAL,
+                    created_at  TEXT NOT NULL,
+                    checked_at  TEXT,
+                    UNIQUE (owner_id, draft_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_fm_drafts_status ON fm_drafts(status, checked_at);
+
                 CREATE TABLE IF NOT EXISTS fm_trigger_state (
                     factory_id  TEXT NOT NULL REFERENCES fm_factories(id) ON DELETE CASCADE,
                     key         TEXT NOT NULL,
@@ -1341,6 +1362,63 @@ class FirstMateStore:
                 (factory_id, _text("run_id", run_id, 40), kind, worth, _text("source", source, 40),
                  _text("ref", ref, 200), _iso(_utcnow())))
             return int(cur.lastrowid)
+
+    def set_thumbs(self, factory_id: str, run_id: str, kind: str) -> int:
+        """The owner's 👍/👎 on a run: one per run, the latest wins; "" takes it back."""
+        if kind not in ("thumbs_up", "thumbs_down", ""):
+            raise FirstMateError("thumbs is thumbs_up, thumbs_down or nothing")
+        with self._tx() as conn:
+            self._get_factory(conn, factory_id)
+            conn.execute("DELETE FROM fm_signals WHERE factory_id = ? AND run_id = ?"
+                         " AND kind IN ('thumbs_up', 'thumbs_down')", (factory_id, run_id))
+        return self.add_signal(factory_id, kind, run_id=run_id, source="owner") if kind else 0
+
+    def thumbs(self, run_id: str) -> str:
+        with self._lock:
+            row = self._c().execute("SELECT kind FROM fm_signals WHERE run_id = ? AND kind IN"
+                                    " ('thumbs_up', 'thumbs_down') ORDER BY id DESC LIMIT 1", (run_id,)).fetchone()
+        return row["kind"] if row else ""
+
+    # ── drafts (Phase 4) ───────────────────────────────────────────────
+
+    DRAFT_STATUSES = ("waiting", "sent", "edited", "deleted", "expired")
+
+    def add_draft(self, factory_id: str, owner_id: str, *, run_id: str, draft_id: str, message_id: str = "",
+                  thread_id: str = "", subject: str = "", body: str = "", partial: bool = False) -> bool:
+        """Watch a draft a run left; once only per draft. False when it was there already."""
+        draft_id = _text("draft_id", draft_id, 200, required=True)
+        with self._tx() as conn:
+            self._get_factory(conn, factory_id)
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO fm_drafts (factory_id, run_id, owner_id, draft_id, message_id, thread_id,"
+                " subject, body, partial, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (factory_id, run_id[:40], norm_user(owner_id), draft_id, str(message_id)[:200],
+                 str(thread_id)[:200], str(subject)[:300], str(body)[:4000], int(bool(partial)), _iso(_utcnow())))
+            return cur.rowcount > 0
+
+    def drafts_to_check(self, now: datetime, *, older_than: timedelta, every: timedelta,
+                        limit: int = 20) -> list[dict[str, Any]]:
+        """Waiting drafts old enough to look at, not looked at lately, oldest first."""
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT * FROM fm_drafts WHERE status = 'waiting' AND created_at <= ?"
+                " AND (checked_at IS NULL OR checked_at <= ?) ORDER BY created_at LIMIT ?",
+                (_iso(now - older_than), _iso(now - every), max(1, int(limit)))).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_draft(self, draft_row_id: int, status: str, *, similarity: float | None = None,
+                  now: datetime | None = None) -> None:
+        if status not in self.DRAFT_STATUSES:
+            raise FirstMateError(f"a draft is one of: {', '.join(self.DRAFT_STATUSES)}")
+        with self._tx() as conn:
+            conn.execute("UPDATE fm_drafts SET status = ?, similarity = COALESCE(?, similarity), checked_at = ?"
+                         " WHERE id = ?", (status, similarity, _iso(now or _utcnow()), int(draft_row_id)))
+
+    def drafts(self, factory_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in self._c().execute(
+                "SELECT * FROM fm_drafts WHERE factory_id = ? ORDER BY id DESC LIMIT ?",
+                (factory_id, max(1, min(int(limit), 500)))).fetchall()]
 
     def signals(self, factory_id: str, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:

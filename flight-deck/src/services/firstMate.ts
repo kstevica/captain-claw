@@ -113,6 +113,8 @@ export interface Run {
   note?: string
   /** A rehearsal's: what it would have done. */
   intents?: Intent[]
+  /** The owner's 👍/👎 on its result, if any. */
+  thumbs?: '' | 'thumbs_up' | 'thumbs_down'
   /** A carry-out's: what the register and Gmail/Calendar showed it did. */
   proof?: { state?: 'confirmed' | 'nothing' | 'doubt' | 'unknown'; note?: string; sent?: number; approved?: number; actions?: string[] }
 }
@@ -148,6 +150,36 @@ export interface FactoryCard extends Factory {
   pending_events: number
   /** The newest rehearsal whose intents wait for the owner's yes. */
   proposal: { run_id: string; count: number } | null
+  health: Health
+  health_why: string
+  satisfaction: number | null
+}
+
+export type Health = 'green' | 'amber' | 'red' | 'new'
+
+export const HEALTH_LABELS: Record<Health, string> = {
+  green: 'Healthy', amber: 'Needs a look', red: 'In trouble', new: 'Too new to say',
+}
+
+export interface Scorecard {
+  health: Health
+  health_why: string
+  week: { runs: number; done: number; judged: number; passed: number; tokens_per_run: number; median_minutes: number | null }
+  fortnight: { carry_outs: number; doubts: number }
+  satisfaction: number | null
+  signals: number
+  target: number
+  drafts: Record<'waiting' | 'sent' | 'edited' | 'deleted' | 'expired', number>
+}
+
+export interface Signal { id: number; run_id: string; kind: string; value: number; source: string; at: string }
+
+export const SIGNAL_LABELS: Record<string, string> = {
+  approved: 'You approved what it would do', rejected: 'You rejected what it would do',
+  thumbs_up: 'You gave it 👍', thumbs_down: 'You gave it 👎',
+  sent_as_written: 'You sent its draft as written', sent_edited: 'You sent its draft after edits',
+  draft_deleted: 'You deleted its draft', done: 'Marked done', not_done: 'Marked not done',
+  reopened: 'Reopened', undone: 'Undone',
 }
 
 export interface FactoryEvent {
@@ -163,6 +195,9 @@ export interface FactoryDetail extends Factory {
   runs: Run[]
   events: FactoryEvent[]
   satisfaction: number | null
+  scorecard: Scorecard
+  signals: Signal[]
+  drafts: { id: number; run_id: string; subject: string; status: string; similarity: number | null; created_at: string }[]
 }
 
 export interface DeckSettings { enabled: boolean; admins_only: boolean; max_factories: number; runs_per_day: number }
@@ -247,6 +282,8 @@ export const approveRun = (runId: string, ids?: number[]) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/approve`, json('POST', ids ? { ids } : {}))
 export const rejectRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/reject`, { method: 'POST' })
+export const rateRun = (runId: string, kind: 'up' | 'down' | '') =>
+  call<{ thumbs: string; satisfaction: number | null }>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/thumbs`, json('POST', { kind }))
 export const stopRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/stop`, { method: 'POST' })
 

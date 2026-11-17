@@ -18,6 +18,7 @@ import {
   whenText,
   RUN_LABELS,
   RUNNER_LABELS,
+  HEALTH_LABELS,
   STATE_LABELS,
   TRUST_LABELS,
   type FactoryCard,
@@ -407,6 +408,9 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete
   } else if (f.live) {
     meta.push(<span key="none">No runs yet</span>)
   }
+  if (f.satisfaction != null) {
+    meta.push(<span key="s" title="The average of what you did with its last results">{Math.round(f.satisfaction * 100)}% satisfied</span>)
+  }
   if (f.live && f.share_tokens > 0) {
     meta.push(
       <span key="w" title="Its tokens this week, of its share of your weekly budget"
@@ -430,6 +434,9 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete
             <span className="text-[15px] font-medium leading-snug text-zinc-100">{f.title}</span>
             {f.state !== 'running' && <Pill tone={STATE_TONE[f.state]}>{STATE_LABELS[f.state]}</Pill>}
             {f.draft && f.version > 0 && <Pill tone="amber">Draft waiting</Pill>}
+            {f.live && (f.health === 'amber' || f.health === 'red') && (
+              <Pill tone={f.health === 'red' ? 'red' : 'amber'} title={f.health_why}>{HEALTH_LABELS[f.health]}</Pill>
+            )}
             {f.live && <Pill tone="zinc" title={`Trust: ${TRUST_LABELS[f.trust]}`}>{RUNNER_LABELS[f.live.runner]}</Pill>}
           </span>
           {(f.live ?? f.draft)?.charter && (
