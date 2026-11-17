@@ -3,12 +3,13 @@
 Drives the kiosk's agent groups on a real deck: creating, dragging, the picker, folding,
 search, reordering, editing, deleting, pins, the collapsed rail, a change from another device,
 the phone layout, an admin in the desktop app's user view and in the web's simple layout,
-and a deck without sign-in.
+a deck without sign-in, and the agent family (agents under others: folding, holding one over
+another's row, a refused loop, Undo, ⋯ → Put under).
 
 ```bash
 cd flight-deck && npm run build && cd ..
 flight-deck/e2e/groups/run.sh                 # everything
-flight-deck/e2e/groups/run.sh kiosk phone     # kiosk, phone, pins, admin, no-sign-in
+flight-deck/e2e/groups/run.sh kiosk phone     # kiosk, phone, pins, admin, no-sign-in, family
 ```
 
 Needs uv and Python Playwright with Chromium. Screenshots land in `.run/shots/`. From a

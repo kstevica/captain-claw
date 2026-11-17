@@ -132,7 +132,8 @@ export const useProcessStore = create<ProcessStore>((set, get) => ({
       }
       set(next === cur ? { processes: merged } : { processes: merged, fleetInstructionsOverrides: next })
       // Agents the deck asks to group (First Mate's): into their group, once.
-      const asked = processes.filter((p) => p.group).map((p) => ({ id: `proc-${p.slug}`, group: p.group as string }))
+      // Not a run's worker: it shows in its parent's line (agent_family), in no group of its own.
+      const asked = processes.filter((p) => p.group && p.role !== 'worker').map((p) => ({ id: `proc-${p.slug}`, group: p.group as string }))
       if (asked.length) useGroupStore.getState().autoPlace(asked)
     } catch {
       set({ processes: [] })

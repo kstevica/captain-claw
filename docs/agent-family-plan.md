@@ -7,7 +7,7 @@ sidebar and on the Agents page, and you can move an existing agent under
 another agent by dragging it there. First Mate is a parent too: its factories'
 work hangs under it.
 
-Status: decisions taken 2026-11-17; Phase 1 (data) and Phase 2 (talk) built, see §11 and §12.
+Status: decisions taken 2026-11-17; Phases 1–3 (data, talk, sidebar) built, see §11–§13.
 
 ## User decisions (2026-11-17)
 
@@ -228,7 +228,7 @@ on the phone, Undo restores.
 | P2 Talk | "Your family" prompt block (a file the deck keeps), sender named in consult/delegate/hand-over, `report` to the parent, refresh on change, workers out of the peer lists |
 | P3 Sidebar | Tree rows, fold, worker line, drag onto a row to adopt, drag out to make top-level, ⋯ "Put under another agent…" picker, Undo toast, e2e |
 | P4 Agents page | Trays, hover family highlight, draggable cards, First Mate's factory tray, footer count without workers |
-| P5 Lifecycle | Remove and power dialogs, clone/export rules, info-panel family history |
+| P5 Lifecycle | Remove and power dialogs, clone/export rules, info-panel family history, Basna/Vatra/Council workers under whoever started their run |
 
 ## 10. Not in this plan
 
@@ -311,3 +311,48 @@ on the phone, Undo restores.
   channel (Telegram etc.); Docker agents have no block.
 - Deploy: FD restart, agent restarts (prompt loader, `flight_deck` tool), hard
   refresh (bundle).
+
+## 13. As built (P3, 2026-11-17)
+
+- **Tree rows** (`KioskAgentGroups.AgentSections`): an agent with a `parent`
+  in the list shows right under it, indented 14px a level with a thin line,
+  in its parent's group (decision 4: a child's own group membership is
+  ignored; the header count is the whole tree). Rows stay sibling `<li>`s
+  with `data-parent` and `aria-level`, so `e2e/groups` selectors hold.
+- **Fold**: a chevron in the left gutter of a parent row (the plain list gets
+  a 14px gutter when it holds a tree); a folded parent shows `+N` with a
+  busy/unread dot; the open chat's agent stays in view. Per device in
+  localStorage `fd:agent-tree-folded`.
+- **Drag onto a row** (desktop): held over the middle half of a row for a
+  moment (450 ms), an agent goes under it ("Put X under Y", violet); a
+  refusal shows on the row in red with the deck's words (loop, past 3 levels,
+  12 under one) and drops nothing. A drag that only passes over rows, or is
+  let go at once, the row's edges and the gaps still move it between groups
+  as before. A stopped agent can't be dragged from the middle of its row (a
+  disabled button), as before. A child dropped on a
+  section, on the plain list, or on "Drop here for a new group" is one of the
+  person's own again (and goes into that group).
+- **"⋯" → Put under** (desktop and phone): a sheet of the person's agents,
+  "None — one of your own" first; ones the rules refuse are listed, disabled,
+  with the reason.
+- **Undo**: after a move, a bar under the list says what happened ("Deal
+  digest is now under Glasses") with Undo, for 8 seconds.
+- **Run workers**: a worker under an agent in the list has no row; that agent
+  gets a "Working · N workers" line while they run (First Mate's: one line per
+  factory, "Inbox triage · Working · 2 workers", which opens First Mate).
+  Workers without such a parent (a run the person started) keep their row,
+  without a power switch, as before.
+- **First Mate (decision 5)**: its factory workers no longer go into the
+  "First Mate" group (`processStore` skips `role=worker` in `autoPlace`;
+  `isManagedProcess` has no exception for them); First Mate's own agent still
+  lands there once (#621).
+- **e2e**: `flight-deck/e2e/groups` has a `family` scenario (13 checks:
+  through the deck, tree rows, fold, hold-drag, Undo, refused loop, picker).
+  Four group checks fail on the unchanged sidebar too (P2 branch baseline):
+  drag to Other agents, picker's "No group" first, drop above the pin, unpin.
+- Client rules in `utils/agentFamily.ts` mirror `agent_family.py` (the deck
+  still decides); components in `components/layout/AgentFamily.tsx`; API
+  `services/docker.setProcessParent`.
+- **Not done**: Basna/Vatra/Council workers still don't know who started
+  their run (moved to P5); no virtual First Mate row when no First Mate agent
+  is picked; the Today home still shows running workers as awake agents (P4).

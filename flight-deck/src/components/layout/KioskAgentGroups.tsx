@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { ArrowDown, ArrowUp, Check, ChevronRight, Folder, FolderMinus, FolderPlus, MoreHorizontal, Pin, Plus, Search, Trash2, X } from 'lucide-react'
 import { useGroupStore, type AgentGroup } from '../../stores/groupStore'
 import { AgentPicture } from '../agents/AgentPicture'
-import { GROUP_COLORS, OTHER_SECTION, agentSections, groupTone, isFolder, nextGroupColor, orderedFolders, type AgentSection } from '../../utils/agentGroups'
+import { GROUP_COLORS, agentSections, groupTone, isFolder, nextGroupColor, orderedFolders, type AgentSection } from '../../utils/agentGroups'
 
 // ── Agent groups in the agent column ──
 //
@@ -24,6 +24,9 @@ export interface GroupableAgent {
   description: string
   state: string
   asleep?: boolean
+  /** The id of the agent it sits under (agent_family): it shows under that
+   *  one, in that one's group, and is in no group of its own. */
+  parent?: string
 }
 
 type SessionInfo = Map<string, { busy: boolean; unread: boolean }>
@@ -34,6 +37,23 @@ export interface RowDrag {
   onDragStart?: (e: DragEvent<HTMLElement>) => void
   onDragEnd?: () => void
   style?: { opacity: number }
+  /** Another agent dropped on the middle of this row goes under it. */
+  onDragOver?: (e: DragEvent<HTMLElement>) => void
+  onDragLeave?: (e: DragEvent<HTMLElement>) => void
+  onDrop?: (e: DragEvent<HTMLElement>) => void
+}
+
+/** A row's place in the family tree (agent_family). */
+export interface RowTree {
+  /** 0 for an agent of the person's own, 1 for one under it, … */
+  depth: number
+  /** How many agents sit right under it. */
+  kids: number
+  folded: boolean
+  onToggle: () => void
+  /** Folded: what the agents under it are up to. */
+  busy: boolean
+  unread: boolean
 }
 
 /** A row in a group: its pin, to the top of that group. */
@@ -46,8 +66,12 @@ export interface RowPin {
 /** What an agent's row gets from its section. */
 export interface RowParts {
   drag: RowDrag
-  /** None in "Other agents". */
+  /** None in "Other agents", or for an agent under another. */
   pin?: RowPin
+  tree?: RowTree
+  /** An agent is dragged over the middle of this row: ``refusal`` "" = it can
+   *  go under this one, else why not. */
+  adopt?: { from: string; refusal: string }
 }
 
 type Dragging = { kind: 'agent'; id: string; from: string } | { kind: 'group'; id: string }
@@ -62,7 +86,22 @@ function folded(section: AgentSection<GroupableAgent>, sessionInfo: SessionInfo)
 /** What an agent's drag carries: its id. The column's "New group" takes it too. */
 export const AGENT_DRAG_TYPE = 'application/x-fd-agent'
 
-export function AgentSections<A extends GroupableAgent>({ agents, query, activeAgentId, sessionInfo, renderRow, onEdit, onAgentDrag, phone = false }: {
+// How long an agent is held over another's row before it would go under it.
+const ADOPT_HOLD_MS = 450
+
+// Which agents are folded under their parent: this device's (as group folds).
+const TREE_FOLDED_KEY = 'fd:agent-tree-folded'
+function loadTreeFolded(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(TREE_FOLDED_KEY) || '[]')
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []
+  } catch { return [] }
+}
+
+export function AgentSections<A extends GroupableAgent>({
+  agents, query, activeAgentId, sessionInfo, renderRow, onEdit, onAgentDrag, phone = false,
+  adoptRefusal, onAdopt, onDetach, renderAfter,
+}: {
   agents: A[]
   /** The search box: an agent's name or description, or its group's name. */
   query: string
@@ -73,6 +112,14 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
   /** An agent is being dragged (or no longer is): the column's "New group" becomes a drop target. */
   onAgentDrag?: (dragging: boolean) => void
   phone?: boolean
+  /** May the first go under the second? "" yes, else why not; null = not a family move. */
+  adoptRefusal?: (childId: string, parentId: string) => string | null
+  /** It was dropped on the middle of another agent's row. */
+  onAdopt?: (childId: string, parentId: string) => void
+  /** An agent that sits under another was dropped on a section: it is one of the person's own again. */
+  onDetach?: (childId: string) => void
+  /** After an agent's row (and its children): e.g. its run's workers. */
+  renderAfter?: (a: A, depth: number) => ReactNode
 }) {
   const groups = useGroupStore((s) => s.groups)
   const collapsed = useGroupStore((s) => s.collapsed)
@@ -84,6 +131,11 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
 
   const [dragging, setDragging] = useState<Dragging | null>(null)
   const [over, setOver] = useState<{ id: string; above: boolean } | null>(null)
+  // The row an agent is held over the middle of: it would go under that one.
+  const [adoptOver, setAdoptOver] = useState<string | null>(null)
+  // Since when it's been over that row's middle: a drag that only passes over
+  // rows (or is let go at once) still moves the agent between groups.
+  const [hold, setHold] = useState<{ id: string; since: number } | null>(null)
   const agentDragging = dragging?.kind === 'agent'
   useEffect(() => { onAgentDrag?.(agentDragging) }, [agentDragging, onAgentDrag])
   // The section that just took an agent or the pin, to say so.
@@ -99,6 +151,8 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
   const endDrag = useCallback(() => {
     setDragging(null)
     setOver(null)
+    setAdoptOver(null)
+    setHold(null)
   }, [])
   // The row a drop moves is gone before its dragend would fire.
   useEffect(() => {
@@ -109,14 +163,87 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
 
   const q = query.trim().toLowerCase()
   const searching = q.length > 0
-  const allSections = useMemo(() => agentSections(agents, groups), [agents, groups])
+
+  // The family tree: an agent under another shows under it, in its group.
+  const [treeFolded, setTreeFolded] = useState<string[]>(loadTreeFolded)
+  const toggleTree = (id: string) => setTreeFolded((cur) => {
+    const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]
+    try { localStorage.setItem(TREE_FOLDED_KEY, JSON.stringify(next)) } catch { /* private window */ }
+    return next
+  })
+  const { tops, kidsOf, isChild } = useMemo(() => {
+    const byId = new Map(agents.map((a) => [a.id, a]))
+    const up = (a: A) => (a.parent && a.parent !== a.id ? byId.get(a.parent) : undefined)
+    // Its top: walk up; a loop in the data makes each agent in it a top.
+    const topOf = (a: A): A => {
+      const seen = new Set([a.id])
+      let cur = a
+      for (let p = up(cur); p; p = up(cur)) {
+        if (seen.has(p.id)) return a
+        seen.add(p.id)
+        cur = p
+      }
+      return cur
+    }
+    const kids = new Map<string, A[]>()
+    const child = new Set<string>()
+    for (const a of agents) {
+      const p = up(a)
+      if (!p || topOf(a).id === a.id) continue
+      child.add(a.id)
+      kids.set(p.id, [...(kids.get(p.id) ?? []), a])
+    }
+    return { tops: agents.filter((a) => !child.has(a.id)), kidsOf: kids, isChild: (id: string) => child.has(id) }
+  }, [agents])
+  // A section's rows: each top and, unfolded, what sits under it.
+  const rowsOf = useCallback((list: A[], all: boolean) => {
+    const out: { a: A; depth: number }[] = []
+    const seen = new Set<string>()
+    const walk = (a: A, depth: number) => {
+      if (seen.has(a.id)) return
+      seen.add(a.id)
+      out.push({ a, depth })
+      const kids = kidsOf.get(a.id) ?? []
+      if (all || !treeFolded.includes(a.id)) kids.forEach((k) => walk(k, depth + 1))
+      else {
+        // Folded: the one whose chat is open stays in view.
+        const stack = [...kids.map((k) => ({ k, d: depth + 1 }))]
+        while (stack.length) {
+          const { k, d } = stack.shift()!
+          if (seen.has(k.id)) continue
+          if (k.id === activeAgentId) walk(k, d)
+          else stack.push(...(kidsOf.get(k.id) ?? []).map((x) => ({ k: x, d: d + 1 })))
+        }
+      }
+    }
+    list.forEach((a) => walk(a, 0))
+    return out
+  }, [kidsOf, treeFolded, activeAgentId])
+  const descendants = useCallback((id: string): A[] => {
+    const out: A[] = []
+    const todo = [...(kidsOf.get(id) ?? [])]
+    const seen = new Set([id])
+    while (todo.length) {
+      const k = todo.shift()!
+      if (seen.has(k.id)) continue
+      seen.add(k.id)
+      out.push(k)
+      todo.push(...(kidsOf.get(k.id) ?? []))
+    }
+    return out
+  }, [kidsOf])
+
+  const allSections = useMemo(() => agentSections(tops, groups), [tops, groups])
   const sections = useMemo(() => {
     if (!searching) return allSections
     const hit = (a: A) => a.name.toLowerCase().includes(q) || a.description.toLowerCase().includes(q)
     return allSections
-      .map((s) => (s.group && s.name.toLowerCase().includes(q) ? s : { ...s, agents: s.agents.filter(hit) }))
+      .map((s) => {
+        const every = s.agents.flatMap((a) => [a, ...descendants(a.id)])
+        return s.group && s.name.toLowerCase().includes(q) ? { ...s, agents: every } : { ...s, agents: every.filter(hit) }
+      })
       .filter((s) => s.agents.length > 0)
-  }, [allSections, q, searching])
+  }, [allSections, q, searching, descendants])
 
   const grouped = groups.some(isFolder)
   const pinnedName = groups.find((g) => g.pinned && isFolder(g))?.name
@@ -128,23 +255,87 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
     e.dataTransfer.effectAllowed = 'move'
     setTimeout(() => setDragging(what), 0)
   }
+  // The middle half of a row takes the agent under it; its edges and the gaps
+  // fall through to the section (a group move, as before).
+  const middle = (e: DragEvent<HTMLElement>) => {
+    const r = e.currentTarget.getBoundingClientRect()
+    return e.clientY > r.top + r.height / 4 && e.clientY < r.bottom - r.height / 4
+  }
+  const refusal = (childId: string, parentId: string) => (adoptRefusal && onAdopt ? adoptRefusal(childId, parentId) : null)
+  const rowAdopt = (a: A): Partial<RowDrag> => (canDrag && onAdopt ? {
+    onDragOver: (e) => {
+      if (dragging?.kind !== 'agent' || dragging.id === a.id) return
+      const why = middle(e) ? refusal(dragging.id, a.id) : null
+      if (why === null) {
+        if (hold?.id === a.id) setHold(null)
+        setAdoptOver((o) => (o === a.id ? null : o))
+        return  // the section's
+      }
+      // Held there a moment before it takes the agent under it.
+      const now = Date.now()
+      if (hold?.id !== a.id) {
+        setHold({ id: a.id, since: now })
+        return
+      }
+      if (adoptOver !== a.id && now - hold.since < ADOPT_HOLD_MS) return
+      e.preventDefault()
+      e.stopPropagation()
+      e.dataTransfer.dropEffect = why ? 'none' : 'move'
+      setOver(null)
+      setAdoptOver(a.id)
+    },
+    onDragLeave: (e) => {
+      if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+      if (hold?.id === a.id) setHold(null)
+      setAdoptOver((o) => (o === a.id ? null : o))
+    },
+    onDrop: (e) => {
+      if (dragging?.kind !== 'agent' || adoptOver !== a.id) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (refusal(dragging.id, a.id) === '') onAdopt(dragging.id, a.id)
+      endDrag()
+    },
+  } : {})
   const rowDrag = (a: A, from: string): RowDrag => (canDrag ? {
     draggable: true,
     onDragStart: (e) => startDrag(e, { kind: 'agent', id: a.id, from }, AGENT_DRAG_TYPE),
     onDragEnd: endDrag,
     ...(dragging?.kind === 'agent' && dragging.id === a.id ? { style: { opacity: 0.4 } } : {}),
+    ...rowAdopt(a),
   } : {})
-  const rowParts = (a: A, s: AgentSection<A>): RowParts => {
+  const draggedName = dragging?.kind === 'agent' ? agents.find((x) => x.id === dragging.id)?.name ?? '' : ''
+  const treeOf = (a: A, depth: number): RowTree | undefined => {
+    const kids = kidsOf.get(a.id)?.length ?? 0
+    if (!kids && !depth) return undefined
+    const isFolded = !searching && treeFolded.includes(a.id)
+    const infos = isFolded ? descendants(a.id).map((x) => sessionInfo.get(x.id)) : []
+    return {
+      depth: searching ? 0 : depth, kids, folded: isFolded, onToggle: () => toggleTree(a.id),
+      busy: infos.some((x) => x?.busy), unread: infos.some((x) => x?.unread),
+    }
+  }
+  const rowParts = (a: A, s: AgentSection<A>, depth = 0): RowParts => {
     const { group } = s
+    const under = isChild(a.id)
     return {
       drag: rowDrag(a, s.id),
-      pin: group ? {
+      pin: group && !under ? {
         pinned: !!group.pinnedAgentIds?.includes(a.id),
         groupName: group.name,
         onToggle: () => toggleAgentPin(group.id, a.id),
       } : undefined,
+      tree: treeOf(a, depth),
+      adopt: adoptOver === a.id && dragging?.kind === 'agent'
+        ? { from: draggedName, refusal: refusal(dragging.id, a.id) ?? '' } : undefined,
     }
   }
+  // A section's rows as <li>s: each agent, then what renderAfter adds after it.
+  const rowsHtml = (s: AgentSection<A>, list: A[]) => (searching ? list.map((a) => ({ a, depth: 0 })) : rowsOf(list, false))
+    .flatMap(({ a, depth }) => {
+      const after = renderAfter && !(treeFolded.includes(a.id) && !searching) ? renderAfter(a, depth) : null
+      return after ? [renderRow(a, rowParts(a, s, depth)), after] : [renderRow(a, rowParts(a, s, depth))]
+    })
 
   const togglePinned = (g: AgentGroup) => {
     pinGroup(g.pinned ? null : g.id)
@@ -160,7 +351,12 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
 
   const dropOn = (s: AgentSection<A>, above: boolean) => {
     if (dragging?.kind === 'agent') {
-      if (dragging.from !== s.id) {
+      if (isChild(dragging.id)) {
+        // Out from under its parent: one of the person's own again, in this group.
+        onDetach?.(dragging.id)
+        placeAgent(dragging.id, s.group?.id ?? null)
+        showLanded(s.id)
+      } else if (dragging.from !== s.id) {
         placeAgent(dragging.id, s.group?.id ?? null)
         showLanded(s.id)
       }
@@ -201,8 +397,22 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
 
   // No groups yet: the plain list.
   if (!grouped) {
-    const only = sections[0]?.agents ?? []
-    return <ul className={listClass}>{only.map((a) => renderRow(a, { drag: rowDrag(a, OTHER_SECTION) }))}</ul>
+    const only = sections[0]
+    // A tree in it: room on the left for the fold chevrons (a group's rail has its own).
+    const gutter = !phone && kidsOf.size > 0 && !searching ? ' pl-3.5' : ''
+    // An agent under another, dropped on the list (not on a row's middle): one of the person's own again.
+    const detaching = canDrag && dragging?.kind === 'agent' && isChild(dragging.id)
+    return (
+      <ul
+        className={listClass + gutter}
+        {...(detaching ? {
+          onDragOver: (e: DragEvent<HTMLElement>) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' },
+          onDrop: (e: DragEvent<HTMLElement>) => { e.preventDefault(); onDetach?.(dragging.id); endDrag() },
+        } : {})}
+      >
+        {only ? rowsHtml(only, only.agents) : null}
+      </ul>
+    )
   }
 
   return (
@@ -213,10 +423,11 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
         const tone = s.group ? groupTone(s.group.color) : null
         const isOver = over?.id === s.id
         // Only somewhere else: an agent already here isn't going anywhere.
-        const taking = isOver && dragging?.kind === 'agent' && dragging.from !== s.id
-        const signals = isCollapsed ? folded(s, sessionInfo) : null
-        const stillShown = isCollapsed ? s.agents.filter((a) => a.id === activeAgentId) : []
-        const running = s.agents.filter((a) => a.state === 'running' || a.asleep).length
+        const taking = isOver && dragging?.kind === 'agent' && (dragging.from !== s.id || isChild(dragging.id))
+        const every = searching ? s.agents : s.agents.flatMap((a) => [a, ...descendants(a.id)])
+        const signals = isCollapsed ? folded({ ...s, agents: every }, sessionInfo) : null
+        const stillShown = isCollapsed ? every.filter((a) => a.id === activeAgentId) : []
+        const running = every.filter((a) => a.state === 'running' || a.asleep).length
         // Lines up under the chevron: what's in the group hangs off its header.
         const rail = `${phone ? 'ml-3 pl-2' : 'ml-[13px] pl-1'} border-l ${tone ? tone.rail : 'border-transparent'}`
         return (
@@ -242,13 +453,13 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
               <button
                 onClick={() => toggleCollapsed(s.id)}
                 aria-expanded={!isCollapsed}
-                title={`${s.name} — ${headCount(s.agents.length)}, ${running} on`}
+                title={`${s.name} — ${headCount(every.length)}, ${running} on`}
                 className={`flex min-w-0 flex-1 items-center gap-2 rounded-md text-left transition-colors hover:bg-zinc-800/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40 ${phone ? 'h-11 px-2' : 'h-8 px-1.5'}`}
               >
                 <ChevronRight className={`shrink-0 text-zinc-500 transition-transform duration-200 motion-reduce:transition-none ${isCollapsed ? '' : 'rotate-90'} ${phone ? 'h-4 w-4' : 'h-3.5 w-3.5'}`} />
                 {tone && <span className={`shrink-0 rounded-full ${tone.dot} ${phone ? 'h-2.5 w-2.5' : 'h-2 w-2'}`} />}
                 <span className={`min-w-0 truncate font-semibold ${phone ? 'text-sm' : 'text-[13px]'} ${s.group ? 'text-zinc-200' : 'text-zinc-400'}`}>{s.name}</span>
-                <span className={`shrink-0 rounded-full bg-zinc-800 px-1.5 font-medium tabular-nums text-zinc-400 ${phone ? 'text-xs leading-5' : 'text-[10px] leading-4'}`}>{s.agents.length}</span>
+                <span className={`shrink-0 rounded-full bg-zinc-800 px-1.5 font-medium tabular-nums text-zinc-400 ${phone ? 'text-xs leading-5' : 'text-[10px] leading-4'}`}>{every.length}</span>
                 {/* Off a phone its pin button says so. */}
                 {phone && s.group?.pinned && <Pin className="h-3 w-3 shrink-0 fill-current text-violet-600 dark:text-violet-400" aria-label="Pinned to the top" />}
                 {signals?.busy && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500 dark:bg-amber-400" title="An agent here is working" />}
@@ -285,7 +496,7 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
             <div className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${isCollapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'}`}>
               <div className="min-h-0 overflow-hidden" inert={isCollapsed}>
                 <div className={`${rail} ${phone ? 'pb-1 pt-1' : 'pb-0.5 pt-0.5'}`}>
-                  <ul className={listClass}>{s.agents.map((a) => renderRow(a, rowParts(a, s)))}</ul>
+                  <ul className={listClass}>{rowsHtml(s, s.agents)}</ul>
                   {s.group && s.agents.length === 0 && (
                     <button
                       onClick={() => onEdit(s.id)}
@@ -345,7 +556,7 @@ export function RailGroupMark({ section, sessionInfo }: { section: AgentSection<
 // screen, a sheet from the bottom on a phone. Esc closes it and the focus goes
 // back where it was.
 
-function GroupSheet({ label, picture, title, subtitle, phone, onClose, children, footer }: {
+export function GroupSheet({ label, picture, title, subtitle, phone, onClose, children, footer }: {
   label: string
   /** Inside the coloured square at the top. */
   picture: ReactNode

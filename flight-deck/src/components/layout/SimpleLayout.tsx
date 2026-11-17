@@ -53,6 +53,8 @@ import {
   Network,
   Flame,
   MonitorPlay,
+  CornerDownRight,
+  Workflow,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -145,6 +147,9 @@ import {
   type AgentMenuItem,
 } from './KioskAgentDialogs'
 import { AGENT_DRAG_TYPE, AgentGroupDialog, AgentGroupPicker, AgentSections, RailGroupMark, type RowParts } from './KioskAgentGroups'
+import { AgentParentPicker, FamilyUndoBar } from './AgentFamily'
+import { adoptRefusal, inFamily, slugOf, workerLines, type FamilyMove, type WorkerLineItem } from '../../utils/agentFamily'
+import { setProcessParent } from '../../services/docker'
 import { SimpleNav } from './SimpleNav'
 import { navEntries, type NavEntry, type NavTarget } from './navDestinations'
 import { PeoplePanel } from './PeoplePanel'
@@ -188,6 +193,24 @@ interface SimpleAgent {
   sharedRef?: string
   ownerId?: string
   ownerName?: string
+  /** Its family (agent_family): the id of the agent it sits under, whether it
+   *  stays or is a run's worker, why it was made, its First Mate factory. */
+  parent?: string
+  role?: string
+  madeFor?: string
+  factory?: string
+}
+
+/** The agent family in the column: what the sections and rows need (AgentFamily.tsx). */
+interface FamilyHooks {
+  /** The agents with a row: a run's worker under one of them shows in its line instead. */
+  listed: SimpleAgent[]
+  refusal: (childId: string, parentId: string) => string | null
+  adopt: (childId: string, parentId: string) => void
+  detach: (childId: string) => void
+  lines: (a: SimpleAgent) => WorkerLineItem[]
+  move: FamilyMove | null
+  clearMove: () => void
 }
 
 /** A group to edit (`id`), or a new one with these agents in it. */
@@ -565,6 +588,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         host: 'localhost', port: p.web_port, auth: p.web_auth || '',
         startKey: p.slug, managed: isManagedProcess(p),
         asleep: !!p.asleep,
+        parent: p.parent ? `proc-${p.parent}` : undefined,
+        role: p.role, madeFor: p.made_for || undefined, factory: p.factory || undefined,
       })
     }
     for (const a of localAgents) {
@@ -595,6 +620,58 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     list.sort((x, y) => rank(x) - rank(y) || x.name.localeCompare(y.name))
     return list
   }, [containers, processes, localAgents, dockerDesc, procDesc, sharingEnabled, sharedAgents])
+
+  // ── The agent family (agent_family; AgentFamily.tsx) ──
+  // An agent under another shows under it; one of yours goes under another by
+  // a drag onto its row or "⋯" → Put under; a run's workers under the agent
+  // that started the run are one line there, not rows of their own.
+  const [parentPickerId, setParentPickerId] = useState<string | null>(null)
+  const [familyMove, setFamilyMove] = useState<FamilyMove | null>(null)
+  const clearFamilyMove = useCallback(() => setFamilyMove(null), [])
+  const familyListed = useMemo(() => {
+    const ids = new Set(agents.map((a) => a.id))
+    return agents.filter((a) => !(a.role === 'worker' && a.parent && ids.has(a.parent)))
+  }, [agents])
+  const workersOf = useMemo(() => {
+    const ids = new Set(agents.map((a) => a.id))
+    const out = new Map<string, SimpleAgent[]>()
+    for (const a of agents) {
+      if (a.role !== 'worker' || !a.parent || !ids.has(a.parent) || a.state !== 'running') continue
+      out.set(a.parent, [...(out.get(a.parent) ?? []), a])
+    }
+    return out
+  }, [agents])
+  const moveUnder = useCallback(async (childId: string, parentId: string) => {
+    const child = agents.find((a) => a.id === childId)
+    if (!child) return
+    const before = child.parent ?? ''
+    try {
+      const res = await setProcessParent(slugOf(childId), parentId ? slugOf(parentId) : '')
+      await fetchProcesses()
+      setFamilyMove({
+        text: res.message,
+        undo: async () => {
+          try {
+            await setProcessParent(slugOf(childId), before ? slugOf(before) : '')
+          } catch (e) {
+            useNotificationStore.getState().add('error', `Couldn't put ${child.name} back`, e instanceof Error ? e.message : String(e))
+          }
+          await fetchProcesses()
+        },
+      })
+    } catch (e) {
+      useNotificationStore.getState().add('error', `Couldn't move ${child.name}`, e instanceof Error ? e.message : String(e))
+    }
+  }, [agents, fetchProcesses])
+  const family: FamilyHooks = useMemo(() => ({
+    listed: familyListed,
+    refusal: (c: string, p: string) => adoptRefusal(agents, c, p),
+    adopt: (c: string, p: string) => { void moveUnder(c, p) },
+    detach: (c: string) => { void moveUnder(c, '') },
+    lines: (a: SimpleAgent) => workerLines(workersOf.get(a.id) ?? [], () => window.dispatchEvent(new Event(OPEN_FIRST_MATE_EVENT))),
+    move: familyMove,
+    clearMove: clearFamilyMove,
+  }), [agents, familyListed, workersOf, moveUnder, familyMove, clearFamilyMove])
 
   // Per-agent chat state, folded across lanes: busy if any lane is, unread if
   // any lane finished something while the user looked elsewhere.
@@ -805,6 +882,16 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       onSelect: () => setGroupPickerId(a.id),
     }
   }
+  // One of yours under another of yours (agent_family): "⋯" → Put under, all a phone has.
+  const familyMenuItems = (a: SimpleAgent): AgentMenuItem[] => {
+    if (!inFamily(a)) return []
+    const parent = a.parent ? agents.find((x) => x.id === a.parent) : undefined
+    return [{
+      icon: CornerDownRight, label: 'Put under', tone: 'violet', group: 'place',
+      hint: parent ? `Under ${parent.name}` : 'Under another of your agents',
+      onSelect: () => setParentPickerId(a.id),
+    }]
+  }
   // In a group its "⋯" also pins it to the top of that group (all a phone has).
   const pinMenuItems = (a: SimpleAgent): AgentMenuItem[] => {
     const g = groups.find((x) => isFolder(x) && x.agentIds.includes(a.id))
@@ -914,7 +1001,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     }
     // A local agent, or one Flight Deck runs: its picture is all of "who it is" here.
     if (!((a.kind === 'docker' || a.kind === 'process') && !a.managed)) items.push(pictureMenuItem(a))
-    items.push(groupMenuItem(a), ...pinMenuItems(a))
+    items.push(groupMenuItem(a), ...familyMenuItems(a), ...pinMenuItems(a))
     // The whole agent in one file — Flight Deck writes it from the agent's folder (process agents).
     if (a.kind === 'process' && !a.managed) {
       items.push({ icon: Archive, label: 'Back up / export', hint: 'Save it to a file, to restore it here or on another deck',
@@ -930,7 +1017,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   }
   // Off the kiosk its "⋯" holds only the agent's group and pin (the gear has the rest).
   const menuFor = locked ? agentMenuItems
-    : (a: SimpleAgent) => [...filesDataMenuItems(a, true), groupMenuItem(a), ...identityMenuItems(a), pictureMenuItem(a), ...pinMenuItems(a)]
+    : (a: SimpleAgent) => [...filesDataMenuItems(a, true), groupMenuItem(a), ...familyMenuItems(a), ...identityMenuItems(a), pictureMenuItem(a), ...pinMenuItems(a)]
   const groupPickerAgent = groupPickerId ? agents.find((a) => a.id === groupPickerId) : undefined
   const agentInfo = agentInfoId ? agents.find((a) => a.id === agentInfoId) : undefined
   const agentInstructions = agentInstructionsId ? agents.find((a) => a.id === agentInstructionsId) : undefined
@@ -1426,6 +1513,15 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       {agentPicture && (
         <KioskAgentPictureDialog agentId={agentPicture.id} agentName={agentPicture.name} onClose={() => setAgentPictureId(null)} />
       )}
+      {parentPickerId && agents.some((a) => a.id === parentPickerId) && (
+        <AgentParentPicker
+          agent={agents.find((a) => a.id === parentPickerId)!}
+          agents={agents}
+          phone={isMobile}
+          onPick={async (pid) => { await moveUnder(parentPickerId, pid); setParentPickerId(null) }}
+          onClose={() => setParentPickerId(null)}
+        />
+      )}
       {groupPickerAgent && (
         <AgentGroupPicker agentId={groupPickerAgent.id} agentName={groupPickerAgent.name} phone={isMobile} onClose={() => setGroupPickerId(null)} />
       )}
@@ -1465,6 +1561,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       <>
         <PhoneLayout
           agents={agents}
+          family={family}
           activeAgent={activeAgent}
           activeAgentId={activeAgentId}
           activeSessionName={activeSessionName}
@@ -1517,6 +1614,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     <div className="fd-shell flex h-screen overflow-hidden">
       <AgentsColumn
         agents={agents}
+        family={family}
         activeAgentId={activeAgentId}
         sessionInfo={sessionInfo}
         switching={switching}
@@ -1904,11 +2002,72 @@ function MoreToolsDialog({ onLibrary, onData, onFolders, onPicked, onClose }: {
 
 // ── Left: the nav over the team of agents ────────────────────────────
 
+// ── The family tree in the agent column (agent_family) ──
+
+/** How far an agent under another sits in from it. */
+const TREE_INDENT = 14
+
+/** A row's tree marks: the line it hangs from, and a parent's fold chevron. */
+function TreeMarks({ tree, name }: { tree: NonNullable<RowParts['tree']>; name: string }) {
+  return (
+    <>
+      {tree.depth > 0 && <span aria-hidden className="pointer-events-none absolute -left-[8px] bottom-1 top-1 border-l border-zinc-700/70" />}
+      {tree.kids > 0 && (
+        <button
+          onClick={tree.onToggle}
+          aria-expanded={!tree.folded}
+          aria-label={`${tree.folded ? 'Show' : 'Fold'} the agents under ${name}`}
+          title={`${tree.folded ? 'Show' : 'Fold'} the ${tree.kids} agent${tree.kids === 1 ? '' : 's'} under ${name}`}
+          className="absolute -left-[15px] top-1/2 z-[1] flex h-4 w-3.5 -translate-y-1/2 items-center justify-center rounded text-zinc-500 hover:bg-zinc-700/60 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
+        >
+          <ChevronRight className={`h-3 w-3 transition-transform motion-reduce:transition-none ${tree.folded ? '' : 'rotate-90'}`} />
+        </button>
+      )}
+    </>
+  )
+}
+
+/** A folded parent: how many sit under it, and whether one is working or has news. */
+function FoldedKids({ tree }: { tree: NonNullable<RowParts['tree']> }) {
+  return (
+    <span className="flex shrink-0 items-center gap-1 rounded-full bg-zinc-800 px-1.5 text-[10px] leading-4 tabular-nums text-zinc-400" title={`${tree.kids} under it`}>
+      +{tree.kids}
+      {tree.busy && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500 dark:bg-amber-400" />}
+      {tree.unread && !tree.busy && <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />}
+    </span>
+  )
+}
+
+/** A run's workers under the agent that started it (or First Mate's factories): one line each. */
+function workerLineRows(a: SimpleAgent, depth: number, family: FamilyHooks, phone = false) {
+  const lines = family.lines(a)
+  if (!lines.length) return null
+  return lines.map((line, i) => {
+    const body = (
+      <>
+        <Workflow className={`${phone ? 'h-4 w-4' : 'h-3.5 w-3.5'} shrink-0 animate-pulse motion-reduce:animate-none`} />
+        <span className="min-w-0 truncate">{line.label}</span>
+      </>
+    )
+    const cls = `flex w-full min-w-0 items-center gap-2 rounded-[var(--fd-radius-control)] text-left text-amber-700 dark:text-amber-400 ${phone ? 'px-3 py-2 text-sm' : 'px-1.5 py-1 text-[11px]'}`
+    return (
+      <li key={`${a.id}-workers-${i}`} data-workers-of={a.id} className="relative" style={{ marginLeft: (depth + 1) * TREE_INDENT }} title={line.names.join(', ')}>
+        <span aria-hidden className="pointer-events-none absolute -left-[8px] bottom-1 top-1 border-l border-zinc-700/70" />
+        {line.onOpen
+          ? <button onClick={line.onOpen} className={`${cls} hover:bg-[var(--fd-hover)]`}>{body}</button>
+          : <span className={cls}>{body}</span>}
+      </li>
+    )
+  })
+}
+
 function AgentsColumn({
-  agents, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onLeave, onRefresh, onSpawn, onGroup, onOptions, onSettings, onInfo,
+  agents: allAgents, family, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onLeave, onRefresh, onSpawn, onGroup, onOptions, onSettings, onInfo,
   nav, navCurrent, onLibrary, onData, onFolders, menuFor, locked = false, adminSwitch = false,
 }: {
   agents: SimpleAgent[]
+  /** The agent family: who sits under whom, moves, run workers (AgentFamily.tsx). */
+  family?: FamilyHooks
   activeAgentId: string | null
   sessionInfo: Map<string, { busy: boolean; unread: boolean }>
   switching: Set<string>
@@ -1943,6 +2102,8 @@ function AgentsColumn({
   /** The desktop app's admin in the kiosk: the way back to Admin. */
   adminSwitch?: boolean
 }) {
+  // The rows: a run's worker under one of them is in that one's line instead.
+  const agents = family?.listed ?? allAgents
   const open = useUIStore((s) => s.simpleLeftOpen)
   const setOpen = useUIStore((s) => s.setSimpleLeftOpen)
   const setLayoutMode = useUIStore((s) => s.setLayoutMode)
@@ -2155,6 +2316,9 @@ function AgentsColumn({
               e.preventDefault()
               setOverNew(false)
               const id = e.dataTransfer.getData(AGENT_DRAG_TYPE)
+              // Out from under its parent too: it is one of yours in its new group.
+              const dragged = agents.find((x) => x.id === id)
+              if (dragged?.parent && agents.some((x) => x.id === dragged.parent)) family?.detach(id)
               if (id) onGroup({ agentIds: [id] })
             }}
             className={`flex h-9 w-full items-center justify-center gap-1.5 rounded-full border border-dashed px-2 text-xs font-medium transition-colors ${
@@ -2233,7 +2397,11 @@ function AgentsColumn({
           sessionInfo={sessionInfo}
           onEdit={(id) => onGroup({ id })}
           onAgentDrag={setAgentDrag}
-          renderRow={(a: SimpleAgent, { drag, pin }: RowParts) => {
+          adoptRefusal={family?.refusal}
+          onAdopt={family?.adopt}
+          onDetach={family?.detach}
+          renderAfter={family ? (a: SimpleAgent, depth: number) => workerLineRows(a, depth, family) : undefined}
+          renderRow={(a: SimpleAgent, { drag, pin, tree, adopt }: RowParts) => {
             const info = sessionInfo.get(a.id)
             const active = a.id === activeAgentId
             const busy = !!info?.busy
@@ -2249,10 +2417,12 @@ function AgentsColumn({
             const canRecheck = a.kind === 'local' && a.state !== 'running' && !locked
             const menu = menuFor?.(a) ?? []
             const unread = !!info?.unread && !active && !busy
-            const subtitle = isBooting ? 'Starting…'
-              : busy ? 'Working…'
-                : shared && a.state === 'running' ? `Shared by ${a.ownerName || 'another user'}`
-                  : a.state === 'running' && a.reachable && a.description ? a.description : rowState(a)
+            const subtitle = adopt ? (adopt.refusal || `Put ${adopt.from} under ${a.name}`)
+              : isBooting ? 'Starting…'
+                : busy ? 'Working…'
+                  : shared && a.state === 'running' ? `Shared by ${a.ownerName || 'another user'}`
+                    : a.state === 'running' && a.reachable && a.description ? a.description : rowState(a)
+            const { style: dragStyle, ...dragRest } = drag
             const pinButton = pin && (
               <button
                 onClick={pin.onToggle}
@@ -2267,9 +2437,15 @@ function AgentsColumn({
             return (
               <li
                 key={a.id}
-                {...drag}
-                className={`group/row group relative flex items-center gap-0.5 rounded-[var(--fd-radius-control)] pr-1 transition-colors ${active ? 'bg-[var(--fd-selected)]' : 'hover:bg-[var(--fd-hover)]'}`}
+                {...dragRest}
+                data-parent={tree?.depth ? a.parent : undefined}
+                aria-level={tree ? tree.depth + 1 : undefined}
+                style={{ ...dragStyle, ...(tree?.depth ? { marginLeft: tree.depth * TREE_INDENT } : {}) }}
+                className={`group/row group relative flex items-center gap-0.5 rounded-[var(--fd-radius-control)] pr-1 transition-colors ${
+                  adopt ? (adopt.refusal ? 'bg-red-500/5 ring-1 ring-inset ring-red-500/50' : 'bg-violet-500/10 ring-1 ring-inset ring-violet-500/70')
+                    : active ? 'bg-[var(--fd-selected)]' : 'hover:bg-[var(--fd-hover)]'}`}
               >
+                {tree && <TreeMarks tree={tree} name={a.name} />}
                 <button
                   onClick={() => onOpen(a)}
                   disabled={!openable}
@@ -2291,6 +2467,7 @@ function AgentsColumn({
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
                       <span className={`min-w-0 truncate text-[13px] font-medium ${active || unread ? 'text-zinc-100' : openable ? 'text-zinc-200' : 'text-zinc-400'}`}>{a.name}</span>
+                      {tree?.folded && <FoldedKids tree={tree} />}
                       {shared && (
                         <span
                           className="flex shrink-0 items-center gap-0.5 rounded border border-sky-500/25 bg-sky-500/15 px-1 py-0.5 text-[9px] leading-none text-sky-700 dark:text-sky-300"
@@ -2301,7 +2478,7 @@ function AgentsColumn({
                       )}
                       {shareKeyOf(a) && <NetworkBadge shareKey={shareKeyOf(a)} />}
                     </span>
-                    <span className={`block truncate text-[11px] ${busy ? 'text-amber-700 dark:text-amber-400' : 'text-zinc-500'}`}>{subtitle}</span>
+                    <span className={`block truncate text-[11px] ${adopt ? (adopt.refusal ? 'text-red-600 dark:text-red-400' : 'text-violet-700 dark:text-violet-300') : busy ? 'text-amber-700 dark:text-amber-400' : 'text-zinc-500'}`}>{subtitle}</span>
                   </span>
                 </button>
                 {/* What else there is to do with it: out of the way (no width at all)
@@ -2360,6 +2537,7 @@ function AgentsColumn({
             )
           }}
         />
+        {family && <FamilyUndoBar move={family.move} onDone={family.clearMove} />}
       </div>
 
       {/* The tools apart from the team above them. */}
@@ -2611,11 +2789,13 @@ function FilesDataDialog({ agentId, agentName, onClose }: { agentId: string; age
 // viewport (dvh), and the bottom bar keeps clear of the home indicator.
 
 function PhoneLayout({
-  agents, activeAgent, activeAgentId, activeSessionName, sessionInfo, switching, booting,
+  agents: allAgents, family, activeAgent, activeAgentId, activeSessionName, sessionInfo, switching, booting,
   onOpen, onPower, onLeave, onSpawn, onGroup, onSettings, onInfo, nav,
   onLibrary, onData, onFolders, menuFor, locked, adminSwitch = false, overlayOpen = false, onCloseOverlays, chatOpens = 0,
 }: {
   agents: SimpleAgent[]
+  /** The agent family (AgentFamily.tsx): rows under their parents, run workers in a line. */
+  family?: FamilyHooks
   activeAgent: SimpleAgent | null
   activeAgentId: string | null
   activeSessionName: string
@@ -2646,6 +2826,7 @@ function PhoneLayout({
   /** Counts the chats opened (see SimpleLayout's handleOpen). */
   chatOpens?: number
 }) {
+  const agents = family?.listed ?? allAgents
   const wsConnected = useAgentStore((s) => s.wsConnected)
   const activeChatId = useChatStore((s) => s.activeChatId)
   const groups = useGroupStore((s) => s.groups)
@@ -2878,7 +3059,8 @@ function PhoneLayout({
           activeAgentId={activeAgentId}
           sessionInfo={sessionInfo}
           onEdit={(id) => onGroup({ id })}
-          renderRow={(a: SimpleAgent, { pin }: RowParts) => {
+          renderAfter={family ? (a: SimpleAgent, depth: number) => workerLineRows(a, depth, family, true) : undefined}
+          renderRow={(a: SimpleAgent, { pin, tree }: RowParts) => {
             const info = sessionInfo.get(a.id)
             const busy = !!info?.busy
             const shared = a.kind === 'shared'
@@ -2892,6 +3074,9 @@ function PhoneLayout({
             return (
               <li
                 key={a.id}
+                data-parent={tree?.depth ? a.parent : undefined}
+                aria-level={tree ? tree.depth + 1 : undefined}
+                style={tree?.depth ? { marginLeft: tree.depth * 16 } : undefined}
                 className={`flex items-center gap-1 rounded-[var(--fd-radius-card)] border pr-1 transition-colors ${
                   a.id === activeAgentId ? 'border-violet-500/40 bg-[var(--fd-accent-soft)]' : busy ? 'border-amber-500/30 bg-amber-500/10' : 'border-[var(--fd-line)] bg-[var(--fd-surface-raised)]'
                 }`}
@@ -2912,6 +3097,7 @@ function PhoneLayout({
                       {busy && <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-500 dark:bg-amber-400" title="Working" />}
                       {info?.unread && !busy && <span className="h-2 w-2 shrink-0 rounded-full bg-sky-400" title="New reply" />}
                       {shareKeyOf(a) && <NetworkBadge shareKey={shareKeyOf(a)} />}
+                      {tree?.folded && <FoldedKids tree={tree} />}
                     </span>
                     <span className="block truncate text-xs text-zinc-500">
                       {isBooting ? 'Starting…'
@@ -2921,6 +3107,16 @@ function PhoneLayout({
                     </span>
                   </span>
                 </button>
+                {tree && tree.kids > 0 && (
+                  <button
+                    onClick={tree.onToggle}
+                    aria-expanded={!tree.folded}
+                    aria-label={`${tree.folded ? 'Show' : 'Fold'} the agents under ${a.name}`}
+                    className="flex h-11 w-9 shrink-0 items-center justify-center rounded-lg text-zinc-500 active:bg-zinc-800"
+                  >
+                    <ChevronRight className={`h-4 w-4 transition-transform motion-reduce:transition-none ${tree.folded ? '' : 'rotate-90'}`} />
+                  </button>
+                )}
                 {canPower && (
                   <button
                     onClick={() => onPower(a, !powered)}

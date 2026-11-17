@@ -302,6 +302,16 @@ export const spawnOldMan = (config: OldManSpawnRequest) =>
 export const listProcesses = (asUser?: string) =>
   fdFetch<ProcessInfo[]>('/processes', undefined, asUser)
 
+/** Move one of the owner's agents under another of theirs (``parent`` its
+ *  slug), or back to their own ("") — with everything under it (agent_family).
+ *  A refusal throws with the deck's reason (a loop, too deep, too many). */
+export const setProcessParent = (slug: string, parent: string, madeFor?: string) =>
+  fdFetch<{ ok: boolean; slug: string; parent: string; made_for: string; message: string }>(
+    `/processes/${encodeURIComponent(slug)}/parent`, {
+      method: 'PUT',
+      body: JSON.stringify(madeFor === undefined ? { parent } : { parent, made_for: madeFor }),
+    })
+
 export const spawnProcess = (config: SpawnConfig) =>
   fdFetch<ProcessActionResult>('/spawn-process', {
     method: 'POST',
