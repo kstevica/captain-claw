@@ -83,6 +83,7 @@ OUTWARD_GRANTS = ("email", "spend", "accounts")
 
 TRIGGER_KINDS = ("schedule", "events")   # on demand (Run now) is always there
 RUN_KINDS = ("run", "rehearsal", "carry_out", "check")
+WORK_KINDS = ("run", "rehearsal", "carry_out")  # what the factory did; a check run only measures it
 RUN_TRIGGERS = ("manual", "schedule", "events", "approval", "check")
 _AUTOMATIC_TRIGGERS = ("schedule", "events")
 RUN_STATUSES = ("queued", "running", "done", "failed", "cancelled")
@@ -597,6 +598,47 @@ class FirstMateStore:
                 -- When each schedule trigger of a factory is next due (Phase 2).
                 -- key = a hash of the trigger, so a version that changes it starts
                 -- afresh; kept here so a deck restart neither repeats nor loses one.
+                -- Drafts a factory's run left in the owner's mailbox (Phase 4), watched
+                -- until they're sent (as written or edited), deleted, or two weeks old.
+                CREATE TABLE IF NOT EXISTS fm_drafts (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    factory_id  TEXT NOT NULL REFERENCES fm_factories(id) ON DELETE CASCADE,
+                    run_id      TEXT NOT NULL DEFAULT '',
+                    owner_id    TEXT NOT NULL,
+                    draft_id    TEXT NOT NULL,
+                    message_id  TEXT NOT NULL DEFAULT '',
+                    thread_id   TEXT NOT NULL DEFAULT '',
+                    subject     TEXT NOT NULL DEFAULT '',
+                    body        TEXT NOT NULL DEFAULT '',
+                    partial     INTEGER NOT NULL DEFAULT 0,
+                    status      TEXT NOT NULL DEFAULT 'waiting',
+                    similarity  REAL,
+                    created_at  TEXT NOT NULL,
+                    checked_at  TEXT,
+                    UNIQUE (owner_id, draft_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_fm_drafts_status ON fm_drafts(status, checked_at);
+
+                -- A version run against the factory's cases (Phase 4): each case is a
+                -- rehearsal graded by a reviewer; the score decides whether a new
+                -- version goes live, and a weekly one watches for drift.
+                CREATE TABLE IF NOT EXISTS fm_checks (
+                    id           TEXT PRIMARY KEY,
+                    factory_id   TEXT NOT NULL REFERENCES fm_factories(id) ON DELETE CASCADE,
+                    version      INTEGER NOT NULL,
+                    version_sha  TEXT NOT NULL,
+                    purpose      TEXT NOT NULL,
+                    status       TEXT NOT NULL DEFAULT 'running',
+                    cases        TEXT NOT NULL DEFAULT '[]',
+                    results      TEXT NOT NULL DEFAULT '{}',
+                    score        REAL,
+                    baseline     REAL,
+                    note         TEXT NOT NULL DEFAULT '',
+                    created_at   TEXT NOT NULL,
+                    ended_at     TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_fm_checks_factory ON fm_checks(factory_id, created_at);
+
                 CREATE TABLE IF NOT EXISTS fm_trigger_state (
                     factory_id  TEXT NOT NULL REFERENCES fm_factories(id) ON DELETE CASCADE,
                     key         TEXT NOT NULL,
@@ -1069,12 +1111,14 @@ class FirstMateStore:
 
     def start_run(self, factory_id: str, *, trigger: str = "manual", kind: str = "run",
                   trigger_ref: list[str] | None = None, parent_run: str = "",
-                  now: datetime | None = None) -> dict[str, Any]:
+                  now: datetime | None = None, version: int | None = None) -> dict[str, Any]:
         """A run of the live version, ``queued`` until its runner has a child.
 
         Refused when the factory has no approved version, when its state
         doesn't allow this trigger, when a run is still going (one at a time),
-        or when it reached the deck's runs per day (the last 24 hours)."""
+        or when it reached the deck's runs per day (the last 24 hours). A
+        ``check`` run may run another ``version``: the live one or the draft
+        waiting for approval, never any other."""
         if trigger not in RUN_TRIGGERS:
             raise FirstMateError(f"trigger must be one of: {', '.join(RUN_TRIGGERS)}")
         if kind not in RUN_KINDS:
@@ -1096,11 +1140,15 @@ class FirstMateStore:
                                 (factory_id, *ACTIVE_RUN)).fetchone()
             if busy is not None:
                 raise FirstMateError("this factory already has a run going")
-            today = int(conn.execute("SELECT COUNT(*) FROM fm_runs WHERE factory_id = ? AND created_at >= ?",
+            today = int(conn.execute("SELECT COUNT(*) FROM fm_runs WHERE factory_id = ? AND created_at >= ?"
+                                     " AND kind != 'check'",  # a check's cases are bounded by the case cap
                                      (factory_id, _iso(at - timedelta(days=1)))).fetchone()[0])
-            if today >= cap:
+            if kind != "check" and today >= cap:
                 raise FirstMateError(f"this factory already ran {today} times in the last day (at most {cap})")
-            v = self._get_version(conn, factory_id, f["version"])
+            if version is not None and version != f["version"]:
+                if kind != "check" or version != f["draft_version"]:
+                    raise FirstMateError("only a check runs a version that isn't live, and only the waiting draft")
+            v = self._get_version(conn, factory_id, version if version is not None else f["version"])
             rid = "fmr_" + secrets.token_hex(8)
             conn.execute(
                 "INSERT INTO fm_runs (id, factory_id, owner_id, version, version_sha, kind, trigger, trigger_ref,"
@@ -1163,10 +1211,14 @@ class FirstMateStore:
         with self._lock:
             return self._run(self._c().execute("SELECT * FROM fm_runs WHERE id = ?", (str(run_id or ""),)).fetchone())
 
-    def list_runs(self, factory_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    def list_runs(self, factory_id: str, limit: int = 50, kinds: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+        sql, args = "SELECT * FROM fm_runs WHERE factory_id = ?", [factory_id]
+        if kinds:
+            sql += f" AND kind IN ({','.join('?' * len(kinds))})"
+            args.extend(kinds)
         with self._lock:
-            rows = self._c().execute("SELECT * FROM fm_runs WHERE factory_id = ? ORDER BY created_at DESC, id"
-                                     " LIMIT ?", (factory_id, max(1, min(int(limit), 500)))).fetchall()
+            rows = self._c().execute(sql + " ORDER BY created_at DESC, id LIMIT ?",
+                                     (*args, max(1, min(int(limit), 500)))).fetchall()
         return [self._run(r) for r in rows]
 
     def active_runs(self, owner_id: str | None = None) -> list[dict[str, Any]]:
@@ -1342,6 +1394,159 @@ class FirstMateStore:
                  _text("ref", ref, 200), _iso(_utcnow())))
             return int(cur.lastrowid)
 
+    def set_thumbs(self, factory_id: str, run_id: str, kind: str) -> int:
+        """The owner's 👍/👎 on a run: one per run, the latest wins; "" takes it back."""
+        if kind not in ("thumbs_up", "thumbs_down", ""):
+            raise FirstMateError("thumbs is thumbs_up, thumbs_down or nothing")
+        with self._tx() as conn:
+            self._get_factory(conn, factory_id)
+            conn.execute("DELETE FROM fm_signals WHERE factory_id = ? AND run_id = ?"
+                         " AND kind IN ('thumbs_up', 'thumbs_down')", (factory_id, run_id))
+        return self.add_signal(factory_id, kind, run_id=run_id, source="owner") if kind else 0
+
+    def thumbs(self, run_id: str) -> str:
+        with self._lock:
+            row = self._c().execute("SELECT kind FROM fm_signals WHERE run_id = ? AND kind IN"
+                                    " ('thumbs_up', 'thumbs_down') ORDER BY id DESC LIMIT 1", (run_id,)).fetchone()
+        return row["kind"] if row else ""
+
+    # ── checks (Phase 4) ───────────────────────────────────────────────
+
+    CHECK_PURPOSES = ("approve", "baseline", "weekly", "manual")
+    CHECK_STATUSES = ("running", "done", "void", "failed")
+
+    @staticmethod
+    def _check(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        d = dict(row)
+        for key, empty in (("cases", "[]"), ("results", "{}")):
+            try:
+                d[key] = json.loads(d.get(key) or empty)
+            except (TypeError, ValueError):
+                d[key] = json.loads(empty)
+        return d
+
+    def create_check(self, factory_id: str, *, version: int, purpose: str, cases: list[str],
+                     baseline: float | None = None) -> dict[str, Any]:
+        """One check at a time per factory; it runs the given version's cases."""
+        if purpose not in self.CHECK_PURPOSES:
+            raise FirstMateError(f"a check is for one of: {', '.join(self.CHECK_PURPOSES)}")
+        if not cases:
+            raise FirstMateError("a check needs at least one case")
+        with self._tx() as conn:
+            self._get_factory(conn, factory_id)
+            if conn.execute("SELECT 1 FROM fm_checks WHERE factory_id = ? AND status = 'running'",
+                            (factory_id,)).fetchone():
+                raise FirstMateError("this factory is being checked already")
+            v = self._get_version(conn, factory_id, version)
+            if v is None:
+                raise FirstMateError("no such version")
+            cid = "fmk_" + secrets.token_hex(8)
+            conn.execute("INSERT INTO fm_checks (id, factory_id, version, version_sha, purpose, cases, baseline,"
+                         " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                         (cid, factory_id, version, v["sha"], purpose, json.dumps(list(cases)), baseline,
+                          _iso(_utcnow())))
+            self._event(conn, factory_id, "first_mate", "check_started",
+                        {"check": cid, "version": version, "purpose": purpose, "cases": len(cases)})
+        return self.get_check(cid)
+
+    def get_check(self, check_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            return self._check(self._c().execute("SELECT * FROM fm_checks WHERE id = ?", (check_id,)).fetchone())
+
+    def active_check(self, factory_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            return self._check(self._c().execute(
+                "SELECT * FROM fm_checks WHERE factory_id = ? AND status = 'running'", (factory_id,)).fetchone())
+
+    def running_checks(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [self._check(r) for r in self._c().execute(
+                "SELECT * FROM fm_checks WHERE status = 'running' ORDER BY created_at").fetchall()]
+
+    def checks(self, factory_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        with self._lock:
+            return [self._check(r) for r in self._c().execute(
+                "SELECT * FROM fm_checks WHERE factory_id = ? ORDER BY created_at DESC LIMIT ?",
+                (factory_id, max(1, min(int(limit), 200)))).fetchall()]
+
+    def set_check_result(self, check_id: str, case_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        with self._tx() as conn:
+            row = self._check(conn.execute("SELECT * FROM fm_checks WHERE id = ?", (check_id,)).fetchone())
+            if row is None:
+                raise FirstMateError("no such check")
+            results = {**row["results"], str(case_id): result}
+            conn.execute("UPDATE fm_checks SET results = ? WHERE id = ?", (_sized("results", results), check_id))
+        return self.get_check(check_id)
+
+    def finish_check(self, check_id: str, status: str, *, score: float | None = None, note: str = "") -> dict[str, Any]:
+        if status not in self.CHECK_STATUSES or status == "running":
+            raise FirstMateError("a check ends done, void or failed")
+        with self._tx() as conn:
+            row = self._check(conn.execute("SELECT * FROM fm_checks WHERE id = ?", (check_id,)).fetchone())
+            if row is None:
+                raise FirstMateError("no such check")
+            if row["status"] != "running":
+                return row
+            conn.execute("UPDATE fm_checks SET status = ?, score = ?, note = ?, ended_at = ? WHERE id = ?",
+                         (status, score, _text("note", note, NOTE_MAX), _iso(_utcnow()), check_id))
+            self._event(conn, row["factory_id"], "first_mate", "check_finished",
+                        {"check": check_id, "status": status, "score": score, "version": row["version"],
+                         "purpose": row["purpose"], "note": note[:200]})
+        return self.get_check(check_id)
+
+    def last_score(self, factory_id: str, version: int | None = None) -> float | None:
+        """The latest finished check's score (of ``version`` when given)."""
+        sql, args = "SELECT score FROM fm_checks WHERE factory_id = ? AND status = 'done' AND score IS NOT NULL", [factory_id]
+        if version is not None:
+            sql += " AND version = ?"
+            args.append(version)
+        with self._lock:
+            row = self._c().execute(sql + " ORDER BY ended_at DESC LIMIT 1", args).fetchone()
+        return float(row["score"]) if row else None
+
+    # ── drafts (Phase 4) ───────────────────────────────────────────────
+
+    DRAFT_STATUSES = ("waiting", "sent", "edited", "deleted", "expired")
+
+    def add_draft(self, factory_id: str, owner_id: str, *, run_id: str, draft_id: str, message_id: str = "",
+                  thread_id: str = "", subject: str = "", body: str = "", partial: bool = False) -> bool:
+        """Watch a draft a run left; once only per draft. False when it was there already."""
+        draft_id = _text("draft_id", draft_id, 200, required=True)
+        with self._tx() as conn:
+            self._get_factory(conn, factory_id)
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO fm_drafts (factory_id, run_id, owner_id, draft_id, message_id, thread_id,"
+                " subject, body, partial, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (factory_id, run_id[:40], norm_user(owner_id), draft_id, str(message_id)[:200],
+                 str(thread_id)[:200], str(subject)[:300], str(body)[:4000], int(bool(partial)), _iso(_utcnow())))
+            return cur.rowcount > 0
+
+    def drafts_to_check(self, now: datetime, *, older_than: timedelta, every: timedelta,
+                        limit: int = 20) -> list[dict[str, Any]]:
+        """Waiting drafts old enough to look at, not looked at lately, oldest first."""
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT * FROM fm_drafts WHERE status = 'waiting' AND created_at <= ?"
+                " AND (checked_at IS NULL OR checked_at <= ?) ORDER BY created_at LIMIT ?",
+                (_iso(now - older_than), _iso(now - every), max(1, int(limit)))).fetchall()
+        return [dict(r) for r in rows]
+
+    def set_draft(self, draft_row_id: int, status: str, *, similarity: float | None = None,
+                  now: datetime | None = None) -> None:
+        if status not in self.DRAFT_STATUSES:
+            raise FirstMateError(f"a draft is one of: {', '.join(self.DRAFT_STATUSES)}")
+        with self._tx() as conn:
+            conn.execute("UPDATE fm_drafts SET status = ?, similarity = COALESCE(?, similarity), checked_at = ?"
+                         " WHERE id = ?", (status, similarity, _iso(now or _utcnow()), int(draft_row_id)))
+
+    def drafts(self, factory_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in self._c().execute(
+                "SELECT * FROM fm_drafts WHERE factory_id = ? ORDER BY id DESC LIMIT ?",
+                (factory_id, max(1, min(int(limit), 500)))).fetchall()]
+
     def signals(self, factory_id: str, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
             return [dict(r) for r in self._c().execute(
@@ -1367,7 +1572,7 @@ class FirstMateStore:
         with self._tx() as conn:
             ids = [r["id"] for r in conn.execute("SELECT id FROM fm_factories WHERE owner_id = ?", (owner,))]
             conn.execute("DELETE FROM fm_factories WHERE owner_id = ?", (owner,))
-            conn.execute("DELETE FROM fm_settings WHERE key = ?", (f"prefs:{owner}",))
+            conn.execute("DELETE FROM fm_settings WHERE key IN (?, ?)", (f"prefs:{owner}", f"report:{owner}"))
         for fid in ids:
             shutil.rmtree(self.sealed_dir(fid), ignore_errors=True)
         return len(ids)

@@ -113,6 +113,8 @@ export interface Run {
   note?: string
   /** A rehearsal's: what it would have done. */
   intents?: Intent[]
+  /** The owner's 👍/👎 on its result, if any. */
+  thumbs?: '' | 'thumbs_up' | 'thumbs_down'
   /** A carry-out's: what the register and Gmail/Calendar showed it did. */
   proof?: { state?: 'confirmed' | 'nothing' | 'doubt' | 'unknown'; note?: string; sent?: number; approved?: number; actions?: string[] }
 }
@@ -148,6 +150,76 @@ export interface FactoryCard extends Factory {
   pending_events: number
   /** The newest rehearsal whose intents wait for the owner's yes. */
   proposal: { run_id: string; count: number } | null
+  health: Health
+  health_why: string
+  satisfaction: number | null
+}
+
+export type Health = 'green' | 'amber' | 'red' | 'new'
+
+export const HEALTH_LABELS: Record<Health, string> = {
+  green: 'Healthy', amber: 'Needs a look', red: 'In trouble', new: 'Too new to say',
+}
+
+export interface Scorecard {
+  health: Health
+  health_why: string
+  week: { runs: number; done: number; judged: number; passed: number; tokens_per_run: number; median_minutes: number | null }
+  fortnight: { carry_outs: number; doubts: number }
+  satisfaction: number | null
+  signals: number
+  target: number
+  drafts: Record<'waiting' | 'sent' | 'edited' | 'deleted' | 'expired', number>
+  cases: number
+  check: Pick<Check, 'id' | 'purpose' | 'version' | 'version_sha' | 'status' | 'score' | 'note' | 'created_at' | 'ended_at'> | null
+}
+
+/** An input the factory is tested on, and what a good result does. */
+export interface Case {
+  id: string
+  title: string
+  input: string
+  expect: string[]
+  /** Never shown to the factory, or to anything that rewrites its charter. */
+  sealed: boolean
+  origin: 'owner' | 'run'
+  from_run: string
+  created_at: string
+}
+
+export type CheckPurpose = 'approve' | 'baseline' | 'weekly' | 'manual'
+
+/** One version run on every case, graded by a reviewer on another model. */
+export interface Check {
+  id: string
+  factory_id: string
+  version: number
+  version_sha: string
+  purpose: CheckPurpose
+  status: 'running' | 'done' | 'void' | 'failed'
+  cases: string[]
+  results: Record<string, { run_id?: string; score: number | null; note?: string }>
+  baseline: number | null
+  score: number | null
+  note: string
+  created_at: string
+  ended_at: string | null
+}
+
+export const CHECK_PURPOSE_LABELS: Record<CheckPurpose, string> = {
+  approve: 'Before going live', baseline: 'First score', weekly: 'Weekly', manual: 'By you',
+}
+
+export interface CaseFields { title: string; input: string; expect: string[]; sealed: boolean }
+
+export interface Signal { id: number; run_id: string; kind: string; value: number; source: string; at: string }
+
+export const SIGNAL_LABELS: Record<string, string> = {
+  approved: 'You approved what it would do', rejected: 'You rejected what it would do',
+  thumbs_up: 'You gave it 👍', thumbs_down: 'You gave it 👎',
+  sent_as_written: 'You sent its draft as written', sent_edited: 'You sent its draft after edits',
+  draft_deleted: 'You deleted its draft', done: 'Marked done', not_done: 'Marked not done',
+  reopened: 'Reopened', undone: 'Undone',
 }
 
 export interface FactoryEvent {
@@ -163,6 +235,39 @@ export interface FactoryDetail extends Factory {
   runs: Run[]
   events: FactoryEvent[]
   satisfaction: number | null
+  scorecard: Scorecard
+  signals: Signal[]
+  drafts: { id: number; run_id: string; subject: string; status: string; similarity: number | null; created_at: string }[]
+  /** The check going, if any. */
+  check: Check | null
+  ladder: Ladder
+}
+
+/** How well the deck's own verdict on a result agrees with the owner's labels (👍/👎, approve/reject, drafts). */
+export interface Calibration {
+  n: number
+  kappa: number | null
+  agreement?: number | null
+  /** Calibrated: trust may move on its own. */
+  ready: boolean
+  why: string
+  labels_bar: number
+  kappa_bar: number
+}
+
+/** A factory's record at its trust level, and whether it moves up on its own. */
+export interface Ladder {
+  level: Trust
+  next: Trust | null
+  counted: number
+  needed: number
+  value: number | null
+  bar: number
+  doubts: number
+  pinned: boolean
+  eligible: boolean
+  why: string
+  calibration: Calibration
 }
 
 export interface DeckSettings { enabled: boolean; admins_only: boolean; max_factories: number; runs_per_day: number }
@@ -176,6 +281,42 @@ export interface Status {
   prefs: Prefs
   counts: { factories: number; running: number; runs_going: number }
   week: { start: string; budget: number; used: number }
+  calibration: Calibration | null
+}
+
+/** One factory's week in the report. */
+export interface WeekLine {
+  id: string
+  title: string
+  state: FactoryState
+  trust: Trust
+  health: Health
+  health_why: string
+  runs: number
+  done: number
+  carry_outs: number
+  doubts: number
+  tokens: number
+  share: number
+  signals: number
+  satisfaction: number | null
+  drafts: { sent: number; edited: number; deleted: number }
+  cases_score: number | null
+  moved: string[]
+  look: string[]
+}
+
+/** "First Mate's week": last week (what Monday's Line item is about) or this week so far. */
+export interface WeekReport {
+  start: string
+  end: string
+  title: string
+  text: string
+  totals: { runs: number; done: number; carry_outs: number; doubts: number; tokens: number; budget: number
+    drafts: { sent: number; edited: number; deleted: number } }
+  factories: WeekLine[]
+  look: string[]
+  sent: { week?: string; at?: string; sent?: boolean }
 }
 
 /** Fired to open First Mate: the kiosk opens its dialog, the full layout its page. */
@@ -233,8 +374,9 @@ export const patchFactory = (id: string, body: { title?: string; share?: number;
 export const deleteFactory = (id: string) => call<{ ok: boolean }>(f(id), { method: 'DELETE' })
 export const newDraft = (id: string, body: DraftFields = {}) => call<Factory>(`${f(id)}/draft`, json('POST', body))
 export const editDraft = (id: string, body: DraftFields) => call<Factory>(`${f(id)}/draft`, json('PATCH', body))
-export const approve = (id: string, version: number, sha: string) =>
-  call<Factory>(`${f(id)}/approve`, json('POST', { version, sha }))
+/** A live factory with cases is checked first: the answer then carries the check, and the draft waits. */
+export const approve = (id: string, version: number, sha: string, skipCheck = false) =>
+  call<Factory & { check?: Check }>(`${f(id)}/approve`, json('POST', skipCheck ? { version, sha, skip_check: true } : { version, sha }))
 export const decline = (id: string, version: number, reason = '') =>
   call<Factory>(`${f(id)}/decline`, json('POST', { version, reason }))
 export const setState = (id: string, state: OwnerState, reason = '') =>
@@ -247,8 +389,23 @@ export const approveRun = (runId: string, ids?: number[]) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/approve`, json('POST', ids ? { ids } : {}))
 export const rejectRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/reject`, { method: 'POST' })
+export const rateRun = (runId: string, kind: 'up' | 'down' | '') =>
+  call<{ thumbs: string; satisfaction: number | null }>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/thumbs`, json('POST', { kind }))
 export const stopRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/stop`, { method: 'POST' })
+export const getReport = (week: 'last' | 'this') => call<WeekReport>(`/fd/first-mate/report?week=${week}`)
+export const listCases = (id: string) => call<{ cases: Case[]; checks: Check[]; max: number }>(`${f(id)}/cases`)
+export const addCase = (id: string, body: CaseFields & { from_run?: string }) =>
+  call<Case>(`${f(id)}/cases`, json('POST', body))
+export const updateCase = (id: string, caseId: string, body: Partial<CaseFields>) =>
+  call<Case>(`${f(id)}/cases/${encodeURIComponent(caseId)}`, json('PATCH', body))
+export const deleteCase = (id: string, caseId: string) =>
+  call<{ ok: boolean }>(`${f(id)}/cases/${encodeURIComponent(caseId)}`, { method: 'DELETE' })
+export const caseDraft = (runId: string) =>
+  call<{ title: string; input: string; expect: string[]; from_run: string; has_input: boolean }>(
+    `/fd/first-mate/runs/${encodeURIComponent(runId)}/case-draft`)
+export const checkNow = (id: string) => call<Check>(`${f(id)}/check`, { method: 'POST' })
+export const stopCheck = (id: string) => call<Check>(`${f(id)}/check`, { method: 'DELETE' })
 
 // ── words ──────────────────────────────────────────────────────────────
 

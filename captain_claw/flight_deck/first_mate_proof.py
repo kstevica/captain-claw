@@ -44,6 +44,7 @@ CONFIRMED, NOTHING, DOUBT, UNKNOWN = "confirmed", "nothing", "doubt", "unknown"
 _MAIL_TOOLS = ("google_mail", "microsoft_mail", "imap_mail")
 _SENDS = frozenset({"send", "send_draft", "reply", "forward", "create_draft", "update_draft"})
 _LOWER = {"direct": "commit", "commit": "propose"}
+TWO_DOUBTS_REASON = "two doubtful carry-outs in two weeks"
 ACTIONS_KEPT = 20
 
 
@@ -133,6 +134,13 @@ def judge(rows: list[dict[str, Any]], actions: list[dict[str, Any]], approved: l
             "actions": [a["label"] for a in actions][:ACTIONS_KEPT]}
 
 
+def _doubts_lately(store: fms.FirstMateStore, factory_id: str) -> int:
+    from datetime import UTC, timedelta
+    since = (datetime.now(UTC) - timedelta(days=14)).isoformat()
+    return sum(1 for r in store.runs_since(factory_id, since, kinds=("carry_out",))
+               if (r.get("proof") or {}).get("state") == DOUBT)
+
+
 async def _rows(run: dict[str, Any]) -> list[dict[str, Any]] | None:
     """The carry-out's workers' calls from the register, or None when it can't be read."""
     if not run.get("child_id") or not run.get("started_at"):
@@ -161,6 +169,8 @@ async def prove(store: fms.FirstMateStore, run: dict[str, Any]) -> dict[str, Any
         else:
             from captain_claw.flight_deck import taskboard_proof
             actions = [a for a in (taskboard_proof._action(r) for r in rows) if a]
+            from captain_claw.flight_deck import first_mate_drafts
+            await first_mate_drafts.capture(store, run, rows)  # the drafts it left, watched from here
             try:
                 await taskboard_proof.confirm(run["owner_id"], actions)
             except Exception:  # noqa: BLE001 — the record stands
@@ -179,6 +189,9 @@ async def prove(store: fms.FirstMateStore, run: dict[str, Any]) -> dict[str, Any
                     store.set_trust(factory["id"], lower, "deck")
                 from captain_claw.flight_deck import first_mate_line
                 await first_mate_line.proof_doubt(store.get(factory["id"]), run, proof["note"])
+                if _doubts_lately(store, factory["id"]) >= 2 and store.get(factory["id"])["state"] == "running":
+                    store.set_state(factory["id"], "paused", "deck", TWO_DOUBTS_REASON)
+                    await first_mate_line.factory_paused(store.get(factory["id"]), TWO_DOUBTS_REASON, needs_you=True)
         return proof
     except Exception:  # noqa: BLE001 — a proof never breaks a refresh
         log.warning("first mate: proving a carry-out failed", extra={"run": run.get("id")}, exc_info=True)

@@ -227,6 +227,20 @@ Three layers:
    - They run in rehearsal when a new version is proposed (a version that
      scores lower than the current one doesn't go live) and once a week (a
      drop turns the factory amber).
+   - As built (P4): up to 30 cases a factory, each an input and one to ten
+     lines saying what a good result does; graded full, partial or none per
+     line. A check runs one case at a time (`kind` `check`, a rehearsal that
+     proposes nothing), and its runs stay out of the run list and the day's
+     run count but count against the factory's share. Approving a draft of a
+     live factory that has cases starts a check of the draft; it goes live
+     when it scores within 5 points of the live version's last score, through
+     the same hash-pinned approval, so a draft edited during the check never
+     goes live. Otherwise it stays waiting, the owner is told on the Line, and
+     may approve it anyway. A weekly score 10 points or more under the one
+     before turns the factory amber. Open cases go into the brief as examples
+     (three at most, never the case being checked).
+   - A finished run that started on new mail can become a case: its emails
+     are the input, its contract the first guess at the lines.
 3. **Owner signals** (§8): the real satisfaction.
 
 Building the cases: reuse Captain Swarm's practice sets where a kind exists
@@ -267,6 +281,19 @@ median time, asks per run.
 is checked against the user's own labels with `label_eval`: kappa ≥ 0.6 on at
 least 30 labels, the same bar Captain Swarm uses. Until then trust moves only
 by hand.
+
+As built (P4): every finished run gets the deck's own verdict with no word
+from the user (failed, a leak or a doubtful proof is bad; finished is good).
+The user's label for the same run is their 👍/👎, else approving or rejecting
+what it would do, else what became of its drafts (sent with 70% or more kept
+is good). Kappa runs over the user's latest 200 labelled runs across their
+factories. When the user and the deck called every run good, kappa can't be
+worked out, and that doesn't count as calibrated. The record behind a move is
+the last 10 carry-outs and outright rejections since trust last moved: a
+carry-out counts what the user did with its result, else the deck's verdict,
+times the share of its proposal they approved; a rejection counts 0. The
+supervisor raises a running, unpinned factory one level when they average
+≥ 0.9 with no doubt and the user is calibrated, and says so on the Line.
 
 ## 9. Triggers and events
 
@@ -330,6 +357,18 @@ factory's history.
 per factory, spend against budget, and what it proposes (pause a red factory,
 change a share, a new factory for a stalled goal, an improvement run, §12).
 Each proposal can be accepted from the item.
+
+As built (P4): read from the store with no model call. It covers Monday to
+Monday UTC, the budget's week, and goes out on the first scan after 07:00 UTC
+on the Monday that ends it, once (a mark per user, and the Line item is keyed
+by the week). Totals (runs, done, carry-outs and doubtful ones, tokens against
+the budget, drafts' fate), a line per factory (health, trust, runs, tokens
+against its share, the week's satisfaction, its cases' score, what moved),
+and "Worth a look": a paused or red factory, proposals waiting, a held draft,
+more trust waiting on calibration, a budget 90% used. A week with no run and
+nothing worth a look sends nothing. It reaches the phone only when something
+is worth a look. The First Mate page shows last week and this week so far.
+Accepting proposals from the item comes with P5's weekly proposals.
 
 ## 12. Factories get better
 

@@ -42,8 +42,8 @@ def _excerpt(text: str) -> str:
 async def run_finished(run: dict[str, Any]) -> None:
     """A finished run on its factory's thread. A rehearsal that would do
     something is a proposal: "needs you", with Approve on First Mate."""
-    if run.get("status") not in ("done", "failed"):
-        return
+    if run.get("status") not in ("done", "failed") or (run.get("kind") == "check" and run.get("verdict") != "leak"):
+        return  # a test case is told once, when its check ends; one that reached outside, now
     try:
         from captain_claw.flight_deck import line
         store = fms.get_store()
@@ -100,6 +100,51 @@ async def proofs_seen(owner_id: str, run_ids: list[str]) -> None:
             await line.settle(fms.norm_user(owner_id), "first_mate_proof", rid)
     except Exception:  # noqa: BLE001
         log.debug("first mate: proof settle failed", exc_info=True)
+
+
+async def _check_post(factory: dict[str, Any], title: str, body: str, *, needs_you: bool) -> None:
+    try:
+        from captain_claw.flight_deck import line
+        await line.post(factory["owner_id"], "run", title, body + "\n\nOpen First Mate to see its cases.",
+                        bell_type="first_mate_check", source=SOURCE, needs_you=needs_you,
+                        ref_type="first_mate_factory", ref_id=factory["id"], to_phones=needs_you,
+                        thread_id=thread_of(factory["id"]))
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: check post failed", exc_info=True)
+
+
+async def check_passed(factory: dict[str, Any], version: int, note: str) -> None:
+    await _check_post(factory, f"{factory['title']}: version {version} is live", note, needs_you=False)
+
+
+async def check_held(factory: dict[str, Any], version: int, note: str) -> None:
+    await _check_post(factory, f"{factory['title']}: version {version} didn't go live", note, needs_you=True)
+
+
+async def check_dropped(factory: dict[str, Any], score: float, previous: float) -> None:
+    await _check_post(factory, f"{factory['title']} scores lower on its cases",
+                      f"This week it scored {score:.0%} on its cases, down from {previous:.0%}.", needs_you=False)
+
+
+_TRUST_WORDS = {"commit": "acts within its grants", "direct": "acts directly"}
+_TRUST_HOW = {"commit": "It will carry out what its grants allow without asking you first, and ask about the rest.",
+              "direct": "It won't rehearse any more: it does its work itself."}
+
+
+async def trust_raised(factory: dict[str, Any], record: dict[str, Any], calibration: dict[str, Any]) -> None:
+    """The record moved a factory up a level: the owner hears it, with why."""
+    level = factory["trust"]
+    body = (f"Its last {record['counted']} results scored {record['value']:.0%}, with no doubtful carry-out, and "
+            f"its own checks agree with your labels (kappa {calibration['kappa']:.2f} on {calibration['n']}). "
+            f"{_TRUST_HOW.get(level, '')}\n\nTo keep it asking first, set its trust back on First Mate and pin it.")
+    try:
+        from captain_claw.flight_deck import line
+        await line.post(factory["owner_id"], "run", f"{factory['title']} now {_TRUST_WORDS.get(level, level)}", body,
+                        bell_type="first_mate_trust", source=SOURCE, needs_you=False,
+                        ref_type="first_mate_factory", ref_id=factory["id"], to_phones=True,
+                        thread_id=thread_of(factory["id"]))
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: trust post failed", exc_info=True)
 
 
 async def proposal_settled(run: dict[str, Any] | None) -> None:
