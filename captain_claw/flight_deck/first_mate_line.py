@@ -3,7 +3,9 @@
 See docs/first-mate-plan.md §11 and §14.
 
 * **A run that finished** (done or failed) is a Runs item: not "needs you",
-  not sent to phones. Bat's own "Bat finished" item is skipped for these runs
+  not sent to phones. A rehearsal that would do something is a **proposal**
+  instead: "needs you", to phones, settled once it's approved, rejected or
+  replaced by a newer rehearsal. Bat's own "Bat finished" item is skipped for these runs
   (``bat_routes._bat_on_finish``), so each run is told once. A run stopped by
   its owner says nothing.
 * **A factory First Mate paused** after a failure streak is "needs you". It
@@ -38,6 +40,8 @@ def _excerpt(text: str) -> str:
 
 
 async def run_finished(run: dict[str, Any]) -> None:
+    """A finished run on its factory's thread. A rehearsal that would do
+    something is a proposal: "needs you", with Approve on First Mate."""
     if run.get("status") not in ("done", "failed"):
         return
     try:
@@ -45,23 +49,45 @@ async def run_finished(run: dict[str, Any]) -> None:
         store = fms.get_store()
         factory = store.get(run["factory_id"])
         name = factory["title"] if factory else "A factory"
-        rehearsal = run.get("kind") == "rehearsal"
-        if run["status"] == "done":
-            title = f"{name}: rehearsed" if rehearsal else f"{name}: done"
+        kind = run.get("kind")
+        needs_you, ref_type, to_phones = False, "first_mate_run", False
+        if run["status"] == "done" and kind == "rehearsal":
+            waiting = [i for i in store.intents(run["id"]) if i["status"] == "open"]
+            if waiting:
+                title = f"{name} would do {len(waiting)} {'thing' if len(waiting) == 1 else 'things'}"
+                body = (_would(waiting) + "\n\nApprove it on First Mate to have it carried out once, "
+                        "or reject it.\n\n" + _excerpt(run.get("result", ""))).strip()
+                needs_you, ref_type, to_phones = True, "first_mate_proposal", True
+            else:
+                title = f"{name}: rehearsed"
+                body = (_excerpt(run.get("result", "")) or "It finished, with nothing to show.") + \
+                    "\n\n" + _would([])
+        elif run["status"] == "done":
+            title = f"{name}: carried out" if kind == "carry_out" else f"{name}: done"
             body = _excerpt(run.get("result", "")) or "It finished, with nothing to show."
-            if rehearsal:
-                body += "\n\n" + _would(store.intents(run["id"]))
         else:
-            title = f"{name}: the run failed"
+            title = f"{name}: the carry-out failed" if kind == "carry_out" else f"{name}: the run failed"
             body = run.get("error") or "It stopped without saying why."
             if run.get("result"):
                 body += "\n\n" + _excerpt(run["result"])
         body += "\n\nOpen First Mate to see the whole run."
         await line.post(run["owner_id"], "run", title, body, bell_type="first_mate_run", source=SOURCE,
-                        needs_you=False, ref_type="first_mate_run", ref_id=run["id"], to_phones=False,
+                        needs_you=needs_you, ref_type=ref_type, ref_id=run["id"], to_phones=to_phones,
                         thread_id=thread_of(run["factory_id"]))
     except Exception:  # noqa: BLE001
         log.debug("first mate: run post failed", exc_info=True)
+
+
+async def proposal_settled(run: dict[str, Any] | None) -> None:
+    """A proposal answered (approved, rejected) or replaced by a newer
+    rehearsal: it leaves Needs you."""
+    if not run:
+        return
+    try:
+        from captain_claw.flight_deck import line
+        await line.settle(fms.norm_user(run["owner_id"]), "first_mate_proposal", run["id"])
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: proposal settle failed", exc_info=True)
 
 
 WOULD_SHOWN = 8

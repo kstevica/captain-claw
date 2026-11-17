@@ -54,6 +54,8 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [opened, setOpened] = useState<string | null>(null)
+  const [openedTab, setOpenedTab] = useState<'charter' | 'runs'>('charter')
+  const openAt = (id: string, tab: 'charter' | 'runs' = 'charter') => { setOpenedTab(tab); setOpened(id) }
   const [picking, setPicking] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [scrolled, setScrolled] = useState(false)
@@ -118,7 +120,7 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
   }
 
   const streak = (f: FactoryCard) => f.state === 'paused' && /failed runs in a row/.test(f.state_reason)
-  const needs = useMemo(() => factories.filter((f) => f.draft || f.state === 'paused_budget' || streak(f)
+  const needs = useMemo(() => factories.filter((f) => f.proposal || f.draft || f.state === 'paused_budget' || streak(f)
     || f.last_run?.waiting), [factories])
 
   const create = async (body: { template?: string; title?: string; charter?: string }) => {
@@ -127,7 +129,7 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
       const f = await createFactory(body)
       setPicking(false)
       await load()
-      setOpened(f.id)
+      openAt(f.id)
     } catch (e) {
       setError(errText(e))
     } finally {
@@ -196,12 +198,13 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                     <ul className="divide-y divide-[var(--fd-line)]">
                       {needs.map((f) => (
                         <li key={f.id}>
-                          <button onClick={() => setOpened(f.id)}
+                          <button onClick={() => openAt(f.id, f.proposal ? 'runs' : 'charter')}
                             className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--fd-hover)]">
                             <span className="min-w-0 flex-1">
                               <span className="block text-[15px] font-medium text-zinc-100">{f.title}</span>
                               <span className="block text-xs text-zinc-500">
-                                {f.draft ? (f.version ? `Draft v${f.draft.version} waits for your approval` : 'Its charter waits for your approval')
+                                {f.proposal ? `It would do ${f.proposal.count} ${f.proposal.count === 1 ? 'thing' : 'things'}: carry them out or reject them`
+                                  : f.draft ? (f.version ? `Draft v${f.draft.version} waits for your approval` : 'Its charter waits for your approval')
                                   : f.state === 'paused_budget' ? 'Used its share of this week’s tokens'
                                     : streak(f) ? `Paused after ${f.state_reason}: see why, then resume it`
                                       : 'A run waits for you on the Bat page'}
@@ -240,7 +243,7 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                     <ul className="divide-y divide-[var(--fd-line)]">
                       {factories.map((f) => (
                         <FactoryRow key={f.id} factory={f} busy={busy === f.id} autoOn={status.prefs.on}
-                          onOpen={() => setOpened(f.id)}
+                          onOpen={() => openAt(f.id)}
                           onRun={() => void act(f.id, () => runNow(f.id), `${f.title}: run started`)}
                           onState={(s) => void act(f.id, () => setState(f.id, s), `${f.title}: ${STATE_LABELS[s].toLowerCase()}`)}
                           onDelete={() => {
@@ -266,7 +269,7 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
 
       {notice && <Toast text={notice} onDismiss={() => setNotice(null)} />}
       {opened && (
-        <FactoryDrawer factoryId={opened} onClose={() => setOpened(null)}
+        <FactoryDrawer factoryId={opened} initialTab={openedTab} onClose={() => setOpened(null)}
           onChanged={() => { void listFactories().then(setFactories).catch(() => {}) }}
           onNotice={setNotice} />
       )}
@@ -385,6 +388,11 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete
   if (f.live && autoOn && f.state === 'running' && f.next_at && !going) {
     const due = new Date(f.next_at).getTime() <= Date.now()
     meta.push(<span key="n" className="text-zinc-400">{due ? 'Due now' : `Next ${whenText(f.next_at)}`}</span>)
+  }
+  if (f.proposal) {
+    meta.push(<span key="p" className="text-amber-700 dark:text-amber-300">
+      {f.proposal.count} {f.proposal.count === 1 ? 'thing waits' : 'things wait'} for your yes
+    </span>)
   }
   if (f.pending_events > 0) {
     meta.push(<span key="e" className="text-zinc-400">{f.pending_events} {f.pending_events === 1 ? 'event waits' : 'events wait'} for the next run</span>)

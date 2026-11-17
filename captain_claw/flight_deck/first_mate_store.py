@@ -1297,6 +1297,14 @@ class FirstMateStore:
             n = conn.execute(sql, args).rowcount
         return int(n)
 
+    def open_proposals(self, factory_id: str) -> list[str]:
+        """A factory's rehearsals with intents still waiting for the owner, newest first."""
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT r.id FROM fm_runs r WHERE r.factory_id = ? AND EXISTS (SELECT 1 FROM fm_intents i"
+                " WHERE i.run_id = r.id AND i.status = 'open') ORDER BY r.created_at DESC", (factory_id,)).fetchall()
+        return [r["id"] for r in rows]
+
     # ── signals (Phase 4) ──────────────────────────────────────────────
 
     def add_signal(self, factory_id: str, kind: str, *, value: float | None = None, run_id: str = "",

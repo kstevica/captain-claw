@@ -3,7 +3,9 @@ import { createPortal } from 'react-dom'
 import { Loader2, Play, Square, X } from 'lucide-react'
 import {
   approve,
+  approveRun,
   decline,
+  rejectRun,
   editDraft,
   getFactory,
   newDraft,
@@ -21,6 +23,7 @@ import {
   type DraftFields,
   type FactoryDetail,
   type FactoryEvent,
+  type Intent,
   type Run,
   type Trigger,
   type Version,
@@ -84,14 +87,16 @@ function fieldsOf(form: Form, v: Version): DraftFields {
 const same = (a: Form, b: Form) => a.charter === b.charter && a.checks === b.checks
   && a.schedule === b.schedule && a.runTokens === b.runTokens
 
-export function FactoryDrawer({ factoryId, onClose, onChanged, onNotice }: {
+export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onChanged, onNotice }: {
   factoryId: string
+  /** Open on this tab (a proposal opens on Runs). */
+  initialTab?: Tab
   onClose: () => void
   onChanged: () => void
   onNotice: (text: string) => void
 }) {
   const [data, setData] = useState<FactoryDetail | null>(null)
-  const [tab, setTab] = useState<Tab>('charter')
+  const [tab, setTab] = useState<Tab>(initialTab)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [form, setForm] = useState<Form | null>(null)
@@ -285,8 +290,11 @@ export function FactoryDrawer({ factoryId, onClose, onChanged, onNotice }: {
               ) : (
                 <ul className="space-y-2.5">
                   {f.runs.map((r) => (
-                    <RunItem key={r.id} run={r} busy={busy === `stop:${r.id}`}
-                      onStop={() => void act(`stop:${r.id}`, () => stopRun(r.id), 'Run stopped')} />
+                    <RunItem key={r.id} run={r} busy={busy === `stop:${r.id}`} deciding={busy === `decide:${r.id}`}
+                      onStop={() => void act(`stop:${r.id}`, () => stopRun(r.id), 'Run stopped')}
+                      onApprove={(ids, total) => void act(`decide:${r.id}`, () => approveRun(r.id, ids.length === total ? undefined : ids),
+                        `Carrying out ${ids.length} ${ids.length === 1 ? 'action' : 'actions'}, once`)}
+                      onReject={() => void act(`decide:${r.id}`, () => rejectRun(r.id), 'Rejected: nothing will be done')} />
                   ))}
                 </ul>
               )}
@@ -366,14 +374,38 @@ function LiveVersion({ version: v, trust, approvedAt, onChange, busy }: {
   )
 }
 
-function RunItem({ run: r, busy, onStop }: { run: Run; busy: boolean; onStop: () => void }) {
+const INTENT_DONE: Record<Exclude<Intent['status'], 'open'>, { tone: PillTone; label: string }> = {
+  approved: { tone: 'violet', label: 'Approved' },
+  carried_out: { tone: 'green', label: 'Carried out' },
+  rejected: { tone: 'zinc', label: 'Rejected' },
+  dropped: { tone: 'zinc', label: 'Not done' },
+}
+
+function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject }: {
+  run: Run
+  busy: boolean
+  deciding: boolean
+  onStop: () => void
+  onApprove: (ids: number[], total: number) => void
+  onReject: () => void
+}) {
   const [open, setOpen] = useState(false)
   const going = r.status === 'queued' || r.status === 'running'
+  const waiting = (r.intents ?? []).filter((i) => i.status === 'open')
+  const [unticked, setUnticked] = useState<Set<number>>(new Set())
+  const chosen = waiting.filter((i) => !unticked.has(i.id)).map((i) => i.id)
+  const toggle = (id: number) => setUnticked((s) => {
+    const n = new Set(s)
+    if (n.has(id)) n.delete(id)
+    else n.add(id)
+    return n
+  })
   return (
     <li className="fd-card p-3">
       <div className="flex items-center gap-2">
         <Pill tone={r.waiting ? 'amber' : RUN_TONE[r.status]}>{r.waiting ? 'Waiting for you' : RUN_LABELS[r.status]}</Pill>
         {r.kind === 'rehearsal' && <Pill tone="zinc" title="Anything outward was recorded, not done">Rehearsal</Pill>}
+        {r.kind === 'carry_out' && <Pill tone="violet" title="Did what you approved, once">Carry-out</Pill>}
         {r.verdict === 'leak' && <Pill tone="red" title="The tool-call register shows an outward call that ran">Reached outside</Pill>}
         <span className="text-xs text-zinc-500">{whenText(r.created_at)}</span>
         {r.tokens > 0 && <span className="text-xs text-zinc-500">· {tokensText(r.tokens)}</span>}
@@ -389,17 +421,38 @@ function RunItem({ run: r, busy, onStop }: { run: Run; busy: boolean; onStop: ()
       {r.waiting && r.note && <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">{r.note}</p>}
       {r.kind === 'rehearsal' && !going && r.intents && (
         r.intents.length ? (
-          <div className="mt-2 rounded-xl bg-[var(--fd-hover)] px-3 py-2">
-            <p className="text-[11px] font-semibold text-zinc-400">Would have done (nothing of it was done)</p>
-            <ul className="mt-1 space-y-0.5 text-[13px] text-zinc-300">
-              {r.intents.slice(0, 12).map((i) => (
+          <div className={`mt-2 rounded-xl px-3 py-2 ${waiting.length ? 'border border-amber-500/30 bg-amber-500/[0.06]' : 'bg-[var(--fd-hover)]'}`}>
+            <p className="text-[11px] font-semibold text-zinc-400">
+              {waiting.length ? 'It would do this. Nothing of it is done until you say so.' : 'It would have done this'}
+            </p>
+            <ul className="mt-1.5 space-y-1.5 text-[13px] text-zinc-300">
+              {r.intents.slice(0, 20).map((i) => (
                 <li key={i.id} className="flex gap-2">
-                  <span className="text-zinc-500">{i.kind === 'commit' ? '⏸' : '•'}</span>
-                  <span className="min-w-0 flex-1">{i.what}</span>
+                  {i.status === 'open' ? (
+                    <input type="checkbox" checked={!unticked.has(i.id)} onChange={() => toggle(i.id)} disabled={deciding}
+                      aria-label={`Carry out: ${i.what}`} className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-violet-600" />
+                  ) : <span className="w-3.5 shrink-0 text-zinc-500">{i.kind === 'commit' ? '⏸' : '•'}</span>}
+                  <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      {i.what}
+                      {i.status !== 'open' && <Pill tone={INTENT_DONE[i.status].tone}>{INTENT_DONE[i.status].label}</Pill>}
+                    </span>
+                    {i.detail && <span className="mt-0.5 block whitespace-pre-wrap text-xs leading-relaxed text-zinc-500">{i.detail}</span>}
+                  </span>
                 </li>
               ))}
-              {r.intents.length > 12 && <li className="text-xs text-zinc-500">and {r.intents.length - 12} more</li>}
+              {r.intents.length > 20 && <li className="text-xs text-zinc-500">and {r.intents.length - 20} more</li>}
             </ul>
+            {waiting.length > 0 && (
+              <div className="mt-2.5 flex flex-wrap items-center justify-end gap-2 border-t border-amber-500/20 pt-2.5">
+                <button onClick={onReject} disabled={deciding} className="fd-btn-quiet h-8 px-3 text-xs">Reject</button>
+                <button onClick={() => onApprove(chosen, waiting.length)} disabled={deciding || chosen.length === 0}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-full bg-violet-600 px-3.5 text-xs font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60">
+                  {deciding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                  Carry out {chosen.length === waiting.length ? 'all' : `${chosen.length} of ${waiting.length}`}, once
+                </button>
+              </div>
+            )}
           </div>
         ) : <p className="mt-1.5 text-xs text-zinc-500">It needed nothing outside.</p>
       )}

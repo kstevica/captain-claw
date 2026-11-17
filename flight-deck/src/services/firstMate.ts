@@ -87,6 +87,8 @@ export interface Intent {
   tool: string
   what: string
   status: 'open' | 'approved' | 'rejected' | 'carried_out' | 'dropped'
+  /** What it would have sent or changed, from its arguments. */
+  detail: string
 }
 
 export interface Run {
@@ -142,6 +144,8 @@ export interface FactoryCard extends Factory {
   share_tokens: number
   /** Events claimed for it, waiting for their batch. */
   pending_events: number
+  /** The newest rehearsal whose intents wait for the owner's yes. */
+  proposal: { run_id: string; count: number } | null
 }
 
 export interface FactoryEvent {
@@ -237,6 +241,10 @@ export const setTrust = (id: string, level: Trust, pin?: boolean) =>
   call<Factory>(`${f(id)}/trust`, json('POST', pin === undefined ? { level } : { level, pin }))
 export const runNow = (id: string, note = '') => call<Run>(`${f(id)}/run`, json('POST', { note }))
 export const listRuns = (id: string) => call<{ runs: Run[] }>(`${f(id)}/runs`).then((r) => r.runs)
+export const approveRun = (runId: string, ids?: number[]) =>
+  call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/approve`, json('POST', ids ? { ids } : {}))
+export const rejectRun = (runId: string) =>
+  call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/reject`, { method: 'POST' })
 export const stopRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/stop`, { method: 'POST' })
 

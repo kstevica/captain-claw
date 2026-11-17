@@ -258,7 +258,8 @@ async def test_intents_show_with_the_run_and_in_its_post(store, bat, owner_is):
                                                         what=f"Reply to {who}", args={}))
     [shown] = routes._with_intents(store, [store.get_run(run["id"])])
     assert [i["what"] for i in shown["intents"]] == ["Reply to Ana", "Reply to Ben"]
-    assert set(shown["intents"][0]) == {"id", "kind", "tool", "what", "status"}  # no arguments
+    # The words and a short detail made from them, never the raw arguments.
+    assert set(shown["intents"][0]) == {"id", "kind", "tool", "what", "status", "detail"}
     text = fml._would(store.intents(run["id"]))
     assert "nothing of it was done" in text and "- Reply to Ben" in text
     assert fml._would([]) == "It needed nothing outside."
