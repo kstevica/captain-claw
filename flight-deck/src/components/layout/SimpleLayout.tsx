@@ -99,7 +99,7 @@ import { BasnaPage } from '../../pages/BasnaPage'
 import { CouncilPage } from '../../pages/CouncilPage'
 import { SharedFolders } from '../vfs/SharedFolders'
 import { DialogFullscreen } from '../library/dialogFullscreen'
-import { isManagedAgent } from '../../utils/managedAgents'
+import { isManagedProcess } from '../../utils/managedAgents'
 import { SHARED_PREFIX, sharedCaps, sharedContainerId } from '../../utils/sharedAgent'
 import { CHAT_ONLY_TEXT, workspaceVisible } from '../../utils/sharedWorkspace'
 import { usePersistedSize } from '../../hooks/usePersistedSize'
@@ -563,7 +563,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         description: procDesc[p.slug] || p.description || '',
         state, reachable: (state === 'running' || !!p.asleep) && !!p.web_port,
         host: 'localhost', port: p.web_port, auth: p.web_auth || '',
-        startKey: p.slug, managed: isManagedAgent(p.slug, p.description || ''),
+        startKey: p.slug, managed: isManagedProcess(p),
         asleep: !!p.asleep,
       })
     }

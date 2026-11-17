@@ -154,6 +154,14 @@ class FlightDeckTool(Tool):
                     "tools/description overrides in the message JSON still take precedence."
                 ),
             },
+            "made_for": {
+                "type": "string",
+                "description": (
+                    "Optional, for 'spawn_agent' only: one line on why you are making "
+                    "this agent (e.g. 'drafts follow-ups after deal calls'). The new "
+                    "agent is YOUR child: its owner sees it under you, with this line."
+                ),
+            },
             "message": {
                 "type": "string",
                 "description": (
@@ -726,6 +734,10 @@ class FlightDeckTool(Tool):
         }
         if env_vars:
             spawn_body["env_vars"] = env_vars
+        # Why we make it: FD records the new agent as our child (agent_family).
+        made_for = " ".join(str(kwargs.get("made_for") or overrides.get("made_for") or "").split())[:200]
+        if made_for:
+            spawn_body["made_for"] = made_for
         if archetype:
             spawn_body["archetype"] = archetype
             if "tools" in overrides:
@@ -772,8 +784,10 @@ class FlightDeckTool(Tool):
                             )
                         else:
                             last_error = f"{endpoint} returned 200 but ok=false: {result}"
-                    # If process spawn fails with 400 (already exists), don't retry with docker
-                    elif resp.status_code == 400:
+                    # If process spawn fails with 400 (already exists) or 409 (a name
+                    # that's taken, or past the family limits: too deep, too many
+                    # agents under us), don't retry with docker
+                    elif resp.status_code == 400 or (resp.status_code == 409 and endpoint == "/fd/spawn-process"):
                         detail = resp.json().get("detail", "")
                         return ToolResult(success=False, error=f"Spawn failed: {detail}")
                     # FD couldn't attribute this agent (identity / owner), which

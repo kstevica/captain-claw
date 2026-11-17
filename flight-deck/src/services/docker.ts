@@ -226,6 +226,16 @@ export interface ProcessInfo {
   /** Stopped for being idle (Flight Deck's agent controller), not by its
    *  owner: status is "stopped", but it is still on — opening its chat wakes it. */
   asleep?: boolean
+  /** Its family (agent_family): the slug of the agent it sits under ("" = one
+   *  of the owner's own), who made it (a slug, "first_mate", or "" = its owner),
+   *  why, and whether it is a run's worker ("worker") or stays ("standing"). */
+  parent?: string
+  made_by?: string
+  made_for?: string
+  role?: 'standing' | 'worker'
+  /** A worker's run (`bat:<id>`, `vatra:<id>`) and First Mate factory. */
+  run?: string
+  factory?: string
 }
 
 // ── Free OpenRouter ("Freebie") agents ──

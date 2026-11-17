@@ -26,7 +26,7 @@ import { SharedCountBadge } from './SharedCountBadge'
 import { NetworkBadge, useNetworkShare, type NetworkShareAction } from './NetworkShare'
 import { processShareKey } from '../../stores/networkShareStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
-import { isManagedAgent } from '../../utils/managedAgents'
+import { isManagedProcess } from '../../utils/managedAgents'
 import { ownerShareNote } from '../../utils/sharedAgent'
 import { PACKS_MENU_LABEL } from '../../utils/contextPacks'
 import { ContextPacksModal } from './ContextPacksModal'
@@ -137,7 +137,7 @@ export function ProcessCard({ process: proc, onBrowseFiles, onDragStart, isDragg
   // Sharing: only on decks that share agents, never a Flight Deck–managed
   // worker, and only once the agent has a stable ref (it has an access token).
   const sharingEnabled = useSharedAgentStore((s) => s.enabled)
-  const canShare = sharingEnabled && !!proc.agent_ref && !isManagedAgent(proc.slug, proc.description || '')
+  const canShare = sharingEnabled && !!proc.agent_ref && !isManagedProcess(proc)
   // Context packs ("Shared context…"): wherever the agent can be shared, on a
   // deck whose Flight Deck offers them.
   const packsEnabled = useSharedAgentStore((s) => s.contextPacks)

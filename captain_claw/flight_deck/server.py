@@ -55,6 +55,7 @@ from captain_claw.flight_deck import agent_ws_quiet
 from captain_claw.flight_deck import tenant_profile
 from captain_claw.flight_deck import course_carrier
 from captain_claw.flight_deck import agent_sharing
+from captain_claw.flight_deck import agent_family
 from captain_claw.flight_deck import archetypes as _archetypes
 from captain_claw.flight_deck import context_packs
 from captain_claw.flight_deck import speaker_grants
@@ -2209,9 +2210,14 @@ class AgentConfig(BaseModel):
     _onboarding: dict = PrivateAttr(default_factory=dict)
     # An agent bundle being imported: where its file is (agent_bundle.restore).
     _bundle: dict = PrivateAttr(default_factory=dict)
+    # Family fields FD code sets for the agent it spawns (a run's worker…):
+    # see agent_family.for_spawn. Never from a request body.
+    _family: dict = PrivateAttr(default_factory=dict)
     # Identity
     name: str = ""
     description: str = ""
+    # One line on why the agent is being made (its maker's words): agent_family.
+    made_for: str = ""
     hostname: str = "captain-claw"
     image: str = CC_IMAGE_DEFAULT
 
@@ -6905,6 +6911,22 @@ def _find_agent_endpoint_by_auth(token: str) -> dict | None:
     return None
 
 
+def _spawn_caller_slug(request: Any, owner_id: str, registry: dict[str, dict]) -> str:
+    """The agent asking for this spawn (its ``X-Agent-Auth``), when it is one
+    of this deck's process agents with the new agent's owner — else "". An
+    in-process caller (a run's worker spawn, Forge) and a browser have none."""
+    if not isinstance(request, Request):
+        return ""
+    token = request.headers.get("X-Agent-Auth", "").strip()
+    matched, _owner, slug = _find_agent_by_auth(token)
+    entry = registry.get(slug) if matched and slug else None
+    if not isinstance(entry, dict):
+        return ""
+    if str(entry.get("owner") or "") != str(owner_id or "") and AUTH_ENABLED:
+        return ""
+    return slug
+
+
 def _resolve_agent_identity_by_auth(token: str) -> tuple[bool, str]:
     """Is ``token`` a web_auth THIS deck issued — and to which owner?
 
@@ -10206,6 +10228,14 @@ class ProcessInfo(BaseModel):
     # Stopped for being idle (agent_idle), not by its owner: still on, and it
     # wakes when its chat is opened or something needs it. status is "stopped".
     asleep: bool = False
+    # Its family (agent_family): the agent it sits under ("" = one of the
+    # owner's own), who made it, why, and whether it is a run's worker.
+    parent: str = ""
+    made_by: str = ""
+    made_for: str = ""
+    role: str = "standing"
+    run: str = ""
+    factory: str = ""
 
 
 class ProcessActionResult(BaseModel):
@@ -10255,6 +10285,7 @@ async def list_processes(request: Request, user: dict | None = _agent_manager_de
             freebie=bool(entry.get("freebie", False)),
             agent_ref=agent_sharing.process_ref(slug, entry),
             asleep=not alive and bool(entry.get("asleep")) and not entry.get("stopped"),
+            **agent_family.view(registry, slug),
         ))
     return result
 
@@ -10308,6 +10339,18 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     # Check if already running
     if _process_is_alive(slug):
         raise HTTPException(400, f"Process '{slug}' is already running. Stop it first or use a different name.")
+
+    # Who made it, and where it sits (agent_family): a new agent another agent
+    # makes is that agent's child — within the family limits, checked before
+    # anything is written.
+    _reg_now = _load_process_registry()
+    _caller = _spawn_caller_slug(request, owner_id, _reg_now)
+    if _caller and slug not in _reg_now and not config._family:
+        try:
+            agent_family.check_child(_reg_now, _caller)
+        except agent_family.FamilyError as exc:
+            raise HTTPException(exc.status, exc.reason) from None
+    family_fields = agent_family.for_spawn(config, prior=_reg_now.get(slug), caller=_caller)
 
     # Ensure port is available; find a free one if not. A stopped or sleeping
     # agent's port is free on the host but still its own: it comes back on it.
@@ -10457,6 +10500,8 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         # A workspace FD placed outside the agent's folder (Code mode's repo):
         # a restart pins the same confinement root (_pin_confinement).
         **({"workspace": config.workspace_path} if config.workspace_path else {}),
+        # Who made it and where it sits (agent_family) — a re-spawn keeps its own.
+        **family_fields,
     }
     _save_process_registry(registry)
     # A re-spawn keeps its ref, so its context packs: rewrite their files.
@@ -10799,6 +10844,8 @@ async def _remove_process_agent(slug: str, *, purge: bool = False) -> ProcessAct
     if not purge:
         # The folder stays; once the entry is gone only this says whose it is.
         _record_folder_owner(slug, owner_id)
+    # What sat under it moves up a level (agent_family).
+    agent_family.on_removed(registry, slug)
     registry.pop(slug, None)
     _save_process_registry(registry)
     _processes.pop(slug, None)
@@ -10813,6 +10860,50 @@ async def _remove_process_agent(slug: str, *, purge: bool = False) -> ProcessAct
         return ProcessActionResult(ok=True, slug=slug, message=f"Removed '{slug}' and deleted its folder")
 
     return ProcessActionResult(ok=True, slug=slug, message=f"Removed '{slug}' from registry")
+
+
+class ProcessParentUpdate(BaseModel):
+    # The agent to sit under; "" = one of the owner's own (top-level).
+    parent: str = ""
+    # One line on what it is for there; None leaves the current one.
+    made_for: str | None = None
+
+
+class ProcessParentResult(BaseModel):
+    ok: bool
+    slug: str
+    parent: str = ""
+    made_for: str = ""
+    message: str = ""
+
+
+@app.put("/fd/processes/{slug}/parent", response_model=ProcessParentResult)
+async def set_process_parent(
+    slug: str, body: ProcessParentUpdate, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Move one of the owner's agents under another of their agents, or make it
+    top-level again (``parent`` ""). Everything under it moves with it. Refused
+    with the reason (409) for a loop, more than agent_family.MAX_DEPTH levels,
+    a parent already holding agent_family.MAX_CHILDREN agents, or a run's
+    worker; 403 for an agent that isn't the caller's."""
+    uid = getattr(request.state, "user_id", "")
+    _verify_process_owner(slug, uid)
+    parent = (body.parent or "").strip()
+    if parent:
+        _verify_process_owner(parent, uid)
+    async with _get_spawn_lock():
+        registry = _load_process_registry()
+        try:
+            view = agent_family.move(registry, slug, parent, made_for=body.made_for)
+        except agent_family.FamilyError as exc:
+            raise HTTPException(exc.status, exc.reason) from None
+        _save_process_registry(registry)
+    where = str((registry.get(parent) or {}).get("name") or parent) if parent else ""
+    name = str(registry[slug].get("name") or slug)
+    return ProcessParentResult(
+        ok=True, slug=slug, parent=view["parent"], made_for=view["made_for"],
+        message=f"{name} is now under {where}" if where else f"{name} is one of your own agents again")
 
 
 class ProcessIdentityUpdate(BaseModel):

@@ -905,6 +905,45 @@ async def _spawn_archetype_bat_worker(stub, user, sid, step, owner, arch_id, tie
         return (None, None, None)
 
 
+async def _label_worker(slug: str, run: dict, step_key: str) -> None:
+    """Whose this run's worker is (agent_family): First Mate's agent for a
+    factory's run, the agent that started the run, else nobody's. Its slug
+    stays (``bat-<run>`` ties sends and the tool-call register to the run).
+    Never raises: a worker without its family still works."""
+    from captain_claw.flight_deck import agent_family
+    from captain_claw.flight_deck.server import (
+        _get_spawn_lock, _load_process_registry, _save_process_registry,
+    )
+    cfg = run.get("config") or {}
+    step = step_key.replace("-", " ").strip()
+    fields: dict[str, str] = {"role": agent_family.WORKER, "run": f"bat:{run.get('id') or ''}"}
+    try:
+        fid = str(cfg.get("factory_id") or "")
+        if fid:
+            from captain_claw.flight_deck import first_mate_store as fms
+            fstore = fms.get_store()
+            factory = fstore.get(fid) or {}
+            what = "improving" if cfg.get("source") == "captain_swarm" else ""
+            fields.update(made_by=agent_family.FIRST_MATE, factory=fid,
+                          parent=str(fstore.prefs(fms.norm_user(run.get("owner_id"))).get("agent") or ""),
+                          made_for=" · ".join(x for x in (str(factory.get("title") or ""), what, step) if x))
+        async with _get_spawn_lock():
+            reg = _load_process_registry()
+            owner = str((reg.get(slug) or {}).get("owner") or "")
+            if not fid and cfg.get("source") == "agent":
+                port = int(run.get("source_port") or 0)
+                fields["parent"] = fields["made_by"] = next(
+                    (s for s, e in reg.items() if port and isinstance(e, dict) and s != slug
+                     and int(e.get("web_port") or 0) == port and str(e.get("owner") or "") == owner), "")
+            if fields.get("parent") and str((reg.get(fields["parent"]) or {}).get("owner") or "") != owner:
+                fields["parent"] = ""  # never someone else's agent
+            fields.setdefault("made_for", step)
+            if agent_family.label(reg, slug, fields):
+                _save_process_registry(reg)
+    except Exception:  # noqa: BLE001
+        log.debug("bat: couldn't record a worker's family", exc_info=True)
+
+
 def _teardown(slugs: list[str]) -> None:
     from captain_claw.flight_deck.server import (
         DATA_DIR, _do_stop_process, _load_process_registry, _processes, _save_process_registry,
@@ -1089,6 +1128,7 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
             return {"ok": False, "error": f"could not spawn worker: {worker['message']}", "spawn_refused": True}
         port, auth, slug = worker["port"], worker["auth"], worker["slug"]
 
+    await _label_worker(slug, run, key)
     store = bat_loop.get_store()
     bat_nested.worker_started(sid, key, port=port, slug=slug)
     worker_model = (tiers.get(tier) or {}).get("model", "") if tiers else ""

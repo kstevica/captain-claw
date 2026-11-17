@@ -537,7 +537,7 @@ async def _run_plan(sid: str, user: dict, *, note: str = "", answers: list[dict]
 
 
 async def _spawn_agent(user: dict, *, name: str, description: str, archetype: str, instructions: str,
-                       env: list[dict]) -> Any:
+                       env: list[dict], made_for: str = "") -> Any:
     """A name is a folder, and another account's agent can already hold it: try once
     more with a short suffix rather than make someone guess, as the New agent dialog does."""
     from captain_claw.flight_deck.server import AgentConfig, spawn_process
@@ -545,7 +545,7 @@ async def _spawn_agent(user: dict, *, name: str, description: str, archetype: st
     stub = _stub(user["id"])
     for attempt in (name, f"{name} {secrets.token_hex(2)}"):
         config = AgentConfig(name=attempt, description=description, archetype=archetype,
-                             fleet_instructions=instructions, env_vars=env,
+                             fleet_instructions=instructions, env_vars=env, made_for=made_for,
                              botport_enabled=False, web_enabled=True, web_port=0)
         try:
             return await spawn_process(config, stub, user), attempt
@@ -673,7 +673,8 @@ async def _run_create(sid: str, user: dict) -> None:
             try:
                 res, used = await _spawn_agent(
                     user, name=agent["name"], description=str(arch.get("role") or arch.get("description") or "")[:200],
-                    archetype=agent["archetype"], instructions=composed, env=env)
+                    archetype=agent["archetype"], instructions=composed, env=env,
+                    made_for=str(agent.get("mandate") or ""))
                 if not res.ok:
                     raise HTTPException(502, res.message or "It didn't start.")
                 entry.update(slug=res.slug, name=used, ok=True)
