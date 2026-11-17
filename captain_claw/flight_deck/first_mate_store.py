@@ -1171,6 +1171,33 @@ class FirstMateStore:
                          (child_id, _iso(_utcnow()), run_id))
         return self.get_run(run_id)
 
+    def reopen_run(self, run_id: str, owner_id: str, *, dry_run: bool = False) -> dict[str, Any]:
+        """A run that stopped (failed or cancelled) goes on where it stopped:
+        running again, what it spent kept. Refused when it isn't the owner's,
+        didn't stop, its factory can't start runs by hand, or another run of
+        the factory is going (one at a time). ``dry_run``: only the checks."""
+        with self._tx() as conn:
+            run = self._run(conn.execute("SELECT * FROM fm_runs WHERE id = ?", (run_id,)).fetchone())
+            if run is None or run["owner_id"] != norm_user(owner_id):
+                raise FirstMateError("no such run")
+            if run["status"] not in ("failed", "cancelled"):
+                raise FirstMateError("only a run that stopped can go on")
+            f = self._get_factory(conn, run["factory_id"])
+            if f["state"] not in _HAND_STATES:
+                raise FirstMateError(f"a factory that is {f['state'].replace('_', ' ')} doesn't start runs")
+            busy = conn.execute(f"SELECT id FROM fm_runs WHERE factory_id = ? AND id != ? AND status IN "
+                                f"({','.join('?' * len(ACTIVE_RUN))}) LIMIT 1",
+                                (run["factory_id"], run_id, *ACTIVE_RUN)).fetchone()
+            if busy is not None:
+                raise FirstMateError("this factory already has a run going")
+            if dry_run:
+                return run
+            conn.execute("UPDATE fm_runs SET status = 'running', verdict = '', result = '', error = '',"
+                         " ended_at = NULL WHERE id = ?", (run_id,))
+            self._event(conn, run["factory_id"], "owner", "run_continued",
+                        {"run": run_id, "was": run["status"], "tokens": run["tokens"]})
+        return self.get_run(run_id)
+
     def update_run(self, run_id: str, *, tokens: int | None = None, usd: float | None = None) -> dict[str, Any]:
         """A going run's spend so far. Totals only grow."""
         with self._tx() as conn:

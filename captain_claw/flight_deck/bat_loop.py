@@ -31,7 +31,7 @@ from typing import Any, Awaitable, Callable
 
 import structlog
 
-from captain_claw.flight_deck.bat_store import BatStore, TERMINAL_STATES
+from captain_claw.flight_deck.bat_store import LEASE_STALE_SECONDS, BatStore, TERMINAL_STATES
 
 log = structlog.get_logger(__name__)
 
@@ -260,6 +260,56 @@ async def cancel_run(store: BatStore, run_id: str) -> bool:
         except Exception as e:  # noqa: BLE001
             log.warning("bat stop children failed", run_id=run_id, error=str(e))
     return True
+
+
+# Why a stopped run may go on where it stopped: its cap ran out, or its owner
+# stopped it. A run that stopped on its own (a step kept failing, the reviewers
+# wouldn't pass it) would stop again: that one starts over.
+CONTINUABLE = ("llm_token_cap_reached", "llm_usd_cap_reached")
+
+
+async def why_not_reopen(store: BatStore, run_id: str) -> str:
+    """Why this run can't go on where it stopped, or "" when it can."""
+    run = await store.get_run(run_id)
+    if run is None:
+        return "its Bat run is gone"
+    if run["status"] not in ("error", "cancelled"):
+        return "it didn't stop" if run["status"] != "done" else "it finished"
+    if run["status"] == "error" and (run.get("stopped_reason") or "") not in CONTINUABLE:
+        return f"it stopped on its own ({run.get('stopped_reason') or 'an error'}), so it would stop again"
+    steps = await store.list_steps(run_id)
+    if not any(s["status"] not in ("done", "skipped") for s in steps):
+        return "it has no step left to do"
+    import time
+    if run.get("lease_pid") and time.time() - float(run.get("lease_heartbeat_at") or 0.0) < LEASE_STALE_SECONDS:
+        return "it is still winding down; try again in a minute"
+    return ""
+
+
+async def reopen_run(store: BatStore, run_id: str, *, token_cap: int | None = None) -> dict:
+    """Let a run its cap or its owner stopped go on where it stopped: its finished
+    steps stay finished, the step it was on runs again, and ``token_cap`` (the
+    run's whole cap in tokens, what it used included) replaces its old one.
+    Raises ValueError with why when it can't (:func:`why_not_reopen`)."""
+    why = await why_not_reopen(store, run_id)
+    if why:
+        raise ValueError(why)
+    run = await store.get_run(run_id)
+    cfg = dict(run.get("config") or {})
+    if token_cap:
+        cfg["token_cap"] = int(token_cap)
+    await store.set_config(run_id, cfg)
+    demoted = await store.demote_running_steps(run_id)
+    await store.set_status(run_id, "running", stopped_reason="")
+    note = "continued where it stopped"
+    if token_cap:
+        note += f", with a cap of {int(token_cap):,} tokens"
+    await store.append_event(run_id, "note", note + (f" (re-queued {demoted} step(s))" if demoted else ""))
+    try:
+        await kick()
+    except Exception as e:  # noqa: BLE001 — it starts at the next tick
+        log.warning("bat kick after reopen failed", run_id=run_id, error=str(e))
+    return await store.get_run(run_id)
 
 
 def _assemble_truth(steps: list[dict]) -> str:

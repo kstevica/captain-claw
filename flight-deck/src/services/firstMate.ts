@@ -116,6 +116,8 @@ export interface Run {
   intents?: Intent[]
   /** The owner's 👍/👎 on its result, if any. */
   thumbs?: '' | 'thumbs_up' | 'thumbs_down'
+  /** The newest run, stopped by its cap or by you: it can go on where it stopped. */
+  can_continue?: boolean
   /** A carry-out's: what the register and Gmail/Calendar showed it did. */
   proof?: { state?: 'confirmed' | 'nothing' | 'doubt' | 'unknown'; note?: string; sent?: number; approved?: number; actions?: string[] }
 }
@@ -406,6 +408,10 @@ export const rateRun = (runId: string, kind: 'up' | 'down' | '') =>
   call<{ thumbs: string; satisfaction: number | null }>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/thumbs`, json('POST', { kind }))
 export const stopRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/stop`, { method: 'POST' })
+
+/** Go on where a stopped run stopped, with the factory's cap per run again. */
+export const continueRun = (runId: string) =>
+  call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/continue`, { method: 'POST' })
 
 /** What a run is doing: its runner's steps, events and the agents working for it. */
 export interface RunProgress {

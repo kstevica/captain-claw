@@ -39,6 +39,7 @@ starting and following runs in :mod:`first_mate_runs`.
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
@@ -54,6 +55,7 @@ from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.first_mate_store import FirstMateError
 
 router = APIRouter(tags=["first-mate"])
+log = logging.getLogger(__name__)
 
 # The states an owner may set by hand. paused_budget is the deck's, and a
 # factory leaves draft only through approval.
@@ -162,6 +164,20 @@ def _with_intents(store: fms.FirstMateStore, runs_: list[dict[str, Any]]) -> lis
                           "detail": runs.intent_detail(i)}
                          for i in store.intents(r["id"])] if r["kind"] == "rehearsal" else []}
             for r in runs_]
+
+
+async def _runs_shown(store: fms.FirstMateStore, factory_id: str, limit: int) -> list[dict[str, Any]]:
+    """A factory's runs as the page lists them, newest first; the newest, if it
+    stopped, says whether it can go on where it stopped (``can_continue``)."""
+    listed = _with_intents(store, store.list_runs(factory_id, limit=limit, kinds=fms.WORK_KINDS))
+    if listed and listed[0]["status"] in ("failed", "cancelled"):
+        try:
+            can = not await runs.why_not_continue(listed[0])
+        except Exception:  # noqa: BLE001 — the page still lists its runs
+            log.warning("first mate: couldn't tell whether a run can go on", exc_info=True)
+            can = False
+        listed[0] = {**listed[0], "can_continue": can}
+    return listed
 
 
 def _card(store: fms.FirstMateStore, view: dict[str, Any], week: dict[str, Any], now: datetime) -> dict[str, Any]:
@@ -327,7 +343,7 @@ async def get_factory(factory_id: str, user: dict = Depends(allowed_user)):
             await runs.refresh(run["id"])
     return {**view,
             "versions": store.versions(factory_id),
-            "runs": _with_intents(store, store.list_runs(factory_id, limit=20, kinds=fms.WORK_KINDS)),
+            "runs": await _runs_shown(store, factory_id, 20),
             "check": store.active_check(factory_id),
             "events": store.events(factory_id, limit=50),
             "satisfaction": store.satisfaction(factory_id),
@@ -715,8 +731,7 @@ async def list_runs(factory_id: str, limit: int = 50, user: dict = Depends(allow
     for run in store.list_runs(factory_id, limit=max(1, min(limit, 200))):
         if run["status"] in fms.ACTIVE_RUN:
             await runs.refresh(run["id"])
-    return {"runs": _with_intents(store, store.list_runs(factory_id, limit=max(1, min(limit, 200)),
-                                                         kinds=fms.WORK_KINDS))}
+    return {"runs": await _runs_shown(store, factory_id, max(1, min(limit, 200)))}
 
 
 @router.post("/fd/first-mate/runs/{run_id}/approve")
@@ -762,6 +777,16 @@ async def thumbs(run_id: str, body: Any = Body(...), user: dict = Depends(allowe
     except FirstMateError as exc:
         raise _err(exc) from None
     return {"thumbs": store.thumbs(run_id), "satisfaction": store.satisfaction(run["factory_id"])}
+
+
+@router.post("/fd/first-mate/runs/{run_id}/continue")
+async def continue_run(run_id: str, user: dict = Depends(allowed_user)):
+    """A run its cap or its owner stopped goes on where it stopped, with the
+    factory's cap per run again."""
+    try:
+        return await runs.continue_run(run_id, _uid(user))
+    except FirstMateError as exc:
+        raise _err(exc) from None
 
 
 @router.get("/fd/first-mate/runs/{run_id}/progress")
