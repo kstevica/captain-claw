@@ -36,6 +36,7 @@ import {
 } from '../../services/firstMate'
 import { ErrorBox, Pill, errText, type PillTone } from './ui'
 import { Checks, pct, type CaseSeed } from './Checks'
+import { RunResult } from './RunResult'
 
 // One factory, in a drawer over the page: its charter (the live version, and
 // the draft being written), its runs, and its history. Approving a draft is
@@ -577,7 +578,6 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate, 
   onMakeCase?: () => void
   making: boolean
 }) {
-  const [open, setOpen] = useState(false)
   const going = r.status === 'queued' || r.status === 'running'
   const waiting = (r.intents ?? []).filter((i) => i.status === 'open')
   const [unticked, setUnticked] = useState<Set<number>>(new Set())
@@ -684,12 +684,7 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate, 
         ) : <p className="mt-1.5 text-xs text-zinc-500">It needed nothing outside.</p>
       )}
       {r.error && !going && <p className="mt-1.5 text-xs text-zinc-500">{r.error}</p>}
-      {r.result && (
-        <button onClick={() => setOpen(!open)} className="mt-2 block w-full text-left">
-          <span className={`block whitespace-pre-wrap text-[13px] leading-relaxed text-zinc-300 ${open ? '' : 'line-clamp-3'}`}>{r.result}</span>
-          <span className="mt-1 block text-[11px] text-zinc-500">{open ? 'Show less' : 'Show all'}</span>
-        </button>
-      )}
+      {r.result && <RunResult text={r.result} />}
     </li>
   )
 }
