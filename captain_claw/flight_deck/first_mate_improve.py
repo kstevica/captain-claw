@@ -603,6 +603,48 @@ async def finished(run: dict[str, Any]) -> None:
     await first_mate_line.improvement_drafted(view, run, [e["hypothesis"] for e in kept])
 
 
+# ── a factory's improvement runs (Phase 6, piece 3) ──────────────────
+
+ACTIVE = ("awaiting_go", "baseline", "running")
+
+
+async def runs_for(owner_id: str, factory_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    """The owner's improvement runs of one factory, newest first."""
+    from captain_claw.flight_deck import captain_swarm_loop as loop
+    cs = loop.get_store()
+    if cs is None:
+        return []
+    out = []
+    for r in await cs.list_runs(owner_id, limit=200):
+        obj = r.get("objective") or {}
+        if obj.get("kind") == KIND and (obj.get("subject") or {}).get("factory_id") == factory_id:
+            out.append(r)
+    return out[:limit]
+
+
+async def can_improve(user: dict[str, Any], factory_id: str) -> tuple[bool, str]:
+    """Whether an improvement run of this factory can start now, and if not, why."""
+    from fastapi import HTTPException
+
+    from captain_claw.flight_deck import captain_swarm_loop as loop
+    from captain_claw.flight_deck import captain_swarm_routes as csr
+    from captain_claw.flight_deck.captain_swarm_objective import ObjectiveError
+    try:
+        await csr.admin_user(user)
+    except HTTPException as exc:
+        return False, str(exc.detail)
+    if loop.get_store() is None:
+        return False, "Captain Swarm isn't running on this deck."
+    owner = csr._uid(user)
+    try:
+        ready(fms.get_store(), fms.norm_user(owner), factory_id)
+    except ObjectiveError as exc:
+        return False, str(exc)
+    if any(r["status"] in ACTIVE for r in await runs_for(owner, factory_id)):
+        return False, "An improvement run of this factory is going."
+    return True, ""
+
+
 # ── starting one from First Mate ─────────────────────────────────────
 
 async def start(user: dict[str, Any], factory_id: str, options: dict[str, Any] | None = None,

@@ -11,6 +11,10 @@ never fires it), and Approve does exactly one thing (``op``):
   weight of the weekly budget, at most :data:`SHARE_MAX`);
 * ``draft_for_goal``: draft a factory for a Course goal nothing has moved.
   Approving it only drafts: the charter still waits for its own approval.
+* ``improve``: start an improvement run of a factory whose satisfaction has
+  been under its target for two weeks (Captain Swarm on its own cases,
+  ``first_mate_improve``; admins only, like Captain Swarm). Its best comes
+  back as a draft the owner approves.
 
 Where they come from:
 
@@ -34,7 +38,8 @@ from captain_claw.flight_deck.first_mate_store import FirstMateError
 log = logging.getLogger(__name__)
 
 KIND = "factory"
-OPS = ("pause", "share", "draft_for_goal")
+OPS = ("pause", "share", "draft_for_goal", "improve")
+TWO_WEEKS_SIGNALS = 5  # at least this many signals over the two weeks, two or more in each
 WEEKLY_MAX = 3
 SHARE_MAX = 10
 SOURCE = "first_mate"
@@ -51,6 +56,23 @@ async def available(owner_id: str) -> bool:
 def serves(store: fms.FirstMateStore, owner_id: str, goal_id: str) -> bool:
     """Whether one of the owner's factories already serves this goal."""
     return any(f["goal_id"] == goal_id for f in store.list_factories(owner_id))
+
+
+def below_target(store: fms.FirstMateStore, factory: dict[str, Any], now: Any) -> tuple[float, float] | None:
+    """``(last week's satisfaction, the target)`` when both of the last two
+    weeks were under the factory's target, with enough signals to say so."""
+    from datetime import datetime, timedelta
+    live = store.live(factory["id"]) or {}
+    target = float((live.get("checks") or {}).get("satisfaction_target") or fms.DEFAULT_CHECKS["satisfaction_target"])
+    weeks: list[list[float]] = [[], []]
+    for s in store.signals(factory["id"], limit=500):
+        age = now - datetime.fromisoformat(s["at"])
+        if timedelta(0) <= age < timedelta(days=14):
+            weeks[0 if age >= timedelta(days=7) else 1].append(float(s["value"]))
+    if min(len(w) for w in weeks) < 2 or sum(len(w) for w in weeks) < TWO_WEEKS_SIGNALS:
+        return None
+    means = [sum(w) / len(w) for w in weeks]
+    return (round(means[1], 3), target) if all(m < target for m in means) else None
 
 
 def _target(payload: dict[str, Any]) -> str:
@@ -108,6 +130,20 @@ async def weekly(store: fms.FirstMateStore, owner_id: str, report: dict[str, Any
                       rationale=f"It used its whole share last week ({x['tokens']:,} tokens). A share of "
                                 f"{f['share'] + 1} instead of {f['share']} gives it more of your weekly budget.",
                       payload={"factory_id": f["id"], "share": f["share"] + 1})
+    from datetime import datetime
+
+    from captain_claw.flight_deck import crew_runner, first_mate_improve
+    now = datetime.fromisoformat(report["end"]) if report.get("end") else fms._utcnow()
+    user = await crew_runner._user_of(fms.norm_user(owner_id))
+    for x in report["factories"]:
+        f = store.get(x["id"])
+        low = below_target(store, f, now) if f and f["state"] == "running" else None
+        if low and user and (await first_mate_improve.can_improve(user, f["id"]))[0]:
+            await add(op="improve", title=f"Improve {f['title']}",
+                      rationale=f"Satisfaction has been under its target for two weeks ({low[0]:.0%} last week, "
+                                f"target {low[1]:.0%}). An improvement run tries better charters on its own cases; "
+                                "the best comes back as a draft you approve.",
+                      payload={"factory_id": f["id"]})
     try:
         from captain_claw.flight_deck.course_progress import stalled_goals
         stalled = stalled_goals(fms.norm_user(owner_id))
@@ -136,7 +172,24 @@ async def dispatch(user_id: str, action: dict[str, Any], *, approved_by_human: b
     try:
         if not await available(owner):
             raise FirstMateError("First Mate isn't on for you on this deck")
-        if op in ("pause", "share"):
+        if op == "improve":
+            from fastapi import HTTPException
+
+            from captain_claw.flight_deck import crew_runner, first_mate_improve
+            from captain_claw.flight_deck.captain_swarm_objective import ObjectiveError
+            user = await crew_runner._user_of(owner)
+            f = store.get_owned(str(payload.get("factory_id") or ""), owner)
+            if f is None or not user:
+                raise FirstMateError("that factory is gone")
+            try:
+                run = await first_mate_improve.start(user, f["id"], started_by="the owner, approving First Mate")
+            except ObjectiveError as exc:
+                raise FirstMateError(str(exc)) from None
+            except HTTPException as exc:
+                raise FirstMateError(str(exc.detail)) from None
+            note = (f"Started an improvement run of {f['title']} ({run['id']}). You'll hear when it ends; its best "
+                    "comes back as a draft for you to approve.")
+        elif op in ("pause", "share"):
             f = store.get_owned(str(payload.get("factory_id") or ""), owner)
             if f is None:
                 raise FirstMateError("that factory is gone")

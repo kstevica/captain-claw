@@ -557,6 +557,35 @@ async def improve_factory(factory_id: str, body: Any = Body(default={}), user: d
     return {"run_id": run["id"], "status": run["status"], "title": run["title"]}
 
 
+@router.get("/fd/first-mate/factories/{factory_id}/improvements")
+async def list_improvements(factory_id: str, user: dict = Depends(allowed_user)):
+    """The factory's improvement runs (Captain Swarm), newest first, whether
+    each one's best became a draft, and whether one can start now."""
+    from captain_claw.flight_deck import captain_swarm_routes as csr
+    from captain_claw.flight_deck import first_mate_improve
+    _mine(factory_id, user)
+    store = fms.get_store()
+    drafted = {str((e.get("detail") or {}).get("run") or "") for e in store.events(factory_id, limit=500)
+               if e["event"] == "improvement_drafted"}
+    def iso(t: Any) -> str | None:  # Captain Swarm keeps epoch seconds; the page reads ISO
+        return datetime.fromtimestamp(float(t), UTC).isoformat() if isinstance(t, (int, float)) and t > 0 else None
+
+    runs_ = []
+    for r in await first_mate_improve.runs_for(csr._uid(user), factory_id):
+        summary = csr._run_summary(r)
+        runs_.append({**summary, "created_at": iso(summary["created_at"]), "started_at": iso(summary["started_at"]),
+                      "finished_at": iso(summary["finished_at"]), "drafted": r["id"] in drafted,
+                      "going": r["status"] in first_mate_improve.ACTIVE})
+    ok, why = await first_mate_improve.can_improve(user, factory_id)
+    from captain_claw.flight_deck import captain_swarm_loop
+    try:
+        await csr.admin_user(user)
+        available = captain_swarm_loop.get_store() is not None
+    except HTTPException:
+        available = False  # not an admin, or the desktop app: Captain Swarm isn't theirs here
+    return {"runs": runs_, "can": {"ok": ok, "why": why}, "available": available}
+
+
 @router.post("/fd/first-mate/factories/{factory_id}/improvements/{run_id}/draft")
 async def improvement_draft(factory_id: str, run_id: str, user: dict = Depends(allowed_user)):
     """A finished improvement run's best as the factory's new draft, when it
