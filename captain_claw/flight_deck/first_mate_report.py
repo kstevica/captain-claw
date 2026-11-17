@@ -191,6 +191,9 @@ def text(report: dict[str, Any]) -> tuple[str, str]:
         parts += [f"- {m}" for m in x["moved"]]
     if report["look"]:
         parts += ["", "**Worth a look**"] + [f"- {item}" for item in report["look"]]
+    if report.get("proposals"):
+        parts += ["", "**First Mate proposes** (approve or reject each on the Line)"]
+        parts += [f"- {p}" for p in report["proposals"]]
     parts += ["", "Open First Mate for each factory's record."]
     body = "\n".join(parts)
     if len(body) > 3900:
@@ -218,9 +221,15 @@ async def maybe_send(store: fms.FirstMateStore, owner_id: str, now: datetime) ->
     start, end = period(now, "last")
     report = build(store, owner_id, start, end, now)
     sent = bool(report["factories"]) and bool(report["totals"]["runs"] or report["look"])
+    # Proposals come with a report that goes out: a quiet week proposes nothing.
     store._put_setting(_mark_key(owner_id), {"week": week, "at": fms._iso(now), "sent": sent})
     if not sent:
         return False
+    try:
+        from captain_claw.flight_deck import first_mate_review
+        report["proposals"] = [r["title"] for r in await first_mate_review.weekly(store, owner_id, report)]
+    except Exception:  # noqa: BLE001 — the report goes out without them
+        log.warning("first mate: the weekly proposals failed", extra={"owner": owner_id}, exc_info=True)
     title, body = text(report)
     try:
         from captain_claw.flight_deck import line

@@ -370,6 +370,26 @@ nothing worth a look sends nothing. It reaches the phone only when something
 is worth a look. The First Mate page shows last week and this week so far.
 Accepting proposals from the item comes with P5's weekly proposals.
 
+As built (P5):
+- **The `first_mate` tool** (every agent, not on a shared agent's member
+  turn, refused in workers and rehearsals): list, status, run, pause, resume,
+  report and draft. It never approves, carries out or moves trust.
+- **Drafting** from the user's words or one of their Course goals: one model
+  call writes the name, charter, starts, done-when lines and up to three
+  sealed cases, through the store's checks (mail sending and organizing only
+  when asked for, never spending or accounts). The draft waits with a Line
+  card keyed by its hash; approving, declining or editing it settles the card.
+- **The First Mate agent:** the user picks one of their agents, or makes one
+  (concierge archetype) with a button. Turning First Mate on doesn't make one,
+  because an agent is a process with its own cost. Drafting runs on its model,
+  falling back to the user's tier set.
+- **Proposals** are ledger rows of kind `factory` (Approve and Reject on the
+  Line and the Taskboard), never fired on their own: pause a red factory, a
+  bigger share for one that used all of its share, draft a factory for a
+  stalled goal (approving only drafts it). The weekly review makes up to three
+  with Monday's report, which lists them. The Arbiter may propose
+  `draft_for_goal` for one of the goals it was shown that no factory serves.
+
 ## 12. Factories get better
 
 A factory below its satisfaction target for two weeks leads to a proposal for
