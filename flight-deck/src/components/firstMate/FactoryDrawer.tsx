@@ -12,6 +12,7 @@ import {
   editDraft,
   getFactory,
   newDraft,
+  patchFactory,
   runNow,
   stopRun,
   continueRun,
@@ -39,6 +40,7 @@ import { ErrorBox, Pill, errText, type PillTone } from './ui'
 import { Checks, pct, type CaseSeed } from './Checks'
 import { RunResult } from './RunResult'
 import { RunProgress } from './RunProgress'
+import { CapPicker } from './CapPicker'
 
 // One factory, in a drawer over the page: its charter (the live version, and
 // the draft being written), its runs, and its history. Approving a draft is
@@ -77,7 +79,7 @@ function eventText(e: FactoryEvent): string {
 }
 
 /** The editable part of a draft, as the form holds it. */
-interface Form { charter: string; checks: string; schedule: string; runTokens: string }
+interface Form { charter: string; checks: string; schedule: string }
 
 function formOf(v: Version): Form {
   const sched = v.triggers.find((t): t is Extract<Trigger, { kind: 'schedule' }> => t.kind === 'schedule')
@@ -85,24 +87,21 @@ function formOf(v: Version): Form {
     charter: v.charter,
     checks: v.checks.contract.join('\n'),
     schedule: sched?.schedule ?? '',
-    runTokens: v.budget.run_tokens ? String(v.budget.run_tokens) : '',
   }
 }
 
 function fieldsOf(form: Form, v: Version): DraftFields {
   const others = v.triggers.filter((t) => t.kind !== 'schedule')
   const schedule = form.schedule.trim()
-  const tokens = form.runTokens.trim().replace(/[,_\s]/g, '')
   return {
     charter: form.charter,
     checks: { ...v.checks, contract: form.checks.split('\n').map((s) => s.trim()).filter(Boolean) },
     triggers: [...(schedule ? [{ kind: 'schedule' as const, schedule, tz: '' }] : []), ...others],
-    budget: { run_tokens: tokens ? Number(tokens) : null },
   }
 }
 
 const same = (a: Form, b: Form) => a.charter === b.charter && a.checks === b.checks
-  && a.schedule === b.schedule && a.runTokens === b.runTokens
+  && a.schedule === b.schedule
 
 export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onChanged, onNotice }: {
   factoryId: string
@@ -167,6 +166,8 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
       setBusy(null)
     }
   }
+  const setCap = (tokens: number) => void act('cap', () => patchFactory(factoryId, { run_tokens: tokens }),
+    tokens ? `Each run may now use ${tokensText(tokens)}` : 'Each run uses the cap it inherits')
 
   const f = data
   const draft = f?.draft ?? null
@@ -262,7 +263,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                       placeholder="Bat writes its own checks when you leave this empty"
                       onChange={(e) => setForm({ ...form, checks: e.target.value })} />
                   </div>
-                  <div className="grid gap-3 wide:grid-cols-2">
+                  <div>
                     <div>
                       <label className={label} htmlFor="fm-schedule">When it runs</label>
                       <input id="fm-schedule" className={input} value={form.schedule} placeholder="weekdays 08:00"
@@ -271,11 +272,6 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                         {form.schedule.trim() ? scheduleText(form.schedule) : 'Empty: only when you press Run now'}.
                         {' '}It starts on its own while your First Mate is on.
                       </p>
-                    </div>
-                    <div>
-                      <label className={label} htmlFor="fm-tokens">Token cap per run</label>
-                      <input id="fm-tokens" inputMode="numeric" className={input} value={form.runTokens} placeholder="Your default"
-                        onChange={(e) => setForm({ ...form, runTokens: e.target.value })} />
                     </div>
                   </div>
                   {gate && (
@@ -316,6 +312,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
 
               {f.live ? (
                 <LiveVersion version={f.live} trust={f.trust} pinned={f.trust_pinned} approvedAt={f.live.decided_at}
+                  cap={<CapPicker id="fm-cap" cap={f.run_cap} own={f.run_tokens ?? 0} busy={busy === 'cap'} onPick={setCap} />}
                   onChange={draft ? undefined : () => void act('draft', () => newDraft(factoryId))}
                   busy={busy === 'draft'} trustBusy={busy === 'trust'}
                   onTrust={(level, pin) => void act('trust', () => setTrust(factoryId, level, pin),
@@ -342,6 +339,13 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                   className="inline-flex h-9 items-center gap-1.5 rounded-full bg-violet-600 px-4 text-xs font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60">
                   {busy === 'run' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />} Run now
                 </button>
+                {f.live && (
+                  <div className="flex w-full flex-wrap items-center gap-2 text-xs text-zinc-500">
+                    <label htmlFor="fm-cap-runs">Each run may use</label>
+                    <CapPicker id="fm-cap-runs" cap={f.run_cap} own={f.run_tokens ?? 0} busy={busy === 'cap'} onPick={setCap} />
+                    <span>Continue gives a stopped run this much more.</span>
+                  </div>
+                )}
               </div>
               {f.runs.length === 0 ? (
                 <p className="text-zinc-500">No runs yet.</p>
@@ -392,8 +396,10 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
 
 const TRUST_ORDER: Trust[] = ['propose', 'commit', 'direct']
 
-function LiveVersion({ version: v, trust, pinned, approvedAt, onChange, busy, trustBusy, onTrust }: {
+function LiveVersion({ version: v, cap, trust, pinned, approvedAt, onChange, busy, trustBusy, onTrust }: {
   version: Version
+  /** The factory's cap per run, to change in place. */
+  cap: React.ReactNode
   trust: FactoryDetail['trust']
   pinned: boolean
   approvedAt: string | null
@@ -430,8 +436,11 @@ function LiveVersion({ version: v, trust, pinned, approvedAt, onChange, busy, tr
         )}
         <div className={row}><span className={key}>Starts</span><span className="text-zinc-300">{triggersText(v.triggers)}</span></div>
         <div className={row}>
-          <span className={key}>Cap per run</span>
-          <span className="text-zinc-300">{v.budget.run_tokens ? tokensText(v.budget.run_tokens) : 'Your default'}</span>
+          <label className={key} htmlFor="fm-cap">Cap per run</label>
+          <span className="min-w-0 flex-1">
+            {cap}
+            <span className="mt-1 block text-[11px] text-zinc-500">Tokens one run may use before it stops. Changing it needs no approval; the next run, or Continue, uses it.</span>
+          </span>
         </div>
         <div className={row}>
           <span className={key}>May act</span>

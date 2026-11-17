@@ -135,6 +135,8 @@ export interface Factory {
   share: number
   priority: number
   goal_id: string
+  /** Its own cap per run; 0 = its charter's, else your default. */
+  run_tokens?: number
   template: string
   created_at: string
   updated_at: string
@@ -233,7 +235,17 @@ export interface FactoryEvent {
   detail: Record<string, unknown>
 }
 
+/** The cap per run in force, and what applies when the factory sets none. */
+export interface RunCap {
+  tokens: number
+  source: 'factory' | 'charter' | 'default'
+  inherited: number
+  inherited_from: 'charter' | 'default'
+}
+
 export interface FactoryDetail extends Factory {
+  /** Tokens one run may use. */
+  run_cap: RunCap
   versions: Version[]
   runs: Run[]
   events: FactoryEvent[]
@@ -384,7 +396,7 @@ export const listFactories = (includeRetired = false) =>
 export const createFactory = (body: { template?: string; title?: string; charter?: string }) =>
   call<Factory>('/fd/first-mate/factories', json('POST', body))
 export const getFactory = (id: string) => call<FactoryDetail>(f(id))
-export const patchFactory = (id: string, body: { title?: string; share?: number; priority?: number; goal_id?: string }) =>
+export const patchFactory = (id: string, body: { title?: string; share?: number; priority?: number; goal_id?: string; run_tokens?: number }) =>
   call<Factory>(f(id), json('PATCH', body))
 export const deleteFactory = (id: string) => call<{ ok: boolean }>(f(id), { method: 'DELETE' })
 export const newDraft = (id: string, body: DraftFields = {}) => call<Factory>(`${f(id)}/draft`, json('POST', body))

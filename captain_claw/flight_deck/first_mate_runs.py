@@ -179,9 +179,20 @@ def bat_config(factory: dict[str, Any], version: dict[str, Any], run: dict[str, 
 
 
 def token_cap_for(store: fms.FirstMateStore, factory: dict[str, Any], version: dict[str, Any]) -> int:
-    """The version's cap per run, else the owner's default."""
-    cap = (version.get("budget") or {}).get("run_tokens")
-    return int(cap or store.prefs(factory["owner_id"])["run_tokens"])
+    """What one run may use: the factory's own cap per run, else its version's,
+    else the owner's default."""
+    return int(run_cap(store, factory, version)["tokens"])
+
+
+def run_cap(store: fms.FirstMateStore, factory: dict[str, Any], version: dict[str, Any] | None) -> dict[str, Any]:
+    """The cap per run as the page shows it: ``tokens`` in force, where they come
+    from (``factory`` | ``charter`` | ``default``), and what applies when the
+    factory sets none (``inherited``, ``inherited_from``)."""
+    charter = int(((version or {}).get("budget") or {}).get("run_tokens") or 0)
+    inherited = charter or int(store.prefs(factory["owner_id"])["run_tokens"])
+    own = int(factory.get("run_tokens") or 0)
+    return {"tokens": own or inherited, "source": "factory" if own else "charter" if charter else "default",
+            "inherited": inherited, "inherited_from": "charter" if charter else "default"}
 
 
 # ── Bat ────────────────────────────────────────────────────────────────
