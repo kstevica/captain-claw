@@ -103,7 +103,8 @@ class FlightDeckTool(Tool):
         "Discover, communicate with, and spawn peer agents in the Flight Deck environment. "
         "Actions: 'list_agents' to discover peers, 'consult' for quick synchronous Q&A, "
         "'delegate' for tasks the peer should do independently, "
-        "'spawn_agent' to create a new agent in the fleet. "
+        "'spawn_agent' to create a new agent in the fleet (it becomes your child), "
+        "'report' to send the agent you sit under (your parent) a report. "
         "Agents on OTHER Flight Decks (connected through BotPort) appear in list_agents as "
         "'Agent@deck' — consult/delegate them by that full name, exactly like local peers. "
         "IMPORTANT: When the user says 'delegate', or the task is large/long-running "
@@ -117,7 +118,7 @@ class FlightDeckTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["list_agents", "consult", "delegate", "spawn_agent"],
+                "enum": ["list_agents", "consult", "delegate", "spawn_agent", "report"],
                 "description": (
                     "'list_agents' — get all agents currently in the fleet. "
                     "'consult' — ONLY for quick questions where you need the answer right now to continue your work (synchronous, blocks until response). "
@@ -130,6 +131,9 @@ class FlightDeckTool(Tool):
                     "`env` map ({\"BRAVE_API_KEY\": \"...\"}) to give the new agent extra credentials, via the "
                     "message field as JSON. Without an archetype it uses your own provider/model/key/base_url as defaults "
                     "(your key only together with your own provider and base_url — for another one pass its api_key). "
+                    "'report' — send your parent (the agent you sit under, named in your family block) a report "
+                    "in `message`: when you finish work it asked for, or it should know something. It reaches "
+                    "your parent even when it's asleep. "
                     "RULE: If the user says 'delegate' or the task involves work (not just a question), use 'delegate'."
                 ),
             },
@@ -166,7 +170,7 @@ class FlightDeckTool(Tool):
                 "type": "string",
                 "description": (
                     "The message/task to send to the peer agent "
-                    "(required for 'consult' and 'delegate' actions)."
+                    "(required for 'consult', 'delegate' and 'report' actions)."
                 ),
             },
             "file": {
@@ -849,5 +853,29 @@ class FlightDeckTool(Tool):
             if not agent_name:
                 return ToolResult(success=False, error="agent_name is required for spawn_agent action.")
             return await self._spawn_agent(fd_url, agent_name, message, **kwargs)
+        elif action == "report":
+            if not message.strip():
+                return ToolResult(success=False, error="message is required for report action.")
+            return await self._report(fd_url, message)
         else:
-            return ToolResult(success=False, error=f"Unknown action: {action}. Use 'list_agents', 'consult', 'delegate', or 'spawn_agent'.")
+            return ToolResult(success=False, error=f"Unknown action: {action}. Use 'list_agents', 'consult', 'delegate', 'spawn_agent' or 'report'.")
+
+    async def _report(self, fd_url: str, message: str) -> ToolResult:
+        """Send the agent this one sits under (its parent) a report: Flight Deck
+        finds the parent from our own identity and gives it a turn on it."""
+        try:
+            import httpx
+        except ImportError:
+            return ToolResult(success=False, error="httpx is required")
+        from captain_claw.fd_client import refusal_detail
+
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.post(f"{fd_url}/fd/family/agent/report",
+                                         headers=_fd_agent_headers(fd_url), json={"message": message[:8000]})
+                if resp.status_code != 200:
+                    return ToolResult(success=False, error=await refusal_detail(resp))
+                result = resp.json()
+        except Exception as e:
+            return ToolResult(success=False, error=f"Failed to report: {e}")
+        return ToolResult(success=True, content=str(result.get("message") or "Report sent."))

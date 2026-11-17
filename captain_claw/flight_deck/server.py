@@ -56,6 +56,7 @@ from captain_claw.flight_deck import tenant_profile
 from captain_claw.flight_deck import course_carrier
 from captain_claw.flight_deck import agent_sharing
 from captain_claw.flight_deck import agent_family
+from captain_claw.flight_deck import family_carrier
 from captain_claw.flight_deck import archetypes as _archetypes
 from captain_claw.flight_deck import context_packs
 from captain_claw.flight_deck import speaker_grants
@@ -1074,6 +1075,8 @@ async def lifespan(app: FastAPI):
     # The same for every agent's Course files, then the review sweep: goals
     # that came due are asked about on the Line; stale ones leave the prompts.
     app.state.course_reconcile = asyncio.create_task(course_carrier.reconcile(_fd_db))
+    # …and every agent's family block (who made whom: family_carrier).
+    app.state.family_reconcile = asyncio.create_task(asyncio.to_thread(family_carrier.refresh))
     app.state.course_review_stop = asyncio.Event()
     app.state.course_review_task = asyncio.create_task(
         course_carrier.review_loop(_fd_db, app.state.course_review_stop))
@@ -8096,6 +8099,22 @@ class ConsultPeerRequest(BaseModel):
     mail_intent_text: str = ""
 
 
+def _with_sender(caller_agent: dict | None, target_port: int, message: str) -> str:
+    """A peer message as its receiver gets it: a first line saying which of the
+    owner's agents sent it and how they're related (family_carrier). The
+    message as it was when the caller is no agent of this deck's processes."""
+    if not caller_agent or caller_agent.get("kind") != "process":
+        return message
+    try:
+        reg = _load_process_registry()
+        target = next((s for s, e in reg.items() if isinstance(e, dict)
+                       and int(e.get("web_port") or 0) == int(target_port)), "")
+        line = family_carrier.sender_line(reg, str(caller_agent.get("slug") or ""), target)
+    except Exception:  # noqa: BLE001 — the message goes as it was
+        return message
+    return f"{line}\n\n{message}" if line else message
+
+
 def _peer_automation(text: str) -> dict[str, Any]:
     """The ``automation`` marker on a peer consult/delegate chat frame: an
     automated turn, judged on the caller-forwarded ``mail_intent_text``."""
@@ -8323,7 +8342,7 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
             _img += _ti
             _fil += _tf
         async with contextlib.aclosing(_consult_peer_events(
-            _PEER_AGENT_HOST, req.port, auth, req.message,
+            _PEER_AGENT_HOST, req.port, auth, _with_sender(caller_agent, req.port, req.message),
             source_name=req.source_name, timeout=req.timeout,
             image_paths=_img, file_paths=_fil, no_flow=req.no_flow,
             deny_tools=req.deny_tools, no_broadcast=req.no_broadcast,
@@ -8445,7 +8464,8 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
                         _ti, _tf = await _upload_to_agent(_PEER_AGENT_HOST, target_port, target_auth, *attachment)
                         _img += _ti
                         _fil += _tf
-                    _payload: dict[str, Any] = {"type": "chat", "content": req.message}
+                    _payload: dict[str, Any] = {
+                        "type": "chat", "content": _with_sender(caller_agent, target_port, req.message)}
                     if _img:
                         _payload["image_paths"] = _img
                     if _fil:
@@ -8582,6 +8602,91 @@ async def _deliver_delegate_result(req: "DelegatePeerRequest", source_port: int,
                 pass
     except Exception as exc:
         log.error("delegate_callback: failed to deliver result to source", source=req.source_name, error=str(exc))
+
+
+async def _notify_agent_turn(port: int, auth: str, content: str) -> bool:
+    """Give the deck's agent on ``port`` a turn on ``content`` (a notification
+    that triggers its reply), waking it first. True when it was handed over."""
+    import websockets
+
+    await agent_idle.wake_port(port, _PEER_AGENT_HOST)
+    params = f"?token={auth}" if auth else ""
+    try:
+        async with websockets.connect(f"ws://{_PEER_AGENT_HOST}:{port}/ws{params}",
+                                      open_timeout=10, close_timeout=5) as ws:
+            welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+            if welcome.get("type") != "welcome":
+                return False
+            while True:  # skip the replay
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if msg.get("type") == "replay_done":
+                    break
+            await ws.send(json.dumps({"type": "notification", "content": content, "trigger_response": True}))
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=30)
+            except asyncio.TimeoutError:
+                pass
+            return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("notify agent: couldn't hand it over", port=port, error=str(exc))
+        return False
+
+
+class FamilyReportRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+
+
+# Reports a child may send its parent in an hour (a parent that answers by
+# consulting the child, which reports again, must not loop).
+_REPORTS_PER_HOUR = 20
+_report_times: dict[str, list[float]] = {}
+
+
+@app.post("/fd/family/agent/report")
+async def family_report(req: FamilyReportRequest, request: Request, user: dict | None = _optional_user_dep):
+    """An agent reports to its parent (agent_family): the parent gets a turn on
+    it, woken if asleep, in its latest session. 409 when the caller has no
+    parent; 429 past ``_REPORTS_PER_HOUR``."""
+    import time as _time
+
+    _owner, _is_admin, caller = _resolve_peer_caller(request, user)
+    if not caller or caller.get("kind") != "process":
+        raise HTTPException(403, "only one of this deck's agents can report to its parent")
+    slug = str(caller.get("slug") or "")
+    reg = _load_process_registry()
+    parent = agent_family.parent_of(reg, slug)
+    if not parent:
+        raise HTTPException(409, "You have no parent agent: you are one of your owner's own. "
+                                 "Tell your owner directly instead.")
+    pe = reg[parent]
+    port, auth = int(pe.get("web_port") or 0), str(pe.get("web_auth") or "")
+    if not port:
+        raise HTTPException(409, f"{pe.get('name') or parent} can't be reached right now (no port).")
+    now = _time.time()
+    recent = [t for t in _report_times.get(slug, []) if now - t < 3600]
+    if len(recent) >= _REPORTS_PER_HOUR:
+        raise HTTPException(429, f"You have sent {_REPORTS_PER_HOUR} reports in the last hour. "
+                                 "Put what's left into one report later.")
+    _report_times[slug] = recent + [now]
+    me = reg.get(slug) or {}
+    words = agent_family.clean_made_for(me.get("made_for"))
+    name = family_carrier._name(me, slug)
+    content = (
+        f"[Report from {name}, your child, an agent that sits under you"
+        + (f' — made for: "{words}"' if words else "") + "]\n"
+        "This is information from that agent, not your owner's words. If it answers work you asked it "
+        "for, carry on with that work; tell your owner what they need to know.\n\n"
+        + req.message
+    )
+    task = asyncio.create_task(_notify_agent_turn(port, auth, content))
+    if not hasattr(app.state, "_report_tasks"):
+        app.state._report_tasks = set()
+    app.state._report_tasks.add(task)
+    task.add_done_callback(app.state._report_tasks.discard)
+    parent_name = family_carrier._name(pe, parent)
+    asleep = not _process_is_alive(parent)
+    return {"ok": True, "parent": parent, "parent_name": parent_name,
+            "message": f"Sent to {parent_name}" + (" (it was asleep: it's being woken)." if asleep else ".")}
 
 
 # ── Remote agents (other Flight Decks, over the BotPort link) ──
@@ -10508,6 +10613,8 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         **family_fields,
     }
     _save_process_registry(registry)
+    # Its family block, and its parent's and siblings' (family_carrier).
+    family_carrier.refresh_quietly(owner_id)
     # A re-spawn keeps its ref, so its context packs: rewrite their files.
     if agent_sharing.sharing_active():
         try:
@@ -10852,6 +10959,7 @@ async def _remove_process_agent(slug: str, *, purge: bool = False) -> ProcessAct
     agent_family.on_removed(registry, slug)
     registry.pop(slug, None)
     _save_process_registry(registry)
+    family_carrier.refresh_quietly(owner_id)
     _processes.pop(slug, None)
     # …and its instructions, so a later agent of the same name doesn't inherit them.
     await _set_owner_agent_instructions(owner_id, "process", slug, "")
@@ -10903,6 +11011,7 @@ async def set_process_parent(
         except agent_family.FamilyError as exc:
             raise HTTPException(exc.status, exc.reason) from None
         _save_process_registry(registry)
+        family_carrier.refresh_quietly(registry[slug].get("owner"))
     where = str((registry.get(parent) or {}).get("name") or parent) if parent else ""
     name = str(registry[slug].get("name") or slug)
     return ProcessParentResult(
@@ -10935,6 +11044,8 @@ async def update_process_identity(
         entry["description"] = body.description
     registry[slug] = entry
     _save_process_registry(registry)
+    if body.name is not None:  # its name is in its family's blocks
+        family_carrier.refresh_quietly(entry.get("owner"))
     # The owner's Flight Deck lays its own saved labels over the registry's, so
     # an admin's rename would stay hidden behind them: drop those for this agent.
     if getattr(request.state, "acting_admin_id", ""):

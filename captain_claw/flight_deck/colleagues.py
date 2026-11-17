@@ -598,6 +598,17 @@ def what_of(action: dict) -> str:
     return ""
 
 
+def _relation(sender: str, receiver: str) -> str:
+    """What ``sender`` is to ``receiver`` (family_carrier), "" when not family."""
+    try:
+        from captain_claw.flight_deck import family_carrier
+        from captain_claw.flight_deck.server import _load_process_registry
+
+        return family_carrier.relation_words(_load_process_registry(), sender, receiver)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def turn_spec(uid: str, action: dict, view_: dict, words: str, slug: str) -> dict | None:
     """``{prompt, automation, what}`` for a colleague's hand-over or its answer
     going back; None for any other."""
@@ -615,8 +626,9 @@ def turn_spec(uid: str, action: dict, view_: dict, words: str, slug: str) -> dic
         frm = str(p.get("from_name") or "a colleague")
         role = f" ({p['from_role']})" if p.get("from_role") else ""
         me = f" as the {p['to_role']} you are" if p.get("to_role") else ""
+        kin = _relation(str(p.get("from") or ""), slug) or "another of your owner's agents"
         lines = [
-            f"Your colleague {frm}{role}, another of your owner's agents, hands you a task on your owner's Taskboard. "
+            f"Your colleague {frm}{role}, {kin}, hands you a task on your owner's Taskboard. "
             f"Do it now with your tools{me}, then answer with what you did and what you found or made — your answer "
             f"goes back to {frm}, who carries on with it. Don't ask {frm} to confirm: do what you can and say what is "
             "missing.",

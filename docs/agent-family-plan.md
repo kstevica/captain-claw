@@ -7,7 +7,7 @@ sidebar and on the Agents page, and you can move an existing agent under
 another agent by dragging it there. First Mate is a parent too: its factories'
 work hangs under it.
 
-Status: decisions taken 2026-11-17; Phase 1 (data) built, see §11.
+Status: decisions taken 2026-11-17; Phase 1 (data) and Phase 2 (talk) built, see §11 and §12.
 
 ## User decisions (2026-11-17)
 
@@ -225,7 +225,7 @@ on the phone, Undo restores.
 | Phase | What |
 |-------|------|
 | P1 Data | Registry fields, spawn paths record the parent, `bat-` treated as managed, `PUT /fd/processes/{slug}/parent` with the limits, `ProcessInfo` fields, First Mate labels → `parent`/`factory` |
-| P2 Talk | "Your family" prompt block, sender named in consult/delegate/hand-over, `report` to the parent, refresh on change |
+| P2 Talk | "Your family" prompt block (a file the deck keeps), sender named in consult/delegate/hand-over, `report` to the parent, refresh on change, workers out of the peer lists |
 | P3 Sidebar | Tree rows, fold, worker line, drag onto a row to adopt, drag out to make top-level, ⋯ "Put under another agent…" picker, Undo toast, e2e |
 | P4 Agents page | Trays, hover family highlight, draggable cards, First Mate's factory tray, footer count without workers |
 | P5 Lifecycle | Remove and power dialogs, clone/export rules, info-panel family history |
@@ -278,3 +278,36 @@ on the phone, Undo restores.
   top-level; clone lands top-level (P5).
 - Deploy: FD restart (server + routes), agent restarts (the `spawn_agent`
   tool), hard refresh (bundle).
+
+## 12. As built (P2, 2026-11-17)
+
+- **The block** (`family_carrier.py`): `family_context.md` in a process agent's
+  config home, next to the Course files; the agent inserts it on its owner's
+  turns (`tenant_context.load_family_context`, `agent_context_mixin`), in the
+  cached part of the prompt. It says who the agent's parent is (and whether it
+  made the agent or the owner put it there, with `made_for`), its siblings (12
+  by name, then "and N more") and its children. No live state (awake/asleep):
+  the block changes only when the family does. None for workers or for agents
+  without family. Names and `made_for` lines are flattened, quoted and capped.
+- **Kept in step**: rewritten for the owner's agents after a spawn, a move, a
+  removal and a rename (an unchanged file is left alone, so the prompt cache
+  holds), and once at FD startup. Not through the identity frame: a file reaches
+  a sleeping agent too.
+- **"Other Available Agents" stays** (decision 3), minus run workers: the
+  browser's peer frame (`chatStore`) and FD's (`agent_handshake.identity_frame`)
+  leave out `role=worker` agents.
+- **Who's talking**: consult and delegate messages from one of the deck's process
+  agents start with `[From <name>, <relation>]` (your parent / your child /
+  your sibling, also under X / another of your owner's agents). The colleagues
+  hand-over says the relation in place of "another of your owner's agents".
+- **Report**: `POST /fd/family/agent/report {message}` (the calling agent's
+  X-Agent-Auth, as the peer routes) gives the parent a turn on it — woken if
+  asleep, in its latest session (a notification with `trigger_response`, as a
+  delegated result), headed `[Report from <name>, your child … made for: …]`
+  and marked as not the owner's words. 409 without a parent, 429 past 20 an
+  hour. The agent's `flight_deck` tool has a `report` action.
+- **Not done**: the session the child was made in isn't recorded, so a report
+  goes to the parent's latest session; a report doesn't follow the parent's
+  channel (Telegram etc.); Docker agents have no block.
+- Deploy: FD restart, agent restarts (prompt loader, `flight_deck` tool), hard
+  refresh (bundle).

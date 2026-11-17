@@ -3,6 +3,7 @@ import { AgentChatWS, splitImageRefs, type ChatMessage, type TokenUsage, type To
 import { useAuthStore, registerSignOutFlush, registerSignOutTeardown } from './authStore'
 import { useContainerStore } from './containerStore'
 import { useLocalAgentStore } from './localAgentStore'
+import { isManagedAgent } from '../utils/managedAgents'
 import { useProcessStore } from './processStore'
 import { useTraceStore } from './traceStore'
 import { useQuotaStore } from './quotaStore'
@@ -1729,6 +1730,8 @@ function peerAgentsFrame(containerId: string): Record<string, unknown> {
   const { getForwardingTask: getProcFwd, getConsultApproval: getProcApproval } = useProcessStore.getState()
   for (const p of processes) {
     if (p.slug === containerId || p.status !== 'running' || !p.web_port) continue
+    // A run's workers aren't peers: their run talks to them (agent_family).
+    if (p.role === 'worker' || isManagedAgent(p.slug, p.description || '')) continue
     peers.push({
       name: p.name || p.slug,
       description: p.description || '',

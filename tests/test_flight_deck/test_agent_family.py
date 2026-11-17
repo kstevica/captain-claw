@@ -360,32 +360,37 @@ class TestBatWorkers:
 # ── the agent-side tool ─────────────────────────────────────────────
 
 
+@pytest.fixture
+def bob_agent(spawn_env, monkeypatch, tmp_path):
+    """This agent IS bob-agent, its tool's requests go into the deck (as
+    test_spawn_owner_integrity's TestFlightDeckToolSpawn)."""
+    from captain_claw import config as config_mod
+    from captain_claw.config import Config
+    from captain_claw.flight_deck import agent_secret
+
+    cfg = Config()
+    cfg.web.auth_token = "bob-agent-token"
+    monkeypatch.setattr(config_mod, "_config", cfg)
+    monkeypatch.setenv("CAPTAIN_CLAW_FD_HOME", str(tmp_path / "fd-home"))
+    monkeypatch.setenv("FD_LOCKDOWN", "1")
+    monkeypatch.setenv("FD_OWNER_ID", BOB)
+    monkeypatch.setenv("FD_URL", "http://fd.test")
+    agent_secret.reset_cache_for_tests()
+    real_client = httpx.AsyncClient
+
+    def _to_fd(*args, **kwargs):
+        return real_client(transport=httpx.ASGITransport(app=server.app, client=LOOPBACK),
+                           timeout=30.0)
+
+    monkeypatch.setattr(httpx, "AsyncClient", _to_fd)
+    yield cfg
+    agent_secret.reset_cache_for_tests()
+
+
 class TestTool:
     @pytest.fixture
-    def agent(self, spawn_env, monkeypatch, tmp_path):
-        """This agent IS bob-agent, its tool's requests go into the deck (as
-        test_spawn_owner_integrity's TestFlightDeckToolSpawn)."""
-        from captain_claw import config as config_mod
-        from captain_claw.config import Config
-        from captain_claw.flight_deck import agent_secret
-
-        cfg = Config()
-        cfg.web.auth_token = "bob-agent-token"
-        monkeypatch.setattr(config_mod, "_config", cfg)
-        monkeypatch.setenv("CAPTAIN_CLAW_FD_HOME", str(tmp_path / "fd-home"))
-        monkeypatch.setenv("FD_LOCKDOWN", "1")
-        monkeypatch.setenv("FD_OWNER_ID", BOB)
-        monkeypatch.setenv("FD_URL", "http://fd.test")
-        agent_secret.reset_cache_for_tests()
-        real_client = httpx.AsyncClient
-
-        def _to_fd(*args, **kwargs):
-            return real_client(transport=httpx.ASGITransport(app=server.app, client=LOOPBACK),
-                               timeout=30.0)
-
-        monkeypatch.setattr(httpx, "AsyncClient", _to_fd)
-        yield cfg
-        agent_secret.reset_cache_for_tests()
+    def agent(self, bob_agent):
+        return bob_agent
 
     async def test_made_for_reaches_the_deck(self, agent, users):
         from captain_claw.tools.flight_deck import FlightDeckTool
