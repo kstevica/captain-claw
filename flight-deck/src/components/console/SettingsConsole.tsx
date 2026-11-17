@@ -11,6 +11,7 @@ import { DeckCourseSettings } from '../course/DeckCourseSettings'
 import { TrustedModelCard } from '../anonymize/TrustedModelCard'
 import { NamePackCard } from '../anonymize/NamePackCard'
 import { ApprovalsPolicyCard } from '../approvals/ApprovalsPolicyCard'
+import { FirstMateDeckCard } from '../firstMate/FirstMateDeckCard'
 import {
   CUSTOM_TOOLS_HINT, CUSTOM_TOOLS_TITLE, EVERYBODY_APPROVAL_HINT, EVERYBODY_APPROVAL_TITLE, SANDBOX_HINT, SANDBOX_TITLE, sandboxLine,
 } from '../admin/customTools'
@@ -21,8 +22,8 @@ import {
 import { Page, PageHeader, Card, SettingRow, Segmented, Notice, Button, inputCls } from './parts'
 
 // Settings: how the deck looks and who gets in — branding, sign-up and the
-// waitlist, kiosk mode, how agents run, and what every agent knows about the
-// company. The same system config as Admin → Settings.
+// waitlist, kiosk mode, how agents run, First Mate, and what every agent knows
+// about the company. The same system config as Admin → Settings.
 
 const KIOSK_HINT: Record<KioskMode, string> = {
   off: 'Everyone gets the normal layout.',
@@ -227,6 +228,9 @@ export function SettingsConsole() {
           />
         </SettingRow>
       </Card>
+
+      {/* First Mate: the same switches as "This deck" on its page — loads on its own. */}
+      <FirstMateDeckCard />
 
       <TrustedModelCard />
 
