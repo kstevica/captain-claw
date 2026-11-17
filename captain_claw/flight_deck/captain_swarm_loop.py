@@ -821,6 +821,9 @@ class Driver:
         # A test's own lane has no grants to count.
         self.capacity: Callable[[dict, int], Awaitable[int]] = parts["capacity"] if _LANE is None else as_asked
         self.slice, self.carry = bool(parts["slice"]), bool(parts["carry"])
+        # What a kind does once a run ends (optional): First Mate's factory kind
+        # turns a kept gain into a draft for the owner.
+        self.finished: Callable[[dict], Awaitable[None]] | None = parts.get("finished")
 
     # small helpers
 
@@ -869,6 +872,11 @@ class Driver:
         await self._state(report=report_of(await self._run(), reason))
         rehearsal.release_sites(self.run_id)
         await remember(self.store, self.run_id)
+        if self.finished is not None:
+            try:
+                await self.finished(await self._run())
+            except Exception:  # noqa: BLE001 — the run's end stands whatever its kind does after
+                log.warning("captain swarm: a kind's end-of-run step failed", run_id=self.run_id, exc_info=True)
         return status
 
     async def _measured(self, exp_id: str, sha: str, which: str) -> dict:

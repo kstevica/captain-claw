@@ -167,6 +167,59 @@ async def charter_drafted(factory: dict[str, Any], cases: int, words: str = "") 
         log.debug("first mate: charter post failed", exc_info=True)
 
 
+def _score(point: dict[str, Any] | None, part: str) -> float | None:
+    s = ((point or {}).get(part) or {}).get("stats") or {}
+    return s.get("mean")
+
+
+async def improvement_drafted(factory: dict[str, Any], run: dict[str, Any], kept: list[str]) -> None:
+    """An improvement run's best is a draft: one card, approved against its hash.
+    Approving it checks it on the cases against the live version first."""
+    draft = factory.get("draft") or {}
+    if not draft:
+        return
+    before, after = _score(run.get("baseline"), "dev"), _score(run.get("champion"), "dev")
+    parts = [f"Captain Swarm tried {run.get('experiments', 0)} ideas on its cases"
+             + (f": the best scored {after:.0%}, against {before:.0%} before" if before is not None
+                and after is not None else "") + ", and the held-out cases confirmed it.", ""]
+    if kept:
+        parts += ["**What changed**"] + [f"- {_cut(k, 200)}" for k in kept[:5]] + [""]
+    parts += ["**The new charter**", _cut(draft["charter"], 900), ""]
+    steps = (draft.get("runner_config") or {}).get("steps") or []
+    if steps:
+        parts += ["**Steps:** " + "; ".join(_cut(x, 80) for x in steps[:8]), ""]
+    parts.append("Approving it checks it on its cases against the live version first: it goes live only if it "
+                 "holds up. Its grants and when it starts don't change.")
+    try:
+        from captain_claw.flight_deck import line
+        await line.post(factory["owner_id"], "proposal", f"{factory['title']}: a better charter to approve",
+                        "\n".join(parts), bell_type="first_mate_improvement", source=SOURCE, needs_you=True,
+                        ref_type="first_mate_charter", ref_id=charter_ref(factory["id"], draft["sha"]),
+                        to_phones=False, thread_id=thread_of(factory["id"]))
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: improvement post failed", exc_info=True)
+
+
+async def improvement_ended(factory: dict[str, Any], run: dict[str, Any], *, kept: bool, note: str) -> None:
+    """An improvement run ended with nothing for the owner to approve: it found
+    nothing better, or its best couldn't become a draft (and why)."""
+    if kept:
+        title = f"{factory['title']}: a better charter waits"
+        body = (f"The improvement run found a better charter, but it couldn't become a draft: {note.rstrip('.')}. "
+                "Then open First Mate and make it a draft from the factory's Checks tab.")
+    else:
+        title = f"{factory['title']}: the improvement run found nothing better"
+        body = (f"Captain Swarm tried {run.get('experiments', 0)} ideas on its cases and kept none"
+                + (f" ({note.rstrip('.')})" if note else "") + ". The factory stays as it is.")
+    try:
+        from captain_claw.flight_deck import line
+        await line.post(factory["owner_id"], "run", title, body, bell_type="first_mate_improvement", source=SOURCE,
+                        needs_you=kept, ref_type="first_mate_factory", ref_id=factory["id"], to_phones=False,
+                        thread_id=thread_of(factory["id"]))
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: improvement post failed", exc_info=True)
+
+
 async def charter_settled(owner_id: str, factory_id: str, sha: str) -> None:
     """The draft a card showed was approved, declined or changed: it leaves Needs you."""
     try:

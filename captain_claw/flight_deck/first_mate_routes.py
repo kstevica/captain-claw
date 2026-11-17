@@ -557,6 +557,28 @@ async def improve_factory(factory_id: str, body: Any = Body(default={}), user: d
     return {"run_id": run["id"], "status": run["status"], "title": run["title"]}
 
 
+@router.post("/fd/first-mate/factories/{factory_id}/improvements/{run_id}/draft")
+async def improvement_draft(factory_id: str, run_id: str, user: dict = Depends(allowed_user)):
+    """A finished improvement run's best as the factory's new draft, when it
+    couldn't become one as the run ended (a draft was open then)."""
+    from captain_claw.flight_deck import captain_swarm_loop, first_mate_improve, first_mate_line
+    _mine(factory_id, user)
+    cs = captain_swarm_loop.get_store()
+    run = await cs.get_run(run_id) if cs is not None else None
+    subj = ((run or {}).get("objective") or {}).get("subject") or {}
+    if run is None or fms.norm_user(run["owner_id"]) != _uid(user) or subj.get("factory_id") != factory_id:
+        raise HTTPException(404, "no such improvement run")
+    if run["status"] in ("awaiting_go", "baseline", "running"):
+        raise HTTPException(409, "that improvement run is still going")
+    try:
+        view = await first_mate_improve.draft_from(run)
+    except FirstMateError as exc:
+        raise _err(exc) from None
+    kept = [e["hypothesis"] for e in await cs.list_experiments(run_id) if e.get("status") == "kept"]
+    await first_mate_line.improvement_drafted(view, run, kept)
+    return view
+
+
 # ── cases and checks ───────────────────────────────────────────────────
 
 _CASE_FIELDS = ("title", "input", "expect", "sealed")

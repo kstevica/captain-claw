@@ -537,7 +537,70 @@ def parts() -> dict[str, Any]:
     """What this kind brings to Captain Swarm's loop (``captain_swarm_loop.parts_for``)."""
     return {"lane": FactoryLane(), "propose": propose, "measure": measure, "seal": seal, "screen": screen,
             "branch": no_branch, "start": start_point, "capacity": capacity, "queue": lambda run: None,
-            "review": review_material, "slice": False, "carry": False}
+            "review": review_material, "slice": False, "carry": False, "finished": finished}
+
+
+# ── the result: a draft for the owner (Phase 6, piece 2) ─────────────
+
+def _pct(point: dict[str, Any] | None) -> float | None:
+    s = ((point or {}).get("dev") or {}).get("stats") or {}
+    return s.get("mean")
+
+
+async def draft_from(run: dict[str, Any]) -> dict[str, Any]:
+    """The run's best charter and steps as the factory's new draft, waiting for
+    the owner's approval (which checks it on the cases against the live
+    version first). Refused when the run kept nothing, the factory isn't the
+    run owner's any more, or a draft is already open (the owner's own work is
+    never replaced)."""
+    from captain_claw.flight_deck.first_mate_store import FirstMateError
+    champ = run.get("champion") or {}
+    if not champ.get("exp") or not champ.get("sha"):
+        raise FirstMateError("this run kept nothing better")
+    obj = run["objective"]
+    store = fms.get_store()
+    fid = obj["subject"]["factory_id"]
+    f = store.get_owned(fid, fms.norm_user(run["owner_id"]))
+    live = store.live(fid) if f else None
+    if f is None or live is None:
+        raise FirstMateError("that factory is gone or has no live version")
+    if f["draft_version"]:
+        raise FirstMateError(f"{f['title']} already has a draft open: approve or discard it first")
+    content = await content_of(champ["sha"])
+    before, after = _pct(run.get("baseline")), _pct(champ)
+    note = f"From improvement run {run['id']}" + (f": {before:.0%} → {after:.0%} on its cases"
+                                                   if before is not None and after is not None else "")
+    if obj["subject"].get("sha") and obj["subject"]["sha"] != live["sha"]:
+        note += f" (measured against version {obj['subject'].get('version')}; version {live['version']} is live now)"
+    rc = {**(live.get("runner_config") or {}), "worker_mode": content["worker_mode"], "steps": content["steps"]}
+    store.new_draft(fid, "first_mate", note=note[:fms.NOTE_MAX], charter=content["charter"], runner_config=rc)
+    view = store.submit(fid, "first_mate")
+    store.note(fid, "first_mate", "improvement_drafted", {"run": run["id"], "version": view["draft"]["version"]})
+    return view
+
+
+async def finished(run: dict[str, Any]) -> None:
+    """A factory's improvement run ended: its best becomes a draft with a card
+    on the Line, or the owner hears it found nothing better."""
+    from captain_claw.flight_deck import first_mate_line
+    from captain_claw.flight_deck.first_mate_store import FirstMateError
+    store = fms.get_store()
+    fid = run["objective"]["subject"]["factory_id"]
+    f = store.get(fid)
+    if f is None:
+        return
+    report = (run.get("state") or {}).get("report") or {}
+    kept = [e for e in await _store().list_experiments(run["id"]) if e.get("status") == "kept"]
+    if not (run.get("champion") or {}).get("exp"):
+        await first_mate_line.improvement_ended(f, run, kept=False, note=str(report.get("reason") or run.get(
+            "stopped_reason") or ""))
+        return
+    try:
+        view = await draft_from(run)
+    except FirstMateError as exc:
+        await first_mate_line.improvement_ended(f, run, kept=True, note=str(exc))
+        return
+    await first_mate_line.improvement_drafted(view, run, [e["hypothesis"] for e in kept])
 
 
 # ── starting one from First Mate ─────────────────────────────────────

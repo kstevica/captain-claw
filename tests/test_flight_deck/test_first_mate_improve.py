@@ -184,7 +184,9 @@ async def test_an_attempt_is_an_edit_and_the_screen_is_fair(store, cs):
     assert (await attempt({"steps": ["read the inbox", "check invoices", "draft replies"]}))["ok"]
     assert (await attempt({}))["reason"] == "it changed nothing"
     assert "too short" in (await attempt({"charter": "Do it."}))["reason"]
-    held = await attempt({"charter": better + " Watch for client0@held.example."})
+    held_out = {x["id"]: x for x in cases.cases(store, f["id"])}[split["holdout"][0]]
+    email = held_out["input"].split("<", 1)[1].split(">", 1)[0]  # a client only a held-out case names
+    held = await attempt({"charter": better + f" Watch for {email}."})
     assert not held["ok"] and "held-out case it was never shown" in held["reason"]
     opened = await attempt({"charter": better + " Like ana@open.example, keep it short."})
     assert opened["ok"]  # an open case's words are fair to use
