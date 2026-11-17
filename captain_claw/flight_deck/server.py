@@ -1826,6 +1826,7 @@ from captain_claw.flight_deck.chat_routes import router as chat_router
 from captain_claw.flight_deck.admin_routes import router as admin_router
 from captain_claw.flight_deck.profile_routes import router as profile_router
 from captain_claw.flight_deck.course_routes import router as course_router
+from captain_claw.flight_deck.first_mate_routes import router as first_mate_router
 from captain_claw.flight_deck.council_routes import router as council_router
 from captain_claw.flight_deck.basna_routes import router as basna_router
 from captain_claw.flight_deck.vatra_routes import router as vatra_router
@@ -1960,6 +1961,7 @@ app.include_router(chat_router)
 app.include_router(admin_router)
 app.include_router(profile_router)
 app.include_router(course_router)
+app.include_router(first_mate_router)
 app.include_router(council_router)
 app.include_router(basna_router)
 app.include_router(vatra_router)

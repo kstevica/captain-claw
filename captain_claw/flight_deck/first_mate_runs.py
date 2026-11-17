@@ -299,6 +299,7 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
     if state["status"] == "running":
         run = store.update_run(run_id, tokens=state["tokens"], usd=state["usd"])
         return {**run, "waiting": bool(state.get("waiting")), "note": state.get("note", "")}
+    _unwatch(run_id)  # a page read finished it: its watcher has nothing left to do
     return store.finish_run(run_id, state["status"], verdict=state.get("verdict", ""),
                             result=state.get("result", ""), error=state.get("note", ""),
                             tokens=state["tokens"], usd=state["usd"])
