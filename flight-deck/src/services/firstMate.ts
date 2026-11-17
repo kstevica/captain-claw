@@ -360,6 +360,7 @@ const f = (id: string) => `/fd/first-mate/factories/${encodeURIComponent(id)}`
 
 export const getStatus = () => call<Status>('/fd/first-mate')
 export const savePrefs = (prefs: Partial<Prefs>) => call<Prefs>('/fd/first-mate/prefs', json('PUT', prefs))
+export const getDeckSettings = () => call<DeckSettings & { defaults: DeckSettings }>('/fd/admin/first-mate/settings')
 export const saveDeckSettings = (s: Partial<DeckSettings>) =>
   call<DeckSettings>('/fd/admin/first-mate/settings', json('PUT', s))
 /** The agent that is the owner's First Mate: where they talk to it, and whose model drafts for it. */
