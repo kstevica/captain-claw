@@ -126,6 +126,56 @@ async def check_dropped(factory: dict[str, Any], score: float, previous: float) 
                       f"This week it scored {score:.0%} on its cases, down from {previous:.0%}.", needs_you=False)
 
 
+def _cut(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit].rsplit(" ", 1)[0] + " …"
+
+
+def charter_ref(factory_id: str, sha: str) -> str:
+    """A charter card's ref: the factory and the start of the draft's hash, so
+    the card approves only the draft it showed."""
+    return f"{factory_id}:{(sha or '')[:12]}"
+
+
+async def charter_drafted(factory: dict[str, Any], cases: int, words: str = "") -> None:
+    """A drafted factory waits for the owner: one card, approved against its hash."""
+    draft = factory.get("draft") or {}
+    if not draft:
+        return
+    grants = [w for k, w in (("email", "send mail"), ("organize", "organize mail")) if draft["grants"].get(k)]
+    starts = [t["schedule"] for t in draft.get("triggers") or [] if t.get("kind") == "schedule"]
+    starts += ["on new mail" for t in draft.get("triggers") or [] if t.get("kind") == "events"]
+    parts = []
+    if words:
+        parts += [f"You asked: {_cut(words, 300)}", ""]
+    parts += ["**What it does, each run**", _cut(draft["charter"], 900), ""]
+    if draft["checks"].get("contract"):
+        parts += ["**Done when**"] + [f"- {c}" for c in draft["checks"]["contract"]] + [""]
+    parts.append(f"**Starts:** {', '.join(starts) if starts else 'only when you press Run now'}")
+    parts.append(f"**May:** {', '.join(grants) if grants else 'nothing outward: it asks before anything leaves'}")
+    if cases:
+        parts.append(f"**Test cases:** {cases}, sealed (it never sees them).")
+    parts += ["", "Approve it to start it, or open it on First Mate to change it first. "
+                  "It asks first: nothing goes out without your yes."]
+    try:
+        from captain_claw.flight_deck import line
+        await line.post(factory["owner_id"], "proposal", f"A new factory to approve: {factory['title']}",
+                        "\n".join(parts), bell_type="first_mate_charter", source=SOURCE, needs_you=True,
+                        ref_type="first_mate_charter", ref_id=charter_ref(factory["id"], draft["sha"]),
+                        to_phones=False, thread_id=thread_of(factory["id"]))
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: charter post failed", exc_info=True)
+
+
+async def charter_settled(owner_id: str, factory_id: str, sha: str) -> None:
+    """The draft a card showed was approved, declined or changed: it leaves Needs you."""
+    try:
+        from captain_claw.flight_deck import line
+        await line.settle(fms.norm_user(owner_id), "first_mate_charter", charter_ref(factory_id, sha))
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: charter settle failed", exc_info=True)
+
+
 _TRUST_WORDS = {"commit": "acts within its grants", "direct": "acts directly"}
 _TRUST_HOW = {"commit": "It will carry out what its grants allow without asking you first, and ask about the rest.",
               "direct": "It won't rehearse any more: it does its work itself."}

@@ -151,7 +151,7 @@ _AGENT_REFS = frozenset({"agent_lessons", "agent_exam", "agent_setup", "agent_fo
 # same list (services/line.ts ANSWERED_ELSEWHERE; a test holds them equal).
 ANSWERED_REFS = frozenset({"autonomy_action", "person_ask", "course_review", "course_goal",
                            "course_conflict", "bat_ask", "captain_swarm_run", "purchase",
-                           "custom_tool_proposal"})
+                           "custom_tool_proposal", "first_mate_charter"})
 # Whose words an item's text is: the deck's own, an agent's, or someone
 # else's (an email, a WhatsApp chat) — what a reader may trust of it.
 _TRUST: dict[str, str] = {

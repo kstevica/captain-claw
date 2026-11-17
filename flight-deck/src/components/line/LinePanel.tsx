@@ -11,7 +11,7 @@ import {
   markThreadRead, type LineItem,
 } from '../../services/line'
 import { dismissConflict, goalAction, OPEN_COURSE_EVENT } from '../../services/course'
-import { OPEN_FIRST_MATE_EVENT, rateRun } from '../../services/firstMate'
+import { OPEN_FIRST_MATE_EVENT, approve as approveCharter, decline as declineCharter, getFactory, rateRun } from '../../services/firstMate'
 import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '../../services/notifications'
 import { useLineStore } from '../../stores/lineStore'
 import { useNotificationStore } from '../../stores/notificationStore'
@@ -877,8 +877,36 @@ function CourseReviewCard({ item, onAnswered }: { item: LineItem; onAnswered: ()
 /** A First Mate item (a factory's run, a pause): opened on First Mate. */
 function FirstMateCard({ item }: { item: LineItem }) {
   const [rated, setRated] = useState<'' | 'up' | 'down'>('')
+  const [charterBusy, setCharterBusy] = useState(false)
+  const [charterNote, setCharterNote] = useState('')
   if (!item.ref_type?.startsWith('first_mate')) return null
-  const waiting = item.needs_you && !item.resolved
+  const waiting = item.needs_you && !item.resolved && !charterNote
+  // A drafted factory's card approves only the draft it showed: its ref is the
+  // factory and the start of that draft's hash.
+  const charter = item.ref_type === 'first_mate_charter'
+  const decideCharter = async (yes: boolean) => {
+    const [fid, sha12] = (item.ref_id || '').split(':')
+    setCharterBusy(true)
+    try {
+      const f = await getFactory(fid)
+      const d = f.draft
+      if (!d || !sha12 || !d.sha.startsWith(sha12)) {
+        setCharterNote('It changed since this card was written. Open it on First Mate to see it as it is now.')
+        return
+      }
+      if (yes) {
+        await approveCharter(fid, d.version, d.sha)
+        setCharterNote('Approved. It runs on its schedule, and asks before anything goes out.')
+      } else {
+        await declineCharter(fid, d.version)
+        setCharterNote('Discarded. Nothing will run.')
+      }
+    } catch (e) {
+      setCharterNote(e instanceof Error ? e.message : 'That didn’t work.')
+    } finally {
+      setCharterBusy(false)
+    }
+  }
   const rate = (kind: 'up' | 'down') => {
     const next = rated === kind ? '' : kind
     rateRun(item.ref_id, next).then(() => setRated(next)).catch(() => {})
@@ -886,9 +914,20 @@ function FirstMateCard({ item }: { item: LineItem }) {
   return (
     <div className={`mt-3 flex flex-wrap items-center gap-2 rounded-xl border px-3.5 py-3 ${
       waiting ? 'border-amber-500/30 bg-amber-500/10' : 'border-[var(--fd-line)]'}`}>
-      <span className={`flex-1 text-xs ${waiting ? 'text-amber-800 dark:text-amber-200' : 'text-zinc-400'}`}>
-        {waiting ? 'This factory waits for you.' : 'From one of your First Mate factories.'}
+      <span className={`min-w-[12rem] flex-1 text-xs ${waiting ? 'text-amber-800 dark:text-amber-200' : 'text-zinc-400'}`}>
+        {charterNote || (waiting ? (charter ? 'A new factory waits for your approval.' : 'This factory waits for you.')
+          : 'From one of your First Mate factories.')}
       </span>
+      {charter && waiting && (
+        <span className="inline-flex gap-1.5">
+          <button onClick={() => void decideCharter(false)} disabled={charterBusy}
+            className="rounded-md px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100">Discard</button>
+          <button onClick={() => void decideCharter(true)} disabled={charterBusy}
+            className="rounded-md bg-violet-600 px-3 py-1 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-60">
+            {charterBusy ? 'Checking…' : 'Approve and start'}
+          </button>
+        </span>
+      )}
       {item.ref_type === 'first_mate_run' && (
         <span className="inline-flex gap-1">
           <button onClick={() => rate('up')} aria-pressed={rated === 'up'} aria-label="Good result" title="Good result"
@@ -898,8 +937,9 @@ function FirstMateCard({ item }: { item: LineItem }) {
         </span>
       )}
       <button onClick={() => window.dispatchEvent(new CustomEvent(OPEN_FIRST_MATE_EVENT))}
-        className="rounded-md bg-violet-600 px-3 py-1 text-xs text-white hover:bg-violet-500">
-        Open First Mate
+        className={charter && waiting ? 'rounded-md px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100'
+          : 'rounded-md bg-violet-600 px-3 py-1 text-xs text-white hover:bg-violet-500'}>
+        {charter && waiting ? 'Change it first' : 'Open First Mate'}
       </button>
     </div>
   )

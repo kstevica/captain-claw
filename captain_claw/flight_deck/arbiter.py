@@ -35,7 +35,7 @@ from captain_claw.flight_deck.course import goal_ref, live_goals, prompt_lines
 _log = logging.getLogger(__name__)
 
 # Action kinds the arbiter may propose (must match the ledger / later dispatch).
-_KINDS = ("nudge", "run_prompt", "basna", "materialize_schedule", "stop_run", "tool_action", "track")
+_KINDS = ("nudge", "run_prompt", "basna", "materialize_schedule", "stop_run", "tool_action", "track", "factory")
 _RISKS = ("low", "normal", "high")
 
 _SYSTEM_PROMPT = (
@@ -64,7 +64,7 @@ _SYSTEM_PROMPT = (
     "something the USER needs or move the user's world forward. Self-observation "
     "with no user-facing value is DROP ([]), not a note.\n\n"
     "Reply with ONLY a JSON array of 0 or 1 objects:\n"
-    '{"kind": one of ["nudge","run_prompt","basna","materialize_schedule","stop_run","tool_action","track"], '
+    '{"kind": one of ["nudge","run_prompt","basna","materialize_schedule","stop_run","tool_action","track","factory"], '
     '"title": short imperative, "rationale": one sentence on why now, '
     '"risk": "low" | "normal" | "high", "domain": short slug e.g. "ops"/"research", '
     '"score": 0.0-1.0 how valuable/timely, '
@@ -124,7 +124,11 @@ _SYSTEM_PROMPT = (
     "leave goal_id out then. Never invent a goal id. A goal never makes an action less "
     "risky and never replaces the user's approval. A '(course · G:<id> · no progress in N "
     "days)' candidate is a goal nothing has moved lately: propose one small, concrete step "
-    "toward it (with its goal_id) only when a useful one is clear — never busywork.\n"
+    "toward it (with its goal_id) only when a useful one is clear — never busywork. When "
+    "such a goal needs the same work again and again (a weekly report, a recurring check, "
+    'replies that keep coming), you may instead propose kind="factory" (risk "normal") with its '
+    '"goal_id": a standing First Mate job for it. It waits for the user\'s approval, and '
+    "approving only drafts the job for them to look at.\n"
     "Score honestly: a genuinely useful action is ~0.7-0.9; score low only if you "
     "doubt it helps. A track is cheap and worth doing — score it ~0.6+. Don't invent "
     "busywork, and never duplicate the 'already proposed' list.\n\n"
@@ -783,6 +787,18 @@ async def maybe_run_arbiter(
                      f"{a['kind']}{':' + a['action_id'] if a.get('action_id') else ''} "
                      f"weight {_weight_for(a):.2f} < {suppress_below}", routine=True)
                 continue
+            if a["kind"] == "factory":
+                # A standing job for a goal: only one of the goals shown, only
+                # when First Mate is on for this user and no factory serves it.
+                from captain_claw.flight_deck import first_mate_review
+                from captain_claw.flight_deck import first_mate_store as fms
+                if a.get("goal_id") not in {g["id"] for g in course_goals}:
+                    emit("dropped: factory without one of the user's goals", a["title"], routine=True)
+                    continue
+                if not await first_mate_review.available(user_id) \
+                        or first_mate_review.serves(fms.get_store(), user_id, a["goal_id"]):
+                    emit("dropped: factory not wanted here", a["title"], routine=True)
+                    continue
             if a["kind"] == "stop_run" and a.get("target") not in valid_targets:
                 # Don't let it stop a run it can't see (or hallucinate a session id).
                 emit("dropped: stop_run unknown target", str(a.get("target")), "warn")
@@ -836,6 +852,8 @@ async def maybe_run_arbiter(
                 "follow_up_days": days,
                 "follow_up_id": chosen.get("follow_up_id") or "",  # set ⇒ re-snooze
             }
+        elif chosen["kind"] == "factory":
+            _payload = {"op": "draft_for_goal", "goal_id": chosen.get("goal_id") or ""}
         elif chosen["kind"] == "nudge" and chosen.get("follow_up_id"):
             # A reminder nudge that addresses a due follow-up — dispatch re-arms it.
             _payload = {"follow_up_id": chosen.get("follow_up_id")}

@@ -58,8 +58,8 @@ MEMORY_WRITES = frozenset({"insights", "topics", "intentions", "facts", "persona
 SEND_ALLOWED = frozenset({"ask_human", "jev"})
 # Code, the screen, and other runs.
 EXEC_REFUSED_TOOLS = frozenset({"shell", "terminal", "desktop_action", "scripts", "app_runner", "code", "termux",
-                                "pinchtab", "vatra", "basna", "bat", "crew", "captain_swarm", "screen_capture",
-                                "custom_tools"})
+                                "pinchtab", "vatra", "basna", "bat", "crew", "captain_swarm", "first_mate",
+                                "screen_capture", "custom_tools"})
 
 _COMMIT_RE = re.compile(
     r"\b(submit|buy|purchase|order|check ?out|pay|payment|place (my |the )?order|send|post|publish|delete|remove|"
@@ -166,7 +166,7 @@ def _why(verdict_what: str) -> str:
     tool = verdict_what.split(" ", 1)[0]
     if tool in MEMORY_WRITES:
         return "a rehearsal keeps nothing."
-    if tool in ("vatra", "basna", "bat", "crew", "captain_swarm"):
+    if tool in ("vatra", "basna", "bat", "crew", "captain_swarm", "first_mate"):
         return "a rehearsal starts no other runs."
     return "no code runs and no screen is driven in a rehearsal. Use the web, the browser and your own files."
 

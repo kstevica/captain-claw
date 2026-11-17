@@ -362,6 +362,17 @@ export const getStatus = () => call<Status>('/fd/first-mate')
 export const savePrefs = (prefs: Partial<Prefs>) => call<Prefs>('/fd/first-mate/prefs', json('PUT', prefs))
 export const saveDeckSettings = (s: Partial<DeckSettings>) =>
   call<DeckSettings>('/fd/admin/first-mate/settings', json('PUT', s))
+/** The agent that is the owner's First Mate: where they talk to it, and whose model drafts for it. */
+export interface MyAgent {
+  current: { slug: string; name: string; exists: boolean; running: boolean }
+  agents: { slug: string; name: string }[]
+}
+export const getMyAgent = () => call<MyAgent>('/fd/first-mate/my-agent')
+export const makeMyAgent = () => call<MyAgent & { slug: string; name: string }>('/fd/first-mate/my-agent', { method: 'POST' })
+
+/** A new factory drafted by a model from the owner's words or one of their Course goals; it waits for approval. */
+export const draftFactory = (body: { words?: string; goal_id?: string }) =>
+  call<Factory & { cases: number }>('/fd/first-mate/draft', json('POST', body))
 export const getTemplates = () => call<{ templates: Template[] }>('/fd/first-mate/templates').then((r) => r.templates)
 export const listFactories = (includeRetired = false) =>
   call<{ factories: FactoryCard[] }>(`/fd/first-mate/factories${includeRetired ? '?include_retired=true' : ''}`)

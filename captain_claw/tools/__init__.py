@@ -59,6 +59,7 @@ from captain_claw.tools.basna import BasnaTool
 from captain_claw.tools.vatra import VatraTool
 from captain_claw.tools.bat import BatTool
 from captain_claw.tools.captain_swarm import CaptainSwarmTool
+from captain_claw.tools.first_mate import FirstMateTool
 from captain_claw.tools.bat_spend import SpendTool
 from captain_claw.tools.bat_ask import AskHumanTool
 from captain_claw.tools.code_session import CodeSessionTool
@@ -163,6 +164,7 @@ __all__ = [
     "VatraTool",
     "BatTool",
     "CaptainSwarmTool",
+    "FirstMateTool",
     "SpendTool",
     "AskHumanTool",
     "CodeSessionTool",

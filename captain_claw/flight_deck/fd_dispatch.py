@@ -230,7 +230,9 @@ def should_auto_dispatch(cfg: dict[str, Any], action: dict[str, Any]) -> bool:
     - otherwise (off / propose): never.
     """
     # stop_run is a destructive safety action — always human-approved, never auto.
-    if str(action.get("kind")) == "stop_run":
+    # A First Mate proposal (pause a factory, change its share, draft one for a
+    # goal) is the owner's call by design: never auto either.
+    if str(action.get("kind")) in ("stop_run", "factory"):
         return False
     # track is internal bookkeeping (an open loop, no external side effect): always
     # record it without approval, even under the 'propose' ceiling — otherwise every
@@ -875,6 +877,9 @@ async def dispatch_action(
         return await _dispatch_crew_merge(user_id, action, approved_by_human=approved_by_human)
     if str(action.get("kind")) == "deck_update":
         return await _dispatch_deck_update(user_id, action, approved_by_human=approved_by_human)
+    if str(action.get("kind")) == "factory":
+        from captain_claw.flight_deck import first_mate_review
+        return await first_mate_review.dispatch(user_id, action, approved_by_human=approved_by_human)
     agent = _dispatch_agent(user_id, action)
     if not agent:
         return {"ok": False, "target": "", "note": "no running agent to dispatch to"}
