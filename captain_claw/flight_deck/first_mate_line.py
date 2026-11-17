@@ -152,7 +152,7 @@ async def charter_drafted(factory: dict[str, Any], cases: int, words: str = "") 
     if draft["checks"].get("contract"):
         parts += ["**Done when**"] + [f"- {c}" for c in draft["checks"]["contract"]] + [""]
     parts.append(f"**Starts:** {', '.join(starts) if starts else 'only when you press Run now'}")
-    parts.append(f"**May:** {', '.join(grants) if grants else 'nothing outward: it asks before anything leaves'}")
+    parts.append(f"**May:** {', '.join(grants) if grants else 'nothing outward: what would leave is refused'}")
     if cases:
         parts.append(f"**Test cases:** {cases}, sealed (it never sees them).")
     parts += ["", "Approve it to start it, or open it on First Mate to change it first. "

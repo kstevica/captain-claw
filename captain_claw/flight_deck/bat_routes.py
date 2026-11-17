@@ -482,22 +482,50 @@ def _final_deliverable(steps: list[dict]) -> str:
     return out if len(out) >= 200 else _assemble_deliverable(steps)
 
 
-_STEP_SYSTEM = (
+_STEP_HEAD = (
     "You are a Bat worker — the stubborn finisher. Complete the assigned step no matter how many "
     "approaches it takes; retry, change tactics, and use any tool available to you (including the "
     "browser, computer use, and starting a `vatra` run for a sub-problem). If you start a Basna, Vatra, "
     "Code or Crew run, end your turn once it has started: Captain waits for it and adds its result to "
     "this step, so don't poll it. Be honest: only report "
     "what you actually accomplished and verified — never claim a step is done when it isn't. "
+)
+_STEP_ASK = (
     "If you are blocked on something only the human can provide (a verification code, a 2FA/OTP, a "
     "CAPTCHA, a credential), call the `ask_human` tool (kind='secret' for codes/passwords) and STOP — "
     "never guess or fabricate it, and never try to bypass or solve a CAPTCHA yourself. "
-    "Absolutely never run anything that could harm the host or its drives."
 )
+_STEP_TAIL = "Absolutely never run anything that could harm the host or its drives."
+_STEP_SYSTEM = _STEP_HEAD + _STEP_ASK + _STEP_TAIL
+# A First Mate factory's run: nobody is there to answer (see _factory_run).
+_FACTORY_STEP_SYSTEM = _STEP_HEAD + (
+    "This run belongs to a First Mate factory and runs on its own: nobody answers questions while it "
+    "runs, so don't ask and don't wait. If you are blocked on something only the owner can provide (a "
+    "verification code, a 2FA/OTP, a CAPTCHA, a credential), skip it, finish what you can, and say "
+    "exactly what was missing — never guess or fabricate it, and never try to bypass or solve a CAPTCHA "
+    "yourself. It sends email or organizes mail only where its charter allows that, and never spends "
+    "money or signs up for accounts: those are refused, so do the rest of the work without them. "
+) + _STEP_TAIL
+
+
+FACTORY_NO_ANSWER = ("Nobody answers questions during a First Mate factory run, and the run doesn't wait. "
+                     "Carry on without it if you can; otherwise finish what you can and say exactly what was "
+                     "missing in your result.")
+
+
+def _factory_run(run: dict) -> bool:
+    """A First Mate factory's run: its owner approved the factory's charter, not
+    each run, and nobody waits on it to answer. It never stops to ask. Its
+    grants are the charter's, set when the run is made; what they don't cover
+    is refused as it happens (the mail guard, the spend policy), never asked
+    about (see :func:`_gate_check` and :func:`release_factory_ask`)."""
+    return bool((run.get("config") or {}).get("factory_id"))
 
 
 def _build_step_prompt(run: dict, step: dict, prior: list[dict], human_input: str = "") -> str:
-    lines = [_STEP_SYSTEM, f"\n# Goal\n{run.get('task', '')}", f"\n# Your step\n{step.get('title') or step.get('step_key')}"]
+    factory = _factory_run(run)
+    lines = [_FACTORY_STEP_SYSTEM if factory else _STEP_SYSTEM, f"\n# Goal\n{run.get('task', '')}",
+             f"\n# Your step\n{step.get('title') or step.get('step_key')}"]
     if (step.get("brief") or "").strip():
         lines.append(f"\n# Why this step exists\nThe work was checked and these problems were found. "
                      f"Fix them, and report the whole result, not only what changed.\n{step['brief']}")
@@ -532,6 +560,11 @@ def _build_step_prompt(run: dict, step: dict, prior: list[dict], human_input: st
                      "passwords in the browser credential store — ask the human to set "
                      "CLAW_BROWSER_CREDENTIAL_KEY first, or keep credentials out of storage.")
         lines.append(note)
+    if factory:
+        lines.append("\nDo this step, and only this step: other steps cover the rest of the goal. Do it fully and "
+                     "report the concrete result. Nobody answers during this run: if something only the owner "
+                     "could give you is missing, say what it was in your result — do not guess or fabricate it.")
+        return "\n".join(lines)
     lines.append("\nDo this step, and only this step: other steps cover the rest of the goal. Do it fully and "
                  "report the concrete result. If you are truly blocked on "
                  "something only the human can give you, use the `ask_human` tool and stop — do not "
@@ -1324,7 +1357,10 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
     now = await store.get_run(sid) if store is not None else None
     # A Captain Swarm rehearsal doesn't ask: its run checks every result's page
     # itself, so the reviewers' objection rides along with the result instead.
-    if now and now["status"] != "cancelled" and verdict.overridden and not cfg.get("rehearsal"):
+    # Nor does a First Mate factory's run: nobody waits on it, and First Mate
+    # checks and scores what it finished.
+    if now and now["status"] != "cancelled" and verdict.overridden and not cfg.get("rehearsal") \
+            and not _factory_run(run):
         findings = _findings(verdict.to_dict())
         await store.set_config(sid, {**cfg, "tie_break_findings": findings[:1500]})
         await human_ask.raise_ask(
@@ -1474,10 +1510,14 @@ async def _gate_check(store, run: dict) -> str:
     create an account or organize mail pauses (awaiting_plan) for owner
     approval, and so does a fix round whose new steps go beyond what was approved;
     (2) RESUME — an awaiting_* run proceeds once its ask is answered,
-    is cancelled if the plan is rejected, and errors if the ask expired."""
+    is cancelled if the plan is rejected, and errors if the ask expired.
+
+    A First Mate factory's run (:func:`_factory_run`) never pauses at the start
+    gate, and an approval never widens its grants: they are its charter's."""
     from captain_claw.flight_deck import human_ask
     run_id = run["id"]
     status = run["status"]
+    factory = _factory_run(run)
 
     if status in ("awaiting_plan", "awaiting_human"):
         ask = await store.latest_ask(run_id)
@@ -1498,6 +1538,13 @@ async def _gate_check(store, run: dict) -> str:
             if decision in _APPROVE_WORDS:
                 cfg = dict(run.get("config") or {})
                 cfg["plan_approved"] = True
+                if factory:
+                    # Left open from before factory runs stopped asking. It runs on
+                    # its charter's grants, whoever answered.
+                    await store.set_config(run_id, cfg)
+                    await store.append_event(run_id, "note", "its factory's charter is its approval — proceeding "
+                                                             "with only what the charter allows")
+                    return "proceed"
                 # Grant the run-scoped email exception ONLY now, because the
                 # owner approved a plan whose gate reason included mail (Phase 5).
                 # The grant lives on the run config and is never copied to a child.
@@ -1537,6 +1584,12 @@ async def _gate_check(store, run: dict) -> str:
                 run_id, "note", f"spend {'approved' if approved else 'declined'} by the owner")
             return "proceed"
         if ask["kind"] == "tie_break":
+            if factory and (ask.get("answer") or "").strip() != _TIE_BREAK_STOP:
+                # Its judge ends it the way a factory run ends now: done, with the
+                # reviewers' objection on the result.
+                await store.append_event(run_id, "note", "a factory run doesn't wait on a tie-break — "
+                                                         "finishing with the reviewers' objection")
+                return "proceed"
             if (ask.get("answer") or "").strip() == _TIE_BREAK_STOP:
                 await store.set_status(run_id, "error", truth=bat_loop._assemble_truth(await store.list_steps(run_id)),
                                        stopped_reason=f"stopped by you: the reviewers wouldn't pass it. "
@@ -1569,6 +1622,11 @@ async def _gate_check(store, run: dict) -> str:
         # workers turn all of that into intents. The owner is asked when the
         # winner is carried out, not now.
         return "proceed"
+    if factory:
+        # Its owner approved the factory's charter, and nobody waits on a factory
+        # run to answer. Its grants are the charter's: mail it may not write is
+        # refused by the workers' mail guard, spending by the spend policy.
+        return "proceed"
     steps = await store.list_steps(run_id)
     needs, reason = plan_needs_gate(run.get("task", ""), steps)
     if not needs:
@@ -1596,6 +1654,36 @@ async def _gate_check(store, run: dict) -> str:
     await store.set_status(run_id, "awaiting_plan")
     await store.append_event(run_id, "awaiting_plan", f"needs approval — would {reason}")
     return "wait"
+
+
+# How First Mate answers an ask left open on its factory's run: the plan runs on
+# the charter's grants, a spend is declined, a question gets no answer (its step
+# runs again and says what was missing), and a tie-break ends like a factory
+# run's does now.
+_FACTORY_ANSWER = {"plan_approval": "approve", "spend_approval": "deny"}
+
+
+async def release_factory_ask(store, run: dict) -> bool:
+    """Answer the open ask of a First Mate factory's run that is waiting on its
+    owner — one raised before factory runs stopped asking — so it carries on,
+    and wake the supervisor. True when one was answered. Nothing for any
+    other run."""
+    from captain_claw.flight_deck import human_ask
+    if not _factory_run(run) or run.get("status") not in ("awaiting_plan", "awaiting_human"):
+        return False
+    ask = await store.latest_open_ask(run["id"])
+    if ask is None:
+        return False
+    done = await human_ask.answer(store, ask["id"], _FACTORY_ANSWER.get(ask["kind"], ""), via="first_mate")
+    if not done.get("ok"):
+        return False
+    await store.append_event(run["id"], "note", "First Mate answered for its factory: a factory run "
+                                                "doesn't wait on anyone", agent=ask.get("step_key") or "")
+    try:
+        await bat_loop.kick()
+    except Exception:  # noqa: BLE001 — it carries on at Bat's next tick
+        log.warning("bat kick after a factory ask failed", run_id=run["id"])
+    return True
 
 
 async def _notify_ask(ask: dict) -> None:
@@ -1849,12 +1937,22 @@ async def spend_status(body: _SpendReq):
 @router.post("/agent/ask")
 async def agent_ask(body: _AskReq):
     """A Bat worker raises a question only the human can answer and the run
-    stands down until they reply. The worker must stop after calling this."""
+    stands down until they reply. The worker must stop after calling this.
+
+    A First Mate factory's run never stands down: nobody answers it, so the
+    worker is told to carry on (``status: declined``) and nothing is asked."""
     owner, run = await _owner_run(body)
     kind = body.kind if body.kind in ("input", "secret") else "input"
     question = (body.question or "").strip()[:1000]
     if not question:
         raise HTTPException(400, "question is required")
+    if _factory_run(run):
+        await _store().append_event(
+            body.session_id, "note",
+            "a worker needed a private value; nobody answers during a factory run" if kind == "secret"
+            else f"a worker asked: {question[:200]} (nobody answers during a factory run)",
+            agent=body.step_key or "")
+        return {"status": "declined", "message": FACTORY_NO_ANSWER}
     ask_id = await human_ask.raise_ask(
         _store(), run_id=body.session_id, owner=owner, kind=kind,
         question=question, options=body.options or [], step_key=body.step_key or "",

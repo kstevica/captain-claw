@@ -358,12 +358,15 @@ async def test_bats_gate_lets_a_carry_out_through_only_for_its_grants(store):
     f = _live(store)
     version = store.live(f["id"])
     brief = runs.carry_out_brief(f, version, [{"what": "Send a reply email to Ana", "args": {"to": "a@b.c"}}])
-    run = {"id": "bat_carry", "status": "planning", "owner_id": BOB, "task": brief,
-           "config": runs.carry_out_config(version, brief)}
+    fm_run = {"id": "fmr_0123456789abcdef", "kind": "carry_out"}
+    config = {**runs.bat_config(f, version, fm_run, token_cap=100_000), **runs.carry_out_config(version, brief)}
+    run = {"id": "bat_carry", "status": "planning", "owner_id": BOB, "task": brief, "config": config}
     gs = GateStore([{"title": "Send the reply email to Ana", "status": "pending"}])
     assert await bat_routes._gate_check(gs, run) == "proceed" and not gs.asks
-    # Something the charter never granted still asks: here, a purchase.
+    assert bat_routes._bat_automation(run)["mail_write"] == "allow"
+    # Something the charter never granted isn't asked about either (a factory's run
+    # doesn't wait on its owner): it is refused. Here, a purchase.
     run2 = {**run, "task": brief + "\nThen buy the upgrade."}
     gs2 = GateStore([{"title": "Buy the upgrade", "status": "pending"}])
-    assert await bat_routes._gate_check(gs2, run2) == "wait"
-    assert gs2.status == "awaiting_plan" and gs2.asks and gs2.asks[0]["kind"] == "plan_approval"
+    assert await bat_routes._gate_check(gs2, run2) == "proceed" and not gs2.asks and gs2.status is None
+    assert bat_routes._spend_policy(run2)["enabled"] is False

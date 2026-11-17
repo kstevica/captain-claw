@@ -429,7 +429,7 @@ function LiveVersion({ version: v, trust, pinned, approvedAt, onChange, busy, tr
         <div className={row}>
           <span className={key}>May act</span>
           <span className="text-zinc-300">
-            {grants.length ? grants.join(', ') : 'Nothing outward: Bat asks you before a run sends, spends or signs up'}
+            {grants.length ? grants.join(', ') : 'Nothing outward: a run never sends, spends or signs up'}
           </span>
         </div>
         <div className={row}>

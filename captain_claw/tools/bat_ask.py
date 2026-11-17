@@ -93,10 +93,13 @@ class AskHumanTool(Tool):
             if resp.status_code in (403, 404):
                 return ToolResult(success=False, error="could not reach the Bat run (not authorized).")
             resp.raise_for_status()
-            resp.json()
+            data = resp.json()
         except Exception as e:  # noqa: BLE001
             log.warning("ask_human error", error=str(e))
             return ToolResult(success=False, error=f"ask_human failed: {e}")
+        if isinstance(data, dict) and data.get("status") == "declined":
+            # A run nobody answers (a First Mate factory's): it doesn't pause.
+            return ToolResult(success=False, error=str(data.get("message") or "Nobody answers during this run."))
         return ToolResult(success=True, content=(
             "Asked the owner and PAUSED the run. Stop now — do not continue, guess, or retry. "
             "The run will re-run this step with their answer once they reply."))
