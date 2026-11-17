@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { FlaskConical, Loader2, Play, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
+import { ChevronRight, FlaskConical, Loader2, Play, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
 import {
   approve,
   approveRun,
@@ -37,6 +37,7 @@ import {
 import { ErrorBox, Pill, errText, type PillTone } from './ui'
 import { Checks, pct, type CaseSeed } from './Checks'
 import { RunResult } from './RunResult'
+import { RunProgress } from './RunProgress'
 
 // One factory, in a drawer over the page: its charter (the live version, and
 // the draft being written), its runs, and its history. Approving a draft is
@@ -580,6 +581,9 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate, 
 }) {
   const going = r.status === 'queued' || r.status === 'running'
   const waiting = (r.intents ?? []).filter((i) => i.status === 'open')
+  // Its steps, agents and activity: open while it's going, a click away after.
+  const traceable = r.runner === 'bat' && !!r.child_id
+  const [open, setOpen] = useState(going)
   const [unticked, setUnticked] = useState<Set<number>>(new Set())
   const chosen = waiting.filter((i) => !unticked.has(i.id)).map((i) => i.id)
   const toggle = (id: number) => setUnticked((s) => {
@@ -591,6 +595,14 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate, 
   return (
     <li className="fd-card p-3">
       <div className="flex items-center gap-2">
+        {traceable && (
+          <button onClick={() => setOpen((o) => !o)} aria-expanded={open}
+            title={open ? 'Hide its progress' : 'Show its steps, agents and activity'}
+            aria-label={open ? 'Hide its progress' : 'Show its progress'}
+            className="-ml-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
+            <ChevronRight className={`h-4 w-4 transition-transform ${open ? 'rotate-90' : ''}`} />
+          </button>
+        )}
         <Pill tone={r.waiting ? 'amber' : RUN_TONE[r.status]}>{r.waiting ? 'Waiting for you' : RUN_LABELS[r.status]}</Pill>
         {r.kind === 'rehearsal' && <Pill tone="zinc" title="Anything outward was recorded, not done">Rehearsal</Pill>}
         {r.kind === 'carry_out' && <Pill tone="violet" title="Did what you approved, once">Carry-out</Pill>}
@@ -636,6 +648,7 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate, 
         )}
       </div>
       {r.waiting && r.note && <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">{r.note}</p>}
+      {traceable && open && <RunProgress runId={r.id} going={going} />}
       {r.kind === 'carry_out' && r.proof?.state && (r.proof.note || (r.proof.actions?.length ?? 0) > 0) && (
         <div className={`mt-2 rounded-xl px-3 py-2 text-xs ${r.proof.state === 'doubt' ? 'bg-red-500/[0.07] text-red-700 dark:text-red-300' : 'bg-[var(--fd-hover)] text-zinc-400'}`}>
           {r.proof.note && <p>{r.proof.note}</p>}

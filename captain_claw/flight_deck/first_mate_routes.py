@@ -764,6 +764,20 @@ async def thumbs(run_id: str, body: Any = Body(...), user: dict = Depends(allowe
     return {"thumbs": store.thumbs(run_id), "satisfaction": store.satisfaction(run["factory_id"])}
 
 
+@router.get("/fd/first-mate/runs/{run_id}/progress")
+async def run_progress(run_id: str, since: int = 0, user: dict = Depends(allowed_user)):
+    """What one of the owner's runs is doing: its steps, its events from
+    ``since`` (``next`` is where the following read starts), the agents working
+    for it now, and its files' folder."""
+    run = fms.get_store().get_run(run_id)
+    if run is None or run["owner_id"] != _uid(user):
+        raise HTTPException(404, "no such run")
+    try:
+        return await runs.progress(run, since=since)
+    except FirstMateError as exc:
+        raise _err(exc) from None
+
+
 @router.post("/fd/first-mate/runs/{run_id}/stop")
 async def stop_run(run_id: str, user: dict = Depends(allowed_user)):
     try:
