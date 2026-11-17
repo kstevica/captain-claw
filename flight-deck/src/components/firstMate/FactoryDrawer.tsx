@@ -373,6 +373,8 @@ function RunItem({ run: r, busy, onStop }: { run: Run; busy: boolean; onStop: ()
     <li className="fd-card p-3">
       <div className="flex items-center gap-2">
         <Pill tone={r.waiting ? 'amber' : RUN_TONE[r.status]}>{r.waiting ? 'Waiting for you' : RUN_LABELS[r.status]}</Pill>
+        {r.kind === 'rehearsal' && <Pill tone="zinc" title="Anything outward was recorded, not done">Rehearsal</Pill>}
+        {r.verdict === 'leak' && <Pill tone="red" title="The tool-call register shows an outward call that ran">Reached outside</Pill>}
         <span className="text-xs text-zinc-500">{whenText(r.created_at)}</span>
         {r.tokens > 0 && <span className="text-xs text-zinc-500">· {tokensText(r.tokens)}</span>}
         {r.trigger !== 'manual' && <span className="text-xs text-zinc-500">· {r.trigger}</span>}
@@ -385,6 +387,22 @@ function RunItem({ run: r, busy, onStop }: { run: Run; busy: boolean; onStop: ()
         )}
       </div>
       {r.waiting && r.note && <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">{r.note}</p>}
+      {r.kind === 'rehearsal' && !going && r.intents && (
+        r.intents.length ? (
+          <div className="mt-2 rounded-xl bg-[var(--fd-hover)] px-3 py-2">
+            <p className="text-[11px] font-semibold text-zinc-400">Would have done (nothing of it was done)</p>
+            <ul className="mt-1 space-y-0.5 text-[13px] text-zinc-300">
+              {r.intents.slice(0, 12).map((i) => (
+                <li key={i.id} className="flex gap-2">
+                  <span className="text-zinc-500">{i.kind === 'commit' ? '⏸' : '•'}</span>
+                  <span className="min-w-0 flex-1">{i.what}</span>
+                </li>
+              ))}
+              {r.intents.length > 12 && <li className="text-xs text-zinc-500">and {r.intents.length - 12} more</li>}
+            </ul>
+          </div>
+        ) : <p className="mt-1.5 text-xs text-zinc-500">It needed nothing outside.</p>
+      )}
       {r.error && !going && <p className="mt-1.5 text-xs text-zinc-500">{r.error}</p>}
       {r.result && (
         <button onClick={() => setOpen(!open)} className="mt-2 block w-full text-left">

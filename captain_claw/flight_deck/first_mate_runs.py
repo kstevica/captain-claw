@@ -73,8 +73,14 @@ def _fence(text: str) -> str:
     return f"```\n{body}\n```"
 
 
+REHEARSAL_NOTE = ("This run is a rehearsal. Read, look things up and work in your own files as usual, but anything "
+                  "that would reach outside (mail sent, a mailbox or calendar changed, messages, posts, purchases) "
+                  "is recorded and not done. Do the work as if it will be carried out, and end your result with a "
+                  "plain list of exactly what you would do, one line each.")
+
+
 def compose_brief(factory: dict[str, Any], version: dict[str, Any], *, note: str = "",
-                  context: list[dict[str, Any]] | None = None) -> str:
+                  context: list[dict[str, Any]] | None = None, rehearsal: bool = False) -> str:
     """What one run is asked to do.
 
     * The charter, quoted as the owner wrote it.
@@ -108,6 +114,8 @@ def compose_brief(factory: dict[str, Any], version: dict[str, Any], *, note: str
     contract = version.get("checks", {}).get("contract") or []
     if contract:
         parts += ["", "It's done when:"] + [f"- {rule}" for rule in contract]
+    if rehearsal:
+        parts += ["", REHEARSAL_NOTE]
     brief = "\n".join(parts)
     return brief[:BRIEF_MAX]
 
@@ -145,6 +153,8 @@ def bat_config(factory: dict[str, Any], version: dict[str, Any], run: dict[str, 
         "real_usd_cap": 0.0,
         "per_item_usd": 0.0,
     }
+    if run.get("kind") == "rehearsal":
+        cfg["rehearsal"] = run["id"]  # CLAW_REHEARSAL on every worker: outward calls become intents
     contract = bat_contract(version)
     if contract is not None:
         cfg["contract"] = contract
@@ -242,7 +252,13 @@ def runner_for(kind: str) -> Runner:
 _WATCHERS: dict[str, asyncio.Task] = {}
 
 
-async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind: str = "run",
+def kind_for(factory: dict[str, Any]) -> str:
+    """How a factory's runs go (docs/first-mate-plan.md §6): at ``propose`` or
+    ``commit`` every run is a rehearsal; at ``direct`` it acts itself."""
+    return "run" if factory.get("trust") == "direct" else "rehearsal"
+
+
+async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind: str | None = None,
                 note: str = "", context: list[dict[str, Any]] | None = None,
                 watch: bool = True, max_tokens: int | None = None) -> dict[str, Any]:
     """Start one run of a factory's live version through its runner.
@@ -253,7 +269,8 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
     fails to start its child leaves the run failed, with why.
 
     ``max_tokens`` lowers the run's token cap (the loop passes what is left of
-    the factory's share this week); it never raises it."""
+    the factory's share this week); it never raises it. ``kind`` defaults to
+    what the factory's trust says (:func:`kind_for`)."""
     store = fms.get_store()
     factory = store.get_owned(factory_id, owner_id)
     if factory is None:
@@ -266,7 +283,8 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
         raise FirstMateError("no free slot for another run right now: one is kept for your own runs. "
                              "Try again when one of your runs finishes")
     refs = [str(c.get("id")) for c in (context or []) if c.get("id")]
-    brief = compose_brief(factory, version, note=note, context=context)
+    kind = kind or kind_for(factory)
+    brief = compose_brief(factory, version, note=note, context=context, rehearsal=kind == "rehearsal")
     token_cap = token_cap_for(store, factory, version)
     if max_tokens is not None:
         token_cap = max(1, min(token_cap, int(max_tokens)))
@@ -308,12 +326,53 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
         run = store.update_run(run_id, tokens=state["tokens"], usd=state["usd"])
         return {**run, "waiting": bool(state.get("waiting")), "note": state.get("note", "")}
     _unwatch(run_id)  # a page read finished it: its watcher has nothing left to do
+    if run["kind"] == "rehearsal":
+        leak = await _leak(run)
+        if leak:
+            finished = store.finish_run(run_id, "failed", verdict="leak", result=state.get("result", ""),
+                                        error=f"its rehearsal reached outside: {leak}"[:300],
+                                        tokens=state["tokens"], usd=state["usd"])
+            await _hold_after_leak(store, finished)
+            from captain_claw.flight_deck import first_mate_line
+            await first_mate_line.run_finished(finished)
+            return finished
     finished = store.finish_run(run_id, state["status"], verdict=state.get("verdict", ""),
                                 result=state.get("result", ""), error=state.get("note", ""),
                                 tokens=state["tokens"], usd=state["usd"])
     from captain_claw.flight_deck import first_mate_line
     await first_mate_line.run_finished(finished)
     return finished
+
+
+LEAK_REASON = "its rehearsal reached outside"
+
+
+async def _leak(run: dict[str, Any]) -> str:
+    """What a rehearsal's workers did outside anyway, by the tool-call register
+    (the guard's own rules, re-applied afterwards), or "". A broken guard is a
+    bug to fix, never a result. When the register can't be read, it says so in
+    the log and the run stands on the guard alone."""
+    if not run.get("child_id") or not run.get("started_at"):
+        return ""
+    try:
+        from captain_claw.flight_deck import captain_swarm_rehearsal
+        from captain_claw.flight_deck.captain_swarm_outcome import worker_prefix
+        since = datetime.fromisoformat(run["started_at"]).timestamp() - 5
+        found = await captain_swarm_rehearsal.leaks(worker_prefix(run["child_id"]), since=since)
+    except Exception:  # noqa: BLE001
+        log.warning("first mate: couldn't check a rehearsal against the register", extra={"run": run["id"]},
+                    exc_info=True)
+        return ""
+    return str(found[0].get("what") or found[0].get("tool") or "a call") if found else ""
+
+
+async def _hold_after_leak(store: fms.FirstMateStore, run: dict[str, Any]) -> None:
+    """A rehearsal that reached outside pauses its factory and tells the owner."""
+    factory = store.get(run["factory_id"])
+    if factory and factory["state"] == "running":
+        store.set_state(factory["id"], "paused", "deck", LEAK_REASON)
+        from captain_claw.flight_deck import first_mate_line
+        await first_mate_line.factory_paused(store.get(factory["id"]), LEAK_REASON, needs_you=True)
 
 
 async def refresh_owner(owner_id: str) -> list[dict[str, Any]]:

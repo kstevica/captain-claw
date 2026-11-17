@@ -80,6 +80,15 @@ export interface Version {
   decided_at: string | null
 }
 
+export interface Intent {
+  id: number
+  /** intent: an outward call recorded; commit: the browser stopped before submitting. */
+  kind: 'intent' | 'commit'
+  tool: string
+  what: string
+  status: 'open' | 'approved' | 'rejected' | 'carried_out' | 'dropped'
+}
+
 export interface Run {
   id: string
   factory_id: string
@@ -100,6 +109,8 @@ export interface Run {
   /** Set while it waits on the owner (a Bat plan or question). */
   waiting?: boolean
   note?: string
+  /** A rehearsal's: what it would have done. */
+  intents?: Intent[]
 }
 
 export interface Factory {

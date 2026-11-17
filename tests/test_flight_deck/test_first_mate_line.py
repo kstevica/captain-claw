@@ -59,6 +59,15 @@ class FakeBat:
         self.runs[run_id].update(status=status, **kw)
 
 
+@pytest.fixture(autouse=True)
+def _no_register(monkeypatch):
+    """A rehearsal's leak check reads the tool-call register; a test never opens one
+    (importing the deck server points it at a data folder)."""
+    from captain_claw.flight_deck import tool_audit_routes
+    monkeypatch.setattr(tool_audit_routes, "_data_dir", None)
+    monkeypatch.setattr(tool_audit_routes, "_store", None)
+
+
 @pytest.fixture
 async def db(tmp_path: Path):
     prev = fd_auth._db
@@ -128,10 +137,11 @@ async def test_a_finished_run_posts_once_on_its_thread(store, bat, db, phones):
     await runs.refresh(run["id"])
     await runs.refresh(run["id"])
     [item] = await _items(db)
-    assert item["title"] == "Weekly report: done" and "All quiet." in item["body"]
+    assert item["title"] == "Weekly report: rehearsed" and "All quiet." in item["body"]  # trust: propose
+    assert "It needed nothing outside." in item["body"]
     assert item["thread_id"] == f"fm:{f['id']}" and item["source"] == "First Mate"
     assert item["ref_type"] == "first_mate_run" and item["ref_id"] == run["id"] and not item["needs_you"]
-    assert phones == [("Weekly report: done", False)]
+    assert phones == [("Weekly report: rehearsed", False)]
 
 
 async def test_a_failed_run_says_why_and_a_stopped_one_says_nothing(store, bat, db, phones):

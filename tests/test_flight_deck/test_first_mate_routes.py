@@ -59,6 +59,15 @@ class FakeBat:
         self.runs[run_id].update(status=status, **kw)
 
 
+@pytest.fixture(autouse=True)
+def _no_register(monkeypatch):
+    """A rehearsal's leak check reads the tool-call register; a test never opens one
+    (importing the deck server points it at a data folder)."""
+    from captain_claw.flight_deck import tool_audit_routes
+    monkeypatch.setattr(tool_audit_routes, "_data_dir", None)
+    monkeypatch.setattr(tool_audit_routes, "_store", None)
+
+
 @pytest.fixture
 async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Auth-enabled deck with an admin, Bob and Carol; First Mate's and

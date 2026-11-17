@@ -42,11 +42,15 @@ async def run_finished(run: dict[str, Any]) -> None:
         return
     try:
         from captain_claw.flight_deck import line
-        factory = fms.get_store().get(run["factory_id"])
+        store = fms.get_store()
+        factory = store.get(run["factory_id"])
         name = factory["title"] if factory else "A factory"
+        rehearsal = run.get("kind") == "rehearsal"
         if run["status"] == "done":
-            title = f"{name}: done"
+            title = f"{name}: rehearsed" if rehearsal else f"{name}: done"
             body = _excerpt(run.get("result", "")) or "It finished, with nothing to show."
+            if rehearsal:
+                body += "\n\n" + _would(store.intents(run["id"]))
         else:
             title = f"{name}: the run failed"
             body = run.get("error") or "It stopped without saying why."
@@ -58,6 +62,19 @@ async def run_finished(run: dict[str, Any]) -> None:
                         thread_id=thread_of(run["factory_id"]))
     except Exception:  # noqa: BLE001
         log.debug("first mate: run post failed", exc_info=True)
+
+
+WOULD_SHOWN = 8
+
+
+def _would(intents: list[dict[str, Any]]) -> str:
+    """A rehearsal's intents in words, for its post."""
+    if not intents:
+        return "It needed nothing outside."
+    lines = [f"- {i['what']}" for i in intents[:WOULD_SHOWN]]
+    if len(intents) > WOULD_SHOWN:
+        lines.append(f"- and {len(intents) - WOULD_SHOWN} more")
+    return "It would have done this, and nothing of it was done (a rehearsal):\n" + "\n".join(lines)
 
 
 async def factory_paused(factory: dict[str, Any], reason: str, *, needs_you: bool) -> None:
