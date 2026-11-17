@@ -403,6 +403,25 @@ Captain Swarm is admin-only today (#402). While First Mate is also admin-only
 this changes nothing. Opening First Mate to members means deciding the same
 for improvement runs.
 
+As built (P6):
+- **Captain Swarm's `factory` kind** (`first_mate_improve`): a version is
+  `{charter, steps, worker_mode}`; an attempt is an edit made at once. A
+  version is measured by running it on the factory's cases, each as one Bat
+  run in rehearsal under a Captain Swarm tag, graded by First Mate's reviewer.
+  Open cases and every other sealed case are `dev`; the rest of the sealed
+  ones are held out, fixed when the run starts. The proposer sees only open
+  cases' words; a sealed case shows as a number. Grants, triggers, budget and
+  done-when lines never vary. A run needs 3 cases, 2 of them sealed.
+- **The result:** a kept gain becomes the factory's new draft with a Line card
+  (before and after scores, what changed). Approving it runs the regression
+  check (§7). A draft the owner already has open is never replaced. Captain
+  Swarm's driver got an optional end-of-run step per kind for this.
+- **Starting one:** "Run one now" on the factory's Checks tab, or an
+  `improve` proposal from the weekly review when satisfaction has been under
+  target for both of the last two weeks (two or more signals in each, five in
+  all). Admins only, like Captain Swarm. The Checks tab lists the runs, and
+  "Make it a draft" covers a result that couldn't become one when it ended.
+
 ## 13. Safety and containment
 
 - **Never more than the user.** Factory runs are the user's own runs, within

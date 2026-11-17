@@ -895,8 +895,11 @@ function FirstMateCard({ item }: { item: LineItem }) {
         return
       }
       if (yes) {
-        await approveCharter(fid, d.version, d.sha)
-        setCharterNote('Approved. It runs on its schedule, and asks before anything goes out.')
+        const got = await approveCharter(fid, d.version, d.sha)
+        setCharterNote(got.check
+          ? 'Checking it on its cases first: it goes live if it scores about as well as the live version.'
+          : f.version ? `Approved: version ${d.version} is live.`
+            : 'Approved. It runs on its schedule, and asks before anything goes out.')
       } else {
         await declineCharter(fid, d.version)
         setCharterNote('Discarded. Nothing will run.')
@@ -915,7 +918,8 @@ function FirstMateCard({ item }: { item: LineItem }) {
     <div className={`mt-3 flex flex-wrap items-center gap-2 rounded-xl border px-3.5 py-3 ${
       waiting ? 'border-amber-500/30 bg-amber-500/10' : 'border-[var(--fd-line)]'}`}>
       <span className={`min-w-[12rem] flex-1 text-xs ${waiting ? 'text-amber-800 dark:text-amber-200' : 'text-zinc-400'}`}>
-        {charterNote || (waiting ? (charter ? 'A new factory waits for your approval.' : 'This factory waits for you.')
+        {charterNote || (waiting ? (charter ? (item.type === 'first_mate_improvement' ? 'A better charter waits for your approval.'
+          : 'A new factory waits for your approval.') : 'This factory waits for you.')
           : 'From one of your First Mate factories.')}
       </span>
       {charter && waiting && (
@@ -924,7 +928,7 @@ function FirstMateCard({ item }: { item: LineItem }) {
             className="rounded-md px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100">Discard</button>
           <button onClick={() => void decideCharter(true)} disabled={charterBusy}
             className="rounded-md bg-violet-600 px-3 py-1 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-60">
-            {charterBusy ? 'Checking…' : 'Approve and start'}
+            {charterBusy ? 'Checking…' : item.type === 'first_mate_improvement' ? 'Approve' : 'Approve and start'}
           </button>
         </span>
       )}

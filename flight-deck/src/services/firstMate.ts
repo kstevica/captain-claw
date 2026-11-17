@@ -404,6 +404,29 @@ export const rateRun = (runId: string, kind: 'up' | 'down' | '') =>
   call<{ thumbs: string; satisfaction: number | null }>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/thumbs`, json('POST', { kind }))
 export const stopRun = (runId: string) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/stop`, { method: 'POST' })
+/** A factory's improvement run: Captain Swarm trying better charters on its cases. */
+export interface ImprovementRun {
+  id: string
+  title: string
+  status: string
+  stopped_reason: string
+  experiments: number
+  baseline_dev: number | null
+  champion_dev: number | null
+  improved: boolean
+  spent_tokens: number
+  created_at: string
+  finished_at: string | null
+  /** Its best became the factory's draft. */
+  drafted: boolean
+  going: boolean
+}
+export const listImprovements = (id: string) =>
+  call<{ runs: ImprovementRun[]; can: { ok: boolean; why: string }; available: boolean }>(`${f(id)}/improvements`)
+export const improveFactory = (id: string) =>
+  call<{ run_id: string; status: string; title: string }>(`${f(id)}/improve`, json('POST', {}))
+export const draftImprovement = (id: string, runId: string) =>
+  call<Factory>(`${f(id)}/improvements/${encodeURIComponent(runId)}/draft`, { method: 'POST' })
 export const getReport = (week: 'last' | 'this') => call<WeekReport>(`/fd/first-mate/report?week=${week}`)
 export const listCases = (id: string) => call<{ cases: Case[]; checks: Check[]; max: number }>(`${f(id)}/cases`)
 export const addCase = (id: string, body: CaseFields & { from_run?: string }) =>

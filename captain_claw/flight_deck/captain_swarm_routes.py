@@ -615,7 +615,7 @@ async def _can_run(owner: str, objective: dict | None = None, user: dict | None 
     tiers, _ = await _load_owner_tiers(get_db(), owner)
     if not _creds_for(tiers):
         raise HTTPException(409, "Set up a model tier first: a run asks a model for ideas.")
-    if (objective or {}).get("kind") in ("outcome", "document"):
+    if (objective or {}).get("kind") in ("outcome", "document", "factory"):
         from captain_claw.flight_deck import bat_loop
         if bat_loop.get_store() is None:
             raise HTTPException(503, "Bat isn't running on this deck, and every attempt is a Bat run.")

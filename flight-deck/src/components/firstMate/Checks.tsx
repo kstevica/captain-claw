@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ChevronDown, ChevronRight, Loader2, Lock, Pencil, Play, Plus, Square, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, ExternalLink, Loader2, Lock, Pencil, Play, Plus, Sparkles, Square, Trash2 } from 'lucide-react'
 import {
   addCase,
   checkNow,
   deleteCase,
+  draftImprovement,
+  improveFactory,
   listCases,
+  listImprovements,
   stopCheck,
   updateCase,
   whenText,
@@ -12,7 +15,9 @@ import {
   type Case,
   type CaseFields,
   type Check,
+  type ImprovementRun,
 } from '../../services/firstMate'
+import { useUIStore } from '../../stores/uiStore'
 import { ErrorBox, Pill, errText, type PillTone } from './ui'
 
 // A factory's test cases and the checks run on them. A case is an input the
@@ -207,6 +212,8 @@ export function Checks({ factoryId, live, seed, onSeedUsed, onChanged, onNotice 
         </ul>
       </section>
 
+      <Improvements factoryId={factoryId} onChanged={onChanged} onNotice={onNotice} />
+
       {data.checks.length > 0 && (
         <section>
           <h3 className="mb-2 text-sm font-semibold text-zinc-100">Checks</h3>
@@ -246,6 +253,99 @@ export function Checks({ factoryId, live, seed, onSeedUsed, onChanged, onNotice 
         </section>
       )}
     </div>
+  )
+}
+
+const RUN_WORDS: Record<string, string> = {
+  awaiting_go: 'Waiting', baseline: 'Measuring', running: 'Going', done: 'Done', stalled: 'Done', stopped: 'Stopped',
+  failed: 'Failed', cancelled: 'Cancelled', declined: 'Declined',
+}
+
+/** Captain Swarm runs that try better charters on this factory's cases. Admins only, like Captain Swarm. */
+function Improvements({ factoryId, onChanged, onNotice }: {
+  factoryId: string
+  onChanged: () => void
+  onNotice: (text: string) => void
+}) {
+  const [data, setData] = useState<{ runs: ImprovementRun[]; can: { ok: boolean; why: string }; available: boolean } | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const setView = useUIStore((s) => s.setView)
+  const load = useCallback(async () => {
+    try {
+      setData(await listImprovements(factoryId))
+    } catch (e) {
+      setError(errText(e))
+    }
+  }, [factoryId])
+  useEffect(() => { void load() }, [load])
+  const going = !!data?.runs.some((r) => r.going)
+  useEffect(() => {
+    if (!going) return
+    const t = setInterval(() => { void load() }, 10000)
+    return () => clearInterval(t)
+  }, [going, load])
+  const act = async (key: string, fn: () => Promise<unknown>, done: string) => {
+    setBusy(key); setError(null)
+    try {
+      await fn()
+      onNotice(done)
+      await load()
+      onChanged()
+    } catch (e) {
+      setError(errText(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+  if (!data) return null
+  if (!data.runs.length && !data.available) return null  // Captain Swarm isn't theirs on this deck
+  return (
+    <section className="space-y-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="flex-1 text-sm font-semibold text-zinc-100">Improvement runs</h3>
+        <button onClick={() => void act('improve', () => improveFactory(factoryId),
+          'An improvement run started: it tries better charters on these cases')}
+          disabled={!data.can.ok || !!busy} title={data.can.ok ? 'Captain Swarm tries better charters on these cases' : data.can.why}
+          className="fd-btn-quiet h-8 px-3 text-xs">
+          {busy === 'improve' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />} Run one now
+        </button>
+      </div>
+      <p className="text-xs text-zinc-500">
+        Captain Swarm tries better charters and steps on these cases, as rehearsals, and keeps only what scores
+        clearly higher and holds up on the sealed cases it never showed the writer. The best comes back as a draft
+        you approve. {!data.can.ok && data.can.why ? data.can.why : ''}
+      </p>
+      {error && <ErrorBox text={error} onDismiss={() => setError(null)} />}
+      {data.runs.length > 0 && (
+        <ul className="space-y-1.5">
+          {data.runs.map((r) => (
+            <li key={r.id} className="flex flex-wrap items-center gap-2 text-[13px]">
+              <span className="w-24 shrink-0 text-xs text-zinc-500">{whenText(r.created_at)}</span>
+              <Pill tone={r.going ? 'violet' : r.improved ? 'green' : r.status === 'failed' ? 'red' : 'zinc'}>
+                {r.going ? RUN_WORDS[r.status] ?? r.status : r.improved ? 'Found a better one' : RUN_WORDS[r.status] ?? r.status}
+              </Pill>
+              <span className="min-w-0 flex-1 truncate text-xs text-zinc-400">
+                {r.experiments} {r.experiments === 1 ? 'idea' : 'ideas'}
+                {r.baseline_dev != null && <> · {pct(r.baseline_dev)}{r.champion_dev != null && r.improved ? ` → ${pct(r.champion_dev)}` : ''}</>}
+                {r.drafted && ' · became a draft'}
+              </span>
+              {r.improved && !r.drafted && !r.going && (
+                <button onClick={() => void act(`draft:${r.id}`, () => draftImprovement(factoryId, r.id),
+                  'Its best charter is a draft now: approve it on the Charter tab')}
+                  disabled={!!busy} className="fd-btn-quiet h-7 px-2.5 text-xs">
+                  {busy === `draft:${r.id}` ? <Loader2 className="h-3 w-3 animate-spin" /> : null} Make it a draft
+                </button>
+              )}
+              <button onClick={() => setView('captain-swarm')} title="Open Captain Swarm"
+                className="flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
+                <ExternalLink className="h-3.5 w-3.5" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 
