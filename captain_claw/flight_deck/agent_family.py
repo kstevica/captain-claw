@@ -43,6 +43,9 @@ MADE_FOR_MAX = 200
 
 FIELDS = ("parent", "made_by", "made_for", "role", "made_at", "parent_set_by", "run", "factory")
 
+# Lines kept in an agent's family history (``family_log``: newest last).
+LOG_MAX = 12
+
 # The env every runner stamps on its workers (bat_routes / vatra_routes /
 # council_routes _WORKER_MARKER, Basna's, Code mode's).
 _WORKER_ENV = frozenset({
@@ -164,6 +167,17 @@ def height(registry: dict, slug: str) -> int:
         level = nxt
 
 
+def log(entry: dict, text: str) -> None:
+    """Add a line to an agent's family history (``family_log``), oldest dropped first."""
+    lines = [x for x in (entry.get("family_log") or []) if isinstance(x, dict)]
+    lines.append({"at": now_iso(), "text": str(text)[:200]})
+    entry["family_log"] = lines[-LOG_MAX:]
+
+
+def name_of(registry: dict, slug: str) -> str:
+    return _name(registry, slug)
+
+
 def view(registry: dict, slug: str) -> dict[str, str]:
     """The family fields an API returns for ``slug``."""
     e = _entry(registry, slug) or {}
@@ -224,11 +238,15 @@ def move(registry: dict, slug: str, parent: str, *, made_for: Any = None) -> dic
     """Put ``slug`` under ``parent`` ("" = top-level) by the owner's hand."""
     check_move(registry, slug, parent)
     e = registry[slug]
+    before = parent_of(registry, slug)
     if parent:
         e["parent"] = parent
     else:
         e.pop("parent", None)
     e["parent_set_by"] = "person"
+    if before != parent:
+        log(e, f"Put under {_name(registry, parent)} by its owner" if parent
+            else "Made one of its owner's own agents by its owner")
     e.setdefault("role", STANDING)
     if made_for is not None:
         text = clean_made_for(made_for)
@@ -244,12 +262,54 @@ def on_removed(registry: dict, slug: str) -> list[str]:
     Call before the entry is dropped. Returns the slugs that moved."""
     up = parent_of(registry, slug)
     moved = children(registry, slug, workers=True)
+    gone = _name(registry, slug)
     for c in moved:
         if up:
             registry[c]["parent"] = up
         else:
             registry[c].pop("parent", None)
+        log(registry[c], f"{gone} was removed: moved up " + (f"under {_name(registry, up)}" if up else "to its owner's own agents"))
     return moved
+
+
+def removal_order(registry: dict, slug: str) -> list[str]:
+    """The standing agents under ``slug``, deepest first: what "remove them too" removes before it."""
+    out: list[str] = []
+    level, seen = [slug], {slug}
+    while level:
+        nxt = [c for s in level for c in children(registry, s) if c not in seen]
+        seen.update(nxt)
+        out = nxt + out
+        level = nxt
+    return out
+
+
+# Who started a run, by the run (``vatra:<session>``, ``basna:<session[:8]>``):
+# its workers sit under that agent. Kept in memory a day, as runs are.
+_RUN_STARTERS: dict[str, tuple[str, float]] = {}
+_RUN_STARTER_TTL = 86_400.0
+
+
+def note_run_starter(run: str, registry: dict, *, port: int, owner: str) -> str:
+    """An agent (found by its web port, with ``owner``) started ``run``: remember it
+    for the run's workers. Returns its slug, or "" when no such agent."""
+    import time
+
+    if not run or not port:
+        return ""
+    slug = next((s for s, e in registry.items() if isinstance(e, dict) and int(e.get("web_port") or 0) == int(port)
+                 and str(e.get("owner") or "") == str(owner or "") and role_of(s, e) == STANDING), "")
+    now = time.time()
+    for k in [k for k, (_, t) in _RUN_STARTERS.items() if now - t > _RUN_STARTER_TTL]:
+        _RUN_STARTERS.pop(k, None)
+    if slug:
+        _RUN_STARTERS[run] = (slug, now)
+    return slug
+
+
+def run_starter(run: str) -> str:
+    hit = _RUN_STARTERS.get(run) if run else None
+    return hit[0] if hit else ""
 
 
 def label(registry: dict, slug: str, fields: dict[str, Any]) -> bool:
@@ -306,7 +366,11 @@ def for_spawn(config: Any, *, prior: dict | None, caller: str) -> dict[str, str]
         out = {"role": STANDING, "parent": caller, "made_by": caller, "parent_set_by": "spawn"}
     elif _WORKER_ENV & env.keys():
         run = next((f"{kind}:{env[k]}" for k, kind in _RUN_ENV if env.get(k)), "")
-        out = {"role": WORKER, "run": run}
+        name = str(getattr(config, "name", "") or "")
+        if not run and "CLAW_BASNA_WORKER" in env and name.startswith("basna-"):
+            run = "basna:" + name.split("-")[1][:8]
+        starter = run_starter(run)
+        out = {"role": WORKER, "run": run, "parent": starter, "made_by": starter}
     elif prior is not None:
         out = {k: str(prior.get(k) or "") for k in FIELDS}
         out["role"] = out["role"] or STANDING

@@ -6,6 +6,7 @@ import {
   Brain,
   BrainCog,
   Check,
+  CornerDownRight,
   Cpu,
   Database,
   Eye,
@@ -28,6 +29,7 @@ import {
   X,
 } from 'lucide-react'
 import { IntentionsPanel } from '../agents/IntentionsPanel'
+import { FamilyPanel } from './AgentFamily'
 import { AgentMailSetting } from '../agents/AgentMailSetting'
 import { ToolSearchSetting } from '../agents/ToolSearchSetting'
 import { AgentPicture } from '../agents/AgentPicture'
@@ -246,22 +248,26 @@ export function AgentDialog({ title, icon: Icon, agentName, size = 'sm', onClose
 
 // ── Info: intentions and topics ──
 
-type InfoTab = 'intentions' | 'topics'
+type InfoTab = 'intentions' | 'topics' | 'family'
 const INFO_TABS: { id: InfoTab; label: string; icon: typeof Info }[] = [
   { id: 'intentions', label: 'Intentions', icon: Target },
   { id: 'topics', label: 'Topics', icon: Tags },
+  { id: 'family', label: 'Family', icon: CornerDownRight },
 ]
 
 export function KioskAgentInfoDialog({ agent, phone, onClose }: { agent: KioskAgent; phone: boolean; onClose: () => void }) {
-  const [tab, setTab] = useState<InfoTab>('intentions')
-  // Both read the agent itself, through Flight Deck: a stopped one has nothing to say.
+  // Both read the agent itself, through Flight Deck: a stopped one has nothing to say
+  // (its family, the deck's, it has: Info opens on it then).
   const up = agent.reachable && agent.port > 0
+  const [tab, setTab] = useState<InfoTab>(() => (!up && agent.kind === 'process' ? 'family' : 'intentions'))
+  // Family is the deck's to say (agent_family), for its process agents, on or off.
+  const tabs = INFO_TABS.filter((t) => t.id !== 'family' || agent.kind === 'process')
 
   return (
     <AgentDialog title="Info" icon={Info} agentName={agent.name} size="lg" onClose={onClose}>
       <div className="shrink-0 border-b border-zinc-800 p-2">
-        <div className="grid grid-cols-2 rounded-xl bg-zinc-900 p-1 wide:max-w-xs" role="tablist">
-          {INFO_TABS.map(({ id, label, icon: Icon }) => (
+        <div className={`grid ${tabs.length === 3 ? 'grid-cols-3 wide:max-w-sm' : 'grid-cols-2 wide:max-w-xs'} rounded-xl bg-zinc-900 p-1`} role="tablist">
+          {tabs.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               role="tab"
@@ -271,14 +277,16 @@ export function KioskAgentInfoDialog({ agent, phone, onClose }: { agent: KioskAg
                 tab === id ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
               }`}
             >
-              <Icon className={`h-4 w-4 ${id === 'intentions' ? 'text-amber-400' : 'text-sky-400'}`} />
+              <Icon className={`h-4 w-4 ${id === 'intentions' ? 'text-amber-400' : id === 'family' ? 'text-violet-400' : 'text-sky-400'}`} />
               {label}
             </button>
           ))}
         </div>
       </div>
       <div className="min-h-0 flex-1 overflow-hidden">
-        {!up ? (
+        {tab === 'family' ? (
+          <FamilyPanel slug={agent.startKey} name={agent.name} />
+        ) : !up ? (
           <div className="flex h-full items-center justify-center px-8 text-center text-sm text-zinc-500">
             Power {agent.name} on to see its intentions and topics.
           </div>
@@ -1027,12 +1035,14 @@ function TabButton({ on, onClick, icon: Icon, iconClass, label, children }: {
 
 // ── Remove ──
 
-export function KioskRemoveAgentDialog({ agent, busy, onRemove, onOpenLibrary, onOpenData, onClose }: {
+export function KioskRemoveAgentDialog({ agent, busy, under, onRemove, onOpenLibrary, onOpenData, onClose }: {
   agent: KioskAgent
   /** At work right now (in a chat open here). */
   busy: boolean
-  /** Removes it; rejects with what went wrong. */
-  onRemove: () => Promise<void>
+  /** The agents under it (agent_family), and where they would move up to. */
+  under?: { names: string[]; upTo: string }
+  /** Removes it (and, with "remove", the agents under it); rejects with what went wrong. */
+  onRemove: (family: 'up' | 'remove') => Promise<void>
   /** Opens the File library on its files — to keep some before they go. */
   onOpenLibrary?: () => void
   /** Opens the Data library on its tables — likewise. */
@@ -1041,13 +1051,15 @@ export function KioskRemoveAgentDialog({ agent, busy, onRemove, onOpenLibrary, o
 }) {
   const [removing, setRemoving] = useState(false)
   const [error, setError] = useState('')
+  const [family, setFamily] = useState<'up' | 'remove'>('up')
   const cancelRef = useRef<HTMLButtonElement>(null)
   useEffect(() => { cancelRef.current?.focus() }, [])
+  const n = under?.names.length ?? 0
 
   const remove = async () => {
     setRemoving(true); setError('')
     try {
-      await onRemove()
+      await onRemove(n ? family : 'up')
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setRemoving(false)
@@ -1075,6 +1087,23 @@ export function KioskRemoveAgentDialog({ agent, busy, onRemove, onOpenLibrary, o
             <p className="mt-2 font-medium text-red-600 dark:text-red-400">This can't be undone.</p>
           </div>
         </div>
+        {under && n > 0 && (
+          <fieldset className="space-y-1.5 rounded-xl border border-zinc-800 p-3">
+            <legend className="px-1 text-xs font-medium text-zinc-400">
+              {n === 1 ? `${under.names[0]} sits under ${agent.name}` : `${n} agents sit under ${agent.name}: ${under.names.join(', ')}`}
+            </legend>
+            {([
+              ['up', n === 1 ? `Keep it: it moves up to ${under.upTo}` : `Keep them: they move up to ${under.upTo}`],
+              ['remove', n === 1 ? 'Remove it too, with everything it keeps' : `Remove all ${n} too, with everything they keep`],
+            ] as const).map(([value, label]) => (
+              <label key={value} className="flex cursor-pointer items-start gap-2.5 rounded-lg px-2 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800/50">
+                <input type="radio" name="family" value={value} checked={family === value} onChange={() => setFamily(value)}
+                  disabled={removing} className="mt-0.5 accent-violet-600" />
+                <span className={value === 'remove' ? 'text-red-700 dark:text-red-300' : ''}>{label}</span>
+              </label>
+            ))}
+          </fieldset>
+        )}
         {(onOpenLibrary || onOpenData) && (
           <div className="space-y-2">
             {onOpenLibrary && (
@@ -1110,7 +1139,7 @@ export function KioskRemoveAgentDialog({ agent, busy, onRemove, onOpenLibrary, o
           className="flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-red-500 disabled:opacity-60"
         >
           {removing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-          {removing ? 'Removing…' : 'Remove agent'}
+          {removing ? 'Removing…' : n && family === 'remove' ? `Remove ${n + 1} agents` : 'Remove agent'}
         </button>
       </div>
     </AgentDialog>

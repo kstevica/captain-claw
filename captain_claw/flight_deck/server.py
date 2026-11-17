@@ -10611,7 +10611,12 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         **({"workspace": config.workspace_path} if config.workspace_path else {}),
         # Who made it and where it sits (agent_family) — a re-spawn keeps its own.
         **family_fields,
+        **({"family_log": prior["family_log"]} if prior.get("family_log") else {}),
     }
+    if not prior and family_fields.get("role") != agent_family.WORKER:
+        _maker = family_fields.get("made_by", "")
+        agent_family.log(registry[slug], "Made by its owner" if not _maker
+                         else f"Made by {agent_family.name_of(registry, _maker)}")
     _save_process_registry(registry)
     # Its family block, and its parent's and siblings' (family_carrier).
     family_carrier.refresh_quietly(owner_id)
@@ -10937,11 +10942,26 @@ async def restart_process(slug: str, request: Request, user: dict | None = _agen
 
 
 @app.delete("/fd/processes/{slug}", response_model=ProcessActionResult)
-async def remove_process(slug: str, force: bool = False, purge: bool = False, request: Request = None, user: dict | None = _agent_manager_dep):
+async def remove_process(slug: str, force: bool = False, purge: bool = False, family: str = "up",
+                         request: Request = None, user: dict | None = _agent_manager_dep):
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Remove a process agent from the registry. Stops it first if running.
-    With ``purge`` its folder, chat log and scheduled tasks are deleted too."""
-    return await _remove_process_agent(slug, purge=purge)
+    With ``purge`` its folder, chat log and scheduled tasks are deleted too.
+    The agents under it (agent_family) move up a level, or with
+    ``family=remove`` go too (deepest first, the same way)."""
+    if family not in ("up", "remove"):
+        raise HTTPException(400, "family is 'up' or 'remove'")
+    gone: list[str] = []
+    if family == "remove":
+        for child in agent_family.removal_order(_load_process_registry(), slug):
+            res = await _remove_process_agent(child, purge=purge)
+            if not res.ok:
+                return ProcessActionResult(ok=False, slug=slug, message=f"Stopped at {child}: {res.message}")
+            gone.append(child)
+    res = await _remove_process_agent(slug, purge=purge)
+    if gone and res.ok:
+        res.message += f", and the {len(gone)} under it"
+    return res
 
 
 async def _remove_process_agent(slug: str, *, purge: bool = False) -> ProcessActionResult:
@@ -10972,6 +10992,26 @@ async def _remove_process_agent(slug: str, *, purge: bool = False) -> ProcessAct
         return ProcessActionResult(ok=True, slug=slug, message=f"Removed '{slug}' and deleted its folder")
 
     return ProcessActionResult(ok=True, slug=slug, message=f"Removed '{slug}' from registry")
+
+
+@app.get("/fd/processes/{slug}/family")
+async def get_process_family(slug: str, request: Request, user: dict | None = _agent_manager_dep):
+    """One of the owner's agents' family (agent_family): where it sits, who made
+    it and why, the agents under it, and its family history."""
+    _verify_process_owner(slug, getattr(request.state, "user_id", ""))
+    reg = _load_process_registry()
+    e = reg.get(slug) or {}
+    view = agent_family.view(reg, slug)
+    return {
+        **view,
+        "made_at": str(e.get("made_at") or ""),
+        "parent_name": agent_family.name_of(reg, view["parent"]) if view["parent"] else "",
+        "made_by_name": ("First Mate" if view["made_by"] == agent_family.FIRST_MATE
+                         else agent_family.name_of(reg, view["made_by"]) if view["made_by"] else ""),
+        "children": [{"slug": c, "name": agent_family.name_of(reg, c)} for c in agent_family.children(reg, slug)],
+        "workers": len(agent_family.children(reg, slug, workers=True)) - len(agent_family.children(reg, slug)),
+        "log": [x for x in (e.get("family_log") or []) if isinstance(x, dict)],
+    }
 
 
 class ProcessParentUpdate(BaseModel):
@@ -11199,8 +11239,22 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
         "owner": entry.get("owner", ""),
         "grid_tags": list(entry.get("grid_tags") or []),
         "grid_recall": entry.get("grid_recall", ""),
+        # Its family (agent_family): beside its source, under the same parent when
+        # there's room; made by its owner, for what its source was made for.
+        "role": agent_family.STANDING,
+        "made_at": agent_family.now_iso(),
+        **({"made_for": entry["made_for"]} if entry.get("made_for") else {}),
     }
+    _src_parent = agent_family.parent_of(registry, slug)
+    try:
+        if _src_parent:
+            agent_family.check_child(registry, _src_parent)
+            registry[new_slug].update(parent=_src_parent, parent_set_by="person")
+    except agent_family.FamilyError:
+        pass  # no room under it: one of the owner's own
+    agent_family.log(registry[new_slug], f"Cloned from {agent_family.name_of(registry, slug)} by its owner")
     _save_process_registry(registry)
+    family_carrier.refresh_quietly(entry.get("owner"))
     if replaced is not None:  # the clone is a new agent: the replaced one's shares go
         await _forget_shared_agent(agent_sharing.process_ref(new_slug, replaced),
                                    str(replaced.get("owner") or ""))

@@ -292,6 +292,8 @@ async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: 
             "name": str(entry.get("name") or slug),
             "slug": slug,
             "description": str(entry.get("description") or ""),
+            # Why it was made (agent_family); where it sat doesn't travel: it lands top-level.
+            "made_for": str(entry.get("made_for") or ""),
             "archetype": str(entry.get("archetype") or ""),
             "tier": str(entry.get("tier") or ""),
             "model_tier": str(entry.get("model_tier") or ""),

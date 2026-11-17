@@ -91,6 +91,7 @@ def spawn_config(agent: dict[str, Any], name: str, *, keep_model: bool = True):
     fields: dict[str, Any] = {
         "name": name,
         "description": str(agent.get("description") or "")[:2000],
+        "made_for": str(agent.get("made_for") or "")[:200],
         "cognitive_mode": str(agent.get("cognitive_mode") or "neutra")[:40],
         "fleet_instructions": str(agent.get("fleet_instructions") or "")[:64_000],
         "grid_memory_tags": [str(t) for t in agent.get("grid_tags") or []][:20],
