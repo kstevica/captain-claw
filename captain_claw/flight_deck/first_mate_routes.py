@@ -63,7 +63,7 @@ OWNER_STATES = ("running", "paused", "stopped", "retired")
 _CREATE_FIELDS = ("template", "title", "charter", "runner", "runner_config", "triggers", "grants",
                   "budget", "checks", "goal_id", "share", "priority", "note")
 _VERSION_FIELDS = ("charter", "runner", "runner_config", "triggers", "grants", "budget", "checks")
-_FACTORY_FIELDS = ("title", "share", "priority", "goal_id")
+_FACTORY_FIELDS = ("title", "share", "priority", "goal_id", "run_tokens")
 
 
 def _uid(user: dict) -> str:
@@ -345,6 +345,7 @@ async def get_factory(factory_id: str, user: dict = Depends(allowed_user)):
             "versions": store.versions(factory_id),
             "runs": await _runs_shown(store, factory_id, 20),
             "check": store.active_check(factory_id),
+            "run_cap": runs.run_cap(store, view, store.live(factory_id)),
             "events": store.events(factory_id, limit=50),
             "satisfaction": store.satisfaction(factory_id),
             "scorecard": first_mate_score.scorecard(store, view, fms._utcnow()),

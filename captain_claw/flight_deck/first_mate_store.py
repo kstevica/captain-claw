@@ -652,6 +652,10 @@ class FirstMateStore:
             cols = {r["name"] for r in self._c().execute("PRAGMA table_info(fm_runs)")}
             if "proof" not in cols:
                 self._c().execute("ALTER TABLE fm_runs ADD COLUMN proof TEXT NOT NULL DEFAULT '{}'")
+            # The owner's cap per run on the factory itself (0 = its charter's, else their default).
+            cols = {r["name"] for r in self._c().execute("PRAGMA table_info(fm_factories)")}
+            if "run_tokens" not in cols:
+                self._c().execute("ALTER TABLE fm_factories ADD COLUMN run_tokens INTEGER NOT NULL DEFAULT 0")
             self._c().commit()
 
     # ── rows ───────────────────────────────────────────────────────────
@@ -867,10 +871,13 @@ class FirstMateStore:
 
     def update_factory(self, factory_id: str, actor: str, *, title: str | None = None,
                        share: int | None = None, priority: int | None = None,
-                       goal_id: str | None = None) -> dict[str, Any]:
+                       goal_id: str | None = None, run_tokens: int | None = None) -> dict[str, Any]:
         """What isn't part of a version: the name, the budget share, the
-        priority, the Course goal. Changing these needs no approval."""
+        priority, the Course goal, the cap per run (``run_tokens``, 0 = not set
+        here). Changing these needs no approval."""
         updates: dict[str, Any] = {}
+        if run_tokens is not None:
+            updates["run_tokens"] = 0 if run_tokens == 0 else _int("run_tokens", run_tokens, 100_000, 50_000_000)
         if title is not None:
             updates["title"] = _text("title", title, TITLE_MAX, required=True)
         if share is not None:
