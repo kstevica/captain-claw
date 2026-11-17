@@ -227,7 +227,7 @@ export function FactoryDrawer({ factoryId, onClose, onChanged, onNotice }: {
                         onChange={(e) => setForm({ ...form, schedule: e.target.value })} />
                       <p className="mt-1 text-[11px] text-zinc-500">
                         {form.schedule.trim() ? scheduleText(form.schedule) : 'Empty: only when you press Run now'}.
-                        {' '}It doesn’t start on its own yet: use Run now.
+                        {' '}It starts on its own while your First Mate is on.
                       </p>
                     </div>
                     <div>

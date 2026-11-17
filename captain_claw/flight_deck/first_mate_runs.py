@@ -244,13 +244,16 @@ _WATCHERS: dict[str, asyncio.Task] = {}
 
 async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind: str = "run",
                 note: str = "", context: list[dict[str, Any]] | None = None,
-                watch: bool = True) -> dict[str, Any]:
+                watch: bool = True, max_tokens: int | None = None) -> dict[str, Any]:
     """Start one run of a factory's live version through its runner.
 
     Refused (FirstMateError) when the factory isn't the owner's, has no
     approved version, can't start this run (see ``FirstMateStore.start_run``),
     its runner isn't wired, or the runner has no free slot. A runner that
-    fails to start its child leaves the run failed, with why."""
+    fails to start its child leaves the run failed, with why.
+
+    ``max_tokens`` lowers the run's token cap (the loop passes what is left of
+    the factory's share this week); it never raises it."""
     store = fms.get_store()
     factory = store.get_owned(factory_id, owner_id)
     if factory is None:
@@ -265,12 +268,17 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
     refs = [str(c.get("id")) for c in (context or []) if c.get("id")]
     brief = compose_brief(factory, version, note=note, context=context)
     token_cap = token_cap_for(store, factory, version)
+    if max_tokens is not None:
+        token_cap = max(1, min(token_cap, int(max_tokens)))
     run = store.start_run(factory_id, trigger=trigger, kind=kind, trigger_ref=refs)
     try:
         child = await runner.start(factory, version, run, brief, token_cap=token_cap)
     except Exception as exc:  # noqa: BLE001 — the run records why, the caller hears it
         log.warning("first mate: run didn't start", extra={"run": run["id"]}, exc_info=True)
-        store.finish_run(run["id"], "failed", error=f"couldn't start: {exc}"[:300])
+        failed = store.finish_run(run["id"], "failed", error=f"couldn't start: {exc}"[:300])
+        if trigger != "manual":  # nobody is watching an automatic one start
+            from captain_claw.flight_deck import first_mate_line
+            await first_mate_line.run_finished(failed)
         raise FirstMateError(f"the run couldn't start: {exc}") from None
     run = store.mark_running(run["id"], child)
     if watch:
@@ -300,9 +308,12 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
         run = store.update_run(run_id, tokens=state["tokens"], usd=state["usd"])
         return {**run, "waiting": bool(state.get("waiting")), "note": state.get("note", "")}
     _unwatch(run_id)  # a page read finished it: its watcher has nothing left to do
-    return store.finish_run(run_id, state["status"], verdict=state.get("verdict", ""),
-                            result=state.get("result", ""), error=state.get("note", ""),
-                            tokens=state["tokens"], usd=state["usd"])
+    finished = store.finish_run(run_id, state["status"], verdict=state.get("verdict", ""),
+                                result=state.get("result", ""), error=state.get("note", ""),
+                                tokens=state["tokens"], usd=state["usd"])
+    from captain_claw.flight_deck import first_mate_line
+    await first_mate_line.run_finished(finished)
+    return finished
 
 
 async def refresh_owner(owner_id: str) -> list[dict[str, Any]]:

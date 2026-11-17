@@ -123,6 +123,7 @@ import ConnectionsPage, { type TabId as ConnectionsTab } from '../../pages/Conne
 import { ProfilePage } from '../../pages/ProfilePage'
 import { CoursePage } from '../../pages/CoursePage'
 import { OPEN_COURSE_EVENT } from '../../services/course'
+import { OPEN_FIRST_MATE_EVENT } from '../../services/firstMate'
 import { OPEN_PROFILE_EVENT } from '../../utils/profileSources'
 import { NotificationBell } from '../common/NotificationCenter'
 import { LinePanel } from '../line/LinePanel'
@@ -472,6 +473,12 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const firstMateOpen = useFirstMateStore((s) => s.open)
   const closeFirstMate = useFirstMateStore((s) => s.close)
   const firstMateVisible = useFirstMateVisible()
+  const openFirstMateDialog = useFirstMateStore((s) => s.openFirstMate)
+  useEffect(() => {
+    const open = () => { setLineOpen(false); openFirstMateDialog() }
+    window.addEventListener(OPEN_FIRST_MATE_EVENT, open)
+    return () => window.removeEventListener(OPEN_FIRST_MATE_EVENT, open)
+  }, [openFirstMateDialog])
   // Vatra, Basna, Council: agents working as a team, opened from More.
   const teamWork = useTeamWorkStore((s) => s.open)
   const closeTeamWork = useTeamWorkStore((s) => s.close)

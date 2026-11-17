@@ -1290,6 +1290,15 @@ async def lifespan(app: FastAPI):
         app.state.captain_swarm_stop = _cs_stop
         app.state.captain_swarm_task = asyncio.create_task(_cs_loop.supervisor_loop(_cs_store, _cs_stop))
         print("Flight Deck: Captain Swarm supervisor started")
+    # ── First Mate supervisor (factories that run on their own: schedules,
+    # budget shares, failure streaks). Disable with FD_FIRST_MATE_DISABLED=true.
+    # Idle while the deck's First Mate switch is off. ──
+    if os.environ.get("FD_FIRST_MATE_DISABLED", "").lower() not in ("true", "1", "yes"):
+        from captain_claw.flight_deck import first_mate_loop as _fm_loop
+        _fm_stop = asyncio.Event()
+        app.state.first_mate_stop = _fm_stop
+        app.state.first_mate_task = asyncio.create_task(_fm_loop.supervisor_loop(_fm_stop))
+        print("Flight Deck: First Mate supervisor started")
     # ── Flow engine (process automations: trigger → steps on the agent pool) ──
     try:
         from captain_claw.flight_deck.flows_store import FlowStore
@@ -1528,6 +1537,14 @@ async def lifespan(app: FastAPI):
                 await asyncio.wait_for(app.state.course_review_task, timeout=5.0)
             except (TimeoutError, asyncio.CancelledError, Exception):
                 pass
+    # Stop the First Mate supervisor before Bat's: a scan never starts a run
+    # on a Bat that is shutting down. Its runs are Bat runs and outlive it.
+    if hasattr(app.state, "first_mate_stop"):
+        app.state.first_mate_stop.set()
+        try:
+            await asyncio.wait_for(app.state.first_mate_task, timeout=5.0)
+        except (TimeoutError, asyncio.CancelledError, Exception):
+            pass
     # Stop the Captain Swarm supervisor: its runs go stale and are re-adopted
     # on the next boot, and a measurement it was in the middle of runs again.
     if hasattr(app.state, "captain_swarm_stop"):

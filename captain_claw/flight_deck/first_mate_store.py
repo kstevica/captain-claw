@@ -593,6 +593,17 @@ class FirstMateStore:
                     key    TEXT PRIMARY KEY,
                     value  TEXT NOT NULL
                 );
+
+                -- When each schedule trigger of a factory is next due (Phase 2).
+                -- key = a hash of the trigger, so a version that changes it starts
+                -- afresh; kept here so a deck restart neither repeats nor loses one.
+                CREATE TABLE IF NOT EXISTS fm_trigger_state (
+                    factory_id  TEXT NOT NULL REFERENCES fm_factories(id) ON DELETE CASCADE,
+                    key         TEXT NOT NULL,
+                    next_at     REAL,
+                    last_at     REAL,
+                    PRIMARY KEY (factory_id, key)
+                );
                 """
             )
             self._c().commit()
@@ -1166,6 +1177,73 @@ class FirstMateStore:
             return int(self._c().execute(
                 "SELECT COALESCE(SUM(tokens), 0) FROM fm_runs WHERE factory_id = ? AND created_at >= ?",
                 (factory_id, _iso(since))).fetchone()[0])
+
+    def runs_since(self, factory_id: str, since: str, kinds: tuple[str, ...] = ("run",)) -> list[dict[str, Any]]:
+        """A factory's runs created after ``since`` (ISO), newest first."""
+        with self._lock:
+            rows = self._c().execute(
+                f"SELECT * FROM fm_runs WHERE factory_id = ? AND created_at > ?"
+                f" AND kind IN ({','.join('?' * len(kinds))}) ORDER BY created_at DESC, id",
+                (factory_id, since, *kinds)).fetchall()
+        return [self._run(r) for r in rows]
+
+    # ── the loop's bookkeeping (Phase 2) ───────────────────────────────
+
+    def owners(self) -> list[str]:
+        """Everyone with a factory that isn't retired."""
+        with self._lock:
+            return [r["owner_id"] for r in self._c().execute(
+                "SELECT DISTINCT owner_id FROM fm_factories WHERE state != 'retired' ORDER BY owner_id")]
+
+    def resumed_at(self, factory_id: str) -> str:
+        """When the factory last started running: its latest approval or move
+        back to running. A failure streak counts only runs after it."""
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT at, event, detail FROM fm_events WHERE factory_id = ? AND event IN ('approved', 'state')"
+                " ORDER BY id DESC", (factory_id,)).fetchall()
+        for r in rows:
+            if r["event"] == "approved":
+                return r["at"]
+            try:
+                if json.loads(r["detail"] or "{}").get("to") == "running":
+                    return r["at"]
+            except (TypeError, ValueError):
+                continue
+        return ""
+
+    def trigger_state(self, factory_id: str) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            rows = self._c().execute("SELECT key, next_at, last_at FROM fm_trigger_state WHERE factory_id = ?",
+                                     (factory_id,)).fetchall()
+        return {r["key"]: {"next_at": r["next_at"], "last_at": r["last_at"]} for r in rows}
+
+    def set_trigger(self, factory_id: str, key: str, *, next_at: float | None,
+                    last_at: float | None = None) -> None:
+        """Save when a trigger is next due (None: never again) and, when it
+        fired, when."""
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO fm_trigger_state (factory_id, key, next_at, last_at) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(factory_id, key) DO UPDATE SET next_at = excluded.next_at,"
+                " last_at = COALESCE(excluded.last_at, fm_trigger_state.last_at)",
+                (factory_id, key, next_at, last_at))
+
+    def keep_triggers(self, factory_id: str, keys: list[str]) -> None:
+        """Forget the trigger state of triggers the live version no longer has."""
+        with self._tx() as conn:
+            if keys:
+                conn.execute(f"DELETE FROM fm_trigger_state WHERE factory_id = ? AND key NOT IN"
+                             f" ({','.join('?' * len(keys))})", (factory_id, *keys))
+            else:
+                conn.execute("DELETE FROM fm_trigger_state WHERE factory_id = ?", (factory_id,))
+
+    def note(self, factory_id: str, actor: str, event: str, detail: dict[str, Any] | None = None) -> None:
+        """One line in a factory's history, from outside the store's own rules
+        (the loop: a skipped schedule, a budget week)."""
+        with self._tx() as conn:
+            self._get_factory(conn, factory_id)
+            self._event(conn, factory_id, actor, _text("event", event, 40, required=True), detail)
 
     # ── intents (Phase 3) ──────────────────────────────────────────────
 
