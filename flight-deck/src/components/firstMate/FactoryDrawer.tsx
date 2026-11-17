@@ -14,6 +14,7 @@ import {
   newDraft,
   runNow,
   stopRun,
+  continueRun,
   scheduleText,
   tokensText,
   triggersText,
@@ -63,6 +64,7 @@ function eventText(e: FactoryEvent): string {
     case 'trust': return `${e.actor === 'record' ? 'Its record raised trust to' : e.actor === 'deck' ? 'Trust lowered to' : 'Trust:'} ${TRUST_LABELS[d.to as keyof typeof TRUST_LABELS] ?? String(d.to ?? '')}${d.pinned ? ' (pinned)' : ''}`
     case 'updated': return `Changed ${Object.keys(d).join(', ').replace(/_/g, ' ')}`
     case 'run_started': return 'Run started'
+    case 'run_continued': return 'Run continued where it stopped'
     case 'run_finished': return `Run ${RUN_LABELS[d.status as Run['status']]?.toLowerCase() ?? String(d.status ?? '')}`
     case 'case_added': return 'Test case added'
     case 'case_deleted': return 'Test case deleted'
@@ -348,6 +350,10 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                   {f.runs.map((r) => (
                     <RunItem key={r.id} run={r} busy={busy === `stop:${r.id}`} deciding={busy === `decide:${r.id}`}
                       onStop={() => void act(`stop:${r.id}`, () => stopRun(r.id), 'Run stopped')}
+                      continuing={busy === `continue:${r.id}`}
+                      onContinue={r.can_continue
+                        ? () => void act(`continue:${r.id}`, () => continueRun(r.id), 'Going on where it stopped')
+                        : undefined}
                       onApprove={(ids, total) => void act(`decide:${r.id}`, () => approveRun(r.id, ids.length === total ? undefined : ids),
                         `Carrying out ${ids.length} ${ids.length === 1 ? 'action' : 'actions'}, once`)}
                       onReject={() => void act(`decide:${r.id}`, () => rejectRun(r.id), 'Rejected: nothing will be done')}
@@ -567,11 +573,14 @@ const INTENT_DONE: Record<Exclude<Intent['status'], 'open'>, { tone: PillTone; l
   dropped: { tone: 'zinc', label: 'Not done' },
 }
 
-function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate, onMakeCase, making }: {
+function RunItem({ run: r, busy, deciding, onStop, onContinue, continuing, onApprove, onReject, onRate, onMakeCase, making }: {
   run: Run
   busy: boolean
   deciding: boolean
   onStop: () => void
+  /** A stopped run that can go on where it stopped. */
+  onContinue?: () => void
+  continuing: boolean
   onApprove: (ids: number[], total: number) => void
   onReject: () => void
   onRate: (kind: 'up' | 'down' | '') => void
@@ -584,6 +593,7 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate, 
   // Its steps, agents and activity: open while it's going, a click away after.
   const traceable = r.runner === 'bat' && !!r.child_id
   const [open, setOpen] = useState(going)
+  useEffect(() => { if (going) setOpen(true) }, [going])  // a run that goes on opens again
   const [unticked, setUnticked] = useState<Set<number>>(new Set())
   const chosen = waiting.filter((i) => !unticked.has(i.id)).map((i) => i.id)
   const toggle = (id: number) => setUnticked((s) => {
@@ -639,6 +649,13 @@ function RunItem({ run: r, busy, deciding, onStop, onApprove, onReject, onRate, 
               <ThumbsDown className="h-3.5 w-3.5" />
             </button>
           </span>
+        )}
+        {onContinue && (
+          <button onClick={onContinue} disabled={continuing}
+            title="Go on where it stopped: finished steps stay finished, with your cap per run again"
+            className="inline-flex h-7 items-center gap-1 rounded-full bg-violet-600 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60">
+            {continuing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />} Continue
+          </button>
         )}
         {going && (
           <button onClick={onStop} disabled={busy}

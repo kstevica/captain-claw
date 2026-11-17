@@ -247,8 +247,9 @@ class BatRunner:
         elif status == "done":
             out.update(status="done", verdict="pass", result=b.get("truth") or "")
         elif status == "error":
+            reason = b.get("stopped_reason") or ""
             out.update(status="failed", verdict="fail", result=b.get("truth") or "",
-                       note=b.get("stopped_reason") or "Bat stopped it")
+                       note=STOP_WORDS.get(reason, reason or "Bat stopped it"))
         elif status == "cancelled":
             out.update(status="cancelled", note=b.get("stopped_reason") or "stopped")
         return out
@@ -256,6 +257,22 @@ class BatRunner:
     async def stop(self, child_id: str) -> bool:
         from captain_claw.flight_deck import bat_loop
         return bool(await bat_loop.cancel_run(self._store(), child_id))
+
+    async def why_not_reopen(self, child_id: str) -> str:
+        from captain_claw.flight_deck import bat_loop
+        return await bat_loop.why_not_reopen(self._store(), child_id)
+
+    async def reopen(self, child_id: str, token_cap: int) -> None:
+        """Its Bat run goes on where it stopped, with ``token_cap`` more tokens
+        than it has used."""
+        from captain_claw.flight_deck import bat_loop
+        store = self._store()
+        b = await store.get_run(child_id)
+        used = int((b or {}).get("cumulative_tokens") or 0)
+        try:
+            await bat_loop.reopen_run(store, child_id, token_cap=used + int(token_cap))
+        except ValueError as exc:
+            raise FirstMateError(str(exc)) from None
 
     async def progress(self, child_id: str, since: int = 0) -> dict[str, Any] | None:
         """The Bat run's steps, its events from ``since`` (the newest
@@ -312,6 +329,12 @@ async def progress(run: dict[str, Any], *, since: int = 0) -> dict[str, Any]:
         return out
     return {**out, **got, "available": True} if got else out
 
+
+# Bat's stop reasons, in words, for the ones a person can do something about.
+STOP_WORDS = {
+    "llm_token_cap_reached": "It used all the tokens one run may use (the factory's cap per run).",
+    "llm_usd_cap_reached": "It reached its spending cap for one run.",
+}
 
 RUNNERS: dict[str, Runner] = {"bat": BatRunner()}
 
@@ -389,6 +412,84 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
     run = store.mark_running(run["id"], child)
     if watch:
         _watch(run["id"])
+    return run
+
+
+# ── going on where a run stopped ───────────────────────────────────────
+
+# A carry-out never goes on (it could do what it already did, again); a check
+# is measured from its own start.
+CONTINUE_KINDS = ("run", "rehearsal")
+
+
+def _same_work(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """Two versions that ask for the same work: charter, runner, steps, grants
+    and done-checks. A new token cap alone keeps it the same."""
+    def work(v: dict[str, Any]) -> tuple:
+        return (v.get("charter"), v.get("runner"), json.dumps(v.get("runner_config") or {}, sort_keys=True),
+                json.dumps(v.get("grants") or {}, sort_keys=True),
+                json.dumps((v.get("checks") or {}).get("contract") or [], sort_keys=True))
+    return work(a) == work(b)
+
+
+async def why_not_continue(run: dict[str, Any]) -> str:
+    """Why a stopped run can't go on where it stopped, or "" when it can. Only
+    the factory's own runs and rehearsals, stopped by their cap or by the owner,
+    on a charter that still asks for the same work."""
+    store = fms.get_store()
+    if run["kind"] not in CONTINUE_KINDS:
+        return "only a factory's own run or rehearsal goes on; start a new one"
+    if run["status"] not in ("failed", "cancelled"):
+        return "only a run that stopped can go on"
+    if not run.get("child_id"):
+        return "it never started"
+    live = store.live(run["factory_id"])
+    old = store.version(run["factory_id"], run["version"])
+    if live is None or old is None or not _same_work(old, live):
+        return "its charter changed since it ran: start a new run"
+    runner = runner_for(run["runner"])
+    check = getattr(runner, "why_not_reopen", None)
+    if check is None:
+        return "its runner can't go on where it stopped"
+    try:
+        return await check(run["child_id"])
+    except FirstMateError as exc:
+        return str(exc)
+
+
+async def continue_run(run_id: str, owner_id: str) -> dict[str, Any]:
+    """A run its cap or its owner stopped goes on where it stopped: the steps it
+    finished stay finished, and it gets the factory's cap per run again (the
+    live version's, so raising the cap first gives it more). Refused, with why,
+    when it can't (:func:`why_not_continue`, and as for any run: the factory's
+    state, one run at a time, a free slot)."""
+    store = fms.get_store()
+    run = store.get_run(run_id)
+    if run is None or run["owner_id"] != fms.norm_user(owner_id):
+        raise FirstMateError("no such run")
+    why = await why_not_continue(run)
+    if why:
+        raise FirstMateError(why)
+    factory = store.get(run["factory_id"])
+    runner = runner_for(run["runner"])
+    if await runner.capacity(run["owner_id"]) <= 0:
+        raise FirstMateError("no free slot for another run right now: one is kept for your own runs. "
+                             "Try again when one of your runs finishes")
+    allowance = token_cap_for(store, factory, store.live(run["factory_id"]))
+    store.reopen_run(run_id, owner_id, dry_run=True)  # refused here, nothing has moved yet
+    try:
+        await runner.reopen(run["child_id"], allowance)
+    except FirstMateError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — it stays stopped
+        log.warning("first mate: run didn't go on", extra={"run": run_id}, exc_info=True)
+        raise FirstMateError(f"it couldn't go on: {exc}") from None
+    try:
+        run = store.reopen_run(run_id, owner_id)
+    except FirstMateError:
+        await runner.stop(run["child_id"])  # something changed in between: its runner stops again
+        raise
+    _watch(run_id)
     return run
 
 
