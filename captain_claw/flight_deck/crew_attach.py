@@ -80,13 +80,15 @@ def _new_slot(uid: str) -> tuple[str, Path]:
     return upload_id, folder
 
 
-def _kept(folder: Path, upload_id: str, name: str, size: int, kind: str) -> dict[str, Any]:
+def _kept(folder: Path, upload_id: str, name: str, size: int, kind: str, origin: str = "") -> dict[str, Any]:
     meta = {"id": upload_id, "name": name, "size": size, "type": kind}
+    if origin:  # where it came from, in words: "Files of Researcher", "Pasted"
+        meta["origin"] = origin[:120]
     (folder / _META).write_text(json.dumps(meta), encoding="utf-8")
     return meta
 
 
-def stage_copy(uid: str, source: Path, name: str = "") -> dict[str, Any]:
+def stage_copy(uid: str, source: Path, name: str = "", origin: str = "") -> dict[str, Any]:
     """A file already on this computer (one an agent of theirs made), kept like an upload.
     The caller has checked it's theirs to hand over."""
     name = clean_name(name or source.name)
@@ -101,10 +103,10 @@ def stage_copy(uid: str, source: Path, name: str = "") -> dict[str, Any]:
     except OSError:
         shutil.rmtree(folder, ignore_errors=True)
         raise HTTPException(404, f"{name} couldn't be read.") from None
-    return _kept(folder, upload_id, name, size, type_of(name))
+    return _kept(folder, upload_id, name, size, type_of(name), origin)
 
 
-def stage_text(uid: str, name: str, text: str, kind: str = "text/markdown") -> dict[str, Any]:
+def stage_text(uid: str, name: str, text: str, kind: str = "text/markdown", origin: str = "") -> dict[str, Any]:
     """Words made here (a conversation written out), kept like an upload."""
     name = clean_name(name)
     data = text.encode("utf-8")
@@ -112,7 +114,7 @@ def stage_text(uid: str, name: str, text: str, kind: str = "text/markdown") -> d
         raise HTTPException(413, f"{name} would be bigger than {MAX_FILE_BYTES // 1_000_000} MB. Choose fewer messages.")
     upload_id, folder = _new_slot(uid)
     (folder / name).write_bytes(data)
-    return _kept(folder, upload_id, name, len(data), kind)
+    return _kept(folder, upload_id, name, len(data), kind, origin)
 
 
 async def save_upload(uid: str, upload: Any) -> dict[str, Any]:
@@ -136,6 +138,11 @@ async def save_upload(uid: str, upload: Any) -> dict[str, Any]:
     said = (upload.content_type or "").split(";")[0].strip()
     kind = said if _MEDIA_TYPE.match(said) else mimetypes.guess_type(name)[0] or "application/octet-stream"
     return _kept(folder, upload_id, name, size, kind)
+
+
+def staged_file(uid: str, item: dict[str, Any]) -> Path:
+    """Where a staged upload's file is (``item`` from :func:`staged`)."""
+    return _uploads(uid) / str(item["id"]) / str(item["name"])
 
 
 def drop_upload(uid: str, upload_id: str) -> None:

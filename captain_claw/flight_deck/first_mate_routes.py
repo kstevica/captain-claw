@@ -45,8 +45,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from captain_claw.flight_deck import first_mate_data as fm_data
 from captain_claw.flight_deck import first_mate_runs as runs
 from captain_claw.flight_deck import first_mate_store as fms
 from captain_claw.flight_deck import first_mate_templates as templates
@@ -348,6 +350,7 @@ async def get_factory(factory_id: str, user: dict = Depends(allowed_user)):
             "runs": await _runs_shown(store, factory_id, 20),
             "check": store.active_check(factory_id),
             "run_cap": runs.run_cap(store, view, store.live(factory_id)),
+            "data": fm_data.items(factory_id),
             "events": store.events(factory_id, limit=50),
             "satisfaction": store.satisfaction(factory_id),
             "scorecard": first_mate_score.scorecard(store, view, fms._utcnow()),
@@ -387,9 +390,111 @@ async def patch_factory(factory_id: str, body: Any = Body(...), user: dict = Dep
 async def delete_factory(factory_id: str, user: dict = Depends(allowed_user)):
     _mine(factory_id, user)
     try:
-        return {"ok": fms.get_store().delete(factory_id, _uid(user))}
+        ok = fms.get_store().delete(factory_id, _uid(user))
     except FirstMateError as exc:
         raise _err(exc) from None
+    if ok:
+        fm_data.drop_all(factory_id)
+    return {"ok": ok}
+
+
+# ── extra data: the factory's, and one run's ───────────────────────────
+
+def _staged_ids(body: Any, allowed: tuple[str, ...] = ("ids",)) -> list[str]:
+    body = _object(body)
+    _only(body, allowed)
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not ids or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(400, "ids must be a list of staged upload ids")
+    return ids
+
+
+def _raw_uid(user: dict) -> str:
+    """Whose staged uploads: as /fd/context kept them."""
+    return str(user.get("id") or "")
+
+
+@router.get("/fd/first-mate/factories/{factory_id}/data")
+async def factory_data(factory_id: str, user: dict = Depends(allowed_user)):
+    """The extra data every run of the factory gets in its folder."""
+    _mine(factory_id, user)
+    return {"items": fm_data.items(factory_id), "limits": {"files": fm_data.MAX_FILES, "bytes": fm_data.MAX_BYTES}}
+
+
+@router.post("/fd/first-mate/factories/{factory_id}/data", status_code=201)
+async def add_factory_data(factory_id: str, body: Any = Body(default={}), user: dict = Depends(allowed_user)):
+    """Staged uploads (``/fd/context``) become the factory's: runs from now on get them."""
+    _mine(factory_id, user)
+    try:
+        added = fm_data.add(_raw_uid(user), factory_id, _staged_ids(body))
+    except FirstMateError as exc:
+        raise _err(exc) from None
+    fms.get_store().note_event(factory_id, "owner", "data_added", {"files": [a["name"] for a in added]})
+    return {"added": added, "items": fm_data.items(factory_id)}
+
+
+@router.get("/fd/first-mate/factories/{factory_id}/data/{item_id}/file")
+async def factory_data_file(factory_id: str, item_id: str, download: bool = False, user: dict = Depends(allowed_user)):
+    _mine(factory_id, user)
+    try:
+        path, meta = fm_data.file_of(factory_id, item_id)
+    except FirstMateError as exc:
+        raise _err(exc) from None
+    kind = str(meta.get("type") or "application/octet-stream")
+    # Shown in the page only as text, a picture or a PDF; anything else is a download.
+    inline = not download and (kind.startswith(("text/", "image/")) and kind != "image/svg+xml"
+                               or kind in ("application/pdf", "application/json"))
+    headers = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"}
+    return FileResponse(path, media_type=kind if inline else "application/octet-stream",
+                        filename=meta["name"], content_disposition_type="inline" if inline else "attachment",
+                        headers=headers)
+
+
+@router.delete("/fd/first-mate/factories/{factory_id}/data/{item_id}")
+async def drop_factory_data(factory_id: str, item_id: str, user: dict = Depends(allowed_user)):
+    _mine(factory_id, user)
+    try:
+        _, meta = fm_data.file_of(factory_id, item_id)
+        fm_data.drop(factory_id, item_id)
+    except FirstMateError as exc:
+        raise _err(exc) from None
+    fms.get_store().note_event(factory_id, "owner", "data_removed", {"file": meta["name"]})
+    return {"items": fm_data.items(factory_id)}
+
+
+def _own_run(run_id: str, user: dict) -> dict[str, Any]:
+    run = fms.get_store().get_run(run_id)
+    if run is None or run["owner_id"] != _uid(user):
+        raise HTTPException(404, "no such run")
+    return run
+
+
+@router.get("/fd/first-mate/runs/{run_id}/data")
+async def run_data(run_id: str, user: dict = Depends(allowed_user)):
+    """The extra data in one run's folder (``extra/``)."""
+    return fm_data.run_items(_own_run(run_id, user))
+
+
+@router.post("/fd/first-mate/runs/{run_id}/data", status_code=201)
+async def add_run_data(run_id: str, body: Any = Body(default={}), user: dict = Depends(allowed_user)):
+    """Staged uploads go into the run's folder; its next steps see them (a stopped
+    run's when it goes on)."""
+    run = _own_run(run_id, user)
+    try:
+        added = fm_data.add_to_run(_raw_uid(user), run, _staged_ids(body))
+    except FirstMateError as exc:
+        raise _err(exc) from None
+    return {"added": added, **fm_data.run_items(run)}
+
+
+@router.delete("/fd/first-mate/runs/{run_id}/data")
+async def drop_run_data(run_id: str, path: str, user: dict = Depends(allowed_user)):
+    run = _own_run(run_id, user)
+    try:
+        fm_data.drop_from_run(run, path)
+    except FirstMateError as exc:
+        raise _err(exc) from None
+    return fm_data.run_items(run)
 
 
 # ── versions ───────────────────────────────────────────────────────────
@@ -527,14 +632,20 @@ async def set_trust(factory_id: str, body: Any = Body(...), user: dict = Depends
 
 @router.post("/fd/first-mate/factories/{factory_id}/run")
 async def run_now(factory_id: str, body: Any = Body(default={}), user: dict = Depends(allowed_user)):
+    """``data``: staged uploads (``/fd/context``) for this run alone, beside the
+    factory's own extra data."""
     body = _object(body)
-    _only(body, ("note",))
+    _only(body, ("note", "data"))
     _mine(factory_id, user)
     note = body.get("note") or ""
     if not isinstance(note, str):
         raise HTTPException(400, "note must be text")
+    data = body.get("data") or []
+    if not isinstance(data, list) or not all(isinstance(i, str) for i in data):
+        raise HTTPException(400, "data must be a list of staged upload ids")
     try:
-        return await runs.start(factory_id, _uid(user), trigger="manual", note=note)
+        return await runs.start(factory_id, _uid(user), trigger="manual", note=note,
+                                data=data or None, uploader=_raw_uid(user))
     except FirstMateError as exc:
         raise _err(exc) from None
 

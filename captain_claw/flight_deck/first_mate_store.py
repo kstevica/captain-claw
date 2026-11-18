@@ -919,6 +919,13 @@ class FirstMateStore:
                             {k: v for k, v in updates.items() if k != "updated_at"})
             return self.view(factory_id)
 
+    def note_event(self, factory_id: str, actor: str, event: str, detail: dict[str, Any] | None = None) -> None:
+        """An event in the factory's history that changes nothing in the store (its
+        extra data is kept beside it, see ``first_mate_data``)."""
+        with self._tx() as conn:
+            self._get_factory(conn, factory_id)
+            self._event(conn, factory_id, actor, event, detail)
+
     def new_draft(self, factory_id: str, actor: str, *, note: str = "", **fields: Any) -> dict[str, Any]:
         """Open a new draft: the live version (or, before any approval, the
         latest one) with ``fields`` changed. One open draft at a time."""

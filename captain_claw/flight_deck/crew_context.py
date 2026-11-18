@@ -71,6 +71,10 @@ def _root_of(user: dict, slug: str) -> Path:
     return _workspace(slug).resolve()
 
 
+def _agent_name(user: dict, slug: str) -> str:
+    return next((a["name"] for a in own_agents(user) if a["id"] == slug), slug)
+
+
 def why_not(path: Path) -> str:
     """Why a file mustn't go to a worker, or "": the same rules as an agent's mail."""
     from captain_claw import mail_attachments as rules
@@ -132,9 +136,10 @@ def stage_files(user: dict, slug: str, paths: list[str]) -> list[dict[str, Any]]
             raise HTTPException(400, f"{path.name} can't be attached: {reason}.")
         sources.append(path)
     made: list[dict[str, Any]] = []
+    origin = f"Files of {_agent_name(user, slug)}"
     try:
         for path in sources:
-            made.append(crew_attach.stage_copy(str(user["id"]), path))
+            made.append(crew_attach.stage_copy(str(user["id"]), path, origin=origin))
     except BaseException:
         for meta in made:
             crew_attach.drop_upload(str(user["id"]), meta["id"])
@@ -308,4 +313,5 @@ async def stage_conversation(db, user: dict, lane: str, session: int, first: int
     if not rows:
         raise HTTPException(400, "There's nothing to send in those messages.")
     agent = str(chat.get("agent_name") or "") or _lane_parts(lane)[0]
-    return crew_attach.stage_text(uid, _file_name(agent, rows), write_out(agent, title, rows))
+    origin = f"Conversation with {agent}, {len(rows)} message{'' if len(rows) == 1 else 's'}"
+    return crew_attach.stage_text(uid, _file_name(agent, rows), write_out(agent, title, rows), origin=origin)
