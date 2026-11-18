@@ -119,11 +119,12 @@ export function RunFiles({ project, live }: { project: string; live: boolean }) 
   const canView = !!current && isViewable(asAgentFile(current.name))
   return (
     <div className="space-y-3">
+      <div className={current ? 'grid gap-3 @4xl:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)] @4xl:items-start' : ''}>
       {results.length === 0 ? <p className="px-1 text-xs text-zinc-500">No results in its folder yet.</p> : (
-        <ul className="max-h-72 space-y-0.5 overflow-y-auto pr-1">{results.map(row)}</ul>
+        <ul className="max-h-72 space-y-0.5 overflow-y-auto pr-1 @4xl:max-h-[28rem]">{results.map(row)}</ul>
       )}
       {current && (
-        <div className="rounded-xl border border-[var(--fd-line)] bg-[var(--fd-surface-raised)] p-3">
+        <div className="rounded-xl border border-[var(--fd-line)] bg-[var(--fd-surface-raised)] p-3 @4xl:sticky @4xl:top-0">
           <FilePreview key={`${current.path}:${current.mtime}`} group={getFileTypeGroup(asAgentFile(current.name))}
             extension={extOf(current.name)} size={current.size}
             url={vfsApi.viewUrl(ref, current.path, current.mtime)}
@@ -150,10 +151,11 @@ export function RunFiles({ project, live }: { project: string; live: boolean }) 
           </div>
         </div>
       )}
+      </div>
       {notes.length > 0 && (
         <div>
           <p className="mb-1 flex items-center gap-1.5 px-1 text-[11px] font-medium text-zinc-500"><NotebookPen className="h-3 w-3" />Its working notes</p>
-          <ul className="max-h-40 space-y-0.5 overflow-y-auto pr-1">{notes.map(row)}</ul>
+          <ul className="grid max-h-56 gap-0.5 overflow-y-auto pr-1 @4xl:grid-cols-2">{notes.map(row)}</ul>
         </div>
       )}
       <RunDatastorePanel project={project} live={live} variant="tab" hideWhenEmpty />

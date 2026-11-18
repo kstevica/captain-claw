@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Archive, ArchiveRestore, ChevronLeft, ChevronRight, Database, FlaskConical, Loader2, Maximize2, Minimize2, Play, ScrollText, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
+import { Archive, ArchiveRestore, ChevronLeft, ChevronRight, Database, FlaskConical, Gauge, History, Loader2, Mail, Maximize2, Minimize2, Play, ScrollText, ShieldCheck, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
 import {
   approve,
   approveRun,
@@ -39,12 +39,12 @@ import {
   type Trust,
   type Version,
 } from '../../services/firstMate'
-import { ErrorBox, Pill, errText, type PillTone } from './ui'
+import { ErrorBox, Pill, Section, errText, type PillTone } from './ui'
 import { Checks, pct, type CaseSeed } from './Checks'
 import { RunResult } from './RunResult'
 import { RunProgress } from './RunProgress'
 import { CapPicker } from './CapPicker'
-import { FactoryData, RunDataList } from './FactoryData'
+import { FactoryData } from './FactoryData'
 import { FactoryResults, TimingChips } from './FactoryResults'
 import { AddDataPanel } from '../context/AddData'
 import { CharterText, GoalChecklist, GoalList, SchedulePicker } from './CharterEditor'
@@ -230,7 +230,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
   const input = 'w-full rounded-xl border border-[var(--fd-line)] bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none'
 
   const headBtn = 'flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200'
-  const wrap = full ? 'mx-auto w-full max-w-4xl' : ''
+  const wrap = full ? 'w-full wide:px-8' : ''
   return createPortal(
     <div className={`fd-fade fixed inset-0 z-[60] flex justify-end bg-black/30 ${full ? '' : 'wide:p-3'}`} onClick={onClose}>
       <aside
@@ -318,9 +318,13 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                     <Pill tone="amber">{f.version ? 'Not live yet' : 'Waiting for your approval'}</Pill>
                   </header>
                   <div className="space-y-6 px-4 py-4">
-                    <CharterText value={form.charter} onChange={(charter) => setForm({ ...form, charter })} />
-                    <GoalList goals={form.goals} onChange={(goals) => setForm({ ...form, goals })} />
-                    <SchedulePicker value={form.schedule} onChange={(schedule) => setForm({ ...form, schedule })} />
+                    <div className="grid gap-6 @6xl:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)] @6xl:gap-8">
+                      <CharterText value={form.charter} onChange={(charter) => setForm({ ...form, charter })} />
+                      <div className="space-y-6">
+                        <GoalList goals={form.goals} onChange={(goals) => setForm({ ...form, goals })} />
+                        <SchedulePicker value={form.schedule} onChange={(schedule) => setForm({ ...form, schedule })} />
+                      </div>
+                    </div>
                   {gate && (
                     <div className="flex items-start gap-2 rounded-xl border border-violet-500/30 bg-violet-500/[0.06] px-3 py-2 text-xs text-zinc-300">
                       <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-violet-500" />
@@ -509,14 +513,18 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
           )}
 
           {f && tab === 'history' && (
-            <ol className="space-y-2">
-              {f.events.map((e) => (
-                <li key={e.id} className="flex gap-3 text-[13px]">
-                  <span className="w-28 shrink-0 text-xs text-zinc-500">{whenText(e.at)}</span>
-                  <span className="min-w-0 flex-1 text-zinc-300">{eventText(e)}</span>
-                </li>
-              ))}
-            </ol>
+            <Section icon={History} title="History" hint="What happened to this factory, newest first">
+              {f.events.length ? (
+                <ol className="fd-card divide-y divide-[var(--fd-line)] overflow-hidden p-0">
+                  {f.events.map((e) => (
+                    <li key={e.id} className="flex gap-4 px-4 py-2.5 text-[13px] transition-colors hover:bg-[var(--fd-hover)]">
+                      <span className="w-32 shrink-0 text-xs tabular-nums text-zinc-500">{whenText(e.at)}</span>
+                      <span className="min-w-0 flex-1 text-zinc-300">{eventText(e)}</span>
+                    </li>
+                  ))}
+                </ol>
+              ) : <p className="text-xs text-zinc-500">Nothing yet.</p>}
+            </Section>
           )}
           </div>
         </div>
@@ -545,15 +553,23 @@ function LiveVersion({ version: v, cap, trust, pinned, approvedAt, onChange, bus
   const row = 'flex gap-3 py-2'
   const key = 'w-28 shrink-0 text-xs text-zinc-500'
   return (
-    <section className="space-y-3">
-      <div className="flex items-center gap-2">
-        <h3 className="flex-1 text-sm font-semibold text-zinc-100">Live: version {v.version}</h3>
+    <section className="rounded-2xl border border-[var(--fd-line)] bg-[var(--fd-surface-raised)] shadow-sm">
+      <header className="flex items-center gap-3 rounded-t-2xl border-b border-[var(--fd-line)] bg-gradient-to-r from-emerald-500/[0.07] via-violet-500/[0.03] to-transparent px-4 py-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--fd-accent-soft)] text-[var(--fd-accent-text)]">
+          <ScrollText className="h-4 w-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h3 className="text-sm font-semibold text-zinc-100">Live charter · version {v.version}</h3>
+          <p className="text-[11px] text-zinc-500">{approvedAt ? `Approved ${whenText(approvedAt)}. ` : ''}What every run works to.</p>
+        </div>
+        <Pill tone="green">Live</Pill>
         {onChange && (
           <button onClick={onChange} disabled={busy} className="fd-btn-quiet h-8 px-3 text-xs">
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Change it
           </button>
         )}
-      </div>
+      </header>
+      <div className="grid gap-4 px-4 py-4 @6xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)] @6xl:items-start @6xl:gap-8">
       <blockquote className="whitespace-pre-wrap rounded-xl border-l-2 border-violet-500/50 bg-[var(--fd-hover)] px-3 py-2 leading-relaxed text-zinc-200">
         {v.charter}
       </blockquote>
@@ -604,7 +620,7 @@ function LiveVersion({ version: v, cap, trust, pinned, approvedAt, onChange, bus
             </label>
           </span>
         </div>
-        {approvedAt && <div className={row}><span className={key}>Approved</span><span className="text-zinc-300">{whenText(approvedAt)}</span></div>}
+      </div>
       </div>
     </section>
   )
@@ -618,16 +634,14 @@ function Record({ detail: d }: { detail: FactoryDetail }) {
   const s = d.scorecard
   const l = d.ladder
   const pct = (x: number | null) => (x == null ? '—' : `${Math.round(x * 100)}%`)
-  const cell = 'rounded-xl bg-[var(--fd-hover)] px-3 py-2.5'
-  const big = 'text-lg font-semibold text-zinc-100'
+  const cell = 'fd-card px-4 py-3.5'
+  const big = 'text-2xl font-semibold tracking-tight text-zinc-100'
   const small = 'text-[11px] text-zinc-500'
   return (
-    <div className="space-y-5">
-      <section className="flex items-start gap-3">
-        <Pill tone={HEALTH_TONE[s.health]}>{HEALTH_LABELS[s.health]}</Pill>
-        {s.health_why && <p className="text-[13px] text-zinc-400">{s.health_why}</p>}
-      </section>
-      <section className="grid grid-cols-2 gap-2 wide:grid-cols-4">
+    <div className="space-y-7">
+      <Section icon={Gauge} title="How it's doing" action={<Pill tone={HEALTH_TONE[s.health]}>{HEALTH_LABELS[s.health]}</Pill>}
+        hint={s.health_why || undefined}>
+      <div className="grid grid-cols-2 gap-2.5 @3xl:grid-cols-4">
         <div className={cell}><div className={big}>{pct(s.satisfaction)}</div>
           <div className={small}>Satisfaction · {s.signals} {s.signals === 1 ? 'signal' : 'signals'} · target {pct(s.target)}</div></div>
         <div className={cell}><div className={big}>{s.week.done}/{s.week.runs}</div><div className={small}>Runs done this week</div></div>
@@ -636,11 +650,11 @@ function Record({ detail: d }: { detail: FactoryDetail }) {
         <div className={cell}><div className={big}>{s.week.tokens_per_run ? tokensText(s.week.tokens_per_run).replace(' tokens', '') : '—'}</div>
           <div className={small}>Tokens per run{s.week.median_minutes == null ? ''
             : s.week.median_minutes < 1 ? ' · under a minute' : ` · ${Math.round(s.week.median_minutes)} min`}</div></div>
-      </section>
+      </div>
+      </Section>
       {l && (
-        <section>
-          <h3 className="mb-1.5 text-xs font-semibold text-zinc-400">Trust</h3>
-          <div className="rounded-xl bg-[var(--fd-hover)] px-3 py-2.5 text-[13px]">
+        <Section icon={ShieldCheck} title="Trust" hint="How much it may do without asking you">
+          <div className="fd-card px-4 py-3.5 text-[13px]">
             <div className="flex flex-wrap items-center gap-2">
               <Pill tone="violet">{TRUST_LABELS[l.level]}</Pill>
               {l.next && <span className="text-zinc-400">→ {TRUST_LABELS[l.next]} after {l.needed} settled results at {pct(l.bar)}</span>}
@@ -663,17 +677,14 @@ function Record({ detail: d }: { detail: FactoryDetail }) {
               </p>
             )}
           </div>
-        </section>
+        </Section>
       )}
       {d.drafts.length > 0 && (
-        <section>
-          <h3 className="mb-1.5 text-xs font-semibold text-zinc-400">Its drafts in your mailbox</h3>
-          <p className="mb-2 text-xs text-zinc-500">
-            {s.drafts.sent} sent as written · {s.drafts.edited} sent after edits · {s.drafts.deleted} deleted · {s.drafts.waiting} waiting
-          </p>
-          <ul className="space-y-1 text-[13px]">
+        <Section icon={Mail} title="Its drafts in your mailbox"
+          hint={`${s.drafts.sent} sent as written · ${s.drafts.edited} sent after edits · ${s.drafts.deleted} deleted · ${s.drafts.waiting} waiting`}>
+          <ul className="fd-card divide-y divide-[var(--fd-line)] overflow-hidden p-0 text-[13px]">
             {d.drafts.slice(0, 8).map((x) => (
-              <li key={x.id} className="flex gap-2">
+              <li key={x.id} className="flex gap-2 px-4 py-2.5">
                 <span className="min-w-0 flex-1 truncate text-zinc-300">{x.subject || '(no subject)'}</span>
                 <span className="shrink-0 text-xs text-zinc-500">
                   {{ waiting: 'Waiting', sent: 'Sent as written', edited: `Sent, ${pct(x.similarity)} kept`, deleted: 'Deleted', expired: 'Left alone' }[x.status] ?? x.status}
@@ -681,16 +692,15 @@ function Record({ detail: d }: { detail: FactoryDetail }) {
               </li>
             ))}
           </ul>
-        </section>
+        </Section>
       )}
-      <section>
-        <h3 className="mb-1.5 text-xs font-semibold text-zinc-400">What you did with its results</h3>
+      <Section icon={ThumbsUp} title="What you did with its results" hint="Your ratings, approvals and sent drafts: they set its score">
         {d.signals.length === 0 ? (
-          <p className="text-xs text-zinc-500">Nothing yet. Rate a run, approve or reject what it would do, or send its drafts.</p>
+          <p className="rounded-[var(--fd-radius-card)] border border-dashed border-zinc-800 px-4 py-4 text-sm text-zinc-500">Nothing yet. Rate a run, approve or reject what it would do, or send its drafts.</p>
         ) : (
-          <ol className="space-y-1">
+          <ol className="fd-card divide-y divide-[var(--fd-line)] overflow-hidden p-0">
             {d.signals.map((g) => (
-              <li key={g.id} className="flex gap-3 text-[13px]">
+              <li key={g.id} className="flex gap-3 px-4 py-2.5 text-[13px]">
                 <span className="w-28 shrink-0 text-xs text-zinc-500">{whenText(g.at)}</span>
                 <span className="min-w-0 flex-1 text-zinc-300">{SIGNAL_LABELS[g.kind] ?? g.kind}</span>
                 <span className={`shrink-0 text-xs ${g.value >= 0.7 ? 'text-emerald-600 dark:text-emerald-400' : g.value < 0.3 ? 'text-red-600 dark:text-red-300' : 'text-zinc-500'}`}>
@@ -700,7 +710,7 @@ function Record({ detail: d }: { detail: FactoryDetail }) {
             ))}
           </ol>
         )}
-      </section>
+      </Section>
     </div>
   )
 }
@@ -747,8 +757,8 @@ function RunItem({ run: r, busy, deciding, onStop, onContinue, continuing, onApp
     return n
   })
   return (
-    <li className="fd-card p-3">
-      <div className="flex items-center gap-2">
+    <li className="fd-card p-3 @2xl:p-4">
+      <div className="flex flex-wrap items-center gap-2">
         {traceable && (
           <button onClick={() => setOpen((o) => !o)} aria-expanded={open}
             title={open ? 'Hide its progress' : 'Show its steps, agents and activity'}
@@ -817,9 +827,8 @@ function RunItem({ run: r, busy, deciding, onStop, onContinue, continuing, onApp
         )}
       </div>
       {r.waiting && r.note && <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">{r.note}</p>}
-      {!going && <TimingChips timing={r.timing} className="mt-2" />}
-      {traceable && open && <RunDataList runId={r.id} going={going} stopped={!!onContinue} />}
-      {traceable && open && <RunProgress runId={r.id} going={going} />}
+      {!going && !(traceable && open) && <TimingChips timing={r.timing} className="mt-2" />}
+      {traceable && open && <RunProgress runId={r.id} going={going} stopped={!!onContinue} />}
       {r.kind === 'carry_out' && r.proof?.state && (r.proof.note || (r.proof.actions?.length ?? 0) > 0) && (
         <div className={`mt-2 rounded-xl px-3 py-2 text-xs ${r.proof.state === 'doubt' ? 'bg-red-500/[0.07] text-red-700 dark:text-red-300' : 'bg-[var(--fd-hover)] text-zinc-400'}`}>
           {r.proof.note && <p>{r.proof.note}</p>}

@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useState } from 'react'
 import {
   Bot, ClipboardPaste, Database, Download, Eye, Folder, Link2, Loader2, MessagesSquare, Plus, Trash2, UploadCloud,
   type LucideIcon,
 } from 'lucide-react'
 import {
-  addFactoryData, addRunData, dropFactoryData, dropRunData, factoryDataUrl, getRunData,
-  type FactoryDataItem, type RunData,
+  addFactoryData, addRunData, dropFactoryData, dropRunData, factoryDataUrl,
+  type FactoryDataItem,
 } from '../../services/firstMate'
 import { vfsApi } from '../../services/vfsApi'
 import { getFileTypeGroup, isViewable, type AgentFile } from '../../services/fileTransfer'
@@ -13,6 +13,7 @@ import { AddDataPanel, FileGlyph, type DataSource } from '../context/AddData'
 import { sizeText } from '../../utils/format'
 import { FileViewer } from '../agents/FileViewer'
 import { errText } from './ui'
+import type { RunDataState } from './useRunData'
 
 // Extra data: what a factory hands every run (kept with the factory), and what one run
 // was given (in its folder's extra/). Both come in through the shared Add data panel.
@@ -154,7 +155,7 @@ export function FactoryData({ factoryId, title, items, onChanged, onNotice }: {
       {items.length > 0 && (
         <>
           <p className="px-1 text-[11px] font-medium text-zinc-500">{items.length} file{items.length === 1 ? '' : 's'} · {sizeText(total)}</p>
-          <ul className="grid gap-2 @2xl:grid-cols-2">
+          <ul className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,22rem),1fr))] gap-2">
             {cards.map((c) => (
               <DataCard key={c.key} card={c} removing={removing === c.key}
                 onOpen={viewer.canOpen(c) ? () => viewer.open(c) : undefined} onRemove={() => void remove(c.key, c.name)} />
@@ -180,21 +181,19 @@ export function FactoryData({ factoryId, title, items, onChanged, onNotice }: {
 }
 
 /** One run's extra data: its folder's extra/ (what the factory gave every run, and what
- *  was given to this one), with more to add while it can still use it. */
-export function RunDataList({ runId, going, stopped }: { runId: string; going: boolean; stopped: boolean }) {
-  const [data, setData] = useState<RunData | null>(null)
+ *  was given to this one), with more to add while it can still use it. Shown on the
+ *  run's Extra data tab. */
+export function RunDataList({ runId, going, stopped, state }: { runId: string; going: boolean; stopped: boolean; state: RunDataState }) {
+  const { data, setData, error, setError } = state
   const [panel, setPanel] = useState(false)
   const [removing, setRemoving] = useState('')
-  const [error, setError] = useState('')
   const viewer = useViewer()
 
-  const load = useCallback(() => {
-    getRunData(runId).then(setData).catch((e) => setError(errText(e)))
-  }, [runId])
-  useEffect(() => { load() }, [load])
-
   const canAdd = going || stopped
-  if (!data) return error ? <p className="text-xs text-red-700 dark:text-red-300">{error}</p> : null
+  if (!data) {
+    return error ? <p className="text-xs text-red-700 dark:text-red-300">{error}</p>
+      : <p className="flex items-center gap-1.5 text-xs text-zinc-500"><Loader2 className="h-3 w-3 animate-spin" />Loading its data…</p>
+  }
   const ref = { project: data.project, owner: '' }
   const cards: Card[] = data.files.map((f) => {
     const path = `${data.folder}/${f.path}`
@@ -203,7 +202,7 @@ export function RunDataList({ runId, going, stopped }: { runId: string; going: b
       view: vfsApi.viewUrl(ref, path, f.mtime), download: vfsApi.downloadUrl(ref, path),
     }
   })
-  if (!cards.length && !canAdd) return null
+  const total = data.files.reduce((n, f) => n + f.size, 0)
 
   const remove = async (path: string) => {
     setRemoving(path); setError('')
@@ -217,22 +216,22 @@ export function RunDataList({ runId, going, stopped }: { runId: string; going: b
   }
 
   return (
-    <div className="mt-3 rounded-xl border border-[var(--fd-line)] p-3">
-      <div className="mb-2 flex items-center gap-2">
-        <Database className="h-3.5 w-3.5 text-violet-600 dark:text-violet-300" />
-        <span className="text-xs font-semibold text-zinc-300">Extra data</span>
-        <span className="text-[11px] text-zinc-500">
-          {cards.length ? `${cards.length} file${cards.length === 1 ? '' : 's'} in its extra/ folder` : 'None given'}
-        </span>
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <p className="min-w-0 flex-1 text-xs text-zinc-500">
+          {cards.length
+            ? <>{cards.length} file{cards.length === 1 ? '' : 's'} · {sizeText(total)} in its <span className="font-mono text-[11px]">extra/</span> folder: what the factory gives every run, and what was added to this one.</>
+            : canAdd ? 'Nothing given yet. What you add here, its next steps read.' : 'It was given no extra data.'}
+        </p>
         {canAdd && (
-          <button onClick={() => setPanel(true)} className="ml-auto inline-flex h-7 items-center gap-1 rounded-full border border-[var(--fd-line)] px-2.5 text-[11px] font-medium text-zinc-300 transition-colors hover:border-violet-500/40 hover:text-zinc-100">
-            <Plus className="h-3 w-3" />Add data
+          <button onClick={() => setPanel(true)} className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full bg-violet-600 px-3 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-violet-500">
+            <Plus className="h-3.5 w-3.5" />Add data
           </button>
         )}
       </div>
-      {error && <p role="alert" className="mb-2 text-xs text-red-700 dark:text-red-300">{error}</p>}
+      {error && <p role="alert" className="text-xs text-red-700 dark:text-red-300">{error}</p>}
       {cards.length > 0 && (
-        <ul className="grid gap-1.5 @2xl:grid-cols-2">
+        <ul className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,22rem),1fr))] gap-2">
           {cards.map((c) => (
             <DataCard key={c.key} card={c} removing={removing === c.key}
               onOpen={viewer.canOpen(c) ? () => viewer.open(c) : undefined} onRemove={() => void remove(c.key)} />
