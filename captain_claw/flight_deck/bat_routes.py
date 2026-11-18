@@ -390,7 +390,7 @@ def _parse_plan(content: str, task: str) -> list[dict]:
     return out[:12]
 
 
-def _parse_fix_plan(content: str) -> list[dict]:
+def _parse_fix_plan(content: str, limit: int = _MAX_FIX_STEPS) -> list[dict]:
     """A fix round's new steps: [{title, after}], ``after`` as 1-based places in the
     same list (bat_loop.fix_steps gives them their keys). Invalid → []."""
     c = (content or "").strip()
@@ -409,7 +409,7 @@ def _parse_fix_plan(content: str) -> list[dict]:
             after = it.get("after") if isinstance(it, dict) else None
             out.append({"title": title[:400],
                         "after": [a for a in after if isinstance(a, int)] if isinstance(after, list) else []})
-    return out[:_MAX_FIX_STEPS]
+    return out[:limit]
 
 
 # Tools a Bat worker never gets: the `bat` launcher (blocks Bat-in-Bat) and
@@ -527,6 +527,16 @@ _FACTORY_STEP_SYSTEM = _STEP_HEAD + (
 FACTORY_NO_ANSWER = ("Nobody answers questions during a First Mate factory run, and the run doesn't wait. "
                      "Carry on without it if you can; otherwise finish what you can and say exactly what was "
                      "missing in your result.")
+
+
+# How big a planned step may be: one worker's turn, so big repetitive work goes
+# by batch, not by phase.
+_STEP_SIZE = (
+    "Each step is one worker's turn, so keep each to a size one worker can finish. When the goal is many "
+    "items of the same kind (hundreds of leads, pages, records), split by batch, not by phase: each step does "
+    "the whole job for one batch of at most about 50 items (find them, check them, add them to one shared "
+    "file), and a last step merges, de-duplicates and checks the whole list."
+)
 
 
 _SAVE_AS_YOU_GO = (
@@ -1187,7 +1197,8 @@ async def _plan_steps(run: dict) -> list[dict]:
             resp = await prov.complete(messages=[
                 Message(role="system", content=(
                     "Break the user's goal into the smallest ordered list of concrete, independently "
-                    "checkable steps that together finish it. Return ONLY a JSON array (max 8) of objects "
+                    "checkable steps that together finish it. " + _STEP_SIZE + " Return ONLY a JSON array "
+                    "(max 12) of objects "
                     '{"step": "<short step>", "after": [<1-based numbers of the earlier steps it needs>]}. '
                     'A step that needs none gets "after": []. Steps that don\'t need each other run at the '
                     "same time, so say so wherever order doesn't matter, and keep such steps to separate "
@@ -1220,9 +1231,10 @@ async def _plan_with_archetypes(run: dict, db, creds: dict) -> list[dict]:
     resp = await prov.complete(messages=[
         Message(role="system", content=(
             "Break the user's goal into the smallest ordered list of concrete, independently checkable "
-            "steps. For EACH step pick the best-fit agent from the catalog by its exact id. Return ONLY "
+            "steps. " + _STEP_SIZE + " For EACH step pick the best-fit agent from the catalog by its exact id. "
+            "Return ONLY "
             "a JSON array of objects {\"step\": \"...\", \"archetype\": \"<id from the catalog>\", "
-            "\"after\": [<1-based numbers of the earlier steps it needs>]}, max 8, no prose. A step that "
+            "\"after\": [<1-based numbers of the earlier steps it needs>]}, max 12, no prose. A step that "
             "needs none gets \"after\": []; steps that don't need each other run at the same time, so keep "
             "those to separate files.\n\n## Agent catalog\n" + catalog)),
         Message(role="user", content=run.get("task", "")),
@@ -1508,14 +1520,36 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
     return {**verdict.to_dict(), "failing": failing}
 
 
-_REPLAN_SYSTEM = (
-    "A team's work on a goal was checked and it isn't done yet. Write the smallest set of NEW steps that "
-    "fix exactly what the check found. Don't repeat a step that already finished. If an approach failed, "
-    "the new step must take a different one. Each step goes to a fresh worker who can see the team's shared "
-    f"folder and earlier results. Return ONLY a JSON array, at most {_MAX_FIX_STEPS} items: "
-    '{"step": "<what to do>", "after": [<1-based numbers of the new steps it must wait for>]}. Steps that '
-    "don't wait for each other run at the same time, so keep those to separate files. No prose."
-)
+def _replan_system(limit: int) -> str:
+    return (
+        "A team's work on a goal was checked and it isn't done yet. Write the smallest set of NEW steps that "
+        "fix exactly what the check found. Don't repeat a step that already finished. If an approach failed, "
+        "the new step must take a different one. A step that ran out of room (time, context or steps) was "
+        "too big for one worker: split what is left of it into smaller steps, one batch each, each starting "
+        "where its progress note says it got to, and say in each step which part it does. Each step goes to "
+        "a fresh worker who can see the team's shared "
+        f"folder and earlier results. Return ONLY a JSON array, at most {limit} items: "
+        '{"step": "<what to do>", "after": [<1-based numbers of the new steps it must wait for>]}. Steps that '
+        "don't wait for each other run at the same time, so keep those to separate files. No prose."
+    )
+
+
+_REPLAN_SYSTEM = _replan_system(_MAX_FIX_STEPS)
+# A fix round that splits a step too big for one turn may write more steps.
+_MAX_SPLIT_STEPS = 8
+
+
+def _replan_line(run: dict, s: dict) -> str:
+    """A step as the fix round's planner sees it: its state, what it said, and an
+    unfinished step's progress note (where to split what's left from)."""
+    line = (f"- [{s.get('status')}] {s.get('title') or s.get('step_key')}"
+            + (f": {(s.get('error') or s.get('output') or '').strip()[:300]}"
+               if (s.get("error") or s.get("output")) else ""))
+    if s.get("status") not in ("done", "skipped"):
+        note = read_progress(run, s.get("step_key", ""), 600)
+        if note:
+            line += f"\n  its progress note ({progress_path(run, s.get('step_key', ''))}): " + " ".join(note.split())
+    return line
 
 
 async def _bat_replan(run: dict, steps: list[dict], verdict: dict, round_no: int) -> list[dict]:
@@ -1526,25 +1560,23 @@ async def _bat_replan(run: dict, steps: list[dict], verdict: dict, round_no: int
     from captain_claw.llm import Message
 
     findings = _findings(verdict)
+    split = any(s.get("status") == "failed" and bat_loop.size_failure(s.get("error")) for s in steps)
+    limit = _MAX_SPLIT_STEPS if split else _MAX_FIX_STEPS
     plan: list[dict] = []
     try:
         tiers, _ = await _load_owner_tiers(get_db(), run["owner_id"])
         creds = _creds_for(tiers)
         if creds:
-            so_far = "\n".join(
-                f"- [{s.get('status')}] {s.get('title') or s.get('step_key')}"
-                + (f": {(s.get('error') or s.get('output') or '').strip()[:300]}"
-                   if (s.get("error") or s.get("output")) else "")
-                for s in steps)
+            so_far = "\n".join(_replan_line(run, s) for s in steps)
             async with _metered(run["id"], f"replan-{round_no}"):
                 prov, mt = _provider_call(creds, temperature=0.2, default_max=4096, cap=16384)
                 resp = await prov.complete(messages=[
-                    Message(role="system", content=_REPLAN_SYSTEM),
+                    Message(role="system", content=_replan_system(limit)),
                     Message(role="user", content=(f"# Goal\n{str(run.get('task', ''))[:4000]}\n\n"
                                                   f"# The work so far\n{so_far[:8000]}\n\n"
                                                   f"# What the check found\n{findings}")),
                 ], temperature=0.2, max_tokens=mt)
-            plan = _parse_fix_plan(resp.content or "")
+            plan = _parse_fix_plan(resp.content or "", limit)
     except Exception as e:  # noqa: BLE001
         log.warning("bat replan fell back to one fix step", run_id=run.get("id"), error=str(e))
     if not plan:
