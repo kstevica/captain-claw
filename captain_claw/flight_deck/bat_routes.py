@@ -529,6 +529,17 @@ FACTORY_NO_ANSWER = ("Nobody answers questions during a First Mate factory run, 
                      "missing in your result.")
 
 
+_SAVE_AS_YOU_GO = (
+    "\n# Save as you go\n"
+    "Your turn can end before this step is finished (a cap, a timeout, a restart), and whoever picks it up next "
+    "has only what is in the run's folder. So:\n"
+    "- Write results to vfs:{project}/ as you go: after each batch (say every 10-25 items) or each finished part, "
+    "add it to your result file. Don't hold everything back for the end.\n"
+    "- Keep {note} current. Rewrite it after each batch, short: what is done (counts and file names), what is "
+    "left, and the criteria and decisions you are applying. It is a working note, not the result."
+)
+
+
 def _factory_run(run: dict) -> bool:
     """A First Mate factory's run: its owner approved the factory's charter, not
     each run, and nobody waits on it to answer. It never stops to ask. Its
@@ -551,6 +562,7 @@ def _build_step_prompt(run: dict, step: dict, prior: list[dict], human_input: st
     if run.get("id"):
         lines.append(f"\n# Where files go\nWrite every file to vfs:{_project_of(run)}/<name>. Your own folders, "
                      "saved/ included, are deleted when your step ends, and only this folder counts as delivered.")
+        lines.append(_SAVE_AS_YOU_GO.format(project=_project_of(run), note=progress_path(run, step.get("step_key", ""))))
     rules = (run.get("config") or {}).get("contract") or []
     if rules:
         lines.append(f"\n# How this run will be checked\nIt's done only when these hold. Captain checks them "
@@ -636,6 +648,31 @@ def _run_folder(run: dict) -> Path:
     return _user_root(run["owner_id"]) / _project_of(run)
 
 
+# The run folder's working notes, not its results: each step's progress note
+# (progress/<step>.md) and the context governor's notes (notes/). The reviewers'
+# evidence and a scan of the whole folder leave them out.
+WORK_DIRS = ("progress", "notes")
+PROGRESS_MAX = 4000
+
+
+def _step_file(step_key: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(step_key or "step")).strip("-.")[:60] or "step"
+
+
+def progress_path(run: dict, step_key: str) -> str:
+    """Where a step's worker keeps its progress note, as the worker writes it."""
+    return f"vfs:{_project_of(run)}/progress/{_step_file(step_key)}.md"
+
+
+def read_progress(run: dict, step_key: str, limit: int = PROGRESS_MAX) -> str:
+    """A step's progress note as its worker left it ("" when there's none)."""
+    try:
+        p = _run_folder(run) / "progress" / f"{_step_file(step_key)}.md"
+        return p.read_text(encoding="utf-8", errors="replace")[:limit].strip() if p.is_file() else ""
+    except (OSError, KeyError):
+        return ""
+
+
 def _owner_has_shell(user: dict | None) -> bool:
     """A contract command and a project's tests run on the deck itself, outside any
     worker's confinement. The same people who already have a shell here (Crew's
@@ -713,7 +750,7 @@ async def _contract_checks(run: dict, has_shell: bool) -> tuple[list[Check], lis
         command_blocked = (r.get("check") or {}).get("type") == "command" and not has_shell
         rules.append({**r, "check": {"type": "judge"}} if command_blocked else r)
     folder = _run_folder(run)
-    res = await code_contract.validate(folder, rules, runner=_floor_runner)
+    res = await code_contract.validate(folder, rules, runner=_floor_runner, skip=WORK_DIRS)
     checks = [Check(f"acceptance: {r['text']}", passed=True, critical=r["severity"] != "minor")
               for r in res["passed"]]
     checks += [Check(f"acceptance: {r['text']}", passed=False, critical=r["severity"] != "minor",
@@ -777,7 +814,9 @@ def _evidence_block(folder: Path, *, max_files: int = 40, excerpts: int = 3, exc
     head = "## VERIFIED — files in the run's shared folder"
     found: list[tuple[float, str, Path, int]] = []
     for root, dirs, names in os.walk(folder):
-        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        # Hidden folders, and the workers' own notes (WORK_DIRS): what was made, not how.
+        dirs[:] = [d for d in dirs if not d.startswith(".")
+                   and not (Path(root) == folder and d in WORK_DIRS)]
         for name in names:
             p = Path(root) / name
             if name.startswith(".") or p.is_symlink() or len(found) >= 5000:

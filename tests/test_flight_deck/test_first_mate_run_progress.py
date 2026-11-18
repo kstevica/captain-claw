@@ -121,3 +121,21 @@ async def test_only_its_owner_sees_it(store, bat, registry):
     with pytest.raises(HTTPException) as no:
         await routes.run_progress(run["id"], since=0, user={"id": CAROL, "role": "user"})
     assert no.value.status_code == 404
+
+
+async def test_an_unfinished_steps_progress_note_shows(store, bat, registry, tmp_path, monkeypatch):
+    from captain_claw.flight_deck import vfs_routes
+    monkeypatch.setattr(vfs_routes, "_user_root", lambda owner: tmp_path / "vfs" / owner)
+    f = _live(store)
+    run = await runs.start(f["id"], BOB, watch=False)
+    bid = run["child_id"]
+    await bat.upsert_step(bid, "step-1", title="Find sources", status="done", seq=0)
+    await bat.upsert_step(bid, "step-2", title="Collect the list", status="running", seq=1)
+    registry({}, set())
+    notes = tmp_path / "vfs" / BOB / f"bat-{bid[:8]}" / "progress"
+    notes.mkdir(parents=True)
+    (notes / "step-1.md").write_text("Done: all sources listed.")
+    (notes / "step-2.md").write_text("Done: 47 of 200 in leads.csv.\nNext: UK fintech.")
+    got = await runs.progress(store.get_run(run["id"]))
+    by_key = {s["key"]: s["note"] for s in got["steps"]}
+    assert by_key == {"step-1": "", "step-2": "Done: 47 of 200 in leads.csv.\nNext: UK fintech."}
