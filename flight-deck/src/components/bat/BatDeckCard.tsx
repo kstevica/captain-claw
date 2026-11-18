@@ -19,18 +19,23 @@ const FIELDS: { key: Field; title: string; hint: string; unit: string }[] = [
   { key: 'idle_minutes', title: 'Quiet minutes before a step stops',
     hint: 'A step has no time limit while its worker keeps working. This long without a sound from it (a hung model call) ends it.',
     unit: 'minutes' },
+  { key: 'call_minutes', title: 'Minutes one model call may take',
+    hint: "Bat's own calls: planning, its checks, the reviewers, First Mate's drafts. A thinking model on one machine can think for several minutes before it answers; cut off, it starts again from nothing.",
+    unit: 'minutes' },
 ]
+
+const draftOf = (s: BatSettings) => Object.fromEntries(FIELDS.map((f) => [f.key, String(s[f.key])])) as Record<Field, string>
 
 export function BatDeckCard() {
   const [s, setS] = useState<BatSettingsView | null>(null)
-  const [draft, setDraft] = useState<Record<Field, string>>({ max_parallel: '', step_ceiling: '', idle_minutes: '' })
+  const [draft, setDraft] = useState<Record<Field, string>>({ max_parallel: '', step_ceiling: '', idle_minutes: '', call_minutes: '' })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState(false)
 
   const take = (got: BatSettingsView) => {
     setS(got)
-    setDraft({ max_parallel: String(got.max_parallel), step_ceiling: String(got.step_ceiling), idle_minutes: String(got.idle_minutes) })
+    setDraft(draftOf(got))
   }
 
   useEffect(() => {

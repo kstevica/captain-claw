@@ -128,7 +128,9 @@ async def _ask_model(owner: str, system: str, user: str, max_tokens: int = DRAFT
     creds = _creds_for(tiers, prefer=("reason", "balanced", "fast"))
     if not creds:
         raise FirstMateError("no model to draft with: set up a tier set first")
-    prov, budget = _provider_call(creds, temperature=0.3, default_max=max_tokens, cap=max_tokens)
+    from captain_claw.flight_deck.bat_routes import call_timeout
+    prov, budget = _provider_call(creds, temperature=0.3, default_max=max_tokens, cap=max_tokens,
+                                  request_timeout=call_timeout())
     resp = await prov.complete(messages=[Message(role="system", content=system), Message(role="user", content=user)],
                                temperature=0.3, max_tokens=budget)
     return resp.content or ""
