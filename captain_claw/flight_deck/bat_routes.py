@@ -459,6 +459,20 @@ def _after_of(item: Any, i: int) -> list[str] | None:
     return out
 
 
+# "Find and record up to 25 firms": "up to" before an amount to collect reads as
+# leave to stop early, and workers took it. The amount is the step's target.
+_UP_TO = re.compile(
+    r"\b((?:find|collect|gather|add|record|vet|research|identify|source|list|append)\b[^.;:\n]{0,40}?)"
+    r"\bup to (\d{1,5})\b", re.IGNORECASE)
+
+
+def firm_amounts(title: str) -> str:
+    """A planned step's title with "up to N" before what it collects made a target:
+    "Find and record up to 25 firms" -> "Find and record 25 firms". A cap on anything
+    else ("up to 300 words") stays."""
+    return _UP_TO.sub(lambda m: f"{m.group(1)}{m.group(2)}", title or "")
+
+
 def _parse_plan(content: str, task: str) -> list[dict]:
     """Parse the planner LLM's JSON into ordered steps. Tolerates ``` fences.
     Each step: {step_key, title, seq, depends_on}. Empty/invalid → [] (caller falls back)."""
@@ -482,7 +496,7 @@ def _parse_plan(content: str, task: str) -> list[dict]:
             continue
         if title:
             how = str(it.get("how") or "").strip().lower() if isinstance(it, dict) else ""
-            out.append({"step_key": f"step-{i + 1}", "title": title[:400], "seq": i,
+            out.append({"step_key": f"step-{i + 1}", "title": firm_amounts(title)[:400], "seq": i,
                         "depends_on": _after_of(it, i), **({"how": how} if how in _HOWS and how != "agent" else {})})
     return out[:12]
 
@@ -515,7 +529,7 @@ def _parse_fix_plan(content: str, limit: int = _MAX_FIX_STEPS) -> list[dict]:
                  str(it.get("step") or it.get("title") or "") if isinstance(it, dict) else "").strip()
         if title:
             after = it.get("after") if isinstance(it, dict) else None
-            out.append({"title": title[:400],
+            out.append({"title": firm_amounts(title)[:400],
                         "after": [a for a in after if isinstance(a, int)] if isinstance(after, list) else []})
     return out[:limit]
 
@@ -555,7 +569,7 @@ def _parse_archetype_plan(content: str, valid_ids: set[str]) -> tuple[list[dict]
         if not title:
             continue
         key = f"step-{i + 1}"
-        steps.append({"step_key": key, "title": title[:400], "seq": i, "depends_on": _after_of(it, i)})
+        steps.append({"step_key": key, "title": firm_amounts(title)[:400], "seq": i, "depends_on": _after_of(it, i)})
         if arch and arch in valid_ids:
             arch_map[key] = arch
     return steps[:12], {k: v for k, v in arch_map.items() if k in {s["step_key"] for s in steps[:12]}}
@@ -624,7 +638,10 @@ _STEP_SYSTEM = _STEP_HEAD + _STEP_ASK + _STEP_TAIL
 # A First Mate factory's run: nobody is there to answer (see _factory_run).
 _FACTORY_STEP_SYSTEM = _STEP_HEAD + (
     "Never lower the bar to reach a number: an item that doesn't meet the charter doesn't count, and a "
-    "shortfall reported honestly is a better result than padding. "
+    "shortfall reported honestly is a better result than padding. But a shortfall is for when the sources "
+    "run out, not for when the step feels long: when your step names an amount, keep finding and checking "
+    "candidates (new searches, other directories and lists, the leads you noted for later) until you reach "
+    "it or have truly tried every source you can think of, and say how many you checked. "
 ) + (
     "This run belongs to a First Mate factory and runs on its own: nobody answers questions while it "
     "runs, so don't ask and don't wait. If you are blocked on something only the owner can provide (a "
@@ -652,7 +669,9 @@ _STEP_SIZE = (
     "and checks it before adding; for a document, its outline, style and which step writes which part; for "
     "code, its structure and interfaces. The last step only puts the parts together and checks the whole "
     "against the task: it does no new research and adds nothing that didn't come through a step, and when "
-    "there are fewer good items than asked it says how many and why instead of lowering the bar."
+    "there are fewer good items than asked it says how many and why instead of lowering the bar. A step "
+    "that collects an amount says how many it must add (\"add 25 boutique consultancies\"), never \"up to "
+    "25\": \"up to\" lets a worker stop at a handful."
 )
 # How a step can be done, beside one worker: a team or a coding run, started by
 # the step's worker under this run (bat_nested adopts it; its spend counts here).
@@ -1956,6 +1975,12 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
     if not finished and not failed:
         failing.append(det[0].name)
     out = {**verdict.to_dict(), "failing": failing}
+    if finished and not verdict.done:
+        # How far the amounts got (rows, words): the same rule failing again isn't a
+        # stall while these still grow.
+        from captain_claw.flight_deck import code_contract
+        out["measured"] = await asyncio.to_thread(
+            code_contract.measure, _run_folder(run), list(cfg.get("contract") or []), WORK_DIRS)
     if profile is not None:
         from captain_claw.flight_deck import deliverable_profile
         out["profile"] = deliverable_profile.summary(profile)
@@ -1968,7 +1993,8 @@ def _replan_system(limit: int) -> str:
         "fix exactly what the check found. Don't repeat a step that already finished. If an approach failed, "
         "the new step must take a different one. A step that ran out of room (time, context or steps) was "
         "too big for one worker: split what is left of it into smaller steps, one batch each, each starting "
-        "where its progress note says it got to, and say in each step which part it does. Each step goes to "
+        "where its progress note says it got to, and say in each step which part it does. A step that adds "
+        "items says how many it must add (\"add 20 boutique consultancies\"), never \"up to\". Each step goes to "
         "a fresh worker who can see the team's shared "
         f"folder and earlier results. Return ONLY a JSON array, at most {limit} items: "
         '{"step": "<what to do>", "after": [<1-based numbers of the new steps it must wait for>]}. Steps that '

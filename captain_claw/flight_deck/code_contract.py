@@ -392,6 +392,33 @@ def contract_directive(constraints: list[dict]) -> str:
 
 # ── deterministic validation ─────────────────────────────────────────
 
+def measure(repo: Path, constraints: list[dict], skip: tuple[str, ...] = ()) -> dict[str, int]:
+    """How far the work has got on the rules that ask for an amount: a table's rows
+    (``min_rows``), a document's words (``min_words``), by rule id. What tells a run
+    that is still growing from one that is stuck, when the same rule fails round after
+    round. Never raises; a rule it can't measure is left out."""
+    from captain_claw.flight_deck import deliverable_profile as dp
+    out: dict[str, int] = {}
+    for c in constraints or []:
+        check = c.get("check") or {}
+        try:
+            if check.get("type") == "table" and check.get("min_rows"):
+                path, _ = _target(repo, check, (".csv", ".tsv"), skip)
+                if path is not None:
+                    prof = dp.profile_table(path)
+                    if not prof.get("too_big"):
+                        out[str(c["id"])] = int(prof.get("rows", 0))
+            elif check.get("type") == "document" and check.get("min_words"):
+                path, _ = _target(repo, check, (".md", ".markdown", ".txt", ".html", ".htm", ".docx", ".rst"), skip)
+                if path is not None:
+                    prof = dp.profile_docx(path) if path.suffix.lower() == ".docx" else dp.profile_document(path)
+                    if not (prof.get("too_big") or prof.get("unread")):
+                        out[str(c["id"])] = int(prof.get("words", 0))
+        except Exception:  # noqa: BLE001 — a measure is a hint, never a failure
+            continue
+    return out
+
+
 async def validate(repo: Path, constraints: list[dict], *,
                    runner: CommandRunner | None = None, skip: tuple[str, ...] = ()) -> dict:
     """Deterministic pass over the repo. Returns
