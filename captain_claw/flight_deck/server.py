@@ -819,11 +819,47 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
         return False
 
 
+def _is_bat_worker(slug: str, entry: dict) -> bool:
+    """A Bat run's worker: made for one step's turn, and gone when the turn ends."""
+    return (str(entry.get("run") or "").startswith("bat:")
+            or (slug.startswith("bat-") and entry.get("description") == "Bat worker"))
+
+
+def _drop_stale_bat_workers(registry: dict[str, dict]) -> list[str]:
+    """Bat workers that aren't this deck's own, alive, mid-turn: their turn ended with
+    the deck that ran it (or with the agents a deck update stopped). Starting one
+    again brings back an idle agent nobody talks to (a cancelled run's worker sat in
+    the sidebar as "Working" after every restart); a run Bat picks up again gets a
+    new worker for the step it runs. Stops any still alive and drops them from
+    ``registry``. Returns their slugs."""
+    def ours_and_alive(slug: str) -> bool:
+        proc = _processes.get(slug)
+        return proc is not None and proc.poll() is None
+
+    gone = [slug for slug, entry in registry.items()
+            if isinstance(entry, dict) and _is_bat_worker(slug, entry) and not ours_and_alive(slug)]
+    for slug in gone:
+        pid = registry[slug].get("pid")
+        if pid and proc_compat.pid_alive(pid):
+            try:
+                _kill_pid(pid)
+            except Exception:  # noqa: BLE001 — it's dropped either way
+                pass
+        registry.pop(slug, None)
+        try:
+            shutil.rmtree(DATA_DIR / slug, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            pass
+    return gone
+
+
 def _reattach_processes():
-    """On startup, check registered processes and restart any that were running."""
+    """On startup, check registered processes and restart any that were running.
+    Bat workers aren't: see :func:`_drop_stale_bat_workers`."""
     import time as _time
 
     registry = _load_process_registry()
+    dropped = _drop_stale_bat_workers(registry)
     restarted = []
     skipped = []
     stagger_s = float(os.environ.get("FD_REATTACH_STAGGER_S", "0.3"))
@@ -863,6 +899,8 @@ def _reattach_processes():
     # independently. Re-read and carry the on-disk web_port/web_auth forward (the
     # announce handler is the authority for those) — only pid is ours to set.
     fresh = _load_process_registry()
+    for slug in dropped:
+        fresh.pop(slug, None)
     for slug, entry in registry.items():
         f = fresh.get(slug)
         if f is None:
@@ -873,6 +911,8 @@ def _reattach_processes():
                 f.pop("on_for_task", None)
                 f["stopped"] = True
     _save_process_registry(fresh)
+    if dropped:
+        print(f"Flight Deck: removed {len(dropped)} leftover Bat worker(s): {', '.join(dropped)}")
     if restarted:
         print(f"Flight Deck: restarted {len(restarted)} process agent(s): {', '.join(restarted)}")
     if skipped:
