@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronRight, FlaskConical, Loader2, Play, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, FlaskConical, Loader2, Maximize2, Minimize2, Play, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
 import {
   approve,
   approveRun,
@@ -48,6 +48,8 @@ import { CapPicker } from './CapPicker'
 // approval once the draft changed under it.
 
 type Tab = 'charter' | 'runs' | 'record' | 'checks' | 'history'
+
+const FULL_KEY = 'fd:fm-drawer-full'
 
 const RUN_TONE: Record<Run['status'], PillTone> = {
   queued: 'zinc', running: 'violet', done: 'green', failed: 'red', cancelled: 'zinc',
@@ -113,6 +115,12 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
 }) {
   const [data, setData] = useState<FactoryDetail | null>(null)
   const [tab, setTab] = useState<Tab>(initialTab)
+  // Full screen, remembered in this browser for the next factory opened.
+  const [full, setFull] = useState(() => { try { return localStorage.getItem(FULL_KEY) === '1' } catch { return false } })
+  const toggleFull = () => setFull((v) => {
+    try { localStorage.setItem(FULL_KEY, v ? '0' : '1') } catch { /* private window */ }
+    return !v
+  })
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [form, setForm] = useState<Form | null>(null)
@@ -200,35 +208,46 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
   const label = 'mb-1.5 block text-xs font-semibold text-zinc-400'
   const input = 'w-full rounded-xl border border-[var(--fd-line)] bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none'
 
+  const headBtn = 'flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200'
+  const wrap = full ? 'mx-auto w-full max-w-4xl' : ''
   return createPortal(
-    <div className="fd-fade fixed inset-0 z-[60] flex justify-end bg-black/30 wide:p-3" onClick={onClose}>
+    <div className={`fd-fade fixed inset-0 z-[60] flex justify-end bg-black/30 ${full ? '' : 'wide:p-3'}`} onClick={onClose}>
       <aside
         role="dialog"
         aria-label={f ? `Factory: ${f.title}` : 'Factory'}
-        className="fd-drawer fd-dialog flex h-full w-full max-w-xl flex-col overflow-hidden border-l border-[var(--fd-line)] bg-zinc-950 wide:rounded-[var(--fd-radius-panel)] wide:border"
+        className={`fd-drawer fd-dialog flex h-full w-full flex-col overflow-hidden bg-zinc-950 ${full ? ''
+          : 'max-w-xl border-l border-[var(--fd-line)] wide:rounded-[var(--fd-radius-panel)] wide:border'}`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start gap-3 px-5 pb-3 pt-5">
-          <div className="min-w-0 flex-1">
-            {f ? (
-              <>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <Pill tone={f.state === 'running' ? 'green' : f.state === 'paused_budget' ? 'amber' : 'zinc'}>{STATE_LABELS[f.state]}</Pill>
-                  {f.live && <Pill tone="violet">{RUNNER_LABELS[f.live.runner]}</Pill>}
-                  {f.live && <Pill tone="zinc">v{f.live.version}</Pill>}
-                </div>
-                <h2 className="mt-2 text-lg font-bold leading-snug tracking-tight text-zinc-100">{f.title}</h2>
-                {f.state_reason && <p className="mt-0.5 text-xs text-zinc-500">{f.state_reason}</p>}
-              </>
-            ) : <Loader2 className="mt-1 h-4 w-4 animate-spin text-zinc-500" />}
-          </div>
-          <button onClick={onClose} title="Close" aria-label="Close"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
+        <div className="flex items-center gap-1 px-3 pt-3">
+          <button onClick={onClose} title="Back to First Mate" aria-label="Back to First Mate"
+            className="inline-flex h-9 items-center gap-1 rounded-full pl-2 pr-3 text-[13px] font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100">
+            <ChevronLeft className="h-4 w-4" />First Mate
+          </button>
+          <span className="flex-1" />
+          <button onClick={toggleFull} className={`${headBtn} hidden wide:flex`} aria-pressed={full}
+            title={full ? 'Exit full screen' : 'Full screen'} aria-label={full ? 'Exit full screen' : 'Full screen'}>
+            {full ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+          </button>
+          <button onClick={onClose} title="Close" aria-label="Close" className={headBtn}>
             <X className="h-4 w-4" />
           </button>
         </div>
+        <div className={`px-5 pb-3 pt-1 ${wrap}`}>
+          {f ? (
+            <>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Pill tone={f.state === 'running' ? 'green' : f.state === 'paused_budget' ? 'amber' : 'zinc'}>{STATE_LABELS[f.state]}</Pill>
+                {f.live && <Pill tone="violet">{RUNNER_LABELS[f.live.runner]}</Pill>}
+                {f.live && <Pill tone="zinc">v{f.live.version}</Pill>}
+              </div>
+              <h2 className="mt-2 text-xl font-bold leading-snug tracking-tight text-zinc-100">{f.title}</h2>
+              {f.state_reason && <p className="mt-0.5 text-xs text-zinc-500">{f.state_reason}</p>}
+            </>
+          ) : <Loader2 className="mt-1 h-4 w-4 animate-spin text-zinc-500" />}
+        </div>
         {f && (
-          <div role="tablist" className="flex gap-1 px-5 pb-3">
+          <div role="tablist" className={`flex gap-1 overflow-x-auto px-5 pb-3 ${wrap}`}>
             <button role="tab" aria-selected={tab === 'charter'} className={tabCls('charter')} onClick={() => setTab('charter')}>Charter</button>
             <button role="tab" aria-selected={tab === 'runs'} className={tabCls('runs')} onClick={() => setTab('runs')}>
               Runs{f.runs.length ? ` · ${f.runs.length}` : ''}
@@ -241,7 +260,8 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
           </div>
         )}
 
-        <div className="min-h-0 flex-1 space-y-5 overflow-y-auto border-t border-[var(--fd-line)] px-5 pb-8 pt-4 text-sm">
+        <div className="min-h-0 flex-1 overflow-y-auto border-t border-[var(--fd-line)] text-sm">
+          <div className={`space-y-5 px-5 pb-8 pt-4 ${wrap}`}>
           {error && <ErrorBox text={error} onDismiss={() => setError(null)} />}
 
           {f && tab === 'charter' && (
@@ -389,6 +409,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
               ))}
             </ol>
           )}
+          </div>
         </div>
       </aside>
     </div>,
