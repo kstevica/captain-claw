@@ -9,6 +9,7 @@ import { RunDatastorePanel } from '../basna/RunArtifacts'
 import { getFileTypeGroup, isViewable, type AgentFile } from '../../services/fileTransfer'
 import { vfsApi, type FolderHit, type FolderRef } from '../../services/vfsApi'
 import { isUntrustedFile } from '../../utils/untrustedContent'
+import { LibraryPick } from '../library/LibraryPick'
 
 // A run's folder the way the Library shows files: the newest first, a preview of
 // the one picked, and the Library's viewer to open it (text files can be changed
@@ -17,6 +18,8 @@ import { isUntrustedFile } from '../../utils/untrustedContent'
 // the data tables the run made follow.
 
 const WORK_DIRS = ['progress/', 'notes/']
+// The extra data it was given is listed on its own (Extra data), not as its files.
+const GIVEN = 'extra/'
 const POLL_MS = 10_000
 
 function extOf(name: string): string {
@@ -82,7 +85,7 @@ export function RunFiles({ project, live }: { project: string; live: boolean }) 
     return () => clearInterval(t)
   }, [load, live])
 
-  const results = (files ?? []).filter((f) => !WORK_DIRS.some((d) => f.path.startsWith(d)))
+  const results = (files ?? []).filter((f) => !f.path.startsWith(GIVEN) && !WORK_DIRS.some((d) => f.path.startsWith(d)))
   const notes = (files ?? []).filter((f) => WORK_DIRS.some((d) => f.path.startsWith(d)))
   const current = (files ?? []).find((f) => f.path === picked) ?? null
 
@@ -143,6 +146,7 @@ export function RunFiles({ project, live }: { project: string; live: boolean }) 
             <a href={vfsApi.downloadUrl(ref, current.path)} className="fd-btn-quiet inline-flex h-8 items-center gap-1.5 px-3 text-xs">
               <Download className="h-3.5 w-3.5" />Download
             </a>
+            {!WORK_DIRS.some((d) => current.path.startsWith(d)) && <LibraryPick folder={project} path={current.path} onError={setError} />}
           </div>
         </div>
       )}

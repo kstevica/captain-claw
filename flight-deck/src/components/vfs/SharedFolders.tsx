@@ -64,6 +64,8 @@ import { AnonymizeHereDialog, type AnonTarget } from '../anonymize/AnonymizeHere
 import { anonymizable } from '../anonymize/anonFormat'
 import { FullscreenButton, Highlight, libraryIconBtn } from '../library/libraryParts'
 import { FilePreview } from '../library/FilePreview'
+import { LibraryPick } from '../library/LibraryPick'
+import { useLibraryPicks } from '../../stores/libraryPicksStore'
 import { isUntrustedFile } from '../../utils/untrustedContent'
 import { DriveConnect } from './DriveConnect'
 import { OneDriveConnect } from './OneDriveConnect'
@@ -278,6 +280,10 @@ export function SharedFolders({
 }) {
   const notify = useNotificationStore((s) => s.add)
   const [projects, setProjects] = useState<VFSProject[] | null>(null)
+  // What of the person's own folders is in the File library: only what they added.
+  const libraryPicks = useLibraryPicks((s) => s.picks)
+  useEffect(() => { void useLibraryPicks.getState().load().catch(() => {}) }, [])
+  const inLibrary = (folder: string) => [...libraryPicks].some((k) => k.startsWith(`${folder}\u0000`))
   const [projectsError, setProjectsError] = useState('')
   const [nav, setNav] = useState<Nav>('')
   const [query, setQuery] = useState('')
@@ -671,8 +677,8 @@ export function SharedFolders({
     const items: AgentMenuItem[] = []
     if (!inside) items.push({ icon: FolderOpen, label: 'Open', onSelect: () => openAt(refOf(p)) })
     // A Drive or OneDrive folder's files on disk are stand-ins until read: no .zip.
-    if (onOpenLibrary && inLibraries(p)) {
-      items.push({ icon: LibraryBig, label: 'Open in the File library', hint: 'Every file summarised, searchable by what is inside', onSelect: () => onOpenLibrary(p.name) })
+    if (onOpenLibrary && inLibraries(p) && inLibrary(p.name)) {
+      items.push({ icon: LibraryBig, label: 'Open in the File library', hint: 'What you added of it, summarised and searchable', onSelect: () => onOpenLibrary(p.name) })
     }
     if (p.files && !isMount(p)) {
       items.push({ icon: Download, label: 'Download as .zip', hint: `${p.files} file${p.files === 1 ? '' : 's'} · ${formatSize(p.bytes)}`, onSelect: () => download(vfsApi.zipUrl(refOf(p)), `${p.name}.zip`) })
@@ -1157,9 +1163,10 @@ export function SharedFolders({
                 <button onClick={newSubfolder} className={`${btn} py-1.5`}><FolderPlus className="h-4 w-4" />New folder</button>
               </>
             )}
-            {onOpenLibrary && inLibraries(p) && p && (
-              <button onClick={() => onOpenLibrary(p.name)} className={`${btn} py-1.5`} title="This folder's files in the File library — summarised, searchable by what is inside">
-                <LibraryBig className="h-4 w-4 text-violet-600 dark:text-violet-400" />In the library
+            {inLibraries(p) && p && <LibraryPick folder={p.name} className="h-auto py-1.5" />}
+            {onOpenLibrary && inLibraries(p) && p && inLibrary(p.name) && (
+              <button onClick={() => onOpenLibrary(p.name)} className={`${btn} py-1.5`} title="What you added of this folder, in the File library: summarised, searchable by what is inside">
+                <LibraryBig className="h-4 w-4 text-violet-600 dark:text-violet-400" />Open in the library
               </button>
             )}
             {hasTables && p && (
@@ -1268,7 +1275,9 @@ export function SharedFolders({
       onRename={() => renameItem(selected.ref, selected.path, selected.name, false)}
       onDelete={() => deleteItem(selected.ref, selected.path, selected.name, false)}
       onShowInFolder={() => openAt(selected.ref, parentOf(selected.path), selected)}
-      // The library leaves hidden files and folders out.
+      // The library leaves hidden files and folders out, and holds only what was added.
+      libraryPick={inLibraries(selFolder) && !selected.path.split('/').some((s) => s.startsWith('.'))
+        ? { folder: selected.ref.project, path: selected.path } : undefined}
       onOpenInLibrary={onOpenFileInLibrary && inLibraries(selFolder) && !selected.path.split('/').some((s) => s.startsWith('.'))
         ? () => onOpenFileInLibrary(selected.ref.project, selected.path, selected.name) : undefined}
     />
@@ -1405,6 +1414,7 @@ export function SharedFolders({
 function FileDetail({
   item, folder, phone, terms, writable: canWrite, viewerOpen, inFolder,
   onClose, onOpen, onEdit, onDownload, onShare, onCopyAddress, onSaveToDrive, onAnonymize, onRename, onDelete, onShowInFolder, onOpenInLibrary,
+  libraryPick,
 }: {
   item: FileItem
   folder: VFSProject | undefined
@@ -1420,8 +1430,11 @@ function FileDetail({
   onShowInFolder: () => void
   /** The file in the File library: its summary, tags, and the library's actions. */
   onOpenInLibrary?: () => void
+  /** One of the person's own folders: the file can be added to the File library. */
+  libraryPick?: { folder: string; path: string }
 }) {
   const file = toAgentFile(item, folder)
+  const inLibrary = useLibraryPicks((s) => !!libraryPick && s.has(libraryPick.folder, libraryPick.path))
   const group = getFileTypeGroup(file)
   const canView = isViewable(file)
   const canEdit = canWrite && !phone && isEditable(file)
@@ -1509,7 +1522,8 @@ function FileDetail({
         {canView && <button onClick={onOpen} className={primaryBtn}><Eye className="h-4 w-4" />Open</button>}
         <button onClick={onDownload} className={btn}><Download className="h-4 w-4" />Download</button>
         {canEdit && <button onClick={onEdit} className={btn}><Pencil className="h-4 w-4" />Edit</button>}
-        {onOpenInLibrary && (
+        {libraryPick && <LibraryPick folder={libraryPick.folder} path={libraryPick.path} className="col-span-2 h-9 justify-center" />}
+        {onOpenInLibrary && inLibrary && (
           <button onClick={onOpenInLibrary} className={btn} title="Its summary and tags in the File library">
             <LibraryBig className="h-4 w-4" />In library
           </button>

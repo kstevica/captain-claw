@@ -324,14 +324,21 @@ class BatRunner:
             if not await bat_routes.release_factory_ask(self._store(), b):
                 out.update(waiting=True, note="waiting on the Bat page")
         elif status == "done":
-            out.update(status="done", verdict="pass", result=b.get("truth") or "")
+            out.update(status="done", verdict="pass", result=final_first(await self._steps(child_id), b.get("truth") or ""))
         elif status == "error":
             reason = b.get("stopped_reason") or ""
-            out.update(status="failed", verdict="fail", result=b.get("truth") or "",
+            out.update(status="failed", verdict="fail", result=final_first(await self._steps(child_id), b.get("truth") or ""),
                        note=STOP_WORDS.get(reason, reason or "Bat stopped it"))
         elif status == "cancelled":
             out.update(status="cancelled", note=b.get("stopped_reason") or "stopped")
         return out
+
+    async def _steps(self, child_id: str) -> list[dict[str, Any]]:
+        """Its steps, for the result's order; none when they can't be read (Bat's text as it is)."""
+        try:
+            return await self._store().list_steps(child_id)
+        except Exception:  # noqa: BLE001
+            return []
 
     async def stop(self, child_id: str) -> bool:
         from captain_claw.flight_deck import bat_loop
@@ -415,7 +422,16 @@ async def progress(run: dict[str, Any], *, since: int = 0) -> dict[str, Any]:
         got = await reader(run["child_id"], max(0, since))
     except FirstMateError:
         return out
-    return {**out, **got, "available": True} if got else out
+    if not got:
+        return out
+    timing = run.get("timing") or None  # kept once it ended; worked out live while it goes
+    if not timing:
+        try:
+            from captain_claw.flight_deck import first_mate_results
+            timing = await first_mate_results.run_timing(run)
+        except Exception:  # noqa: BLE001 — the panel shows the rest without it
+            timing = None
+    return {**out, **got, "available": True, "timing": timing}
 
 
 # Bat's stop reasons, in words, for the ones a person can do something about.
@@ -618,9 +634,9 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
         return {**run, "waiting": bool(state.get("waiting")), "note": state.get("note", "")}
     _unwatch(run_id)  # a page read finished it: its watcher has nothing left to do
     if run["kind"] == "carry_out":
-        finished = store.finish_run(run_id, state["status"], verdict=state.get("verdict", ""),
-                                    result=state.get("result", ""), error=state.get("note", ""),
-                                    tokens=state["tokens"], usd=state["usd"])
+        finished = await _keep_timing(store, store.finish_run(
+            run_id, state["status"], verdict=state.get("verdict", ""), result=state.get("result", ""),
+            error=state.get("note", ""), tokens=state["tokens"], usd=state["usd"]))
         _settle_carry_out(store, finished)
         from captain_claw.flight_deck import first_mate_line, first_mate_proof
         await first_mate_proof.prove(store, finished)
@@ -630,16 +646,16 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
     if run["kind"] in ("rehearsal", "check"):
         leak = await _leak(run)
         if leak:
-            finished = store.finish_run(run_id, "failed", verdict="leak", result=state.get("result", ""),
-                                        error=f"its rehearsal reached outside: {leak}"[:300],
-                                        tokens=state["tokens"], usd=state["usd"])
+            finished = await _keep_timing(store, store.finish_run(
+                run_id, "failed", verdict="leak", result=state.get("result", ""),
+                error=f"its rehearsal reached outside: {leak}"[:300], tokens=state["tokens"], usd=state["usd"]))
             await _hold_after_leak(store, finished)
             from captain_claw.flight_deck import first_mate_line
             await first_mate_line.run_finished(finished)
             return finished
-    finished = store.finish_run(run_id, state["status"], verdict=state.get("verdict", ""),
-                                result=state.get("result", ""), error=state.get("note", ""),
-                                tokens=state["tokens"], usd=state["usd"])
+    finished = await _keep_timing(store, store.finish_run(
+        run_id, state["status"], verdict=state.get("verdict", ""), result=state.get("result", ""),
+        error=state.get("note", ""), tokens=state["tokens"], usd=state["usd"]))
     if finished["kind"] == "run" and finished["status"] == "done":
         from captain_claw.flight_deck import first_mate_drafts
         await first_mate_drafts.capture(store, finished)  # a direct run's drafts are watched too
@@ -655,6 +671,36 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
     from captain_claw.flight_deck import first_mate_line
     await first_mate_line.run_finished(finished)
     return finished
+
+
+async def _keep_timing(store: fms.FirstMateStore, run: dict[str, Any]) -> dict[str, Any]:
+    """A run that just ended keeps how long it took (in all, its agents' work,
+    waiting for its owner), for its page and its message."""
+    try:
+        from captain_claw.flight_deck import first_mate_results
+        timing = await first_mate_results.run_timing(run)
+        if timing:
+            return store.set_timing(run["id"], timing) or run
+    except Exception:  # noqa: BLE001 — the run is finished either way
+        log.warning("first mate: couldn't work out how long a run took", exc_info=True)
+    return run
+
+
+def final_first(steps: list[dict[str, Any]], truth: str) -> str:
+    """A Bat run's result as First Mate shows it: what its last step delivered
+    (the merge, the final list) first, the earlier steps after it. Bat's own
+    text has them in order, so its first step came first."""
+    done = sorted((s for s in steps if s.get("status") == "done" and (s.get("output") or "").strip()),
+                  key=lambda s: int(s.get("seq") or 0))
+    if len(done) < 2:
+        return truth
+    last, earlier = done[-1], done[:-1]
+    head = last.get("title") or last.get("step_key") or "Result"
+    parts = [f"## {head}\n\n{last['output'].strip()}", f"---\n\n**Earlier steps ({len(earlier)})**"]
+    for s in earlier:
+        parts.append(f"### {s.get('title') or s.get('step_key')}\n\n{s['output'].strip()}")
+    note = truth.split("\n\n", 1)[0] if truth.startswith("> Reviewers still objected") else ""
+    return "\n\n".join(([note] if note else []) + parts)
 
 
 # ── proposals and carry-outs (Phase 3) ─────────────────────────────────

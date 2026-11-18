@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, Anchor, BellDot, CalendarDays, Coins, Factory as FactoryIcon, Loader2, MoreHorizontal, PanelRightOpen, Pause,
-  Play, Plus, Power, RefreshCw, SlidersHorizontal, Square, Trash2, Archive, X, ShieldCheck, Ship,
+  Activity, Anchor, Archive, BellDot, CalendarDays, Coins, Factory as FactoryIcon, Loader2, MoreHorizontal, PanelRightOpen, Pause, Play, Plus, Power, RefreshCw, ShieldCheck, Ship, SlidersHorizontal, Square, Trash2, Trophy, X,
 } from 'lucide-react'
 import {
   createFactory,
@@ -35,7 +34,7 @@ import {
 import { getCourse } from '../services/course'
 import { useFirstMateStore } from '../stores/firstMateStore'
 import { QueueMenu, type MenuEntry } from '../components/agents/queue/QueueMenu'
-import { FactoryDrawer } from '../components/firstMate/FactoryDrawer'
+import { FactoryDrawer, type Tab as DrawerTab } from '../components/firstMate/FactoryDrawer'
 import { EmptyBand, ErrorBox, Pill, Section, Switch, Toast, errText, type PillTone } from '../components/firstMate/ui'
 import { FullscreenButton } from '../components/library/libraryParts'
 
@@ -68,8 +67,8 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [opened, setOpened] = useState<string | null>(null)
-  const [openedTab, setOpenedTab] = useState<'charter' | 'runs'>('charter')
-  const openAt = (id: string, tab: 'charter' | 'runs' = 'charter') => { setOpenedTab(tab); setOpened(id) }
+  const [openedTab, setOpenedTab] = useState<DrawerTab>('charter')
+  const openAt = (id: string, tab: DrawerTab = 'charter') => { setOpenedTab(tab); setOpened(id) }
   const [picking, setPicking] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [scrolled, setScrolled] = useState(false)
@@ -273,6 +272,7 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                       {factories.map((f) => (
                         <FactoryRow key={f.id} factory={f} busy={busy === f.id} autoOn={status.prefs.on}
                           onOpen={() => openAt(f.id)}
+                          onResults={() => openAt(f.id, 'results')}
                           onRun={() => void act(f.id, () => runNow(f.id), `${f.title}: run started`)}
                           onState={(s) => void act(f.id, () => setState(f.id, s), `${f.title}: ${STATE_LABELS[s].toLowerCase()}`)}
                           onDelete={() => {
@@ -607,12 +607,14 @@ function DeckSettings({ status, busy, onChange, className = '' }: {
   )
 }
 
-function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete }: {
+function FactoryRow({ factory: f, busy, autoOn, onOpen, onResults, onRun, onState, onDelete }: {
   factory: FactoryCard
   busy: boolean
   /** The owner's switch: off, nothing starts on its own, so no "next run". */
   autoOn: boolean
   onOpen: () => void
+  /** Its Results tab. */
+  onResults: () => void
   onRun: () => void
   onState: (s: OwnerState) => void
   onDelete: () => void
@@ -707,6 +709,20 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete
           )}
           {meta.length > 0 && <span className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-zinc-500">{meta}</span>}
         </button>
+        {f.latest_result && (
+          <button onClick={onResults} title="Its results: open the table, download it, add it to the Library"
+            className={`mt-2.5 inline-flex max-w-full items-center gap-2 rounded-xl border py-1.5 pl-2 pr-3 text-left text-xs transition-colors ${
+              f.latest_result.status === 'done' ? 'border-emerald-500/25 bg-emerald-500/[0.06] hover:border-emerald-500/50'
+                : 'border-[var(--fd-line)] bg-zinc-900/40 hover:border-violet-500/40'}`}>
+            <Trophy className={`h-3.5 w-3.5 shrink-0 ${f.latest_result.status === 'done' ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-500'}`} />
+            <span className="shrink-0 text-zinc-500">{f.latest_result.status === 'done' ? 'Result' : going ? 'So far' : 'Last result'}</span>
+            <span className="min-w-0 truncate font-medium text-zinc-200">{f.latest_result.name}</span>
+            <span className="shrink-0 text-zinc-500">
+              {[f.latest_result.rows !== null ? `${f.latest_result.rows.toLocaleString()} row${f.latest_result.rows === 1 ? '' : 's'}` : '',
+                f.latest_result.files > 1 ? `+${f.latest_result.files - 1} more` : ''].filter(Boolean).join(' · ')}
+            </span>
+          </button>
+        )}
       </div>
       <div className="flex shrink-0 items-start gap-1">
         {canRun && (

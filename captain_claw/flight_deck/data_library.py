@@ -596,7 +596,7 @@ async def run_scan(user: dict, job: ScanJob, retry_errors: bool = False) -> None
     uid = str(user.get("id") or "")
     store = get_store()
     try:
-        agents = await caller_sources(user)
+        agents = await caller_sources(user, all_folders=True)
         from captain_claw.flight_deck.server import _load_process_registry_strict
         try:
             store.drop_agents_except(set(_load_process_registry_strict().keys()))
@@ -742,7 +742,7 @@ _SORTS = {
 
 
 async def _status_payload(user: dict) -> dict:
-    agents = await caller_sources(user)
+    agents = await caller_sources(user, all_folders=True)
     return {"job": _job_for(str(user.get("id") or "")).view(),
             "counts": get_store().counts(list(agents)),
             "agents": sum(1 for k in agents if not folder_of(k)),
@@ -769,7 +769,7 @@ async def data_tables(
     """The caller's tables, searched (names, summaries, columns and the data
     itself) and filtered, with each filter's counts under the others.
     ``agent`` is an agent's slug or a shared folder (``vfs:<folder>``)."""
-    agents = await caller_sources(user)
+    agents = await caller_sources(user, all_folders=True)
     agent = source_key(agent, agents) if agent else ""
     terms = [t for t in q.casefold().split() if t][:8]
     rows = [t for t in get_store().all_for(list(agents))
@@ -810,7 +810,7 @@ async def _owned(table_id: str, user: dict) -> tuple[dict, dict[str, dict]]:
     """The caller's table (one of their agents' or their shared folders'),
     and their sources."""
     t = get_store().get(table_id)
-    agents = await caller_sources(user)
+    agents = await caller_sources(user, all_folders=True)
     if t is None or t["agent_slug"] not in agents:
         raise HTTPException(404, "table not found")
     return t, agents

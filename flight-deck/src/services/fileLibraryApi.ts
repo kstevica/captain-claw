@@ -156,4 +156,13 @@ export const fileLibraryApi = {
   downloadUrl: (id: string) => fileUrl(id, 'download'),
   /** A PDF's first page as a PNG (404 where the deck can't render PDFs). */
   thumbUrl: (id: string, version?: number) => fileUrl(id, 'thumb', version),
+  /** What of the shared folders is in the library: only what was added (`path` '' = the whole folder). */
+  picks: () => api<{ picks: LibraryPick[] }>('/fd/file-library/picks').then((r) => r.picks),
+  addPick: (folder: string, path = '') =>
+    api<{ added: boolean; picks: LibraryPick[] }>('/fd/file-library/picks', { method: 'POST', body: JSON.stringify({ folder, path }) }),
+  dropPick: (folder: string, path = '') =>
+    api<{ dropped: boolean; picks: LibraryPick[] }>(`/fd/file-library/picks?${new URLSearchParams({ folder, path })}`, { method: 'DELETE' }),
 }
+
+/** A shared folder added to the File library whole (`path` ''), or one file of it. */
+export interface LibraryPick { folder: string; path: string }

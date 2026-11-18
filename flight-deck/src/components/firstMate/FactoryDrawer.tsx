@@ -42,6 +42,7 @@ import { RunResult } from './RunResult'
 import { RunProgress } from './RunProgress'
 import { CapPicker } from './CapPicker'
 import { FactoryData, RunDataList } from './FactoryData'
+import { FactoryResults, TimingChips } from './FactoryResults'
 import { AddDataPanel } from '../context/AddData'
 
 // One factory, in a drawer over the page: its charter (the live version, and
@@ -49,7 +50,7 @@ import { AddDataPanel } from '../context/AddData'
 // the owner's own act, against the version they see: the server refuses an
 // approval once the draft changed under it.
 
-type Tab = 'charter' | 'data' | 'runs' | 'record' | 'checks' | 'history'
+export type Tab = 'charter' | 'results' | 'data' | 'runs' | 'record' | 'checks' | 'history'
 
 const FULL_KEY = 'fd:fm-drawer-full'
 
@@ -252,6 +253,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
         {f && (
           <div role="tablist" className={`flex gap-1 overflow-x-auto px-5 pb-3 ${wrap}`}>
             <button role="tab" aria-selected={tab === 'charter'} className={tabCls('charter')} onClick={() => setTab('charter')}>Charter</button>
+            <button role="tab" aria-selected={tab === 'results'} className={tabCls('results')} onClick={() => setTab('results')}>Results</button>
             <button role="tab" aria-selected={tab === 'data'} className={tabCls('data')} onClick={() => setTab('data')}>
               Data{f.data?.length ? ` · ${f.data.length}` : ''}
             </button>
@@ -424,6 +426,8 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
               )}
             </>
           )}
+
+          {f && tab === 'results' && <FactoryResults factoryId={factoryId} onNotice={onNotice} />}
 
           {f && tab === 'data' && (
             <FactoryData factoryId={factoryId} title={f.title} items={f.data ?? []} onNotice={onNotice}
@@ -735,6 +739,7 @@ function RunItem({ run: r, busy, deciding, onStop, onContinue, continuing, onApp
         )}
       </div>
       {r.waiting && r.note && <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">{r.note}</p>}
+      {!going && <TimingChips timing={r.timing} className="mt-2" />}
       {traceable && open && <RunDataList runId={r.id} going={going} stopped={!!onContinue} />}
       {traceable && open && <RunProgress runId={r.id} going={going} />}
       {r.kind === 'carry_out' && r.proof?.state && (r.proof.note || (r.proof.actions?.length ?? 0) > 0) && (

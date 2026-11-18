@@ -23,9 +23,11 @@ and kind. Tokens count toward the owner's daily allowance, and a scan stops
 when it is spent. Workers Flight Deck runs itself (a run's agents, a being's
 body) are not the user's library and are left out.
 
-The user's own shared folders (``vfs:<folder>/``) are sources too, beside
-the agents: their files are walked, summarised and searched the same way
-(see "Shared folders as sources" below).
+The user's own shared folders (``vfs:<folder>/``) can be sources too, beside
+the agents, but only what the person added: a whole folder, or single files
+(a run's folder holds batches, scripts and notes, and summarising all of it
+would bury what matters). Those are walked, summarised and searched the same
+way (see "Shared folders as sources" below).
 """
 
 from __future__ import annotations
@@ -227,6 +229,15 @@ class LibraryStore:
                     waiting_for   TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_library_agent ON library_files(agent_slug, status);
+                -- What of a person's shared folders is in the library: a whole
+                -- folder (path ''), or one file in it.
+                CREATE TABLE IF NOT EXISTS library_picks (
+                    owner     TEXT NOT NULL,
+                    folder    TEXT NOT NULL,
+                    path      TEXT NOT NULL DEFAULT '',
+                    added_at  REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (owner, folder, path)
+                );
                 """
             )
             cols = {r[1] for r in self._conn.execute("PRAGMA table_info(library_files)")}
@@ -297,6 +308,40 @@ class LibraryStore:
                 folder = folder_of(slug)
                 if folder and folder[0] == owner and slug not in keys:
                     self._conn.execute("DELETE FROM library_files WHERE agent_slug = ?", (slug,))
+            self._conn.commit()
+
+    # ── what of the shared folders is in ──
+
+    def picks(self, owner: str) -> dict[str, set[str]]:
+        """``{folder: {path, …}}`` of *owner*'s shared folders; ``''`` is the whole folder."""
+        out: dict[str, set[str]] = {}
+        with self._lock:
+            for folder, path in self._conn.execute(
+                    "SELECT folder, path FROM library_picks WHERE owner = ?", (owner,)):
+                out.setdefault(folder, set()).add(path)
+        return out
+
+    def add_pick(self, owner: str, folder: str, path: str = "") -> bool:
+        """True when it wasn't in already."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO library_picks (owner, folder, path, added_at) VALUES (?, ?, ?, ?)",
+                (owner, folder, path, time.time()))
+            self._conn.commit()
+            return bool(cur.rowcount)
+
+    def drop_pick(self, owner: str, folder: str, path: str = "") -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM library_picks WHERE owner = ? AND folder = ? AND path = ?", (owner, folder, path))
+            self._conn.commit()
+            return bool(cur.rowcount)
+
+    def drop_folder_picks(self, owner: str, folders: set[str]) -> None:
+        """Forget what was added from folders that are gone."""
+        with self._lock:
+            for folder in folders:
+                self._conn.execute("DELETE FROM library_picks WHERE owner = ? AND folder = ?", (owner, folder))
             self._conn.commit()
 
     def drop_agent(self, slug: str) -> None:
@@ -437,8 +482,9 @@ def caller_agents(user: dict) -> dict[str, dict]:
 #
 # The caller's own shared folders — vfs:<folder>/, the ones they or their
 # agents made, an agent run's folder too — sit in both libraries beside the
-# agents: a folder's files are walked and summarised like a workspace, its
-# datastore (vfs:<folder>/.datastore) is in the Data library. A folder's key
+# agents: in the File library only what the person added (a whole folder, or
+# single files; see ``library_picks``), walked and summarised like a
+# workspace; in the Data library every folder's datastore (vfs:<folder>/.datastore). A folder's key
 # carries its owner, since two people may each keep a "reports":
 # ``vfs:<owner>/<folder>``. The UI knows it as ``vfs:<folder>`` (what the
 # agents call it too); the key never leaves Flight Deck. Folders linked in
@@ -466,13 +512,32 @@ def _vfs_owner(uid: str) -> str:
     return safe_name(uid, fallback="local")
 
 
-def caller_folders(user: dict) -> dict[str, dict]:
+def own_folder(user: dict, folder: str) -> Path | None:
+    """One of the caller's own physical shared folders (not linked in, not a
+    mount, not Flight Deck's own), or None."""
+    from captain_claw.vfs import read_links_at
+    name = str(folder or "")
+    if not name or name.startswith(".") or "/" in name or "\\" in name or name in (".", ".."):
+        return None
+    root = _data_dir() / "vfs" / _vfs_owner(str(user.get("id") or ""))
+    try:
+        if name in set(read_links_at(root)):
+            return None
+        p = root / name
+        return p if p.is_dir() and not p.is_symlink() else None
+    except OSError:
+        return None
+
+
+def caller_folders(user: dict, *, picked_only: bool = True) -> dict[str, dict]:
     """The caller's own shared folders as library sources:
     ``{key: {id, name, running, source, folder}}`` (named by the folder; a
-    run's title comes with :func:`caller_sources`)."""
+    run's title comes with :func:`caller_sources`). The File library holds only
+    folders something was added from (``picked_only``); the Data library all."""
     from captain_claw.vfs import read_links_at
     owner = _vfs_owner(str(user.get("id") or ""))
     root = _data_dir() / "vfs" / owner
+    picked = get_store().picks(owner) if picked_only else None
     out: dict[str, dict] = {}
     try:
         entries = sorted(root.iterdir(), key=lambda p: p.name.lower()) if root.is_dir() else []
@@ -484,6 +549,8 @@ def caller_folders(user: dict) -> dict[str, dict]:
         # Dot folders are Flight Deck's own (.drive mount trees); a linked
         # folder's name points elsewhere.
         if name.startswith(".") or name in linked:
+            continue
+        if picked is not None and name not in picked:
             continue
         try:
             if p.is_symlink() or not p.is_dir():
@@ -497,14 +564,40 @@ def caller_folders(user: dict) -> dict[str, dict]:
     return out
 
 
-async def caller_sources(user: dict) -> dict[str, dict]:
+async def _bat_titles(user: dict) -> dict[str, str]:
+    """``{bat-<id8>: "<title> · <day>"}``: a Bat run's folder (a First Mate
+    factory's run, say) named by its run."""
+    try:
+        from datetime import datetime
+
+        from captain_claw.flight_deck import bat_loop
+        store = bat_loop.get_store()
+        if store is None:
+            return {}
+        out = {}
+        for r in await store.list_runs(str(user.get("id") or "") or "local", limit=500):
+            day = ""
+            try:
+                at = datetime.fromtimestamp(float(r.get("created_at") or 0))
+                day = f"{at.day} {at:%b}"
+            except (TypeError, ValueError, OSError):
+                pass
+            out[f"bat-{str(r['id'])[:8]}"] = f"{r.get('title') or 'Bat run'}" + (f" · {day}" if day else "")
+        return out
+    except Exception:  # noqa: BLE001 — names are a nicety
+        return {}
+
+
+async def caller_sources(user: dict, *, all_folders: bool = False) -> dict[str, dict]:
     """Everything the caller's libraries hold: their agents (keyed by slug)
-    and their shared folders (keyed ``vfs:<owner>/<folder>``). Each says the
-    id the UI knows it by, its name, whether it runs, and whether it is an
-    agent or a folder — a run's folder named by the run's title."""
+    and their shared folders (keyed ``vfs:<owner>/<folder>``): in the File
+    library the folders something was added from, in the Data library
+    (``all_folders``) every one. Each says the id the UI knows it by, its
+    name, whether it runs, and whether it is an agent or a folder — a run's
+    folder named by the run's title."""
     agents = caller_agents(user)
     out: dict[str, dict] = {slug: {**a, "id": slug, "source": "agent"} for slug, a in agents.items()}
-    folders = await asyncio.to_thread(caller_folders, user)
+    folders = await asyncio.to_thread(caller_folders, user, picked_only=not all_folders)
     from captain_claw.flight_deck.vfs_routes import _project_origin, _run_titles
     if any(_project_origin(f["folder"])[1] for f in folders.values()):
         titles = await _run_titles(str(user.get("id") or ""))
@@ -512,6 +605,11 @@ async def caller_sources(user: dict) -> dict[str, dict]:
             title = titles.get(_project_origin(f["folder"])[1], "")
             if title:
                 f["name"] = title
+    if any(f["folder"].startswith("bat-") for f in folders.values()):
+        bats = await _bat_titles(user)
+        for f in folders.values():
+            if f["folder"] in bats:
+                f["name"] = bats[f["folder"]]
     out.update(folders)
     return out
 
@@ -562,13 +660,50 @@ def _workspace(slug: str) -> Path:
     return _data_dir() / slug / "data" / "workspace"
 
 
-def walk_workspace(slug: str) -> list[dict]:
-    """The agent's files on disk, as the Files panel lists them."""
+def _file_entry(p: Path, root: Path) -> dict | None:
     from captain_claw.flight_deck.server import _WORKSPACE_ALLOWED_EXTS
+    ext = p.suffix.lower()
+    if p.name.startswith(".") or ext not in _WORKSPACE_ALLOWED_EXTS:
+        return None
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    return {"rel": p.relative_to(root).as_posix(), "filename": p.name, "extension": ext, "kind": kind_of(ext),
+            "size": int(st.st_size), "modified": float(st.st_mtime), "fingerprint": f"{st.st_size}:{int(st.st_mtime)}"}
+
+
+def can_hold(rel: str) -> str:
+    """Why a folder's file can't be in the library, or "" when it can."""
+    from captain_claw.flight_deck.server import _WORKSPACE_ALLOWED_EXTS
+    parts = [s for s in str(rel or "").split("/") if s]
+    if not parts or any(s.startswith(".") or s in _SKIP_DIRS for s in parts):
+        return "hidden files and Flight Deck's own folders stay out of the library"
+    ext = Path(parts[-1]).suffix.lower()
+    if ext not in _WORKSPACE_ALLOWED_EXTS:
+        return f"the library doesn't read {ext or 'files without a kind'}"
+    return ""
+
+
+def walk_workspace(slug: str) -> list[dict]:
+    """The agent's files on disk, as the Files panel lists them; for a shared
+    folder, what of it the person added (all of it, or those files)."""
+    from captain_claw.flight_deck.server import _WORKSPACE_ALLOWED_EXTS
+    from captain_claw.vfs import safe_join
     root = _workspace(slug)
     out: list[dict] = []
     if not root.is_dir():
         return out
+    folder = folder_of(slug)
+    if folder is not None:
+        picked = get_store().picks(folder[0]).get(folder[1], set())
+        if "" not in picked:
+            for rel in sorted(picked):
+                p = safe_join(root, rel)
+                entry = _file_entry(p, root) if p is not None and p.is_file() and not p.is_symlink() else None
+                if entry is not None and not can_hold(rel):
+                    out.append(entry)
+            return out
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
         for name in filenames:
@@ -1397,7 +1532,12 @@ async def run_scan(user: dict, job: ScanJob, retry_errors: bool = False) -> None
             store.drop_agents_except(set(_load_process_registry_strict().keys()))
         except (OSError, ValueError):
             pass
-        store.drop_folders_except(_vfs_owner(uid), {k for k in agents if folder_of(k)})
+        owner = _vfs_owner(uid)
+        gone = {f for f in store.picks(owner) if own_folder(user, f) is None}
+        if gone:  # a folder deleted since: what was added from it goes too
+            store.drop_folder_picks(owner, gone)
+            agents = {k: v for k, v in agents.items() if not (folder_of(k) and folder_of(k)[1] in gone)}
+        store.drop_folders_except(owner, {k for k in agents if folder_of(k)})
         for slug in agents:
             files = await asyncio.to_thread(walk_workspace, slug)
             store.sync_agent(slug, files)
@@ -1596,6 +1736,71 @@ async def _status_payload(user: dict) -> dict:
 async def library_status(user: dict = Depends(get_current_user)) -> dict:
     """Where the caller's library stands: file counts and the running scan."""
     return await _status_payload(user)
+
+
+# ── Adding a shared folder, or files of one ───────────────────────────
+
+def picks_view(user: dict) -> list[dict]:
+    """What the caller added: ``[{folder, path}]`` (``path`` '' = the whole folder)."""
+    picked = get_store().picks(_vfs_owner(str(user.get("id") or "")))
+    return [{"folder": f, "path": p} for f in sorted(picked) for p in sorted(picked[f])]
+
+
+def _refresh_folder(user: dict, folder: str) -> None:
+    """The folder's rows as its picks say now: what was taken out goes at once."""
+    slug = f"{FOLDER_PREFIX}{_vfs_owner(str(user.get('id') or ''))}/{folder}"
+    get_store().sync_agent(slug, walk_workspace(slug))
+
+
+def add_pick(user: dict, folder: str, path: str = "") -> bool:
+    """A whole folder of the caller's own (``path`` ''), or one file in it, into
+    the File library. Raises HTTPException when it can't be."""
+    from captain_claw.vfs import safe_join
+    root = own_folder(user, folder)
+    if root is None:
+        raise HTTPException(404, "Only your own folders go in the library: not linked, mounted or shared ones.")
+    path = str(path or "").strip().strip("/")
+    if path:
+        why = can_hold(path)
+        if why:
+            raise HTTPException(400, f"{Path(path).name} can't go in the library: {why}.")
+        target = safe_join(root, path)
+        if target is None or not target.is_file() or target.is_symlink():
+            raise HTTPException(404, f"{Path(path).name} isn't in that folder.")
+    added = get_store().add_pick(_vfs_owner(str(user.get("id") or "")), folder, path)
+    _refresh_folder(user, folder)
+    return added
+
+
+def drop_pick(user: dict, folder: str, path: str = "") -> bool:
+    path = str(path or "").strip().strip("/")
+    dropped = get_store().drop_pick(_vfs_owner(str(user.get("id") or "")), folder, path)
+    if dropped:
+        _refresh_folder(user, folder)
+    return dropped
+
+
+@router.get("/picks")
+async def library_picks(user: dict = Depends(get_current_user)) -> dict:
+    """The shared folders, and single files of them, the caller added."""
+    return {"picks": await asyncio.to_thread(picks_view, user)}
+
+
+@router.post("/picks")
+async def library_add_pick(body: dict, user: dict = Depends(get_current_user)) -> dict:
+    """``{folder, path}``: into the library (``path`` '' = the whole folder);
+    a scan summarises it."""
+    folder, path = str((body or {}).get("folder") or ""), str((body or {}).get("path") or "")
+    added = await asyncio.to_thread(add_pick, user, folder, path)
+    start_scan(user)
+    return {"added": added, "picks": await asyncio.to_thread(picks_view, user)}
+
+
+@router.delete("/picks")
+async def library_drop_pick(folder: str, path: str = "", user: dict = Depends(get_current_user)) -> dict:
+    """Out of the library (the file stays in its folder)."""
+    dropped = await asyncio.to_thread(drop_pick, user, folder, path)
+    return {"dropped": dropped, "picks": await asyncio.to_thread(picks_view, user)}
 
 
 @router.post("/scan")
