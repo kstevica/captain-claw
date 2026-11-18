@@ -300,7 +300,10 @@ class BatRunner:
         events = [bat_routes._ui_event(e) for e in await store.list_events(child_id, since=start,
                                                                            limit=PROGRESS_EVENTS)]
         steps = [{"key": s["step_key"], "title": s.get("title") or s["step_key"], "status": s.get("status") or "",
-                  "attempt": int(s.get("attempt") or 0), "error": str(s.get("error") or "")[:300]}
+                  "attempt": int(s.get("attempt") or 0), "error": str(s.get("error") or "")[:300],
+                  # where its worker got to, from its progress note (an unfinished step's)
+                  "note": "" if s.get("status") in ("done", "skipped")
+                  else bat_routes.read_progress(b, s["step_key"], PROGRESS_NOTE_MAX)}
                  for s in await store.list_steps(child_id)]
         return {"status": b["status"], "steps": steps, "events": events,
                 "next": (events[-1]["i"] + 1) if events else max(int(since), start),
@@ -308,6 +311,7 @@ class BatRunner:
 
 
 PROGRESS_EVENTS = 300
+PROGRESS_NOTE_MAX = 800
 
 
 def _workers(prefix: str) -> list[dict[str, Any]]:

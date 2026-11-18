@@ -187,6 +187,12 @@ export function RunProgress({ runId, going }: { runId: string; going: boolean })
                   {s.error && stateOf(s.status) === 'failed' && (
                     <span className="mt-0.5 block text-[11px] text-red-600 dark:text-red-300">{s.error}</span>
                   )}
+                  {s.note && (
+                    <span className="mt-1 block max-h-24 overflow-hidden whitespace-pre-wrap rounded-lg border-l-2 border-violet-500/40 pl-2 text-[11px] leading-relaxed text-zinc-400"
+                      title="Its progress note: where its worker got to">
+                      {s.note}
+                    </span>
+                  )}
                 </span>
               </li>
             ))}

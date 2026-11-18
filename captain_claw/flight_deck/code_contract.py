@@ -192,11 +192,12 @@ def contract_directive(constraints: list[dict]) -> str:
 # ── deterministic validation ─────────────────────────────────────────
 
 async def validate(repo: Path, constraints: list[dict], *,
-                   runner: CommandRunner | None = None) -> dict:
+                   runner: CommandRunner | None = None, skip: tuple[str, ...] = ()) -> dict:
     """Deterministic pass over the repo. Returns
     ``{passed, failed, unresolved}`` — ``unresolved`` holds ``judge``-type rules
     (and any that errored), which the caller may send to the LLM judge and fold
-    back with :func:`apply_judgement`. Never raises."""
+    back with :func:`apply_judgement`. ``skip``: top-level folders a scan of the
+    whole repo leaves out (a run's working notes). Never raises."""
     res: dict = {"passed": [], "failed": [], "unresolved": []}
     run = runner or shell_command_runner
     for c in constraints or []:
@@ -211,7 +212,7 @@ async def validate(repo: Path, constraints: list[dict], *,
             elif ctype == "file_contains":
                 ok, note = _check_file_contains(repo, check)
             elif ctype == "no_pattern":
-                ok, note = _check_no_pattern(repo, check)
+                ok, note = _check_no_pattern(repo, check, skip)
             else:  # judge (or unknown) → let the LLM decide
                 entry["how"] = "judge"
                 res["unresolved"].append(entry)
@@ -272,7 +273,7 @@ def _check_file_contains(repo: Path, check: dict) -> tuple[bool, str]:
     return (bool(rx.search(body)), f"`{rel}` does not match /{pat}/")
 
 
-def _check_no_pattern(repo: Path, check: dict) -> tuple[bool, str]:
+def _check_no_pattern(repo: Path, check: dict, skip: tuple[str, ...] = ()) -> tuple[bool, str]:
     pat = str(check.get("pattern") or "")
     glob = str(check.get("glob") or "**/*")
     if not pat:
@@ -284,7 +285,7 @@ def _check_no_pattern(repo: Path, check: dict) -> tuple[bool, str]:
     hits: list[str] = []
     scanned = 0
     for p in repo.glob(glob):
-        if not p.is_file() or _hidden(repo, p):
+        if not p.is_file() or _hidden(repo, p) or p.relative_to(repo).parts[0] in skip:
             continue
         scanned += 1
         if scanned > _SCAN_FILE_CAP:

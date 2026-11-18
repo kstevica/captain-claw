@@ -430,7 +430,8 @@ export interface RunProgress {
   /** False before it has a runner run, or when its runner can't say. */
   available: boolean
   status: string
-  steps: { key: string; title: string; status: string; attempt: number; error: string }[]
+  /** `note`: an unfinished step's progress note, as its worker last left it. */
+  steps: { key: string; title: string; status: string; attempt: number; error: string; note?: string }[]
   /** Events from the asked index; `next` is where the following read starts. */
   events: ProgressEvent[]
   next: number
