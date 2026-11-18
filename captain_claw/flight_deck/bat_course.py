@@ -282,6 +282,26 @@ async def review(run: dict, what: str, verified: str, signals: list[str]) -> dic
             "correction": str(got.get("correction") or "").strip()[:400] if state != "on_course" else ""}
 
 
+async def _shape_again(run: dict) -> dict:
+    """A factory's done-checks that couldn't be turned into Captain's own checks at
+    the start get another try before a step is checked against them."""
+    from captain_claw.flight_deck import bat_routes
+    cfg = run.get("config") or {}
+    if (cfg.get("contract_shaped") or not bat_routes._factory_run(run)
+            or int(cfg.get("contract_shape_tries") or 0) >= bat_routes.SHAPE_TRIES):
+        return run
+    try:
+        from captain_claw.flight_deck.auth import get_db
+        from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+        tiers, _ = await _load_owner_tiers(get_db(), run["owner_id"])
+        await bat_routes._shape_contract(run, bat_routes._creds_for(tiers), False)
+        store = bat_loop.get_store()
+        return (await store.get_run(run["id"]) if store is not None else None) or run
+    except Exception as e:  # noqa: BLE001 — the step is checked with what there is
+        log.warning("bat course: shaping the checks again failed", run_id=run.get("id"), error=str(e))
+        return run
+
+
 # ── the check ──────────────────────────────────────────────────────────
 
 async def check_step(run: dict, step: dict, started_at: float, last_try: bool) -> dict[str, Any] | None:
@@ -298,6 +318,8 @@ async def check_step(run: dict, step: dict, started_at: float, last_try: bool) -
     steps = await store.list_steps(run["id"])
     if len(steps) < MIN_STEPS:
         return None
+    run = await _shape_again(run)
+    cfg = run.get("config") or {}
     folder = _run_folder(run)
     others = [s for s in steps if s["step_key"] != key]
     last_seq = max(int(s.get("seq") or 0) for s in steps)
