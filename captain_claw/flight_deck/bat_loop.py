@@ -56,11 +56,26 @@ _WATCH_INTERVAL_S = 10.0
 _STALL_FIX_ROUNDS = 2
 
 
-def _max_parallel() -> int:
+# The deck's own setting (Console → Settings → Bat), when an admin chose one.
+_PARALLEL: int | None = None
+
+
+def set_max_parallel(n: int | None) -> None:
+    """How many steps of a run work at the same time on this deck (None: the
+    FD_BAT_MAX_PARALLEL default)."""
+    global _PARALLEL
+    _PARALLEL = max(1, int(n)) if n else None
+
+
+def env_max_parallel() -> int:
     try:
         return max(1, int(os.environ.get("FD_BAT_MAX_PARALLEL", _DEFAULT_MAX_PARALLEL)))
     except ValueError:
         return _DEFAULT_MAX_PARALLEL
+
+
+def _max_parallel() -> int:
+    return _PARALLEL or env_max_parallel()
 
 
 # ── the plan's shape (pure) ───────────────────────────────────────────
@@ -184,6 +199,14 @@ _REPLANNER: Replanner | None = None
 # in the run yet (a worker mid-turn). Stop ends the open ones. None = no children.
 _POLL_SPEND: Callable[[BatStore, dict], Awaitable[float]] | None = None
 _STOP_CHILDREN: Callable[[BatStore, dict], Awaitable[None]] | None = None
+# Before a run stops on its token cap: has its owner changed the cap meanwhile?
+# (First Mate's factories follow theirs.) True when the run's cap moved.
+_CAP_REFRESH: Callable[[dict], Awaitable[bool]] | None = None
+
+
+def set_cap_refresh(fn: "Callable[[dict], Awaitable[bool]] | None") -> None:
+    global _CAP_REFRESH
+    _CAP_REFRESH = fn
 _STORE: BatStore | None = None
 # Human-in-the-loop gate (Phase 4). Called once per drive, after planning:
 #   (store, run) -> 'proceed' | 'wait' | 'cancelled' | 'error'
@@ -434,7 +457,12 @@ class BatDriver:
         from captain_claw.flight_deck import bat_nested
         tokens = bat_nested.token_cap(run)
         if tokens and int(run.get("cumulative_tokens") or 0) + bat_nested.live_tokens(run_id) >= tokens:
-            return True, "llm_token_cap_reached"
+            # Read the cap once more before stopping: the owner may have raised it.
+            if _CAP_REFRESH is not None and await _CAP_REFRESH(run):
+                run = await self.store.get_run(run_id) or run
+                tokens = bat_nested.token_cap(run)
+            if tokens and int(run.get("cumulative_tokens") or 0) + bat_nested.live_tokens(run_id) >= tokens:
+                return True, "llm_token_cap_reached"
         return False, ""
 
     async def watch_parked(self, run: dict) -> None:
@@ -622,7 +650,7 @@ class BatDriver:
         ("idle", ""), ("parked", "") when a step needs a human, or ("stop", reason)."""
         running: dict[asyncio.Task, str] = {}
         parked = False
-        limit = _max_parallel()
+        held: int | None = None  # what this deck had room for when a worker couldn't start
         try:
             while True:
                 stop, reason = await self._should_stop(run_id)
@@ -633,6 +661,8 @@ class BatDriver:
                 parked = parked or bool(cur and cur["status"] in ("awaiting_human", "awaiting_plan"))
                 if not parked:
                     busy = set(running.values())
+                    # Read each time round: an admin's change applies to a run going now.
+                    limit = _max_parallel() if held is None else min(held, _max_parallel())
                     room = limit - len(running)
                     holding = ({c["step_key"] for c in await self.store.list_children(run_id, open_only=True)}
                                if _POLL_SPEND is not None else set())
@@ -658,7 +688,7 @@ class BatDriver:
                     outcome = t.result()
                     parked = parked or outcome == "parked"
                     if outcome == "held":
-                        limit = max(1, limit - 1)  # this deck has no room for that many
+                        held = max(1, len(running))  # this deck has no room for that many
         except BaseException:
             # Going down (a restart, or a bug): no worker runs on with nobody watching.
             await self._cancel_running(run_id, running, demote=False)

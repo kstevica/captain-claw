@@ -1274,6 +1274,8 @@ async def lifespan(app: FastAPI):
         await _bat_store.init()
         app.state.bat_store = _bat_store
         _bat_loop_mod.set_store(_bat_store)
+        from captain_claw.flight_deck import bat_routes as _bat_routes_mod
+        await _bat_routes_mod.load_settings()  # the admin's Bat settings (Console → Settings)
         _bat_stop = asyncio.Event()
         app.state.bat_stop = _bat_stop
         app.state.bat_task = asyncio.create_task(_bat_loop_mod.bat_loop(_bat_store, _bat_stop))
@@ -1853,6 +1855,7 @@ from captain_claw.flight_deck.council_routes import router as council_router
 from captain_claw.flight_deck.basna_routes import router as basna_router
 from captain_claw.flight_deck.vatra_routes import router as vatra_router
 from captain_claw.flight_deck.bat_routes import router as bat_router
+from captain_claw.flight_deck.bat_routes import admin_router as bat_admin_router
 from captain_claw.flight_deck.dubina_routes import router as dubina_router
 from captain_claw.flight_deck.vfs_routes import router as vfs_router
 from captain_claw.flight_deck.deep_memory_routes import router as deep_memory_router
@@ -1988,6 +1991,7 @@ app.include_router(council_router)
 app.include_router(basna_router)
 app.include_router(vatra_router)
 app.include_router(bat_router)
+app.include_router(bat_admin_router)
 app.include_router(dubina_router)
 app.include_router(vfs_router)
 app.include_router(deep_memory_router)
