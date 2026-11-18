@@ -930,10 +930,19 @@ def shared_section(run: dict, step: dict) -> str:
         seen = folder is not None and (folder / "seen.csv").is_file()
     except OSError:
         conv, seen = "", False
-    if not conv and not seen:
+    from captain_claw.flight_deck import bat_course
+    fixes = bat_course.read_corrections(folder.parent) if folder is not None else []
+    if not conv and not seen and not fixes:
         return ""
     where = f"vfs:{_project_of(run)}/{SHARED_DIR}/"
-    lines = [f"\n# The run's shared conventions ({where}conventions.md)"]
+    lines = []
+    if fixes:  # Captain's checks of earlier steps: above the conventions, and they win
+        shown = "\n".join(f"- {c}" for c in fixes)[:bat_course.CORRECTIONS_SHOWN]
+        lines += ["\n# Corrections from Captain's checks of earlier steps (follow these; they override the rest)",
+                  shown]
+    if not conv and not seen:
+        return "\n".join(lines)
+    lines.append(f"\n# The run's shared conventions ({where}conventions.md)")
     if conv:
         lines += ["Every step follows these exactly: the same columns, outline or interfaces, so the parts fit "
                   "together without repair.", "----- conventions -----", conv, "----- end -----"]
@@ -1732,6 +1741,11 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
             block = deliverable_profile.render(profile)
             if block:
                 evidence = f"{block}\n\n{evidence}"
+            from captain_claw.flight_deck import bat_course
+            fixes = bat_course.read_corrections(_run_folder(run))
+            if fixes:
+                evidence += ("\n\n## Course corrections Captain gave during the run (check they were followed)\n"
+                             + "\n".join(f"- {c}" for c in fixes))
         except Exception as e:  # noqa: BLE001 — the reviewers still see the files
             log.warning("bat deliverable profile failed", run_id=sid, error=str(e))
         try:
@@ -2215,6 +2229,14 @@ async def _cap_refresh(run: dict) -> bool:
 
 
 bat_loop.set_cap_refresh(_cap_refresh)
+
+
+async def _course_check(run: dict, step: dict, started_at: float, last_try: bool) -> dict | None:
+    from captain_claw.flight_deck import bat_course
+    return await bat_course.check_step(run, step, started_at, last_try)
+
+
+bat_loop.set_step_check(_course_check)
 
 
 # ── routes ─────────────────────────────────────────────────────────────

@@ -102,8 +102,12 @@ async def run_results(run: dict[str, Any], *, profile_now: bool = False) -> dict
     if profile_now and found:  # what the files hold now (a going run's too)
         from captain_claw.flight_deck import deliverable_profile as dp
         checked = dp.summary(await asyncio.to_thread(dp.profile, found, named))
+    from captain_claw.flight_deck import bat_course
     from captain_claw.flight_deck.bat_loop import dissent
+    corrections = await asyncio.to_thread(bat_course.read_corrections,
+                                          _run_folder({"id": child, "owner_id": run["owner_id"]}))
     return {"run_id": run["id"], "status": run["status"], "kind": run["kind"], "created_at": run["created_at"],
+            "corrections": corrections,
             "ended_at": run.get("ended_at"), "project": project, "timing": timing,
             "checked": {"flags": (checked or {}).get("flags") or [], "kind": (checked or {}).get("kind")} if checked else None,
             "dissent": dissent(verdict) if verdict else "",
@@ -283,6 +287,9 @@ def worth_a_look(got: dict[str, Any] | None, limit: int = 3) -> str:
         bits.insert(0, "failed checks: " + "; ".join(failed[:3]))
     if got.get("dissent"):
         bits.append(got["dissent"][:300])
+    fixes = got.get("corrections") or []
+    if fixes:
+        bits.append(f"Captain corrected its course {len(fixes)} time{'' if len(fixes) == 1 else 's'} during the run")
     return ("Worth a look: " + " · ".join(bits)) if bits else ""
 
 

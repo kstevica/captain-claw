@@ -164,6 +164,8 @@ export interface RunResults {
   dissent?: string
   /** Done-checks Captain ran itself that failed. */
   checks?: { text: string; passed: boolean }[]
+  /** What Captain's checks between steps told the later steps to do differently. */
+  corrections?: string[]
 }
 
 /** A factory's newest result, for its card. */

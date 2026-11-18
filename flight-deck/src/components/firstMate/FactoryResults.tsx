@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { AlertTriangle, Archive, CheckCircle2, ChevronRight, Clock, Code2, Download, Eye, FolderArchive, Loader2, MessageSquareWarning, RefreshCw, Table2, Trophy, Wrench } from 'lucide-react'
+import { AlertTriangle, Archive, CheckCircle2, ChevronRight, Clock, Code2, Compass, Download, Eye, FolderArchive, Loader2, MessageSquareWarning, RefreshCw, Table2, Trophy, Wrench } from 'lucide-react'
 import { getFactoryResults, durationText, whenText, RUN_LABELS, type ResultFile, type RunResults, type RunTiming } from '../../services/firstMate'
 import { vfsApi, type FolderRef } from '../../services/vfsApi'
 import { getFileTypeGroup, isViewable, type AgentFile } from '../../services/fileTransfer'
@@ -258,7 +258,8 @@ function FileGroup({ title, hint, icon: Icon, project, files, onOpen, canOpen, o
 function Checked({ r }: { r: RunResults }) {
   const flags = r.checked?.flags ?? []
   const failed = (r.checks ?? []).filter((c) => !c.passed)
-  if (!r.checked && !failed.length && !r.dissent) return null
+  const fixes = r.corrections ?? []
+  if (!r.checked && !failed.length && !r.dissent && !fixes.length) return null
   const clean = !flags.length && !failed.length && !r.dissent
   return (
     <div className={`rounded-xl px-3 py-2.5 text-xs ${clean ? 'bg-emerald-500/[0.07] text-emerald-800 dark:text-emerald-300' : 'bg-amber-500/[0.08] text-amber-900 dark:text-amber-200'}`}>
@@ -274,6 +275,14 @@ function Checked({ r }: { r: RunResults }) {
       )}
       {r.dissent && (
         <p className="mt-1.5 flex items-start gap-1.5"><MessageSquareWarning className="mt-0.5 h-3.5 w-3.5 shrink-0" />{r.dissent}</p>
+      )}
+      {fixes.length > 0 && (
+        <details className="mt-1.5">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 font-medium">
+            <Compass className="h-3.5 w-3.5" />Captain corrected its course {fixes.length} time{fixes.length === 1 ? '' : 's'} during the run
+          </summary>
+          <ul className="mt-1 space-y-0.5 pl-5">{fixes.map((c) => <li key={c} className="list-disc">{c}</li>)}</ul>
+        </details>
       )}
     </div>
   )
