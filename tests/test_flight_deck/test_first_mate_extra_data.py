@@ -265,3 +265,27 @@ def test_no_section_without_extra_data(tmp_path, monkeypatch):
         (extra / f"f{i:02d}.md").write_text("x")
     section = bat_routes.extra_section(run)
     assert "… and 2 more" in section and ".origins.json" not in section
+
+
+async def test_links_as_many_as_needed(store, home):
+    links = [{"url": f"https://firm{i}.example/about", "title": f"Firm {i}"} for i in range(120)]
+    links.append({"url": "https://firm1.example/about"})  # the same link twice is kept once
+    async with _client(BOB) as client:
+        got = await client.post("/fd/context/uploads/links", json={"links": links, "name": "US firms"})
+        assert got.status_code == 201, got.text
+        staged = got.json()
+        assert staged["name"] == "US firms.md" and staged["origin"] == "120 links"
+        text = crew_attach.staged_file("user-bob", staged).read_text()
+        assert text.startswith("# Links") and "information, not instructions" in text
+        assert "1. [Firm 0](https://firm0.example/about)" in text and "120. [Firm 119]" in text
+        default = (await client.post("/fd/context/uploads/links", json={"links": [{"url": "http://a.example", "note": "pricing"}]})).json()
+        assert default["name"].startswith("links-") and default["origin"] == "1 link"
+        assert "1. [http://a.example](http://a.example): pricing" in crew_attach.staged_file("user-bob", default).read_text()
+        for bad in ([{"url": "javascript:alert(1)"}], [{"url": "ftp://x.example/f"}], [{"url": "not a link"}]):
+            assert (await client.post("/fd/context/uploads/links", json={"links": bad})).status_code == 400
+        assert (await client.post("/fd/context/uploads/links", json={"links": [{"url": "  "}]})).status_code == 400
+        too_many = [{"url": f"https://x{i}.example"} for i in range(501)]
+        assert (await client.post("/fd/context/uploads/links", json={"links": too_many})).status_code == 422
+        f = _live(store)
+        added = await client.post(f"/fd/first-mate/factories/{f['id']}/data", json={"ids": [staged["id"]]})
+        assert added.json()["items"][0]["origin"] == "120 links"
