@@ -25,6 +25,7 @@ injected handlers.
 from __future__ import annotations
 
 import asyncio
+import time
 import os
 import re
 import socket
@@ -207,6 +208,16 @@ _CAP_REFRESH: Callable[[dict], Awaitable[bool]] | None = None
 def set_cap_refresh(fn: "Callable[[dict], Awaitable[bool]] | None") -> None:
     global _CAP_REFRESH
     _CAP_REFRESH = fn
+
+
+# Checks a finished step against the run's goal before it counts (bat_course):
+# (run, step, started_at, last_try) -> {"redo": bool, "why": str} or None.
+_STEP_CHECK: Callable[[dict, dict, float, bool], Awaitable[dict | None]] | None = None
+
+
+def set_step_check(fn: "Callable[[dict, dict, float, bool], Awaitable[dict | None]] | None") -> None:
+    global _STEP_CHECK
+    _STEP_CHECK = fn
 _STORE: BatStore | None = None
 # Human-in-the-loop gate (Phase 4). Called once per drive, after planning:
 #   (store, run) -> 'proceed' | 'wait' | 'cancelled' | 'error'
@@ -747,6 +758,7 @@ class BatDriver:
         while others are running and should wait its turn, "" otherwise."""
         key = step["step_key"]
         attempt = int(step["attempt"]) + 1
+        started_at = time.time()
         await self.store.upsert_step(run_id, key, status="running", attempt=attempt)
         await self.store.append_event(
             run_id, "step", step.get("title") or key, agent=key, attempt=attempt)
@@ -789,6 +801,18 @@ class BatDriver:
             # The step isn't finished, it's waiting: it runs again with the answer.
             await self.store.upsert_step(run_id, key, status="pending")
             return "parked"
+        if res.get("ok") and _STEP_CHECK is not None:
+            # Before it counts: is what it made on course for the goal? A broken rule
+            # sends it round again with why (the last try is kept, with the finding).
+            try:
+                check = await _STEP_CHECK(await self.store.get_run(run_id) or run,
+                                          {**step, "attempt": attempt, "output": str(res.get("output", ""))},
+                                          started_at, attempt >= self.max_step_attempts)
+            except Exception as e:  # noqa: BLE001 — a check that breaks never fails a step
+                log.warning("bat step check failed", run_id=run_id, step=key, error=str(e))
+                check = None
+            if check and check.get("redo"):
+                res = {"ok": False, "error": f"Captain checked this step's work and it isn't on course: {check.get('why', '')}"}
         if res.get("ok"):
             await self.store.upsert_step(
                 run_id, key, status="done",
