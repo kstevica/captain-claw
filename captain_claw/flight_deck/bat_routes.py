@@ -1484,6 +1484,19 @@ def _teardown(slugs: list[str]) -> None:
         log.warning("bat teardown registry update failed", error=str(e))
 
 
+def retire_run_workers(run_id: str) -> list[str]:
+    """Every worker still on record for this run, stopped and removed. Each step's
+    own worker goes when its turn ends; this catches one that outlived it (a deck
+    restart in the middle of a turn brought it back). Returns their slugs."""
+    from captain_claw.flight_deck.server import _load_process_registry
+    tag = f"bat:{run_id}"
+    slugs = [slug for slug, e in _load_process_registry().items()
+             if isinstance(e, dict) and str(e.get("run") or "") == tag]
+    if slugs:
+        _teardown(slugs)
+    return slugs
+
+
 def step_cost(entries: list[dict], worker_model: str) -> dict:
     """What one step's turn cost. The agent doesn't always say which model answered;
     it is the worker's own, so it is priced as that rather than not at all (the live
@@ -2074,6 +2087,10 @@ async def _bat_on_finish(run: dict) -> None:
     """Deliver the result back where the run came from (bell / channel / caller
     agent), mirroring Basna/Vatra's completion delivery."""
     sid = run["id"]
+    try:
+        await asyncio.to_thread(retire_run_workers, sid)
+    except Exception as e:  # noqa: BLE001 — the result still goes out
+        log.warning("bat: couldn't remove the run's workers", run_id=sid, error=str(e))
     await _log_own_cost(run)
     if (run.get("config") or {}).get("rehearsal"):
         return  # a Captain Swarm attempt: its run reads the result; nobody is told
