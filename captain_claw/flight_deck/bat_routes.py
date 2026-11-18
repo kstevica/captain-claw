@@ -493,8 +493,7 @@ async def _keep_hows(run: dict, steps: list[dict]) -> None:
     store = bat_loop.get_store()
     if not hows or store is None or not run.get("id"):
         return
-    fresh = await store.get_run(run["id"]) or run
-    await store.set_config(run["id"], {**(fresh.get("config") or {}), "step_hows": hows})
+    await merge_config(run["id"], {"step_hows": hows})
     await store.append_event(run["id"], "note", "steps done by more than one worker: "
                              + ", ".join(f"{k} as {v}" for k, v in hows.items()))
 
@@ -1068,8 +1067,7 @@ async def _ensure_contract(run: dict, creds: dict | None, has_shell: bool) -> No
         rules = _read_rules(resp.content or "")[:_MAX_CONTRACT_RULES]
     except Exception as e:  # noqa: BLE001
         log.warning("bat contract derivation failed", run_id=run.get("id"), error=str(e))
-    cfg["contract"] = rules
-    await store.set_config(run["id"], cfg)
+    await merge_config(run["id"], {"contract": rules})
     await store.append_event(run["id"], "note", (
         f"{len(rules)} acceptance check(s) pinned: " + "; ".join(r["text"] for r in rules)[:400] if rules
         else "No acceptance checks came out of the task, so the reviewers alone decide when it's done."))
@@ -1089,21 +1087,41 @@ _SHAPE_SYSTEM = (
 )
 
 
+async def merge_config(run_id: str, changes: dict) -> dict:
+    """Change a run's config from what it is now, not from a copy read before a long
+    model call: planning writes several things in turn (its checks, its limit on
+    steps at once, who does a step), and a write from an old copy undid the others."""
+    store = bat_loop.get_store()
+    if store is None:
+        return {}
+    fresh = await store.get_run(run_id) or {}
+    cfg = {**(fresh.get("config") or {}), **changes}
+    await store.set_config(run_id, cfg)
+    return cfg
+
+
+SHAPE_TRIES = 3
+
+
 async def _shape_contract(run: dict, creds: dict | None, has_shell: bool) -> None:
     """A factory's done-checks arrive as the owner's sentences, each for a reviewer.
     Once per run, those a script can decide get a check (rows, columns, duplicates,
     links, role inboxes, sections, length…): the reviewers used to pass a list
     nobody counted. A rule that stays a judgement stays the reviewers'."""
-    cfg = dict(run.get("config") or {})
     store = bat_loop.get_store()
+    if store is None or not run.get("id"):
+        return
+    run = await store.get_run(run["id"]) or run  # the config as it is now
+    cfg = dict(run.get("config") or {})
     rules = cfg.get("contract") or []
-    if not _factory_run(run) or cfg.get("contract_shaped") or not rules or not creds or store is None:
+    tries = int(cfg.get("contract_shape_tries") or 0)
+    if not _factory_run(run) or cfg.get("contract_shaped") or not rules or not creds or tries >= SHAPE_TRIES:
         return
     if not all((r.get("check") or {}).get("type") == "judge" for r in rules):
         return
-    from captain_claw.flight_deck.basna_routes import _provider_call
     from captain_claw.llm import Message
     shaped: list[dict] = []
+    why = ""
     try:
         prov, mt = think_call(creds, temperature=0.0)
         listing = "\n".join(f'- id "{r["id"]}": {r["text"]}' for r in rules)
@@ -1111,14 +1129,25 @@ async def _shape_contract(run: dict, creds: dict | None, has_shell: bool) -> Non
             Message(role="system", content=_SHAPE_SYSTEM.replace("COMMAND_SHAPE", _COMMAND_SHAPE if has_shell else "")),
             Message(role="user", content=f"# The job\n{str(run.get('task', ''))[:6000]}\n\n# Its rules\n{listing}"),
         ], temperature=0.0, max_tokens=mt)
-        shaped = _read_rules(resp.content or "")
-    except Exception as e:  # noqa: BLE001 — the rules stay with the reviewers
+        content = resp.content or ""
+        shaped = _read_rules(content)
+        if not shaped:
+            why = ("the answer came back empty (a thinking model can spend its whole budget thinking)"
+                   if not content.strip() else "the answer had no checks in it")
+    except Exception as e:  # noqa: BLE001 — the rules stay with the reviewers for now
+        why = f"{type(e).__name__}: {str(e)[:160]}"
         log.warning("bat contract shaping failed", run_id=run.get("id"), error=str(e))
+    if not shaped:
+        tries += 1
+        await merge_config(run["id"], {"contract_shape_tries": tries})
+        await store.append_event(run["id"], "note", "Couldn't turn its done-checks into checks Captain runs itself ("
+                                 f"{why}). The reviewers judge them for now"
+                                 + ("; trying again before the next check." if tries < SHAPE_TRIES else "."))
+        return
     by_id = {str(r["id"]): r for r in shaped}
     # Each owner's rule keeps its words; only its check can change.
     out = [{**r, "check": by_id[str(r["id"])]["check"]} if str(r["id"]) in by_id else r for r in rules]
-    cfg.update(contract=out, contract_shaped=True)
-    await store.set_config(run["id"], cfg)
+    await merge_config(run["id"], {"contract": out, "contract_shaped": True})
     scripted = [r["text"] for r in out if (r.get("check") or {}).get("type") != "judge"]
     if scripted:
         await store.append_event(run["id"], "note", f"{len(scripted)} of its {len(out)} done-checks are checked by "
@@ -1477,12 +1506,13 @@ def one_machine(tiers: dict | None) -> bool:
 
 async def _one_at_a_time(run: dict, tiers: dict | None) -> None:
     """A run whose owner has one model (or one machine) runs its steps one at a time."""
-    cfg = dict(run.get("config") or {})
     store = bat_loop.get_store()
-    if store is None or "max_parallel" in cfg or not one_machine(tiers):
+    if store is None or not one_machine(tiers):
         return
-    cfg["max_parallel"] = 1
-    await store.set_config(run["id"], cfg)
+    run = await store.get_run(run["id"]) or run
+    if "max_parallel" in (run.get("config") or {}):
+        return
+    await merge_config(run["id"], {"max_parallel": 1})
     await store.append_event(run["id"], "note", "One model does all the work here, so steps run one at a time: "
                              "side by side they would only wait for it.")
 
@@ -1508,14 +1538,48 @@ async def _bat_planner(run: dict) -> list[dict]:
         return await _plan_steps(fresh or run)
 
 
+PLAN_TRIES = 2
+# When the planner gives no plan: still conventions first and the merge last, so a
+# big job isn't one worker's single turn and its steps can be checked as they go.
+FALLBACK_STEPS = (
+    "Write shared/conventions.md for this task: the exact format of what it delivers (a list's columns, a "
+    "document's outline, code's structure), the criteria every part must meet, and how the work splits into "
+    "segments (a source, a region, a kind of item) small enough for one worker each.",
+    "Do the work segment by segment as shared/conventions.md says, saving each segment's results as you go and "
+    "keeping your progress note current: finish every segment, not only the first.",
+    "Put the parts together, remove duplicates, check the whole against the task and finish the deliverables it "
+    "asks for, saying plainly what fell short.",
+)
+_SMALL_TASK = 600  # a task this short and not a factory's runs as one step when there's no plan
+
+
+def fallback_plan(run: dict) -> list[dict]:
+    task = str(run.get("task", ""))
+    if len(task) < _SMALL_TASK and not _factory_run(run):
+        return [{"step_key": "main", "title": task[:400] or "complete the task", "seq": 0}]
+    return [{"step_key": f"step-{i + 1}", "title": t, "seq": i, "depends_on": [f"step-{i}"] if i else []}
+            for i, t in enumerate(FALLBACK_STEPS)]
+
+
+async def _plan_note(run: dict, text: str) -> None:
+    store = bat_loop.get_store()
+    if store is not None and run.get("id"):
+        try:
+            await store.append_event(run["id"], "note", text)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def _plan_steps(run: dict) -> list[dict]:
+    """The run's steps from the planner. When it gives none, it's asked again; when it
+    still gives none, the run gets ``fallback_plan`` and a note says why."""
     cfg = run.get("config") or {}
     explicit = cfg.get("steps") or []
     if explicit:
         return [{"step_key": f"step-{i + 1}", "title": str(s)[:400], "seq": i}
                 for i, s in enumerate(explicit) if str(s).strip()][:12]
     archetype_mode = (cfg.get("worker_mode") or "plain") == "archetype"
-    # Best-effort LLM decomposition; any failure → a single stubborn step.
+    why = "no model is set up to plan with"
     try:
         from captain_claw.flight_deck.basna_routes import _load_owner_tiers, _provider_call
         from captain_claw.flight_deck.auth import get_db
@@ -1528,28 +1592,42 @@ async def _plan_steps(run: dict) -> list[dict]:
             if steps:
                 return steps
             # no usable archetype plan → fall through to the plain decomposition
-        if creds:
+        for attempt in range(PLAN_TRIES if creds else 0):
             prov, mt = think_call(creds, temperature=0.2)
-            resp = await prov.complete(messages=[
-                Message(role="system", content=(
-                    "Break the user's goal into the smallest ordered list of concrete, independently "
-                    "checkable steps that together finish it. " + _STEP_SIZE + _HOW + " Return ONLY a JSON array "
-                    "(max 12) of objects "
-                    '{"step": "<short step>", "after": [<1-based numbers of the earlier steps it needs>], '
-                    '"how": "agent"}. '
-                    'A step that needs none gets "after": []. Steps that don\'t need each other run at the '
-                    "same time, so say so wherever order doesn't matter, and keep such steps to separate "
-                    "files. No prose.")),
-                Message(role="user", content=run.get("task", "") + extra_section(run)),
-            ], temperature=0.2, max_tokens=mt)
-            steps = _parse_plan(resp.content or "", run.get("task", ""))
+            try:
+                resp = await prov.complete(messages=[
+                    Message(role="system", content=(
+                        "Break the user's goal into the smallest ordered list of concrete, independently "
+                        "checkable steps that together finish it. " + _STEP_SIZE + _HOW + " Return ONLY a JSON array "
+                        "(max 12) of objects "
+                        '{"step": "<short step>", "after": [<1-based numbers of the earlier steps it needs>], '
+                        '"how": "agent"}. '
+                        'A step that needs none gets "after": []. Steps that don\'t need each other run at the '
+                        "same time, so say so wherever order doesn't matter, and keep such steps to separate "
+                        "files. No prose.")),
+                    Message(role="user", content=run.get("task", "") + extra_section(run)),
+                ], temperature=0.2, max_tokens=mt)
+            except Exception as e:  # noqa: BLE001 — asked again, then the fallback
+                why = f"{type(e).__name__}: {str(e)[:160]}"
+                log.warning("bat planner call failed", run_id=run.get("id"), attempt=attempt + 1, error=str(e))
+                continue
+            content = resp.content or ""
+            steps = _parse_plan(content, run.get("task", ""))
             if steps:
                 await _keep_hows(run, steps)
+                if attempt:
+                    await _plan_note(run, f"The planner gave a plan on its second try ({why} the first time).")
                 return steps
+            why = ("the answer came back empty (a thinking model can spend its whole budget thinking)"
+                   if not content.strip() else "the answer wasn't a plan")
     except Exception as e:  # noqa: BLE001
-        log.warning("bat planner fell back to single step", run_id=run.get("id"), error=str(e))
-    task = run.get("task", "")
-    return [{"step_key": "main", "title": task[:400] or "complete the task", "seq": 0}]
+        why = f"{type(e).__name__}: {str(e)[:160]}"
+        log.warning("bat planner failed", run_id=run.get("id"), error=str(e))
+    steps = fallback_plan(run)
+    await _plan_note(run, f"The planner gave no plan ({why}). " + (
+        "Running it as one step." if len(steps) == 1 else
+        "Running a three-step plan instead: the conventions, the work segment by segment, putting it together."))
+    return steps
 
 
 async def _plan_with_archetypes(run: dict, db, creds: dict) -> list[dict]:
@@ -1582,9 +1660,7 @@ async def _plan_with_archetypes(run: dict, db, creds: dict) -> list[dict]:
         return []
     store = bat_loop.get_store()
     if store is not None and arch_map:
-        cfg = dict(run.get("config") or {})
-        cfg["step_archetypes"] = arch_map
-        await store.set_config(run["id"], cfg)
+        await merge_config(run["id"], {"step_archetypes": arch_map})
         await store.append_event(run["id"], "note", f"{len(arch_map)} step(s) assigned to archetypes")
     return steps
 
@@ -1752,8 +1828,15 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
         creds, independent = _panel_creds(tiers)
     except Exception as e:  # noqa: BLE001
         log.warning("bat judge tiers failed; deterministic-only", run_id=sid, error=str(e))
-        creds, independent = None, False
+        creds, independent, tiers = None, False, None
     profile = None
+    if finished and not cfg.get("contract_shaped") and store is not None:
+        try:  # its done-checks couldn't be shaped at the start: try again before judging
+            await _shape_contract(run, _creds_for(tiers), has_shell)
+            run = await store.get_run(sid) or run
+            cfg = run.get("config") or {}
+        except Exception as e:  # noqa: BLE001
+            log.warning("bat contract shaping retry failed", run_id=sid, error=str(e))
     if finished:
         evidence = await asyncio.to_thread(_evidence_block, _run_folder(run))
         try:
