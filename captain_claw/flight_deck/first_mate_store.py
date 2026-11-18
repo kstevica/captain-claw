@@ -395,10 +395,16 @@ def check_budget(value: Any) -> dict[str, Any]:
 
 
 def check_checks(value: Any) -> dict[str, Any]:
+    """``contract``: the goals a run is checked against. ``off``: goals the owner
+    switched off, kept with the version so they can be switched on again; runs
+    never see them."""
     c = _dict("checks", value)
-    _known("checks", c, ("contract", "satisfaction_target"))
+    _known("checks", c, ("contract", "off", "satisfaction_target"))
     out = {"contract": _str_list("contract", c.get("contract")),
            "satisfaction_target": DEFAULT_CHECKS["satisfaction_target"]}
+    off = [g for g in _str_list("off", c.get("off")) if g not in out["contract"]]
+    if off:
+        out["off"] = off
     if "satisfaction_target" in c:
         out["satisfaction_target"] = _num("satisfaction_target", c["satisfaction_target"], 0.5, 1.0)
     _no_secret("checks", out)
