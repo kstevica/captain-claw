@@ -252,3 +252,74 @@ def test_summarize_counts():
     assert s["failed_critical"] == 1 and s["failed_major"] == 1
     assert s["unresolved"] == 1
     assert len(s["failed"]) == 2
+
+
+# ── a check is kept whole or not at all ───────────────────────────────
+#
+# A factory run's three Python checks were cut mid-line at 400 characters when they
+# were written: they could only ever fail, and the rows they counted didn't show.
+
+def _one(check: dict) -> dict:
+    return code_contract.parse_contract(json.dumps({"constraints": [
+        {"id": "a1", "text": "the rule", "severity": "major", "check": check}]}))[0]["check"]
+
+
+def test_a_long_script_is_kept_whole_and_one_too_long_goes_to_the_reviewers():
+    long_cmd = "python3 -c '" + "x=1; " * 240 + "'"
+    assert 1000 < len(long_cmd) <= code_contract.CMD_MAX
+    assert _one({"type": "command", "cmd": long_cmd}) == {"type": "command", "cmd": long_cmd}
+    assert _one({"type": "command", "cmd": "x" * (code_contract.CMD_MAX + 1)}) == {"type": "judge"}
+    pattern = "(" + "|".join(f"word{i}" for i in range(80)) + ")"
+    assert _one({"type": "no_pattern", "pattern": pattern})["pattern"] == pattern
+    assert _one({"type": "no_pattern", "pattern": "a" * (code_contract.PATTERN_MAX + 1)}) == {"type": "judge"}
+    table = _one({"type": "table", "path": "leads.csv", "exclude_pattern": pattern})
+    assert table["exclude_pattern"] == pattern
+
+
+async def test_a_script_cut_at_the_old_limit_goes_to_the_reviewers(tmp_path):
+    cut = ("python3 -c 'import csv; rows=list(csv.DictReader(open(\"leads.csv\"))); " + "y" * 400)[:400]
+    ran = []
+
+    async def runner(cmd, cwd):
+        ran.append(cmd)
+        return False, "SyntaxError"
+
+    res = await code_contract.validate(tmp_path, [
+        {"id": "a1", "text": "60 rows", "severity": "major", "check": {"type": "command", "cmd": cut}},
+        {"id": "a2", "text": "ok", "severity": "major", "check": {"type": "command", "cmd": "true"}},
+        # the old cut came after trimming, so one can end in a space
+        {"id": "a3", "text": "dates", "severity": "major", "check": {"type": "command", "cmd": cut[:399] + " "}},
+    ], runner=runner)
+    assert [u["id"] for u in res["unresolved"]] == ["a1", "a3"] and "cut short" in res["unresolved"][0]["note"]
+    assert ran == ["true"]
+
+
+async def test_rows_per_group(tmp_path):
+    (tmp_path / "leads.csv").write_text("Firm,Segment\nA,law\nB,law\nC,research\nD,Research\nE,marketing\n")
+    check = _one({"type": "table", "path": "leads.csv", "allowed": {"Segment": ["law", "research", "marketing", "consulting"]},
+                  "min_per": {"Segment": 2}})
+    assert check["min_per"] == {"Segment": 2}
+    res = await code_contract.validate(tmp_path, [{"id": "a1", "text": "at least 2 per segment", "severity": "major",
+                                                   "check": check}])
+    note = res["failed"][0]["note"]
+    assert "fewer than 2 rows per Segment: marketing 1, consulting 0" in note and "law" not in note.split(":", 2)[-1]
+    # without allowed values: every value present
+    loose = _one({"type": "table", "path": "leads.csv", "min_per": {"Segment": 1}})
+    res = await code_contract.validate(tmp_path, [{"id": "a1", "text": "x", "severity": "major", "check": loose}])
+    assert res["passed"]
+
+
+def test_rows_show_even_when_a_script_or_a_reviewer_holds_the_amount(tmp_path):
+    (tmp_path / "leads.csv").write_text("Firm\nA\nB\nC\n")
+    (tmp_path / "progress").mkdir()
+    (tmp_path / "progress" / "notes.csv").write_text("x\n1\n")
+    rules = [
+        {"id": "fm1", "text": "leads.csv has 60 unique rows", "severity": "major",
+         "check": {"type": "command", "cmd": "python3 -c 'open(\"leads.csv\")'"}},
+        {"id": "fm2", "text": "progress/notes.csv is kept", "severity": "major", "check": {"type": "judge"}},
+    ]
+    assert code_contract.measure(tmp_path, rules, skip=("progress",)) == {"rows:leads.csv": 3}
+    # a table rule that counts rows is the measure itself
+    rules.append({"id": "fm3", "text": "at least 60 rows", "severity": "major",
+                  "check": {"type": "table", "path": "leads.csv", "min_rows": 60}})
+    assert code_contract.measure(tmp_path, rules) == {"fm3": 3}

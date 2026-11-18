@@ -107,6 +107,18 @@ def test_rules_for_a_part():
     got = bat_course.step_rules(RULES + [{"id": "x", "text": "1500 words", "check": {"type": "document", "min_words": 1500}}])
     assert [r["id"] for r in got] == ["fm1", "fm2"]
     assert "min_rows" not in got[0]["check"] and got[0]["check"]["columns"] == ["Name", "Email", "Source"]
+    per = bat_course.step_rules([{"id": "p", "text": "15 per segment", "check": {
+        "type": "table", "path": "", "min_per": {"Segment": 15}, "allowed": {"Segment": ["a", "b"]}}}])
+    assert "min_per" not in per[0]["check"] and per[0]["check"]["allowed"] == {"Segment": ["a", "b"]}
+
+
+def test_shaping_and_drafting_keep_amounts_and_prefer_counted_checks():
+    """A run's checks came back as long Python scripts, "at least 60" read "60"."""
+    from captain_claw.flight_deck import first_mate_drafting
+    assert "never a command" in bat_routes._SHAPE_SYSTEM
+    assert "is min_rows 60, never an exact count" in bat_routes._SHAPE_SYSTEM
+    assert '"min_per"' in bat_routes._SHAPE_SYSTEM
+    assert '"at least 60" stays "at least 60"' in first_mate_drafting.SYSTEM
 
 
 async def test_a_part_that_breaks_the_rules_goes_round_again(bat):

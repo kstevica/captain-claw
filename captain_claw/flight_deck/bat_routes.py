@@ -811,14 +811,17 @@ _TABLE_SHAPES = (
     '- {"type": "table", "path": "<file or \'\'>", "min_rows": N, "columns": [..], "unique": [..], '
     '"non_empty": [..], "link_columns": [..], "min_link_share": 0.9, "email_column": "..", "max_role_share": 0.2, '
     '"max_free_share": 0.1, "max_domain_share": 0.1, "exclude_pattern": "<regex no row may match>", '
-    '"allowed": {"<column>": [values]}}: a delivered list (CSV/TSV); give only the keys the task needs\n'
+    '"allowed": {"<column>": [values]}, "min_per": {"<column>": N}}: a delivered list (CSV/TSV); "min_per" '
+    'is at least N rows for each value of that column (each of its "allowed" values, when it has them); give '
+    'only the keys the task needs\n'
     '- {"type": "document", "path": "<file or \'\'>", "min_words": N, "headings": [<sections it must have>], '
     '"no_placeholders": true, "min_links": N}: a delivered document or report\n'
     '- {"type": "python_syntax"}: delivered Python parses\n'
 )
 _CONTRACT_SYSTEM = _CONTRACT_SYSTEM.replace("TABLE_SHAPES", _TABLE_SHAPES)
 _COMMAND_SHAPE = ('- {"type": "command", "cmd": "<shell command>"}: passes when it exits 0; cheap, '
-                  "deterministic and portable (wc -l pads its number on some systems), no servers or network\n")
+                  "deterministic and portable (wc -l pads its number on some systems), no servers or network; "
+                  "only for what the other shapes can't test, and short (a few hundred characters)\n")
 
 
 def _project_of(run: dict) -> str:
@@ -1099,6 +1102,10 @@ _SHAPE_SYSTEM = (
     "to it; use path \"\" when the rule means the run's main table or document and doesn't name a file. "
     "Only use a scripted check when the rule clearly says it (a count, columns, no duplicates, links, "
     "personal emails, sections, length); anything about meaning or quality stays {\"type\": \"judge\"}. "
+    "A list's rules (rows, columns, rows per group, allowed values, duplicates, emails, links) take the table "
+    "check and a document's (sections, length) the document check, never a command: those are counted as the "
+    "run goes and checked on every part. Keep an amount as the rule gives it: \"at least 60\" is min_rows 60, "
+    "never an exact count. "
     "Reply ONLY with JSON: {\"constraints\": [{\"id\": \"..\", \"text\": \"..\", \"severity\": \"critical|major\", "
     "\"check\": {...}}]}\ncheck shapes:\n"
     '- {"type": "file_exists", "path": "<path>"}\n'
