@@ -30,7 +30,7 @@ from captain_claw.flight_deck.first_mate_store import FirstMateError
 log = logging.getLogger(__name__)
 
 WORDS_MAX = 2000
-DONE_WHEN_MAX = 5
+DONE_WHEN_MAX = 6
 DRAFT_CASES_MAX = 3
 SENDS_PER_RUN = 3
 NEW_MAIL = {"kind": "events", "source": "gmail", "event_type": "new_email",
@@ -39,10 +39,10 @@ NEW_MAIL = {"kind": "events", "source": "gmail", "event_type": "new_email",
 SYSTEM = """You set up a standing job (a "factory") that an assistant runs again and again for one person. From what they want, write its first draft as one JSON object with these fields:
 
 - "title": a short name, at most 5 words.
-- "charter": what one run does, written as the person asking ("Go through my inbox ..."): what to look at, what to do, what never to do, and what to finish with. 2 to 6 sentences. Keep every limit the person gave.
+- "charter": what one run does, written as the person asking ("Go through my inbox ..."): what to look at, what to do, what never to do, and what to finish with, named: the file (a list with its columns, a document or report with its sections, code that runs, or several of these). Say who or what is in and who is out, and where things must come from. 2 to 7 sentences. Keep every limit the person gave. Where their words leave the audience or the result open, take the sensible narrow reading and say it, so they can change it before approving.
 - "schedule": when it starts on its own: "daily HH:MM", "weekdays HH:MM", "weekly mon,thu HH:MM" (any days) or "every N h"; or "" when it should start on new mail instead, or only when they press Run.
 - "on_new_mail": true only when it should start when new mail arrives.
-- "done_when": 2 to 4 short lines a reviewer can check on one run's result.
+- "done_when": 3 to 6 short lines checked on one run's result. Make the countable ones countable, so Captain checks them itself: the file and its kind ("final_leads.csv with columns Name, Email, Source, Reason"), how many or how long ("at least 500 rows", "1,500 to 3,000 words"), no duplicates, where things come from ("every Source is a link to the page the email is on", "personal emails, at most 20% role inboxes like info@"), who is out ("no university staff"), the sections a document must have, that code's tests pass. Then at most two lines on quality a reviewer judges ("each reason names a specific Captain feature").
 - "may_send_email": true only when the job itself must send or reply to email. Writing drafts for the person to send is not sending.
 - "may_organize_mail": true only when it must label, archive or move mail.
 - "cases": 0 to 3 test cases for jobs that react to an input such as an email or a request: realistic inputs this job might get, each {"title": ..., "input": ..., "good_result": [1 to 3 lines]}. [] for other jobs.

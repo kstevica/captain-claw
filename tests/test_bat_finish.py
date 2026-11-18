@@ -1399,7 +1399,7 @@ async def test_the_planner_plans_big_lists_by_batch(plan_env):
     plan_env["prov"] = _PlanProv(json.dumps([{"step": f"leads batch {i}", "after": []} for i in range(14)]))
     steps = await bat_routes._plan_steps({"id": "bat_x", "owner_id": "u1", "task": "Find 500 leads.", "config": {}})
     assert len(steps) == 12
-    assert "split by batch, not by phase" in plan_env["prov"].system and "max 12" in plan_env["prov"].system
+    assert "split by segment, not by phase" in plan_env["prov"].system and "max 12" in plan_env["prov"].system
 
 
 async def test_the_fix_round_splits_a_step_too_big_from_its_note(plan_env, tmp_path):

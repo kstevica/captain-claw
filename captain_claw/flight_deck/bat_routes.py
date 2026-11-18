@@ -459,9 +459,22 @@ def _parse_plan(content: str, task: str) -> list[dict]:
         else:
             continue
         if title:
+            how = str(it.get("how") or "").strip().lower() if isinstance(it, dict) else ""
             out.append({"step_key": f"step-{i + 1}", "title": title[:400], "seq": i,
-                        "depends_on": _after_of(it, i)})
+                        "depends_on": _after_of(it, i), **({"how": how} if how in _HOWS and how != "agent" else {})})
     return out[:12]
+
+
+async def _keep_hows(run: dict, steps: list[dict]) -> None:
+    """Which steps a team or a coding run does, kept on the run for their prompts."""
+    hows = {s["step_key"]: s["how"] for s in steps if s.get("how")}
+    store = bat_loop.get_store()
+    if not hows or store is None or not run.get("id"):
+        return
+    fresh = await store.get_run(run["id"]) or run
+    await store.set_config(run["id"], {**(fresh.get("config") or {}), "step_hows": hows})
+    await store.append_event(run["id"], "note", "steps done by more than one worker: "
+                             + ", ".join(f"{k} as {v}" for k, v in hows.items()))
 
 
 def _parse_fix_plan(content: str, limit: int = _MAX_FIX_STEPS) -> list[dict]:
@@ -589,6 +602,9 @@ _STEP_TAIL = "Absolutely never run anything that could harm the host or its driv
 _STEP_SYSTEM = _STEP_HEAD + _STEP_ASK + _STEP_TAIL
 # A First Mate factory's run: nobody is there to answer (see _factory_run).
 _FACTORY_STEP_SYSTEM = _STEP_HEAD + (
+    "Never lower the bar to reach a number: an item that doesn't meet the charter doesn't count, and a "
+    "shortfall reported honestly is a better result than padding. "
+) + (
     "This run belongs to a First Mate factory and runs on its own: nobody answers questions while it "
     "runs, so don't ask and don't wait. If you are blocked on something only the owner can provide (a "
     "verification code, a 2FA/OTP, a CAPTCHA, a credential), skip it, finish what you can, and say "
@@ -607,10 +623,26 @@ FACTORY_NO_ANSWER = ("Nobody answers questions during a First Mate factory run, 
 # by batch, not by phase.
 _STEP_SIZE = (
     "Each step is one worker's turn, so keep each to a size one worker can finish. When the goal is many "
-    "items of the same kind (hundreds of leads, pages, records), split by batch, not by phase: each step does "
-    "the whole job for one batch of at most about 50 items (find them, check them, add them to one shared "
-    "file), and a last step merges, de-duplicates and checks the whole list."
+    "items of the same kind (hundreds of leads, pages, records), split by segment, not by phase and not "
+    "\"50 more\": each step does the whole job (find, check, add) for one distinct segment of at most about 50 "
+    "items: a source, a region, a kind of item. Segments that don't overlap don't run dry or find the same "
+    "items twice. With several steps, the first writes shared/conventions.md, the conventions every later "
+    "step follows: for a list, its exact columns and that each step adds what it found to shared/seen.csv "
+    "and checks it before adding; for a document, its outline, style and which step writes which part; for "
+    "code, its structure and interfaces. The last step only puts the parts together and checks the whole "
+    "against the task: it does no new research and adds nothing that didn't come through a step, and when "
+    "there are fewer good items than asked it says how many and why instead of lowering the bar."
 )
+# How a step can be done, beside one worker: a team or a coding run, started by
+# the step's worker under this run (bat_nested adopts it; its spend counts here).
+_HOW = (
+    ' Each step may also say "how": "agent" (one worker, the default), "vatra" (a team that splits a big '
+    "piece of research or writing and builds on each other's work), \"basna\" (several agents answer the same "
+    "question independently and the answers are merged: judgement calls, estimates, reviews), \"code\" (a "
+    "coding session that builds or changes software with its tests) or \"crew\" (a coding agent such as "
+    "Claude Code on a project). Use one only where it clearly does the step better than one worker."
+)
+_HOWS = ("agent", "vatra", "basna", "code", "crew")
 
 
 _SAVE_AS_YOU_GO = (
@@ -650,6 +682,12 @@ def _build_step_prompt(run: dict, step: dict, prior: list[dict], human_input: st
         given = extra_section(run)
         if given:
             lines.append(given)
+        shared = shared_section(run, step)
+        if shared:
+            lines.append(shared)
+        how = how_section(run, step)
+        if how:
+            lines.append(how)
         resume = _resume_section(run, step)
         if resume:
             lines.append(resume)
@@ -694,7 +732,9 @@ _VOTE_SYSTEM = (
     "You are an independent, skeptical reviewer deciding whether a task is GENUINELY and fully done, "
     "judging the delivered result itself — not any claim that it is finished. Default to DISAGREE when "
     "the evidence is thin, partial, or merely describes what should be done rather than showing it was. "
-    "A section marked VERIFIED comes from Captain itself: believe it over anything a worker says. When "
+    "A section marked VERIFIED comes from Captain itself: believe it over anything a worker says. Its "
+    "WORTH A LOOK lines are facts about the delivered files: weigh whether they break what the task asked "
+    "for (who or what it is for, where things come from, completeness, quality), not only its count. When "
     "you disagree, the reason goes to whoever fixes it, so name what's wrong or missing. "
     "Answer with exactly two lines:\nVOTE: AGREE|DISAGREE|ABSTAIN\nREASON: <one sentence>"
 )
@@ -720,10 +760,23 @@ _CONTRACT_SYSTEM = (
     '- {"type": "file_exists", "path": "<path>"}: only for a file the task names or clearly requires\n'
     '- {"type": "file_contains", "path": "<path>", "pattern": "<regex>"}: ^ and $ match at each line\n'
     '- {"type": "no_pattern", "pattern": "<regex>", "glob": "<glob>"}: passes when no file matches\n'
+    + "TABLE_SHAPES" +
     "COMMAND_SHAPE"
     '- {"type": "judge"}: anything else; a reviewer decides from the result\n'
     'If the task states nothing checkable, return {"constraints": []}.'
 )
+# What a delivered list or document holds, checked by Captain without a model.
+# "path" "" means the run's main table or document, for a file the task doesn't name.
+_TABLE_SHAPES = (
+    '- {"type": "table", "path": "<file or \'\'>", "min_rows": N, "columns": [..], "unique": [..], '
+    '"non_empty": [..], "link_columns": [..], "min_link_share": 0.9, "email_column": "..", "max_role_share": 0.2, '
+    '"max_free_share": 0.1, "max_domain_share": 0.1, "exclude_pattern": "<regex no row may match>", '
+    '"allowed": {"<column>": [values]}}: a delivered list (CSV/TSV); give only the keys the task needs\n'
+    '- {"type": "document", "path": "<file or \'\'>", "min_words": N, "headings": [<sections it must have>], '
+    '"no_placeholders": true, "min_links": N}: a delivered document or report\n'
+    '- {"type": "python_syntax"}: delivered Python parses\n'
+)
+_CONTRACT_SYSTEM = _CONTRACT_SYSTEM.replace("TABLE_SHAPES", _TABLE_SHAPES)
 _COMMAND_SHAPE = ('- {"type": "command", "cmd": "<shell command>"}: passes when it exits 0; cheap, '
                   "deterministic and portable (wc -l pads its number on some systems), no servers or network\n")
 
@@ -743,7 +796,7 @@ def _run_folder(run: dict) -> Path:
 # its owner gave it (extra/, see :func:`extra_section`). The reviewers' evidence
 # and a scan of the whole folder leave them out.
 EXTRA_DIR = "extra"
-WORK_DIRS = ("progress", "notes", EXTRA_DIR)
+WORK_DIRS = ("progress", "notes", EXTRA_DIR, "shared")
 PROGRESS_MAX = 4000
 EXTRA_LISTED = 40
 
@@ -841,6 +894,53 @@ def extra_files(run: dict) -> list[tuple[str, int]]:
             except OSError:
                 continue
     return sorted(out)
+
+
+SHARED_DIR = "shared"
+CONVENTIONS_MAX = 3000
+
+_HOW_TEXT = {
+    "vatra": ("a Vatra team", 'the `basna` tool, action "start" with mode "vatra"'),
+    "basna": ("a Basna ensemble", 'the `basna` tool, action "start" with mode "basna"'),
+    "code": ("a coding session", "the `code_session` tool"),
+    "crew": ("a coding agent (Crew)", "the `crew` tool"),
+}
+
+
+def how_section(run: dict, step: dict) -> str:
+    """For a step the planner gave to a team or a coding run: start it, tell it
+    where results go, and leave the waiting to Captain."""
+    how = ((run.get("config") or {}).get("step_hows") or {}).get(step.get("step_key", ""))
+    if how not in _HOW_TEXT:
+        return ""
+    what, tool = _HOW_TEXT[how]
+    return (f"\n# How to do this step: {what}\nStart {what} for it with {tool}. Give it this step's whole task, "
+            f"the run's goal and conventions, and tell it to save what it makes in vfs:{_project_of(run)}/ (this "
+            "run's folder). Then end your turn: Captain waits for it, counts its spend toward this run and adds "
+            "its result to this step. If it can't start (the tool refuses or isn't there), do the step yourself.")
+
+
+def shared_section(run: dict, step: dict) -> str:
+    """The conventions the run's first step wrote (columns, outline, interfaces),
+    for every later step, and the seen list for a list's steps."""
+    folder = _run_folder(run) / SHARED_DIR if run.get("id") and run.get("owner_id") else None
+    try:
+        conv = (folder / "conventions.md").read_text(encoding="utf-8", errors="replace")[:CONVENTIONS_MAX].strip() \
+            if folder is not None and (folder / "conventions.md").is_file() else ""
+        seen = folder is not None and (folder / "seen.csv").is_file()
+    except OSError:
+        conv, seen = "", False
+    if not conv and not seen:
+        return ""
+    where = f"vfs:{_project_of(run)}/{SHARED_DIR}/"
+    lines = [f"\n# The run's shared conventions ({where}conventions.md)"]
+    if conv:
+        lines += ["Every step follows these exactly: the same columns, outline or interfaces, so the parts fit "
+                  "together without repair.", "----- conventions -----", conv, "----- end -----"]
+    if seen:
+        lines.append(f"Before adding an item, check {where}seen.csv and skip what is already there; add each "
+                     "item you keep to it as you go.")
+    return "\n".join(lines)
 
 
 def extra_section(run: dict) -> str:
@@ -942,6 +1042,56 @@ async def _ensure_contract(run: dict, creds: dict | None, has_shell: bool) -> No
     await store.append_event(run["id"], "note", (
         f"{len(rules)} acceptance check(s) pinned: " + "; ".join(r["text"] for r in rules)[:400] if rules
         else "No acceptance checks came out of the task, so the reviewers alone decide when it's done."))
+
+
+_SHAPE_SYSTEM = (
+    "An owner wrote the rules a job's result is checked against, in their own words. For EACH rule pick the "
+    "check that tests it by what the delivered files hold, so a script decides it, not a reviewer's opinion. "
+    "Keep each rule's id and text as they are. All the team's files go in one shared folder, paths relative "
+    "to it; use path \"\" when the rule means the run's main table or document and doesn't name a file. "
+    "Only use a scripted check when the rule clearly says it (a count, columns, no duplicates, links, "
+    "personal emails, sections, length); anything about meaning or quality stays {\"type\": \"judge\"}. "
+    "Reply ONLY with JSON: {\"constraints\": [{\"id\": \"..\", \"text\": \"..\", \"severity\": \"critical|major\", "
+    "\"check\": {...}}]}\ncheck shapes:\n"
+    '- {"type": "file_exists", "path": "<path>"}\n'
+    + _TABLE_SHAPES + "COMMAND_SHAPE" + '- {"type": "judge"}\n'
+)
+
+
+async def _shape_contract(run: dict, creds: dict | None, has_shell: bool) -> None:
+    """A factory's done-checks arrive as the owner's sentences, each for a reviewer.
+    Once per run, those a script can decide get a check (rows, columns, duplicates,
+    links, role inboxes, sections, length…): the reviewers used to pass a list
+    nobody counted. A rule that stays a judgement stays the reviewers'."""
+    cfg = dict(run.get("config") or {})
+    store = bat_loop.get_store()
+    rules = cfg.get("contract") or []
+    if not _factory_run(run) or cfg.get("contract_shaped") or not rules or not creds or store is None:
+        return
+    if not all((r.get("check") or {}).get("type") == "judge" for r in rules):
+        return
+    from captain_claw.flight_deck.basna_routes import _provider_call
+    from captain_claw.llm import Message
+    shaped: list[dict] = []
+    try:
+        prov, mt = _provider_call(creds, temperature=0.0, default_max=4096, cap=16384)
+        listing = "\n".join(f'- id "{r["id"]}": {r["text"]}' for r in rules)
+        resp = await prov.complete(messages=[
+            Message(role="system", content=_SHAPE_SYSTEM.replace("COMMAND_SHAPE", _COMMAND_SHAPE if has_shell else "")),
+            Message(role="user", content=f"# The job\n{str(run.get('task', ''))[:6000]}\n\n# Its rules\n{listing}"),
+        ], temperature=0.0, max_tokens=mt)
+        shaped = _read_rules(resp.content or "")
+    except Exception as e:  # noqa: BLE001 — the rules stay with the reviewers
+        log.warning("bat contract shaping failed", run_id=run.get("id"), error=str(e))
+    by_id = {str(r["id"]): r for r in shaped}
+    # Each owner's rule keeps its words; only its check can change.
+    out = [{**r, "check": by_id[str(r["id"])]["check"]} if str(r["id"]) in by_id else r for r in rules]
+    cfg.update(contract=out, contract_shaped=True)
+    await store.set_config(run["id"], cfg)
+    scripted = [r["text"] for r in out if (r.get("check") or {}).get("type") != "judge"]
+    if scripted:
+        await store.append_event(run["id"], "note", f"{len(scripted)} of its {len(out)} done-checks are checked by "
+                                 "Captain itself: " + "; ".join(scripted)[:400])
 
 
 async def _contract_checks(run: dict, has_shell: bool) -> tuple[list[Check], list[dict], list[dict]]:
@@ -1274,6 +1424,38 @@ def _pick_tier(tiers: dict | None, prefer: tuple[str, ...] = ("reason", "fast"))
 
 # ── the three handlers (registered into bat_loop at import) ────────────
 
+_LOCAL_HOST = re.compile(r"^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?|.*\.local$)", re.I)
+
+
+def one_machine(tiers: dict | None) -> bool:
+    """Every tier on one model, or on one self-hosted server: steps side by side only
+    queue on it. (On the Pi, three batches at once took 50-180 min each; one at a
+    time, 30-45 min.)"""
+    from urllib.parse import urlparse
+    models, servers = set(), set()
+    for t in (tiers or {}).values():
+        if not isinstance(t, dict) or not t.get("model"):
+            continue
+        models.add((str(t.get("provider") or ""), str(t.get("model") or ""), str(t.get("base_url") or "")))
+        host = urlparse(str(t.get("base_url") or "")).hostname or ""
+        servers.add(host if host and _LOCAL_HOST.match(host) else "")
+    if not models:
+        return False
+    return len(models) == 1 or (len(servers) == 1 and "" not in servers)
+
+
+async def _one_at_a_time(run: dict, tiers: dict | None) -> None:
+    """A run whose owner has one model (or one machine) runs its steps one at a time."""
+    cfg = dict(run.get("config") or {})
+    store = bat_loop.get_store()
+    if store is None or "max_parallel" in cfg or not one_machine(tiers):
+        return
+    cfg["max_parallel"] = 1
+    await store.set_config(run["id"], cfg)
+    await store.append_event(run["id"], "note", "One model does all the work here, so steps run one at a time: "
+                             "side by side they would only wait for it.")
+
+
 async def _bat_planner(run: dict) -> list[dict]:
     async with _metered(run["id"], "plan"):
         try:
@@ -1282,8 +1464,12 @@ async def _bat_planner(run: dict) -> list[dict]:
             db = get_db()
             tiers, _ = await _load_owner_tiers(db, run["owner_id"])
             user = await db.get_user_by_id(run["owner_id"])
-            await _ensure_contract(run, _creds_for(tiers),
-                                   _owner_has_shell(user) and not (run.get("config") or {}).get("rehearsal"))
+            shell = _owner_has_shell(user) and not (run.get("config") or {}).get("rehearsal")
+            await _ensure_contract(run, _creds_for(tiers), shell)
+            store = bat_loop.get_store()
+            fresh = await store.get_run(run["id"]) if store is not None else None
+            await _shape_contract(fresh or run, _creds_for(tiers), shell)
+            await _one_at_a_time(fresh or run, tiers)
         except Exception as e:  # noqa: BLE001
             log.warning("bat contract step failed", run_id=run.get("id"), error=str(e))
         store = bat_loop.get_store()
@@ -1316,9 +1502,10 @@ async def _plan_steps(run: dict) -> list[dict]:
             resp = await prov.complete(messages=[
                 Message(role="system", content=(
                     "Break the user's goal into the smallest ordered list of concrete, independently "
-                    "checkable steps that together finish it. " + _STEP_SIZE + " Return ONLY a JSON array "
+                    "checkable steps that together finish it. " + _STEP_SIZE + _HOW + " Return ONLY a JSON array "
                     "(max 12) of objects "
-                    '{"step": "<short step>", "after": [<1-based numbers of the earlier steps it needs>]}. '
+                    '{"step": "<short step>", "after": [<1-based numbers of the earlier steps it needs>], '
+                    '"how": "agent"}. '
                     'A step that needs none gets "after": []. Steps that don\'t need each other run at the '
                     "same time, so say so wherever order doesn't matter, and keep such steps to separate "
                     "files. No prose.")),
@@ -1326,6 +1513,7 @@ async def _plan_steps(run: dict) -> list[dict]:
             ], temperature=0.2, max_tokens=mt)
             steps = _parse_plan(resp.content or "", run.get("task", ""))
             if steps:
+                await _keep_hows(run, steps)
                 return steps
     except Exception as e:  # noqa: BLE001
         log.warning("bat planner fell back to single step", run_id=run.get("id"), error=str(e))
@@ -1534,8 +1722,18 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning("bat judge tiers failed; deterministic-only", run_id=sid, error=str(e))
         creds, independent = None, False
+    profile = None
     if finished:
         evidence = await asyncio.to_thread(_evidence_block, _run_folder(run))
+        try:
+            from captain_claw.flight_deck import deliverable_profile
+            named = {str((r.get("check") or {}).get("path") or "") for r in cfg.get("contract") or []} - {""}
+            profile = await asyncio.to_thread(deliverable_profile.profile, _run_files(_run_folder(run)), named)
+            block = deliverable_profile.render(profile)
+            if block:
+                evidence = f"{block}\n\n{evidence}"
+        except Exception as e:  # noqa: BLE001 — the reviewers still see the files
+            log.warning("bat deliverable profile failed", run_id=sid, error=str(e))
         try:
             more, open_rules, script_failed = await _contract_checks(run, has_shell)
             cleared = await _audit_failed_checks(run, script_failed, creds, _run_folder(run)) if script_failed and creds else {}
@@ -1638,7 +1836,11 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
     failing += [c.name for c in det[1:] if c.critical and not c.passed]
     if not finished and not failed:
         failing.append(det[0].name)
-    return {**verdict.to_dict(), "failing": failing}
+    out = {**verdict.to_dict(), "failing": failing}
+    if profile is not None:
+        from captain_claw.flight_deck import deliverable_profile
+        out["profile"] = deliverable_profile.summary(profile)
+    return out
 
 
 def _replan_system(limit: int) -> str:

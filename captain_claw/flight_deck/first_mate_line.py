@@ -44,9 +44,10 @@ async def _made_and_took(run: dict[str, Any]) -> str:
     "" when neither can be said (the message goes out without them)."""
     try:
         from captain_claw.flight_deck import first_mate_results
-        got = await first_mate_results.run_results(run)
+        got = await first_mate_results.run_results(run, profile_now=True)
         lines = [first_mate_results.results_line(got),
-                 first_mate_results.timing_line(run.get("timing") or (got or {}).get("timing"))]
+                 first_mate_results.timing_line(run.get("timing") or (got or {}).get("timing")),
+                 first_mate_results.worth_a_look(got)]
         return "\n".join(x for x in lines if x)
     except Exception:  # noqa: BLE001
         log.debug("first mate: no results line for a finished run", exc_info=True)

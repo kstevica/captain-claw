@@ -129,7 +129,7 @@ def test_an_answer_becomes_checked_fields():
     with pytest.raises(FirstMateError, match="no charter"):
         drafting.fields_of({**ANSWER, "charter": ""})
     many = drafting.fields_of({**ANSWER, "cases": [ANSWER["cases"][0]] * 6, "done_when": ["a"] * 9})
-    assert len(many["cases"]) == 3 and len(many["checks"]["contract"]) == 5
+    assert len(many["cases"]) == 3 and len(many["checks"]["contract"]) == drafting.DONE_WHEN_MAX == 6
     assert drafting._parse('Here it is:\n```json\n{"title": "x"}\n```') == {"title": "x"}
 
 
