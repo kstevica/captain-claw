@@ -12,11 +12,19 @@ export interface BatSettings {
   idle_minutes: number
   /** How long one of Bat's own model calls (planning, checks, reviewers) may take. */
   call_minutes: number
+  /** Which tier of each person's set works the steps; '' = the tier Bat plans on. */
+  worker_tier: string
 }
+
+export type BatNumberSetting = Exclude<keyof BatSettings, 'worker_tier'>
 
 export interface BatSettingsView extends BatSettings {
   defaults: BatSettings
-  ranges: Record<keyof BatSettings, [number, number]>
+  ranges: Record<BatNumberSetting, [number, number]>
+  /** The tier names a run can use. */
+  tiers: string[]
+  /** The model on each tier of the admin's own set, to show what a choice means. */
+  your_tiers: Record<string, string>
 }
 
 async function call(init?: RequestInit): Promise<BatSettingsView> {
