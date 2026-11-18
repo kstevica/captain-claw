@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ChevronDown, ChevronRight, ExternalLink, Loader2, Lock, Pencil, Play, Plus, Sparkles, Square, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, ExternalLink, FlaskConical, History, Info, Loader2, Lock, Pencil, Play, Plus, Sparkles, Square, Trash2 } from 'lucide-react'
 import {
   addCase,
   checkNow,
@@ -18,7 +18,7 @@ import {
   type ImprovementRun,
 } from '../../services/firstMate'
 import { useUIStore } from '../../stores/uiStore'
-import { ErrorBox, Pill, errText, type PillTone } from './ui'
+import { ErrorBox, Pill, Section, errText, type PillTone } from './ui'
 
 // A factory's test cases and the checks run on them. A case is an input the
 // factory might get and what a good result does; a check runs one version on
@@ -118,14 +118,17 @@ export function Checks({ factoryId, live, seed, onSeedUsed, onChanged, onNotice 
   if (!data) return error ? <ErrorBox text={error} onDismiss={() => setError(null)} /> : <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-7">
       {error && <ErrorBox text={error} onDismiss={() => setError(null)} />}
-      <p className="text-[13px] leading-relaxed text-zinc-400">
-        Cases are inputs this factory might get, each with what a good result does. A check runs a version on
-        every case as a rehearsal, so nothing outside changes, and a reviewer on another model grades each
-        result. A new version goes live only if it scores about as well as the live one. It's also checked once
-        a week while your First Mate is on.
-      </p>
+      <div className="flex items-start gap-3 rounded-2xl border border-[var(--fd-line)] bg-gradient-to-br from-violet-500/[0.07] via-transparent to-fuchsia-500/[0.05] px-4 py-3">
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-violet-600 dark:text-violet-300" />
+        <p className="text-[13px] leading-relaxed text-zinc-400">
+          Cases are inputs this factory might get, each with what a good result does. A check runs a version on
+          every case as a rehearsal, so nothing outside changes, and a reviewer on another model grades each
+          result. A new version goes live only if it scores about as well as the live one. It's also checked once
+          a week while your First Mate is on.
+        </p>
+      </div>
 
       {running && (
         <section className="fd-card flex flex-wrap items-center gap-2 border-violet-500/30 p-3">
@@ -141,9 +144,8 @@ export function Checks({ factoryId, live, seed, onSeedUsed, onChanged, onNotice 
         </section>
       )}
 
-      <section className="space-y-2.5">
-        <div className="flex flex-wrap items-center gap-2">
-          <h3 className="flex-1 text-sm font-semibold text-zinc-100">Cases · {cases.length} of {data.max}</h3>
+      <Section icon={FlaskConical} title="Cases" hint={`${cases.length} of ${data.max} · inputs it might get, each with what a good result does`}
+        action={<div className="flex flex-wrap items-center justify-end gap-2">
           {editing === null && cases.length < data.max && (
             <button onClick={() => { setForm(EMPTY); setEditing('new') }} className="fd-btn-quiet h-8 px-3 text-xs">
               <Plus className="h-3.5 w-3.5" /> Add a case
@@ -155,7 +157,8 @@ export function Checks({ factoryId, live, seed, onSeedUsed, onChanged, onNotice 
             className="inline-flex h-8 items-center gap-1.5 rounded-full bg-violet-600 px-3.5 text-xs font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60">
             {busy === 'check' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />} Run the checks now
           </button>
-        </div>
+        </div>}>
+        <div className="space-y-2.5">
 
         {editing === 'new' && (
           <CaseForm form={form} setForm={setForm} label={label} input={input} busy={busy === 'save'} ready={ready}
@@ -165,14 +168,14 @@ export function Checks({ factoryId, live, seed, onSeedUsed, onChanged, onNotice 
         )}
 
         {cases.length === 0 && editing !== 'new' && (
-          <p className="text-xs text-zinc-500">
+          <p className="rounded-[var(--fd-radius-card)] border border-dashed border-zinc-800 px-4 py-4 text-sm text-zinc-500">
             No cases yet. Add one by hand, or open a run that started on new mail and choose Make a test case.
           </p>
         )}
 
-        <ul className="space-y-2.5">
+        <ul className="grid gap-2.5 @5xl:grid-cols-2">
           {cases.map((c) => (editing === c.id ? (
-            <li key={c.id}>
+            <li key={c.id} className="@5xl:col-span-2">
               <CaseForm form={form} setForm={setForm} label={label} input={input} busy={busy === 'save'} ready={ready}
                 title="Edit the case" hint="" onCancel={() => { setEditing(null); setForm(EMPTY) }} onSave={() => void save()} />
             </li>
@@ -210,16 +213,16 @@ export function Checks({ factoryId, live, seed, onSeedUsed, onChanged, onNotice 
             </li>
           )))}
         </ul>
-      </section>
+        </div>
+      </Section>
 
       <Improvements factoryId={factoryId} onChanged={onChanged} onNotice={onNotice} />
 
       {data.checks.length > 0 && (
-        <section>
-          <h3 className="mb-2 text-sm font-semibold text-zinc-100">Checks</h3>
-          <ul className="space-y-1.5">
+        <Section icon={History} title="Checks run" hint="Each version's score on its cases">
+          <ul className="fd-card divide-y divide-[var(--fd-line)] overflow-hidden p-0">
             {data.checks.map((k) => (
-              <li key={k.id} className="text-[13px]">
+              <li key={k.id} className="px-3 py-2 text-[13px]">
                 <button onClick={() => setOpenCheck(openCheck === k.id ? null : k.id)} className="flex w-full items-center gap-2 text-left">
                   {openCheck === k.id ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
                   <span className="w-24 shrink-0 text-xs text-zinc-500">{whenText(k.created_at)}</span>
@@ -250,7 +253,7 @@ export function Checks({ factoryId, live, seed, onSeedUsed, onChanged, onNotice 
               </li>
             ))}
           </ul>
-        </section>
+        </Section>
       )}
     </div>
   )
@@ -301,16 +304,15 @@ function Improvements({ factoryId, onChanged, onNotice }: {
   if (!data) return null
   if (!data.runs.length && !data.available) return null  // Captain Swarm isn't theirs on this deck
   return (
-    <section className="space-y-2.5">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="flex-1 text-sm font-semibold text-zinc-100">Improvement runs</h3>
+    <Section icon={Sparkles} title="Improvement runs" hint="Captain Swarm looks for a better charter on these cases"
+      action={
         <button onClick={() => void act('improve', () => improveFactory(factoryId),
           'An improvement run started: it tries better charters on these cases')}
           disabled={!data.can.ok || !!busy} title={data.can.ok ? 'Captain Swarm tries better charters on these cases' : data.can.why}
           className="fd-btn-quiet h-8 px-3 text-xs">
           {busy === 'improve' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />} Run one now
-        </button>
-      </div>
+        </button>}>
+      <div className="space-y-2.5">
       <p className="text-xs text-zinc-500">
         Captain Swarm tries better charters and steps on these cases, as rehearsals, and keeps only what scores
         clearly higher and holds up on the sealed cases it never showed the writer. The best comes back as a draft
@@ -318,9 +320,9 @@ function Improvements({ factoryId, onChanged, onNotice }: {
       </p>
       {error && <ErrorBox text={error} onDismiss={() => setError(null)} />}
       {data.runs.length > 0 && (
-        <ul className="space-y-1.5">
+        <ul className="fd-card divide-y divide-[var(--fd-line)] overflow-hidden p-0">
           {data.runs.map((r) => (
-            <li key={r.id} className="flex flex-wrap items-center gap-2 text-[13px]">
+            <li key={r.id} className="flex flex-wrap items-center gap-2 px-3 py-2 text-[13px]">
               <span className="w-24 shrink-0 text-xs text-zinc-500">{whenText(r.created_at)}</span>
               <Pill tone={r.going ? 'violet' : r.improved ? 'green' : r.status === 'failed' ? 'red' : 'zinc'}>
                 {r.going ? RUN_WORDS[r.status] ?? r.status : r.improved ? 'Found a better one' : RUN_WORDS[r.status] ?? r.status}
@@ -345,7 +347,8 @@ function Improvements({ factoryId, onChanged, onNotice }: {
           ))}
         </ul>
       )}
-    </section>
+      </div>
+    </Section>
   )
 }
 
