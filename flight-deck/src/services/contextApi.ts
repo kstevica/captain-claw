@@ -53,6 +53,9 @@ export const contextApi = {
   upload,
   drop: (id: string) => api<{ ok: boolean }>(`/fd/context/uploads/${id}`, { method: 'DELETE' }),
   paste: (text: string, name = '') => post<Staged>('/fd/context/uploads/text', { text, name }),
+  /** Web links, as many as needed (up to 500), kept as one Markdown list. */
+  links: (links: { url: string; title?: string; note?: string }[], name = '') =>
+    post<Staged>('/fd/context/uploads/links', { links, name }),
   /** Files from one of Flight Deck's folders (`owner` '' = the person's own): all or none. */
   deckFiles: (project: string, owner: string, paths: string[]) =>
     post<{ files: Staged[] }>('/fd/context/uploads/deck-files', { project, owner, paths }).then((r) => r.files),

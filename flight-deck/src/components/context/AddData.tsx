@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { createPortal } from 'react-dom'
 import {
   AlertTriangle, ArrowLeft, Bot, Check, ChevronRight, ClipboardPaste, Cloud, Database, FileText, Folder,
-  FolderSymlink, Loader2, MessagesSquare, Search, Share2, UploadCloud, X, type LucideIcon,
+  FolderSymlink, Link2, Loader2, MessagesSquare, Plus, Search, Share2, Trash2, UploadCloud, X, type LucideIcon,
 } from 'lucide-react'
 import {
   contextApi,
@@ -21,11 +21,12 @@ import { sizeText } from '../../utils/format'
 // the tray at the bottom; the panel's button hands the tray to whatever it's for (a
 // factory, a run, a Crew task). Closed without that, what's in the tray is let go of.
 
-export type DataSource = 'upload' | 'paste' | 'agents' | 'deck' | 'conversation'
+export type DataSource = 'upload' | 'paste' | 'links' | 'agents' | 'deck' | 'conversation'
 
 const SOURCES: { id: DataSource; label: string; hint: string; icon: LucideIcon }[] = [
   { id: 'upload', label: 'This computer', hint: 'Drop or browse files', icon: UploadCloud },
   { id: 'paste', label: 'Paste', hint: 'Notes, a list, a table', icon: ClipboardPaste },
+  { id: 'links', label: 'Links', hint: 'Web pages to work from', icon: Link2 },
   { id: 'agents', label: "Agents' files", hint: 'What your agents saved', icon: Bot },
   { id: 'deck', label: 'Flight Deck', hint: 'Your folders and shared ones', icon: Folder },
   { id: 'conversation', label: 'A conversation', hint: 'What you said with an agent', icon: MessagesSquare },
@@ -223,6 +224,7 @@ export function AddDataPanel({ title, subtitle, action, onDone, onClose, start =
           <div className="relative min-h-0 min-w-0 flex-1 overflow-y-auto px-5 py-5">
             {source === 'upload' && <UploadSource onFiles={upload} />}
             {source === 'paste' && <PasteSource onAdded={added} onFiles={upload} />}
+            {source === 'links' && <LinksSource onAdded={added} />}
             {source === 'agents' && <AgentsSource onAdded={added} />}
             {source === 'deck' && <DeckSource onAdded={added} />}
             {source === 'conversation' && <ConversationSource onAdded={added} />}
@@ -365,6 +367,130 @@ function PasteSource({ onAdded, onFiles }: { onAdded: (list: Staged[]) => void; 
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardPaste className="h-4 w-4" />}Add it
         </button>
       </div>
+      {error && <p role="alert" className="mt-2 text-xs text-red-700 dark:text-red-300">{error}</p>}
+    </div>
+  )
+}
+
+// ── Links: as many as needed, kept as one list ──
+
+const URL_RE = /^https?:\/\/[^\s/?#]+\.[^\s/?#]+\S*$/i
+const FIND_URLS = /https?:\/\/[^\s<>"'`)\]]+/gi
+const LINKS_MAX = 500
+
+interface LinkRow { id: string; url: string; title: string }
+let linkSeq = 0
+const linkRow = (url = '', title = ''): LinkRow => ({ id: `l${++linkSeq}`, url, title })
+
+/** Every web address in some text, without trailing punctuation, each once. */
+function urlsIn(text: string): string[] {
+  const found = (text.match(FIND_URLS) ?? []).map((u) => u.replace(/[.,;:!?]+$/, ''))
+  return [...new Set(found)]
+}
+
+function LinksSource({ onAdded }: { onAdded: (list: Staged[]) => void }) {
+  const [rows, setRows] = useState<LinkRow[]>([linkRow()])
+  const [bulk, setBulk] = useState<string | null>(null)
+  const [name, setName] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const filled = rows.filter((r) => r.url.trim())
+  const bad = filled.filter((r) => !URL_RE.test(r.url.trim()))
+  const ready = filled.length > 0 && bad.length === 0
+
+  const set = (id: string, change: Partial<LinkRow>) => setRows((old) => old.map((r) => (r.id === id ? { ...r, ...change } : r)))
+  const take = (urls: string[]) => setRows((old) => {
+    const have = new Set(old.map((r) => r.url.trim().toLowerCase()).filter(Boolean))
+    const fresh = urls.filter((u) => !have.has(u.toLowerCase())).map((u) => linkRow(u))
+    const kept = old.filter((r) => r.url.trim() || r.title.trim())
+    return [...kept, ...fresh].slice(0, LINKS_MAX).concat(kept.length + fresh.length ? [] : [linkRow()])
+  })
+
+  const add = async () => {
+    setBusy(true); setError('')
+    try {
+      onAdded([await contextApi.links(filled.map((r) => ({ url: r.url.trim(), title: r.title.trim() })), name)])
+      setRows([linkRow()]); setName('')
+    } catch (e) {
+      setError(errorOf(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div>
+      <SourceHead title="Links" hint="Web pages to work from, as many as you need: they're kept as one list that the workers open as the work needs them." />
+      {bulk === null ? (
+        <>
+          <ol className="space-y-2" aria-label="Links">
+            {rows.map((r, i) => {
+              const wrong = !!r.url.trim() && !URL_RE.test(r.url.trim())
+              return (
+                <li key={r.id} className="flex flex-wrap items-start gap-2 @lg:flex-nowrap">
+                  <span className="mt-2 w-5 shrink-0 text-right text-[11px] font-semibold tabular-nums text-zinc-500">{i + 1}</span>
+                  <div className="min-w-0 flex-1">
+                    <input value={r.url} placeholder="https://…" aria-label={`Link ${i + 1}`} inputMode="url" autoFocus={i === rows.length - 1 && i > 0}
+                      onChange={(e) => set(r.id, { url: e.target.value })}
+                      onPaste={(e) => {
+                        const found = urlsIn(e.clipboardData.getData('text'))
+                        if (found.length > 1) { e.preventDefault(); set(r.id, { url: found[0] }); take(found.slice(1)) }
+                      }}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && r.url.trim()) { e.preventDefault(); setRows((old) => [...old, linkRow()]) } }}
+                      className={`${FIELD} h-9 py-0 font-mono text-[12.5px] ${wrong ? '!border-red-500/60' : ''}`} />
+                    {wrong && <p className="mt-0.5 text-[11px] text-red-700 dark:text-red-300">Not a web address: it starts with http:// or https://</p>}
+                  </div>
+                  <input value={r.title} placeholder="What it is (optional)" aria-label={`What link ${i + 1} is`}
+                    onChange={(e) => set(r.id, { title: e.target.value })} className={`${FIELD} h-9 w-full py-0 @lg:w-56`} />
+                  <button type="button" onClick={() => setRows((old) => (old.length > 1 ? old.filter((x) => x.id !== r.id) : [linkRow()]))}
+                    aria-label={`Remove link ${i + 1}`} title="Remove it"
+                    className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-300">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </li>
+              )
+            })}
+          </ol>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => setRows((old) => [...old, linkRow()])} disabled={rows.length >= LINKS_MAX}
+              className="inline-flex h-8 items-center gap-1.5 rounded-full border border-dashed border-[var(--fd-line)] px-3 text-xs font-medium text-zinc-300 transition-colors hover:border-violet-500/40 hover:text-zinc-100">
+              <Plus className="h-3.5 w-3.5" />Add a link
+            </button>
+            <button type="button" onClick={() => setBulk('')}
+              className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--fd-line)] px-3 text-xs font-medium text-zinc-300 transition-colors hover:border-violet-500/40 hover:text-zinc-100">
+              <ClipboardPaste className="h-3.5 w-3.5" />Paste many
+            </button>
+          </div>
+        </>
+      ) : (
+        <div>
+          <label className="sr-only" htmlFor="ad-links-bulk">Paste links</label>
+          <textarea id="ad-links-bulk" value={bulk} onChange={(e) => setBulk(e.target.value)} autoFocus
+            placeholder="Paste links: one per line, or any text with web addresses in it (an email, a document, a list)."
+            className={`${FIELD} min-h-[12rem] resize-y font-mono text-[12.5px] leading-relaxed`} />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="text-[11px] text-zinc-500">{urlsIn(bulk).length} link{urlsIn(bulk).length === 1 ? '' : 's'} found</span>
+            <button type="button" onClick={() => setBulk(null)} className={`${QUIET} ml-auto h-8 px-3 text-xs`}>Back</button>
+            <button type="button" disabled={!urlsIn(bulk).length} onClick={() => { take(urlsIn(bulk)); setBulk(null) }} className={`${PRIMARY} h-8 px-3 text-xs`}>
+              <Plus className="h-3.5 w-3.5" />Take them
+            </button>
+          </div>
+        </div>
+      )}
+      {bulk === null && (
+        <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-[var(--fd-line)] pt-3">
+          <label className="sr-only" htmlFor="ad-links-name">Name the list</label>
+          <input id="ad-links-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Name the list (optional)" maxLength={120}
+            className={`${FIELD} h-9 min-w-0 flex-1 py-0 @lg:max-w-xs`} />
+          <span className="text-[11px] tabular-nums text-zinc-500">
+            {filled.length} link{filled.length === 1 ? '' : 's'}{bad.length ? ` · ${bad.length} to fix` : ''}
+          </span>
+          <button onClick={() => void add()} disabled={busy || !ready} className={`${PRIMARY} ml-auto`}>
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+            {filled.length > 1 ? `Add ${filled.length} links` : 'Add the link'}
+          </button>
+        </div>
+      )}
       {error && <p role="alert" className="mt-2 text-xs text-red-700 dark:text-red-300">{error}</p>}
     </div>
   )

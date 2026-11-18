@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  Bot, ClipboardPaste, Database, Download, Eye, Folder, Loader2, MessagesSquare, Plus, Trash2, UploadCloud,
+  Bot, ClipboardPaste, Database, Download, Eye, Folder, Link2, Loader2, MessagesSquare, Plus, Trash2, UploadCloud,
   type LucideIcon,
 } from 'lucide-react'
 import {
@@ -20,6 +20,7 @@ import { errText } from './ui'
 const START_CHIPS: { source: DataSource; label: string; icon: LucideIcon }[] = [
   { source: 'upload', label: 'Upload', icon: UploadCloud },
   { source: 'paste', label: 'Paste', icon: ClipboardPaste },
+  { source: 'links', label: 'Links', icon: Link2 },
   { source: 'agents', label: "Agents' files", icon: Bot },
   { source: 'deck', label: 'Flight Deck', icon: Folder },
   { source: 'conversation', label: 'Conversation', icon: MessagesSquare },
