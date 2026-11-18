@@ -350,6 +350,24 @@ async def reopen_run(store: BatStore, run_id: str, *, token_cap: int | None = No
     return await store.get_run(run_id)
 
 
+def run_parallel(run: dict | None) -> int:
+    """A run's own limit on steps at once (``config.max_parallel``), 0 = the deck's."""
+    try:
+        return max(0, int(((run or {}).get("config") or {}).get("max_parallel") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def dissent(verdict: dict) -> str:
+    """"1 of 3 reviewers objected: <why>", for a run the panel passed by a majority."""
+    votes = (verdict.get("panel") or {}).get("votes") or []
+    no = [v for v in votes if v.get("vote") == "disagree" and str(v.get("reason") or "").strip()]
+    if not no:
+        return ""
+    why = " / ".join(str(v["reason"]).strip() for v in no)[:900]
+    return f"{len(no)} of {len(votes)} reviewer{'' if len(votes) == 1 else 's'} objected: {why}"
+
+
 def _assemble_truth(steps: list[dict]) -> str:
     done = [s for s in steps if s["status"] == "done" and (s.get("output") or "").strip()]
     if not done:
@@ -579,6 +597,10 @@ class BatDriver:
                 truth = _assemble_truth(steps)
                 if verdict.get("overridden"):
                     truth = f"> Reviewers still objected when this run ended: {verdict.get('reason', '')}\n\n{truth}"
+                else:
+                    said = dissent(verdict)
+                    if said:  # passed by a majority: the one who said no is heard, not dropped
+                        truth = f"> {said}\n\n{truth}"
                 await self._finish(
                     run_id, "done", truth=truth,
                     analysis={"rounds": rounds, "verdict": verdict},
@@ -663,6 +685,9 @@ class BatDriver:
                     busy = set(running.values())
                     # Read each time round: an admin's change applies to a run going now.
                     limit = _max_parallel() if held is None else min(held, _max_parallel())
+                    own = run_parallel(cur)
+                    if own:  # this run's own limit (one model: one step at a time)
+                        limit = min(limit, own)
                     room = limit - len(running)
                     holding = ({c["step_key"] for c in await self.store.list_children(run_id, open_only=True)}
                                if _POLL_SPEND is not None else set())

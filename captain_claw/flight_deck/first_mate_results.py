@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import re
 from pathlib import Path
 from typing import Any
 
@@ -29,10 +28,7 @@ from captain_claw.flight_deck import first_mate_store as fms
 MAX_FILES = 300
 ROWS_MAX_BYTES = 20_000_000
 RUNS_SHOWN = 10
-_MAIN_NAME = re.compile(r"(^|[\W_])(final|result|results|report|output|deliverable|summary|merged|master|complete)"
-                        r"($|[\W_])", re.IGNORECASE)
-_WORK_NAME = re.compile(r"^(tmp|temp|scratch|test|debug)([\W_]|$)|[\W_](tmp|temp|scratch)$", re.IGNORECASE)
-_WORK_EXTS = {".py", ".sh", ".js", ".mjs", ".ts", ".ipynb", ".pyc", ".log", ".bak", ".swp"}
+RUNS_PROFILED = 3  # the newest runs' files are read for what they hold; older ones keep what Bat found
 _TABLE_EXTS = {".csv": ",", ".tsv": "\t"}
 
 
@@ -62,28 +58,21 @@ def named_by_checks(bat_run: dict[str, Any] | None) -> set[str]:
     return out
 
 
-def _kind(rel: str, named: set[str]) -> str:
-    if rel in named:
-        return "main"
-    name = Path(rel).name
-    stem, ext = Path(name).stem, Path(name).suffix.lower()
-    if "/" in rel or ext in _WORK_EXTS or _WORK_NAME.search(stem):
-        return "work"
-    return "main" if _MAIN_NAME.search(stem) else "other"
-
-
 def sort_files(found: list[tuple[float, str, Path, int]], named: set[str], picked: set[str]) -> dict[str, Any]:
-    """``found`` from ``bat_routes._run_files`` (newest first) into main / other / work."""
-    groups: dict[str, list[dict[str, Any]]] = {"main": [], "other": [], "work": []}
+    """``found`` from ``bat_routes._run_files`` (newest first) into main / other / work
+    (``deliverable_profile.sort_files``), each with its rows and whether it is in the library."""
+    from captain_claw.flight_deck import deliverable_profile as dp
     whole = "" in picked
-    for mtime, rel, path, size in found:
-        item = {"path": rel, "name": Path(rel).name, "size": size, "mtime": mtime,
+
+    def item(entry: tuple[float, str, Path, int]) -> dict[str, Any]:
+        mtime, rel, path, size = entry
+        return {"path": rel, "name": Path(rel).name, "size": size, "mtime": mtime,
                 "rows": rows_of(path), "library": whole or rel in picked}
-        groups[_kind(rel, named)].append(item)
-    groups["main"].sort(key=lambda item: item["path"] not in named)  # what the checks name leads
-    if not groups["main"] and groups["other"]:
-        groups["main"].append(groups["other"].pop(0))  # the newest at the top
-    return {**groups, "total": len(found), "bytes": sum(f[3] for f in found)}
+
+    groups = dp.sort_files(found, named)
+    code = dp.is_code_project(found)
+    out = {k: [item(e) for e in v[:60 if code and k == "main" else len(v)]] for k, v in groups.items()}
+    return {**out, "code": code, "total": len(found), "bytes": sum(f[3] for f in found)}
 
 
 def _library_picks(owner_id: str, project: str) -> set[str]:
@@ -94,7 +83,7 @@ def _library_picks(owner_id: str, project: str) -> set[str]:
         return set()
 
 
-async def run_results(run: dict[str, Any]) -> dict[str, Any] | None:
+async def run_results(run: dict[str, Any], *, profile_now: bool = False) -> dict[str, Any] | None:
     """One First Mate run's files, sorted; None when it has no folder."""
     from captain_claw.flight_deck import bat_loop
     from captain_claw.flight_deck.bat_routes import _project_of, _run_files, _run_folder
@@ -105,17 +94,36 @@ async def run_results(run: dict[str, Any]) -> dict[str, Any] | None:
     found = await asyncio.to_thread(_run_files, _run_folder({"id": child, "owner_id": run["owner_id"]}), limit=MAX_FILES)
     store = bat_loop.get_store()
     bat_run = await store.get_run(child) if store is not None else None
-    sorted_ = await asyncio.to_thread(sort_files, found, named_by_checks(bat_run), _library_picks(run["owner_id"], project))
+    named = named_by_checks(bat_run)
+    sorted_ = await asyncio.to_thread(sort_files, found, named, _library_picks(run["owner_id"], project))
     timing = run.get("timing") or await run_timing(run)
+    verdict = ((bat_run or {}).get("analysis") or {}).get("verdict") or {}
+    checked = verdict.get("profile")
+    if profile_now and found:  # what the files hold now (a going run's too)
+        from captain_claw.flight_deck import deliverable_profile as dp
+        checked = dp.summary(await asyncio.to_thread(dp.profile, found, named))
+    from captain_claw.flight_deck.bat_loop import dissent
     return {"run_id": run["id"], "status": run["status"], "kind": run["kind"], "created_at": run["created_at"],
-            "ended_at": run.get("ended_at"), "project": project, "timing": timing, **sorted_}
+            "ended_at": run.get("ended_at"), "project": project, "timing": timing,
+            "checked": {"flags": (checked or {}).get("flags") or [], "kind": (checked or {}).get("kind")} if checked else None,
+            "dissent": dissent(verdict) if verdict else "",
+            "checks": _check_results(verdict), **sorted_}
+
+
+def _check_results(verdict: dict[str, Any]) -> list[dict[str, Any]]:
+    """The done-checks Captain ran itself on the result, passed or not."""
+    out = []
+    for c in verdict.get("det_criticals") or []:
+        if str(c).startswith("acceptance: "):
+            out.append({"text": str(c)[len("acceptance: "):], "passed": False})
+    return out
 
 
 async def factory_results(factory_id: str, *, limit: int = RUNS_SHOWN) -> list[dict[str, Any]]:
     """The factory's newest runs that left files, newest first."""
     out = []
     for run in fms.get_store().list_runs(factory_id, limit=limit * 2):
-        got = await run_results(run)
+        got = await run_results(run, profile_now=len(out) < RUNS_PROFILED)
         if got and got["total"]:
             out.append(got)
         if len(out) >= limit:
@@ -143,7 +151,7 @@ async def latest(factory_id: str) -> dict[str, Any] | None:
 # the run did before the deck went down. The time a stopped run waited for its
 # owner runs from the stop to "continued where it stopped".
 
-_STOPS = ("cancelled", "budget", "awaiting_human")
+_STOPS = ("cancelled", "budget", "awaiting_human", "awaiting_plan")
 
 
 def _is_stop(ev: dict[str, Any]) -> bool:
@@ -198,6 +206,9 @@ def timing_of(events: list[dict[str, Any]], started: float, ended: float | None,
             if stopped_at is not None:
                 waits.append((stopped_at, ts))
                 stopped_at = None
+        elif ev["stage"] == "phase" and msg == "running" and stopped_at is not None:
+            waits.append((stopped_at, ts))  # a plan approved, a question answered: it goes on
+            stopped_at = None
         elif _is_stop(ev):
             close_all(ts)
             stopped_at = ts if stopped_at is None else stopped_at
@@ -260,6 +271,19 @@ def timing_line(timing: dict[str, Any] | None) -> str:
     if timing.get("waiting_s", 0) >= 60:
         parts.append(f"waiting for you {duration_text(timing['waiting_s'])}")
     return " · ".join(parts)
+
+
+def worth_a_look(got: dict[str, Any] | None, limit: int = 3) -> str:
+    """"Worth a look: 43% of Email are role inboxes …; 1 of 3 reviewers objected: …"."""
+    if not got:
+        return ""
+    bits = [*((got.get("checked") or {}).get("flags") or [])[:limit]]
+    failed = [c["text"] for c in got.get("checks") or [] if not c.get("passed")]
+    if failed:
+        bits.insert(0, "failed checks: " + "; ".join(failed[:3]))
+    if got.get("dissent"):
+        bits.append(got["dissent"][:300])
+    return ("Worth a look: " + " · ".join(bits)) if bits else ""
 
 
 def results_line(got: dict[str, Any] | None) -> str:

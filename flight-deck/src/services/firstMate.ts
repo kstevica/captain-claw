@@ -156,6 +156,14 @@ export interface RunResults {
   work: ResultFile[]
   total: number
   bytes: number
+  /** A code project: its files are the result, together. */
+  code?: boolean
+  /** What Captain found reading the delivered files (a list's role inboxes, a document's placeholders, code's syntax errors…). */
+  checked?: { flags: string[]; kind: string | null } | null
+  /** Reviewers who said no while the majority passed it. */
+  dissent?: string
+  /** Done-checks Captain ran itself that failed. */
+  checks?: { text: string; passed: boolean }[]
 }
 
 /** A factory's newest result, for its card. */

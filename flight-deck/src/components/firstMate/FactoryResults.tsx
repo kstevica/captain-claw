@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Archive, ChevronRight, Clock, Download, Eye, FolderArchive, Loader2, RefreshCw, Table2, Trophy, Wrench } from 'lucide-react'
+import { AlertTriangle, Archive, CheckCircle2, ChevronRight, Clock, Code2, Download, Eye, FolderArchive, Loader2, MessageSquareWarning, RefreshCw, Table2, Trophy, Wrench } from 'lucide-react'
 import { getFactoryResults, durationText, whenText, RUN_LABELS, type ResultFile, type RunResults, type RunTiming } from '../../services/firstMate'
 import { vfsApi, type FolderRef } from '../../services/vfsApi'
 import { getFileTypeGroup, isViewable, type AgentFile } from '../../services/fileTransfer'
@@ -144,7 +144,22 @@ export function FactoryResults({ factoryId, onNotice }: { factoryId: string; onN
             )}
             {expanded && (
               <div className="space-y-3 border-t border-[var(--fd-line)] px-4 py-3">
-                <ul className="space-y-2">
+                <Checked r={r} />
+                {r.code ? (
+                  <div className="flex flex-wrap items-center gap-3 rounded-xl bg-violet-500/[0.06] p-3 ring-1 ring-violet-500/20">
+                    <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--fd-surface-raised)] shadow-sm"><Code2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400" /></span>
+                    <div className="min-w-[10rem] flex-1">
+                      <p className="text-sm font-semibold text-zinc-100">A code project</p>
+                      <p className="text-[11px] text-zinc-500">{r.total} files · {sizeText(r.bytes)}</p>
+                    </div>
+                    <a href={vfsApi.zipUrl(ref)} className="inline-flex h-8 items-center gap-1.5 rounded-full bg-violet-600 px-3 text-xs font-semibold text-white transition-colors hover:bg-violet-500">
+                      <FolderArchive className="h-3.5 w-3.5" />Download it
+                    </a>
+                    <LibraryPick folder={r.project} onError={onNotice} />
+                  </div>
+                ) : null}
+                {r.code && <FileGroup title="Its files" icon={Code2} project={r.project} files={r.main} onOpen={openFile} canOpen={canOpen} onNotice={onNotice} />}
+                <ul className={`space-y-2 ${r.code ? 'hidden' : ''}`}>
                   {r.main.map((f) => (
                     <li key={f.path} className="flex flex-wrap items-center gap-3 rounded-xl bg-violet-500/[0.06] p-3 ring-1 ring-violet-500/20">
                       <button onClick={() => openFile(r.project, f)} disabled={!canOpen(r.project, f)}
@@ -234,6 +249,31 @@ function FileGroup({ title, hint, icon: Icon, project, files, onOpen, canOpen, o
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  )
+}
+
+/** What Captain found reading the files, the done-checks it ran that failed, and a reviewer who said no. */
+function Checked({ r }: { r: RunResults }) {
+  const flags = r.checked?.flags ?? []
+  const failed = (r.checks ?? []).filter((c) => !c.passed)
+  if (!r.checked && !failed.length && !r.dissent) return null
+  const clean = !flags.length && !failed.length && !r.dissent
+  return (
+    <div className={`rounded-xl px-3 py-2.5 text-xs ${clean ? 'bg-emerald-500/[0.07] text-emerald-800 dark:text-emerald-300' : 'bg-amber-500/[0.08] text-amber-900 dark:text-amber-200'}`}>
+      <p className="flex items-center gap-1.5 font-semibold">
+        {clean ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+        {clean ? 'Captain read the result: nothing stood out' : 'Worth a look before you use it'}
+      </p>
+      {(failed.length > 0 || flags.length > 0) && (
+        <ul className="mt-1.5 space-y-0.5 pl-5">
+          {failed.map((c) => <li key={`c:${c.text}`} className="list-disc">Failed check: {c.text}</li>)}
+          {flags.map((f) => <li key={f} className="list-disc">{f}</li>)}
+        </ul>
+      )}
+      {r.dissent && (
+        <p className="mt-1.5 flex items-start gap-1.5"><MessageSquareWarning className="mt-0.5 h-3.5 w-3.5 shrink-0" />{r.dissent}</p>
       )}
     </div>
   )

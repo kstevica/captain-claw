@@ -28,6 +28,7 @@ validators, persistence, renderers. The route file owns the model calls.
 
 from __future__ import annotations
 
+import csv
 import json
 import re
 import time
@@ -41,7 +42,7 @@ log = get_logger(__name__)
 CONTRACT_FILE = ".contract.json"
 
 _SEVERITIES = ("critical", "major", "minor")
-_CHECK_TYPES = ("command", "file_exists", "file_contains", "no_pattern", "judge")
+_CHECK_TYPES = ("command", "file_exists", "file_contains", "no_pattern", "table", "document", "python_syntax", "judge")
 _MAX_CONSTRAINTS = 20
 _CMD_TIMEOUT_S = 180.0        # a contract command must not stall the build loop
 _CMD_OUTPUT_CAP = 2000        # chars of a failing command's output kept for triage
@@ -127,8 +128,208 @@ def _normalize(item, i: int) -> dict | None:
     elif ctype == "no_pattern" and str(check.get("pattern") or "").strip():
         norm = {"type": "no_pattern", "pattern": str(check["pattern"])[:300],
                 "glob": (str(check.get("glob") or "").strip() or "**/*")[:120]}
+    elif ctype == "table":
+        norm = _norm_table(check) or {"type": "judge"}
+    elif ctype == "document":
+        norm = _norm_document(check) or {"type": "judge"}
+    elif ctype == "python_syntax":
+        norm = {"type": "python_syntax", "glob": (str(check.get("glob") or "").strip() or "**/*.py")[:120]}
     return {"id": str(item.get("id") or f"a{i}").strip()[:20],
             "text": text_, "severity": sev, "check": norm}
+
+
+# ── a delivered table or document, checked by what it holds ──
+#
+# For results that aren't code: a list (rows, columns, duplicates, what its email
+# and link columns hold) or a document (length, sections, placeholders, links).
+# ``path`` '' means the run's main table or document (``deliverable_profile``).
+
+def _num(v, lo: float, hi: float, as_int: bool = False):
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return None
+    if n != n or n < lo or n > hi:  # NaN, or out of range
+        return None
+    return int(n) if as_int else round(n, 4)
+
+
+def _names(v, limit: int = 20) -> list[str]:
+    if isinstance(v, str):
+        v = [v]
+    return [str(x).strip()[:80] for x in v or [] if str(x).strip()][:limit] if isinstance(v, list) else []
+
+
+def _norm_table(check: dict) -> dict | None:
+    out: dict = {"type": "table", "path": _relpath(check.get("path")) if check.get("path") else ""}
+    for key, lo, hi, as_int in (("min_rows", 1, 10_000_000, True), ("max_rows", 1, 10_000_000, True),
+                                ("min_link_share", 0, 1, False), ("max_role_share", 0, 1, False),
+                                ("max_free_share", 0, 1, False), ("max_domain_share", 0, 1, False)):
+        n = _num(check.get(key), lo, hi, as_int)
+        if n is not None:
+            out[key] = n
+    for key in ("columns", "unique", "non_empty", "link_columns"):
+        names = _names(check.get(key))
+        if names:
+            out[key] = names
+    if str(check.get("email_column") or "").strip():
+        out["email_column"] = str(check["email_column"]).strip()[:80]
+    pat = str(check.get("exclude_pattern") or "").strip()
+    if pat:
+        try:
+            re.compile(pat)
+            out["exclude_pattern"] = pat[:200]
+        except re.error:
+            pass
+    allowed = check.get("allowed") if isinstance(check.get("allowed"), dict) else {}
+    allowed = {str(k)[:80]: _names(v, 50) for k, v in list(allowed.items())[:5] if _names(v, 50)}
+    if allowed:
+        out["allowed"] = allowed
+    return out if len(out) > 2 or out.get("path") else None
+
+
+def _norm_document(check: dict) -> dict | None:
+    out: dict = {"type": "document", "path": _relpath(check.get("path")) if check.get("path") else ""}
+    for key, hi in (("min_words", 2_000_000), ("max_words", 2_000_000), ("min_links", 10_000)):
+        n = _num(check.get(key), 0, hi, True)
+        if n is not None:
+            out[key] = n
+    heads = _names(check.get("headings"))
+    if heads:
+        out["headings"] = heads
+    if check.get("no_placeholders") is True:
+        out["no_placeholders"] = True
+    return out if len(out) > 2 or out.get("path") else None
+
+
+def _main_file(repo: Path, exts: tuple[str, ...], skip: tuple[str, ...]) -> Path | None:
+    from captain_claw.flight_deck import deliverable_profile as dp
+    found = []
+    for p in repo.iterdir() if repo.is_dir() else []:
+        if p.is_file() and not p.name.startswith(".") and p.suffix.lower() in exts and p.name not in skip:
+            st = p.stat()
+            found.append((st.st_mtime, p.name, p, st.st_size))
+    found.sort(key=lambda f: f[0], reverse=True)
+    main = dp.sort_files(found, set())["main"]
+    return main[0][2] if main else (found[0][2] if found else None)
+
+
+def _target(repo: Path, check: dict, exts: tuple[str, ...], skip: tuple[str, ...]) -> tuple[Path | None, str]:
+    rel = _relpath(check.get("path")) if check.get("path") else ""
+    if rel:
+        p = repo / rel
+        return (p if p.is_file() else None), rel
+    p = _main_file(repo, exts, skip)
+    return p, (p.name if p else "")
+
+
+def _check_table(repo: Path, check: dict, skip: tuple[str, ...] = ()) -> tuple[bool, str]:
+    from captain_claw.flight_deck import deliverable_profile as dp
+    path, rel = _target(repo, check, (".csv", ".tsv"), skip)
+    if path is None:
+        return False, f"`{rel}` is missing" if rel else "no table (.csv/.tsv) at the top of the folder"
+    prof = dp.profile_table(path)
+    if prof.get("too_big"):
+        return True, "(too big to check here)"
+    n, cols = prof.get("rows", 0), prof.get("columns") or []
+    low = {c.lower(): c for c in cols}
+    bad: list[str] = []
+    if check.get("min_rows") and n < check["min_rows"]:
+        bad.append(f"{n} rows, fewer than {check['min_rows']}")
+    if check.get("max_rows") and n > check["max_rows"]:
+        bad.append(f"{n} rows, more than {check['max_rows']}")
+    if prof.get("broken_rows"):
+        bad.append(f"{prof['broken_rows']} rows have a different number of fields than the header")
+    missing = [c for c in check.get("columns") or [] if c.lower() not in low]
+    if missing:
+        bad.append(f"missing columns: {', '.join(missing)} (has {', '.join(cols)})")
+    with path.open(encoding="utf-8", errors="replace", newline="") as fh:
+        rows = list(csv.DictReader(fh, delimiter="\t" if path.suffix.lower() == ".tsv" else ","))
+    def values(col: str) -> list[str]:
+        key = low.get(col.lower())
+        return [str(r.get(key) or "").strip() for r in rows] if key else []
+    for col in check.get("unique") or []:
+        vals = [v.lower() for v in values(col) if v]
+        if len(vals) != len(set(vals)):
+            bad.append(f"{len(vals) - len(set(vals))} repeated values in {col}")
+    for col in check.get("non_empty") or []:
+        empty = sum(1 for v in values(col) if not v)
+        if empty:
+            bad.append(f"{col} is empty in {empty} rows")
+    share = check.get("min_link_share", 0.9)
+    for col in check.get("link_columns") or []:
+        vals = values(col)
+        links = sum(1 for v in vals if re.match(r"^https?://\S+$", v, re.I))
+        if vals and links < len(vals) * share:
+            bad.append(f"only {links} of {len(vals)} {col} values are links (needs {round(share * 100)}%)")
+    ecol = check.get("email_column") or next((c for c in cols if "mail" in c.lower()), "")
+    emails = [v for v in values(ecol) if v] if ecol else []
+    if emails:
+        doms = [e.rsplit("@", 1)[-1].lower() for e in emails]
+        role = sum(1 for e in emails if dp.ROLE_LOCAL.match(e.split("@")[0]))
+        free = sum(1 for d in doms if d in dp.FREE_MAIL)
+        if "max_role_share" in check and role > len(emails) * check["max_role_share"]:
+            bad.append(f"{role} of {len(emails)} emails are role inboxes (allowed {round(check['max_role_share'] * 100)}%)")
+        if "max_free_share" in check and free > len(emails) * check["max_free_share"]:
+            bad.append(f"{free} of {len(emails)} emails are free mail (allowed {round(check['max_free_share'] * 100)}%)")
+        if "max_domain_share" in check:
+            from collections import Counter
+            top, k = (Counter(doms).most_common(1) or [("", 0)])[0]
+            if k > max(1, len(emails) * check["max_domain_share"]):
+                bad.append(f"{k} emails on {top} alone (allowed {round(check['max_domain_share'] * 100)}%)")
+    if check.get("exclude_pattern"):
+        rx = re.compile(check["exclude_pattern"], re.I)
+        hit = [r for r in rows if any(rx.search(str(v or "")) for v in r.values())]
+        if hit:
+            bad.append(f"{len(hit)} rows match the excluded /{check['exclude_pattern']}/")
+    for col, allowed in (check.get("allowed") or {}).items():
+        ok = {a.lower() for a in allowed}
+        off = [v for v in values(col) if v and v.lower() not in ok]
+        if off:
+            bad.append(f"{len(off)} {col} values outside {', '.join(allowed)} (e.g. {off[0]})")
+    return (not bad, f"`{rel}`: " + "; ".join(bad) if bad else "")
+
+
+def _check_document(repo: Path, check: dict, skip: tuple[str, ...] = ()) -> tuple[bool, str]:
+    from captain_claw.flight_deck import deliverable_profile as dp
+    path, rel = _target(repo, check, (".md", ".markdown", ".txt", ".html", ".htm", ".docx", ".rst"), skip)
+    if path is None:
+        return False, f"`{rel}` is missing" if rel else "no document at the top of the folder"
+    prof = dp.profile_docx(path) if path.suffix.lower() == ".docx" else dp.profile_document(path)
+    if prof.get("too_big") or prof.get("unread"):
+        return True, "(couldn't read it here)"
+    bad: list[str] = []
+    words = prof.get("words", 0)
+    if check.get("min_words") and words < check["min_words"]:
+        bad.append(f"{words} words, fewer than {check['min_words']}")
+    if check.get("max_words") and words > check["max_words"]:
+        bad.append(f"{words} words, more than {check['max_words']}")
+    heads = [h.lower() for h in prof.get("headings") or []]
+    missing = [h for h in check.get("headings") or [] if not any(h.lower() in x for x in heads)]
+    if missing:
+        bad.append(f"no section on: {', '.join(missing)}")
+    if check.get("no_placeholders") and prof.get("placeholders"):
+        bad.append("placeholders left: " + ", ".join(f"{h} ×{k}" for h, k in prof["placeholders"]))
+    if check.get("min_links") and prof.get("links", 0) < check["min_links"]:
+        bad.append(f"{prof.get('links', 0)} links, fewer than {check['min_links']}")
+    return (not bad, f"`{rel}`: " + "; ".join(bad) if bad else "")
+
+
+def _check_python_syntax(repo: Path, check: dict, skip: tuple[str, ...] = ()) -> tuple[bool, str]:
+    import ast
+    errors: list[str] = []
+    scanned = 0
+    for p in repo.glob(str(check.get("glob") or "**/*.py")):
+        if not p.is_file() or p.suffix != ".py" or _hidden(repo, p) or p.relative_to(repo).parts[0] in skip:
+            continue
+        scanned += 1
+        if scanned > _SCAN_FILE_CAP:
+            break
+        try:
+            ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+        except SyntaxError as e:
+            errors.append(f"{p.relative_to(repo).as_posix()}:{e.lineno}")
+    return (not errors, "syntax errors in " + ", ".join(errors[:8]) if errors else "")
 
 
 def _relpath(p) -> str:
@@ -213,6 +414,12 @@ async def validate(repo: Path, constraints: list[dict], *,
                 ok, note = _check_file_contains(repo, check)
             elif ctype == "no_pattern":
                 ok, note = _check_no_pattern(repo, check, skip)
+            elif ctype == "table":
+                ok, note = _check_table(repo, check, skip)
+            elif ctype == "document":
+                ok, note = _check_document(repo, check, skip)
+            elif ctype == "python_syntax":
+                ok, note = _check_python_syntax(repo, check, skip)
             else:  # judge (or unknown) → let the LLM decide
                 entry["how"] = "judge"
                 res["unresolved"].append(entry)

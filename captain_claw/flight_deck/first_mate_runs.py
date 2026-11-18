@@ -699,7 +699,7 @@ def final_first(steps: list[dict[str, Any]], truth: str) -> str:
     parts = [f"## {head}\n\n{last['output'].strip()}", f"---\n\n**Earlier steps ({len(earlier)})**"]
     for s in earlier:
         parts.append(f"### {s.get('title') or s.get('step_key')}\n\n{s['output'].strip()}")
-    note = truth.split("\n\n", 1)[0] if truth.startswith("> Reviewers still objected") else ""
+    note = truth.split("\n\n", 1)[0] if truth.startswith("> ") else ""  # what the reviewers said, kept on top
     return "\n\n".join(([note] if note else []) + parts)
 
 
