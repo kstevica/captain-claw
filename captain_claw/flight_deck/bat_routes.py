@@ -94,20 +94,33 @@ CALL_TOKENS = 32_768
 SETTINGS_KEY = "fd:bat-settings"
 SETTING_RANGES = {"max_parallel": (1, 8), "step_ceiling": (300, 100_000), "idle_minutes": (3, 240),
                   "call_minutes": (3, 120)}
-_SETTINGS: dict[str, int] = {}
+# Which of the owner's tiers works the steps ("" = the one Bat plans on). A strong
+# model plans, writes the conventions, checks and reviews (a few calls); a cheaper
+# one does the searching and checking, where nearly all the tokens go.
+TIER_NAMES = ("reason", "balanced", "fast", "longctx", "coding", "vision", "micro")
+_SETTINGS: dict[str, Any] = {}
 
 
-def deck_defaults() -> dict[str, int]:
+def _env_tier(name: str) -> str:
+    v = os.environ.get(name, "").strip().lower()
+    return v if v in TIER_NAMES else ""
+
+
+def deck_defaults() -> dict[str, Any]:
     return {"max_parallel": bat_loop.env_max_parallel(), "step_ceiling": _BAT_STEP_CEILING,
-            "idle_minutes": int(_BAT_IDLE_S // 60), "call_minutes": int(_BAT_CALL_S // 60)}
+            "idle_minutes": int(_BAT_IDLE_S // 60), "call_minutes": int(_BAT_CALL_S // 60),
+            "worker_tier": _env_tier("FD_BAT_WORKER_TIER")}
 
 
-def deck_settings() -> dict[str, int]:
+def deck_settings() -> dict[str, Any]:
     return {**deck_defaults(), **_SETTINGS}
 
 
-def _clean_settings(raw: Any) -> dict[str, int]:
-    out: dict[str, int] = {}
+def _clean_settings(raw: Any) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    tier = (raw or {}).get("worker_tier") if isinstance(raw, dict) else None
+    if isinstance(tier, str) and (tier == "" or tier in TIER_NAMES):
+        out["worker_tier"] = tier
     for key, (lo, hi) in SETTING_RANGES.items():
         v = (raw or {}).get(key) if isinstance(raw, dict) else None
         if isinstance(v, bool) or v is None:
@@ -121,13 +134,13 @@ def _clean_settings(raw: Any) -> dict[str, int]:
     return out
 
 
-def _apply_settings(clean: dict[str, int]) -> None:
+def _apply_settings(clean: dict[str, Any]) -> None:
     _SETTINGS.clear()
     _SETTINGS.update(clean)
     bat_loop.set_max_parallel(clean.get("max_parallel"))
 
 
-async def load_settings() -> dict[str, int]:
+async def load_settings() -> dict[str, Any]:
     """Take up the admin's settings (at start). Never raises: the defaults stand."""
     try:
         from captain_claw.flight_deck.auth import get_db
@@ -138,10 +151,15 @@ async def load_settings() -> dict[str, int]:
     return deck_settings()
 
 
-async def save_settings(patch: dict[str, Any]) -> dict[str, int]:
-    """An admin's change: checked against SETTING_RANGES, kept, and in force now."""
+async def save_settings(patch: dict[str, Any]) -> dict[str, Any]:
+    """An admin's change: checked against SETTING_RANGES (and the tier names), kept,
+    and in force now."""
     from captain_claw.flight_deck.auth import get_db
     for key, value in (patch or {}).items():
+        if key == "worker_tier":
+            if not isinstance(value, str) or (value and value not in TIER_NAMES):
+                raise ValueError(f"worker_tier must be one of {', '.join(TIER_NAMES)}, or empty for the planning tier")
+            continue
         if key not in SETTING_RANGES:
             raise ValueError(f"unknown setting: {key}")
         lo, hi = SETTING_RANGES[key]
@@ -1330,7 +1348,7 @@ def _panel_creds(tiers: dict | None) -> tuple[dict | None, bool]:
     grades their own work. Returns the credentials, and whether it's a different
     model (a deck with one model has no choice)."""
     tiers = tiers or {}
-    worker_model = (tiers.get(_pick_tier(tiers)) or {}).get("model", "")
+    worker_model = _tier_model(tiers, worker_tier(tiers))
     for name in ("reason", "balanced", "longctx", "fast"):
         model = (tiers.get(name) or {}).get("model", "")
         if model and model != worker_model:
@@ -1411,7 +1429,7 @@ async def _spawn_archetype_bat_worker(stub, user, sid, step, owner, arch_id, tie
         arch = next((a for a in await merged_archetypes(get_db(), owner) if a["id"] == arch_id), None)
         if not arch:
             return (None, None, None)
-        arch_tier = arch.get("tier") or _pick_tier(tiers)
+        arch_tier = arch.get("tier") or worker_tier(tiers)
         lt = (tiers or {}).get(arch_tier) or {}
         tcfg = ({"provider": lt.get("provider"), "model": lt.get("model"),
                  "api_key": lt.get("api_key"), "base_url": lt.get("base_url")}
@@ -1521,6 +1539,49 @@ def _pick_tier(tiers: dict | None, prefer: tuple[str, ...] = ("reason", "fast"))
     return next(iter(tiers), "")
 
 
+def plan_tier(tiers: dict | None) -> str:
+    """The tier Bat plans, writes the conventions, checks and reviews on."""
+    return _pick_tier(tiers)
+
+
+def worker_tier(tiers: dict | None, run: dict | None = None) -> str:
+    """The tier a step's worker runs on: the run's own choice, else the deck's
+    "workers use" setting, when the owner's set has a model there; else the
+    planning tier, as before."""
+    want = str(((run or {}).get("config") or {}).get("worker_tier") or deck_settings().get("worker_tier") or "")
+    if want and ((tiers or {}).get(want) or {}).get("model"):
+        return want
+    return plan_tier(tiers)
+
+
+def _tier_model(tiers: dict | None, tier: str) -> str:
+    return str(((tiers or {}).get(tier) or {}).get("model") or "")
+
+
+def is_conventions_step(step: dict) -> bool:
+    """The plan's first step, which writes shared/conventions.md: every later step
+    follows it, so it runs on the planning model."""
+    return (int(step.get("round") or 0) == 0 and int(step.get("seq") or 0) == 0
+            and "conventions" in str(step.get("title") or "").lower())
+
+
+def step_tier(run: dict, step: dict, tiers: dict | None) -> str:
+    return plan_tier(tiers) if is_conventions_step(step) else worker_tier(tiers, run)
+
+
+def workers_note(tiers: dict | None, run: dict | None = None) -> str:
+    """For the planner when a smaller model works the steps: write them to be done
+    as written. "" when one model does both."""
+    worker, planner = _tier_model(tiers, worker_tier(tiers, run)), _tier_model(tiers, plan_tier(tiers))
+    if not worker or worker == planner:
+        return ""
+    return (f" The steps are worked by a smaller model ({worker}) than you: it follows clear instructions well "
+            "and picks an approach badly. So write each step to be done as written: where to start (the "
+            "directories, lists or kinds of page to search), which checks to do first (the cheapest ones that "
+            "rule an item out), and what counts as proof. The first step, which writes shared/conventions.md, "
+            "runs on your model: put the approach there too.")
+
+
 # ── the three handlers (registered into bat_loop at import) ────────────
 
 _LOCAL_HOST = re.compile(r"^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|\[?::1\]?|.*\.local$)", re.I)
@@ -1556,6 +1617,17 @@ async def _one_at_a_time(run: dict, tiers: dict | None) -> None:
                              "side by side they would only wait for it.")
 
 
+async def _models_note(run: dict, tiers: dict | None) -> None:
+    """Which model works the steps and which plans and checks, when they differ."""
+    store = bat_loop.get_store()
+    worker, planner = worker_tier(tiers, run), plan_tier(tiers)
+    if store is None or not run.get("id") or _tier_model(tiers, worker) == _tier_model(tiers, planner):
+        return
+    await store.append_event(run["id"], "note", (
+        f"Workers run on the {worker} tier ({_tier_model(tiers, worker)}); planning, the conventions, the checks "
+        f"and the reviewers on the {planner} tier ({_tier_model(tiers, planner)})."))
+
+
 async def _bat_planner(run: dict) -> list[dict]:
     async with _metered(run["id"], "plan"):
         try:
@@ -1570,6 +1642,7 @@ async def _bat_planner(run: dict) -> list[dict]:
             fresh = await store.get_run(run["id"]) if store is not None else None
             await _shape_contract(fresh or run, _creds_for(tiers), shell)
             await _one_at_a_time(fresh or run, tiers)
+            await _models_note(run, tiers)
         except Exception as e:  # noqa: BLE001
             log.warning("bat contract step failed", run_id=run.get("id"), error=str(e))
         store = bat_loop.get_store()
@@ -1643,7 +1716,7 @@ async def _plan_steps(run: dict) -> list[dict]:
                         '"how": "agent"}. '
                         'A step that needs none gets "after": []. Steps that don\'t need each other run at the '
                         "same time, so say so wherever order doesn't matter, and keep such steps to separate "
-                        "files. No prose.")),
+                        "files. No prose." + workers_note(tiers, run))),
                     Message(role="user", content=run.get("task", "") + extra_section(run)),
                 ], temperature=0.2, max_tokens=mt)
             except Exception as e:  # noqa: BLE001 — asked again, then the fallback
@@ -1676,9 +1749,11 @@ async def _plan_with_archetypes(run: dict, db, creds: dict) -> list[dict]:
     from captain_claw.flight_deck.archetypes import merged_archetypes
     from captain_claw.flight_deck.basna_routes import _provider_call
     from captain_claw.llm import Message
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
     archetypes = await merged_archetypes(db, run["owner_id"])
     if not archetypes:
         return []
+    tiers, _ = await _load_owner_tiers(db, run["owner_id"])
     valid = {a["id"] for a in archetypes}
     catalog = "\n".join(f"- {a['id']}: {a.get('role', '')} — {str(a.get('description', ''))[:120]}"
                         for a in archetypes[:40])
@@ -1691,7 +1766,7 @@ async def _plan_with_archetypes(run: dict, db, creds: dict) -> list[dict]:
             "a JSON array of objects {\"step\": \"...\", \"archetype\": \"<id from the catalog>\", "
             "\"after\": [<1-based numbers of the earlier steps it needs>]}, max 12, no prose. A step that "
             "needs none gets \"after\": []; steps that don't need each other run at the same time, so keep "
-            "those to separate files.\n\n## Agent catalog\n" + catalog)),
+            "those to separate files." + workers_note(tiers, run) + "\n\n## Agent catalog\n" + catalog)),
         Message(role="user", content=run.get("task", "") + extra_section(run)),
     ], temperature=0.2, max_tokens=mt)
     steps, arch_map = _parse_archetype_plan(resp.content or "", valid)
@@ -1719,7 +1794,7 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
     db = get_db()
     user = await db.get_user_by_id(owner) or {"id": owner}
     tiers, env_vars = await _load_owner_tiers(db, owner)
-    tier = _pick_tier(tiers)
+    tier = step_tier(run, step, tiers)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     bat_env = _bat_env(sid, key, owner)
     rehearsal = str((run.get("config") or {}).get("rehearsal") or "")
@@ -2059,7 +2134,7 @@ async def _bat_replan(run: dict, steps: list[dict], verdict: dict, round_no: int
             async with _metered(run["id"], f"replan-{round_no}"):
                 prov, mt = think_call(creds, temperature=0.2)
                 resp = await prov.complete(messages=[
-                    Message(role="system", content=_replan_system(limit)),
+                    Message(role="system", content=_replan_system(limit) + workers_note(tiers, run)),
                     Message(role="user", content=(f"# Goal\n{str(run.get('task', ''))[:4000]}\n\n"
                                                   f"# The work so far\n{so_far[:8000]}\n\n"
                                                   f"# What the check found\n{findings}")),
@@ -2817,13 +2892,26 @@ def _require_admin_dep():
     return require_admin
 
 
+async def _own_tier_models(user: dict) -> dict[str, str]:
+    """The model on each tier of this admin's own set (no keys), so the setting shows
+    what it means for them. Each person's own set decides it for their runs."""
+    try:
+        from captain_claw.flight_deck.auth import get_db
+        from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+        tiers, _ = await _load_owner_tiers(get_db(), str(user.get("id") or ""))
+    except Exception:  # noqa: BLE001
+        return {}
+    return {name: _tier_model(tiers, name) for name in TIER_NAMES if _tier_model(tiers, name)}
+
+
 @admin_router.get("/settings")
 async def get_deck_settings(admin: dict = Depends(_require_admin_dep())):
     """How Bat runs on this deck: steps at the same time, a worker turn's step
     ceiling, and the silence that ends a step. ``defaults`` are the FD_BAT_*
     values the deck started with."""
     return {**deck_settings(), "defaults": deck_defaults(),
-            "ranges": {k: list(v) for k, v in SETTING_RANGES.items()}}
+            "ranges": {k: list(v) for k, v in SETTING_RANGES.items()}, "tiers": list(TIER_NAMES),
+            "your_tiers": await _own_tier_models(admin)}
 
 
 @admin_router.put("/settings")
@@ -2834,4 +2922,5 @@ async def put_deck_settings(body: Any = Body(...), admin: dict = Depends(_requir
         saved = await save_settings(body)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
-    return {**saved, "defaults": deck_defaults(), "ranges": {k: list(v) for k, v in SETTING_RANGES.items()}}
+    return {**saved, "defaults": deck_defaults(), "ranges": {k: list(v) for k, v in SETTING_RANGES.items()},
+            "tiers": list(TIER_NAMES), "your_tiers": await _own_tier_models(admin)}
