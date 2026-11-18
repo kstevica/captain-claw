@@ -563,6 +563,9 @@ def _build_step_prompt(run: dict, step: dict, prior: list[dict], human_input: st
         lines.append(f"\n# Where files go\nWrite every file to vfs:{_project_of(run)}/<name>. Your own folders, "
                      "saved/ included, are deleted when your step ends, and only this folder counts as delivered.")
         lines.append(_SAVE_AS_YOU_GO.format(project=_project_of(run), note=progress_path(run, step.get("step_key", ""))))
+        resume = _resume_section(run, step)
+        if resume:
+            lines.append(resume)
     rules = (run.get("config") or {}).get("contract") or []
     if rules:
         lines.append(f"\n# How this run will be checked\nIt's done only when these hold. Captain checks them "
@@ -657,6 +660,78 @@ PROGRESS_MAX = 4000
 
 def _step_file(step_key: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", str(step_key or "step")).strip("-.")[:60] or "step"
+
+
+def _run_files(folder: Path, *, limit: int = 5000) -> list[tuple[float, str, Path, int]]:
+    """The run folder's files, newest first, as ``(mtime, path, file, size)``:
+    hidden folders and the workers' own notes (WORK_DIRS) left out, symlinks not
+    followed, and the walk has a limit (a worker may have cloned anything here)."""
+    found: list[tuple[float, str, Path, int]] = []
+    if not folder.is_dir():
+        return found
+    for root, dirs, names in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")
+                   and not (Path(root) == folder and d in WORK_DIRS)]
+        for name in names:
+            p = Path(root) / name
+            if name.startswith(".") or p.is_symlink() or len(found) >= limit:
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            found.append((st.st_mtime, p.relative_to(folder).as_posix(), p, st.st_size))
+    found.sort(key=lambda f: f[0], reverse=True)
+    return found
+
+
+def _ago(seconds: float) -> str:
+    s = max(0, int(seconds))
+    return f"{s}s ago" if s < 90 else f"{s // 60} min ago" if s < 5400 else f"{s // 3600} h ago"
+
+
+RESUME_FILES = 30
+
+
+def _resume_section(run: dict, step: dict) -> str:
+    """For a step that was worked on before and didn't finish (it failed, or was
+    cut off by a cap, a stop, a restart or a time limit): pick up from what it
+    saved, not from scratch. Its progress note, its research notes and the run
+    folder's files as they are now. "" for a step's first turn."""
+    key = step.get("step_key", "")
+    note = read_progress(run, key)
+    if not note and int(step.get("attempt", 0) or 0) < 1:
+        return ""
+    lines = ["\n# Pick up where the last attempt stopped",
+             "This step was worked on before and didn't finish. Don't start over: what was saved is in the run's "
+             "folder. Read what you need, check that the last batch was saved whole, and carry on from where it "
+             "got to, keeping the same criteria. Keep its progress note current as you go."]
+    if note:
+        lines.append(f"\nIts progress note, {progress_path(run, key)} (what the last attempt wrote; check it "
+                     f"against the files):\n----- note -----\n{note}\n----- end of note -----")
+    else:
+        lines.append("\nIt left no progress note: work out from the files what is already done.")
+    try:
+        from captain_claw.context_spill import notes_path
+        research = notes_path(_project_of(run), key, str(run.get("id", "")))
+        local = _run_folder(run) / research.split("/", 1)[1] if research.startswith("vfs:") else None
+        if local is not None and local.is_file():
+            lines.append(f"\nIts research notes are in {research}: read them before searching again.")
+    except Exception:  # noqa: BLE001 — the note and the files are enough
+        pass
+    try:
+        files = _run_files(_run_folder(run))
+    except Exception:  # noqa: BLE001
+        files = []
+    if files:
+        import time as _time
+        now = _time.time()
+        shown = [f"- {rel} ({size:,} bytes, changed {_ago(now - mtime)})" for mtime, rel, _, size in files[:RESUME_FILES]]
+        more = [f"- … and {len(files) - RESUME_FILES} more"] if len(files) > RESUME_FILES else []
+        lines.append("\nThe run's folder now, newest first:\n" + "\n".join(shown + more))
+    else:
+        lines.append("\nThe run's folder holds no results yet.")
+    return "\n".join(lines)
 
 
 def progress_path(run: dict, step_key: str) -> str:
@@ -812,23 +887,10 @@ def _evidence_block(folder: Path, *, max_files: int = 40, excerpts: int = 3, exc
     worker: the panel judges this, not only the story of it. Hidden folders aren't
     walked and the walk has a limit, since a worker may have cloned anything here."""
     head = "## VERIFIED — files in the run's shared folder"
-    found: list[tuple[float, str, Path, int]] = []
-    for root, dirs, names in os.walk(folder):
-        # Hidden folders, and the workers' own notes (WORK_DIRS): what was made, not how.
-        dirs[:] = [d for d in dirs if not d.startswith(".")
-                   and not (Path(root) == folder and d in WORK_DIRS)]
-        for name in names:
-            p = Path(root) / name
-            if name.startswith(".") or p.is_symlink() or len(found) >= 5000:
-                continue
-            try:
-                st = p.stat()
-            except OSError:
-                continue
-            found.append((st.st_mtime, p.relative_to(folder).as_posix(), p, st.st_size))
+    # Hidden folders, and the workers' own notes (WORK_DIRS): what was made, not how.
+    found = _run_files(folder)
     if not found:
         return f"{head}\n{_NO_FILES} Any claim that a file was written there is false."
-    found.sort(key=lambda f: f[0], reverse=True)
     lines = [head, *[f"- {rel} ({size:,} bytes)" for _, rel, _, size in found[:max_files]]]
     if len(found) > max_files:
         lines.append(f"- … and {len(found) - max_files} more")
