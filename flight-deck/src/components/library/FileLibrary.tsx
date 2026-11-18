@@ -59,6 +59,7 @@ import {
 import { vfsApi, type FolderRef } from '../../services/vfsApi'
 import { FacetGroup, FullscreenButton, Highlight, ScanStatus, SourceFacetGroup, SourceName, libraryIconBtn } from './libraryParts'
 import { FilePreview } from './FilePreview'
+import { LibraryPick } from './LibraryPick'
 import { isUntrustedFile } from '../../utils/untrustedContent'
 
 // ── File library ────────────────────────────────────────────────────
@@ -547,6 +548,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
       onOpen={() => openFile(selected)}
       onEdit={(a) => setEditing({ item: selected, agent: a })}
       onShowInFolder={onShowInFolder && isFolderItem(selected) ? () => onShowInFolder(selected.folder!, selected.rel_path) : undefined}
+      onOutOfLibrary={() => { setSelected(null); void load(true) }}
       onDownload={() => download(selected)}
       onShare={() => setSharing(selected)}
       onPublicLink={(a) => setLinking({ item: selected, agent: a })}
@@ -890,6 +892,7 @@ function ResultRow({ item, creator, terms, active, onClick }: {
 
 function FileDetail({
   item, creator, terms, phone, viewerOpen, onClose, onOpen, onEdit, onDownload, onShare, onPublicLink, onResummarize, onAnonymize, onTag, onAgent, onOpenAgent, onShowInFolder,
+  onOutOfLibrary,
 }: {
   item: LibraryItem; creator: Creator | null | undefined; terms: string[]; phone: boolean
   /** A file is open in the viewer over the library (its preview pauses). */
@@ -901,6 +904,8 @@ function FileDetail({
   onOpenAgent?: () => void
   /** A shared folder's file, shown where it is in Shared folders. */
   onShowInFolder?: () => void
+  /** A shared folder's file was taken out of the library (it stays in its folder). */
+  onOutOfLibrary?: () => void
 }) {
   const notify = useNotificationStore((s) => s.add)
   const [busy, setBusy] = useState(false)
@@ -1070,6 +1075,11 @@ function FileDetail({
           <button onClick={onShowInFolder} className={btn} title="Show it where it is, in Shared folders — rename, move it along, share the folder">
             <FolderSearch className="h-4 w-4" />Show in folder
           </button>
+        )}
+        {inFolder && item.folder && (
+          <LibraryPick folder={item.folder} path={item.rel_path} className="h-auto justify-center py-2"
+            onChange={(inIt) => { if (!inIt) onOutOfLibrary?.() }}
+            onError={(text) => notify('error', "Couldn't change the library", text)} />
         )}
         {canDeck && (
           <button onClick={present} disabled={!agent} className={btn} title={agent ? 'Present it as a slide deck in a new tab' : offTitle}>

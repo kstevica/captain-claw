@@ -3,6 +3,7 @@ import { Activity, Bot, Check, ChevronDown, Circle, FolderOpen, Loader2, Minus, 
 import { getRunProgress, type RunProgress as Progress } from '../../services/firstMate'
 import type { ProgressEvent } from '../../stores/basnaStore'
 import { RunFiles } from './RunFiles'
+import { TimingChips } from './FactoryResults'
 import { errText } from './ui'
 
 // What a run is doing, inside its row on the Runs tab: the plan's steps as they
@@ -164,6 +165,7 @@ export function RunProgress({ runId, going }: { runId: string; going: boolean })
 
   return (
     <div className="mt-2.5 space-y-2 rounded-xl bg-[var(--fd-hover)] px-3 py-2.5">
+      {going && <TimingChips timing={p.timing} going />}
       {p.steps.length === 0 ? (
         <p className="text-xs text-zinc-500">{going ? 'Planning its steps…' : 'It had no steps.'}</p>
       ) : (

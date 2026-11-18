@@ -96,6 +96,9 @@ async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     carol = data / "vfs" / CAROL / "reports"
     carol.mkdir(parents=True)
     (carol / "carol.md").write_text("# Carol's\n")
+    # Each added their "reports" to the File library (a folder is in it only once added).
+    fl.get_store().add_pick(fl._vfs_owner(BOB), "reports")
+    fl.get_store().add_pick(fl._vfs_owner(CAROL), "reports")
     try:
         yield data
     finally:

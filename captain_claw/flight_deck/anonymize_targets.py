@@ -400,6 +400,9 @@ async def library_file(file_id: str, body: dict[str, Any] = Body(default={}),
     workspace = fl._workspace(row["agent_slug"])
     rel = target.relative_to(workspace).as_posix()
     try:  # list it in the Library now (its summary comes with the next scan)
+        folder = fl.folder_of(row["agent_slug"])
+        if folder is not None:  # from a folder only some files of are in: the copy goes in too
+            fl.get_store().add_pick(folder[0], folder[1], rel)
         fl.get_store().sync_agent(row["agent_slug"], await asyncio.to_thread(fl.walk_workspace, row["agent_slug"]))
     except Exception as exc:  # noqa: BLE001
         log.debug("Library not refreshed after anonymizing", error=type(exc).__name__)

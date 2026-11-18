@@ -121,7 +121,45 @@ export interface Run {
   can_continue?: boolean
   /** A carry-out's: what the register and Gmail/Calendar showed it did. */
   proof?: { state?: 'confirmed' | 'nothing' | 'doubt' | 'unknown'; note?: string; sent?: number; approved?: number; actions?: string[] }
+  /** How long it took, kept once it ended (an empty object before). */
+  timing?: RunTiming | null
 }
+
+/** How long a run took, in seconds: in all, while at least one agent worked,
+ *  agent time summed (side by side count each), stopped waiting for you, and the
+ *  rest (planning, checking, restarts). */
+export interface RunTiming {
+  total_s: number
+  working_s: number
+  agent_s: number
+  waiting_s: number
+  other_s: number
+  turns: number
+}
+
+/** A file a run made. `rows`: a table's rows under its header. `library`: added to the File library. */
+export interface ResultFile { path: string; name: string; size: number; mtime: number; rows: number | null; library: boolean }
+
+/** One run's files, the result first: what its checks name or is called a result
+ *  (`main`), the rest at the top of its folder (`other`), subfolders, scripts and
+ *  temporary files (`work`). Its folder is the shared folder `project`. */
+export interface RunResults {
+  run_id: string
+  status: RunStatus
+  kind: string
+  created_at: string
+  ended_at: string | null
+  project: string
+  timing: RunTiming | null
+  main: ResultFile[]
+  other: ResultFile[]
+  work: ResultFile[]
+  total: number
+  bytes: number
+}
+
+/** A factory's newest result, for its card. */
+export interface LatestResult { run_id: string; project: string; status: RunStatus; name: string; path: string; size: number; rows: number | null; files: number }
 
 export interface Factory {
   id: string
@@ -147,6 +185,8 @@ export interface Factory {
 
 export interface FactoryCard extends Factory {
   last_run: Run | null
+  /** Its newest run's result, if one left files. */
+  latest_result?: LatestResult | null
   /** When its schedules next fire (ISO); past = due now. */
   next_at: string | null
   /** Tokens its runs used this week, and its share of the owner's weekly budget. */
@@ -445,6 +485,20 @@ export function factoryDataUrl(id: string, itemId: string, download = false): st
   const qs = q.toString()
   return `${f(id)}/data/${encodeURIComponent(itemId)}/file${qs ? `?${qs}` : ''}`
 }
+export const getFactoryResults = (id: string) => call<{ runs: RunResults[] }>(`${f(id)}/results`).then((r) => r.runs)
+
+/** "23 h 4 min", "12 min", "45 s". */
+export function durationText(seconds: number | null | undefined): string {
+  const s = Math.max(0, Math.round(seconds ?? 0))
+  if (s < 60) return `${s} s`
+  if (s < 3600) return `${Math.floor(s / 60)} min`
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (h < 48) return m ? `${h} h ${m} min` : `${h} h`
+  const d = Math.floor(h / 24)
+  return h % 24 ? `${d} d ${h % 24} h` : `${d} d`
+}
+
 const runPath = (runId: string) => `/fd/first-mate/runs/${encodeURIComponent(runId)}`
 export const getRunData = (runId: string) => call<RunData>(`${runPath(runId)}/data`)
 export const addRunData = (runId: string, ids: string[]) => call<RunData & { added: string[] }>(`${runPath(runId)}/data`, json('POST', { ids }))
@@ -478,6 +532,8 @@ export interface RunProgress {
   workers: { slug: string; name: string; step: string; running: boolean }[]
   /** Its shared files' folder. */
   files: string
+  /** How long it has taken so far (kept once it ended). */
+  timing?: RunTiming | null
 }
 export const getRunProgress = (runId: string, since = 0) =>
   call<RunProgress>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/progress?since=${since}`)

@@ -39,6 +39,20 @@ def _excerpt(text: str) -> str:
     return text if len(text) <= EXCERPT_MAX else text[:EXCERPT_MAX].rstrip() + "…"
 
 
+async def _made_and_took(run: dict[str, Any]) -> str:
+    """"Result: final_leads.csv · 500 rows · 235 KB …" and "Took … · its agents worked …";
+    "" when neither can be said (the message goes out without them)."""
+    try:
+        from captain_claw.flight_deck import first_mate_results
+        got = await first_mate_results.run_results(run)
+        lines = [first_mate_results.results_line(got),
+                 first_mate_results.timing_line(run.get("timing") or (got or {}).get("timing"))]
+        return "\n".join(x for x in lines if x)
+    except Exception:  # noqa: BLE001
+        log.debug("first mate: no results line for a finished run", exc_info=True)
+        return ""
+
+
 async def run_finished(run: dict[str, Any]) -> None:
     """A finished run on its factory's thread. A rehearsal that would do
     something is a proposal: "needs you", with Approve on First Mate."""
@@ -70,6 +84,14 @@ async def run_finished(run: dict[str, Any]) -> None:
             body = run.get("error") or "It stopped without saying why."
             if run.get("result"):
                 body += "\n\n" + _excerpt(run["result"])
+        if kind in ("run", "carry_out", "rehearsal"):
+            # What it made and how long it took, first: what the owner came for.
+            head = await _made_and_took(run)
+            if head:
+                body = head + "\n\n" + body
+            # Work someone started by hand, or that took a while, is worth a ping.
+            total = ((run.get("timing") or {}).get("total_s") or 0)
+            to_phones = to_phones or (kind in ("run", "carry_out") and (run.get("trigger") == "manual" or total >= 1800))
         body += "\n\nOpen First Mate to see the whole run."
         await line.post(run["owner_id"], "run", title, body, bell_type="first_mate_run", source=SOURCE,
                         needs_you=needs_you, ref_type=ref_type, ref_id=run["id"], to_phones=to_phones,

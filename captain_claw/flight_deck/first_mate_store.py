@@ -673,6 +673,9 @@ class FirstMateStore:
             cols = {r["name"] for r in self._c().execute("PRAGMA table_info(fm_runs)")}
             if "proof" not in cols:
                 self._c().execute("ALTER TABLE fm_runs ADD COLUMN proof TEXT NOT NULL DEFAULT '{}'")
+            # How long a finished run took: in all, its agents' work, waiting for its owner.
+            if "timing" not in cols:
+                self._c().execute("ALTER TABLE fm_runs ADD COLUMN timing TEXT NOT NULL DEFAULT '{}'")
             # The owner's cap per run on the factory itself (0 = its charter's, else their default).
             cols = {r["name"] for r in self._c().execute("PRAGMA table_info(fm_factories)")}
             if "run_tokens" not in cols:
@@ -710,10 +713,11 @@ class FirstMateStore:
             d["trigger_ref"] = json.loads(d.get("trigger_ref") or "[]")
         except (TypeError, ValueError):
             d["trigger_ref"] = []
-        try:
-            d["proof"] = json.loads(d.get("proof") or "{}")
-        except (TypeError, ValueError):
-            d["proof"] = {}
+        for key in ("proof", "timing"):
+            try:
+                d[key] = json.loads(d.get(key) or "{}")
+            except (TypeError, ValueError):
+                d[key] = {}
         return d
 
     def _event(self, conn: sqlite3.Connection, factory_id: str, actor: str, event: str,
@@ -1231,6 +1235,12 @@ class FirstMateStore:
                          " ended_at = NULL WHERE id = ?", (run_id,))
             self._event(conn, run["factory_id"], "owner", "run_continued",
                         {"run": run_id, "was": run["status"], "tokens": run["tokens"]})
+        return self.get_run(run_id)
+
+    def set_timing(self, run_id: str, timing: dict[str, Any]) -> dict[str, Any] | None:
+        """How long a run took (``first_mate_results.timing_of``), kept once it ends."""
+        with self._tx() as conn:
+            conn.execute("UPDATE fm_runs SET timing = ? WHERE id = ?", (json.dumps(timing or {}), run_id))
         return self.get_run(run_id)
 
     def update_run(self, run_id: str, *, tokens: int | None = None, usd: float | None = None) -> dict[str, Any]:

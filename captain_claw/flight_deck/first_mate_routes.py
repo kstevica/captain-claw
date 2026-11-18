@@ -312,8 +312,16 @@ async def list_factories(include_retired: bool = False, user: dict = Depends(all
     store = fms.get_store()
     now = fms._utcnow()
     week = _week(store, uid, now)
-    return {"factories": [_card(store, store.view(f["id"]), week, now)
-                          for f in store.list_factories(uid, include_retired=include_retired)]}
+    from captain_claw.flight_deck import first_mate_results
+    cards = [_card(store, store.view(f["id"]), week, now)
+             for f in store.list_factories(uid, include_retired=include_retired)]
+    for card in cards:  # its newest result, a click from the page
+        try:
+            card["latest_result"] = await first_mate_results.latest(card["id"])
+        except Exception:  # noqa: BLE001 — the list never fails on it
+            log.warning("first mate: couldn't read a factory's latest result", exc_info=True)
+            card["latest_result"] = None
+    return {"factories": cards}
 
 
 @router.post("/fd/first-mate/factories")
@@ -467,6 +475,15 @@ def _own_run(run_id: str, user: dict) -> dict[str, Any]:
     if run is None or run["owner_id"] != _uid(user):
         raise HTTPException(404, "no such run")
     return run
+
+
+@router.get("/fd/first-mate/factories/{factory_id}/results")
+async def factory_results(factory_id: str, user: dict = Depends(allowed_user)):
+    """What the factory's newest runs made, each sorted: the result first, then
+    the other files, then the working ones."""
+    from captain_claw.flight_deck import first_mate_results
+    _mine(factory_id, user)
+    return {"runs": await first_mate_results.factory_results(factory_id)}
 
 
 @router.get("/fd/first-mate/runs/{run_id}/data")
