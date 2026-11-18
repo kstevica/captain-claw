@@ -72,7 +72,8 @@ export interface Version {
   triggers: Trigger[]
   grants: Grants
   budget: { run_tokens: number | null }
-  checks: { contract: string[]; satisfaction_target: number }
+  /** `contract`: what a run is checked against; `off`: goals the owner switched off (kept, never used). */
+  checks: { contract: string[]; off?: string[]; satisfaction_target: number }
   sha: string
   note: string
   created_by: string
@@ -418,7 +419,7 @@ export interface Template {
 export interface DraftFields {
   charter?: string
   triggers?: Trigger[]
-  checks?: { contract: string[]; satisfaction_target?: number }
+  checks?: { contract: string[]; off?: string[]; satisfaction_target?: number }
   budget?: { run_tokens: number | null }
   note?: string
 }

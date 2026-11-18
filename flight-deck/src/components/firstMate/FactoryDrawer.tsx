@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronLeft, ChevronRight, Database, FlaskConical, Loader2, Maximize2, Minimize2, Play, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Database, FlaskConical, Loader2, Maximize2, Minimize2, Play, ScrollText, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
 import {
   approve,
   approveRun,
@@ -16,7 +16,6 @@ import {
   runNow,
   stopRun,
   continueRun,
-  scheduleText,
   tokensText,
   triggersText,
   whenText,
@@ -44,6 +43,8 @@ import { CapPicker } from './CapPicker'
 import { FactoryData, RunDataList } from './FactoryData'
 import { FactoryResults, TimingChips } from './FactoryResults'
 import { AddDataPanel } from '../context/AddData'
+import { CharterText, GoalChecklist, GoalList, SchedulePicker } from './CharterEditor'
+import { checksOf, goalsOf, type Goal } from '../../utils/charterGoals'
 
 // One factory, in a drawer over the page: its charter (the live version, and
 // the draft being written), its runs, and its history. Approving a draft is
@@ -83,14 +84,14 @@ function eventText(e: FactoryEvent): string {
   }
 }
 
-/** The editable part of a draft, as the form holds it. */
-interface Form { charter: string; checks: string; schedule: string }
+/** The editable part of a draft, as the form holds it: its goals each on or off. */
+interface Form { charter: string; goals: Goal[]; schedule: string }
 
 function formOf(v: Version): Form {
   const sched = v.triggers.find((t): t is Extract<Trigger, { kind: 'schedule' }> => t.kind === 'schedule')
   return {
     charter: v.charter,
-    checks: v.checks.contract.join('\n'),
+    goals: goalsOf(v.checks),
     schedule: sched?.schedule ?? '',
   }
 }
@@ -100,13 +101,13 @@ function fieldsOf(form: Form, v: Version): DraftFields {
   const schedule = form.schedule.trim()
   return {
     charter: form.charter,
-    checks: { ...v.checks, contract: form.checks.split('\n').map((s) => s.trim()).filter(Boolean) },
+    checks: { ...v.checks, ...checksOf(form.goals) },
     triggers: [...(schedule ? [{ kind: 'schedule' as const, schedule, tz: '' }] : []), ...others],
   }
 }
 
-const same = (a: Form, b: Form) => a.charter === b.charter && a.checks === b.checks
-  && a.schedule === b.schedule
+const same = (a: Form, b: Form) => a.charter === b.charter && a.schedule.trim() === b.schedule.trim()
+  && JSON.stringify(checksOf(a.goals)) === JSON.stringify(checksOf(b.goals))
 
 export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onChanged, onNotice }: {
   factoryId: string
@@ -209,7 +210,6 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
 
   const tabCls = (t: Tab) => `rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
     tab === t ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:bg-[var(--fd-hover)] hover:text-zinc-200'}`
-  const label = 'mb-1.5 block text-xs font-semibold text-zinc-400'
   const input = 'w-full rounded-xl border border-[var(--fd-line)] bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none'
 
   const headBtn = 'flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200'
@@ -275,35 +275,21 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
           {f && tab === 'charter' && (
             <>
               {draft && form && (
-                <section className="fd-card space-y-4 p-4">
-                  <div className="flex items-center gap-2">
-                    <h3 className="flex-1 text-sm font-semibold text-zinc-100">
-                      {f.version ? `Draft v${draft.version}` : 'Your charter'}
-                    </h3>
-                    <Pill tone="amber">{f.version ? 'Not live yet' : 'Waiting for your approval'}</Pill>
-                  </div>
-                  <div>
-                    <label className={label} htmlFor="fm-charter">What it does, each run</label>
-                    <textarea id="fm-charter" rows={7} className={`${input} resize-y leading-relaxed`} value={form.charter}
-                      onChange={(e) => setForm({ ...form, charter: e.target.value })} />
-                  </div>
-                  <div>
-                    <label className={label} htmlFor="fm-checks">Done when (one per line)</label>
-                    <textarea id="fm-checks" rows={3} className={`${input} resize-y`} value={form.checks}
-                      placeholder="Bat writes its own checks when you leave this empty"
-                      onChange={(e) => setForm({ ...form, checks: e.target.value })} />
-                  </div>
-                  <div>
-                    <div>
-                      <label className={label} htmlFor="fm-schedule">When it runs</label>
-                      <input id="fm-schedule" className={input} value={form.schedule} placeholder="weekdays 08:00"
-                        onChange={(e) => setForm({ ...form, schedule: e.target.value })} />
-                      <p className="mt-1 text-[11px] text-zinc-500">
-                        {form.schedule.trim() ? scheduleText(form.schedule) : 'Empty: only when you press Run now'}.
-                        {' '}It starts on its own while your First Mate is on.
-                      </p>
+                <section className="rounded-2xl border border-violet-500/25 bg-[var(--fd-surface-raised)] shadow-sm">
+                  <header className="flex items-center gap-3 rounded-t-2xl border-b border-[var(--fd-line)] bg-gradient-to-r from-violet-500/[0.08] via-fuchsia-500/[0.04] to-transparent px-4 py-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-md shadow-violet-500/20">
+                      <ScrollText className="h-4 w-4" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="text-sm font-semibold text-zinc-100">{f.version ? `Draft v${draft.version}` : 'Your charter'}</h3>
+                      <p className="text-[11px] text-zinc-500">Read it, switch goals on or off, then approve. Nothing runs before that.</p>
                     </div>
-                  </div>
+                    <Pill tone="amber">{f.version ? 'Not live yet' : 'Waiting for your approval'}</Pill>
+                  </header>
+                  <div className="space-y-6 px-4 py-4">
+                    <CharterText value={form.charter} onChange={(charter) => setForm({ ...form, charter })} />
+                    <GoalList goals={form.goals} onChange={(goals) => setForm({ ...form, goals })} />
+                    <SchedulePicker value={form.schedule} onChange={(schedule) => setForm({ ...form, schedule })} />
                   {gate && (
                     <div className="flex items-start gap-2 rounded-xl border border-violet-500/30 bg-violet-500/[0.06] px-3 py-2 text-xs text-zinc-300">
                       <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-violet-500" />
@@ -320,8 +306,10 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                       {' '}Look at its check on the Checks tab, change it, or approve it anyway.
                     </div>
                   )}
-                  <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[var(--fd-line)] pt-3">
-                    {f.version > 0 && cases > 0 && !gate && !held && (
+                  </div>
+                  <div className="sticky bottom-0 z-[1] flex flex-wrap items-center justify-end gap-2 rounded-b-2xl border-t border-[var(--fd-line)] bg-[var(--fd-surface-raised)]/95 px-4 py-3 backdrop-blur">
+                    {dirty && <span className="mr-auto inline-flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" />Changes not saved</span>}
+                    {!dirty && f.version > 0 && cases > 0 && !gate && !held && (
                       <span className="mr-auto text-[11px] text-zinc-500">It's checked on its {cases} {cases === 1 ? 'case' : 'cases'} before it goes live.</span>
                     )}
                     <button onClick={() => void act('decline', () => decline(factoryId, draft.version), 'Draft discarded')}
@@ -332,7 +320,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                       {busy === 'save' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Save
                     </button>
                     <button onClick={() => void approveDraft(!!held)} disabled={!!busy || !form.charter.trim() || !!gate}
-                      className="inline-flex h-8 items-center gap-1.5 rounded-full bg-violet-600 px-3.5 text-xs font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60">
+                      className="inline-flex h-9 items-center gap-1.5 rounded-full bg-violet-600 px-4 text-xs font-semibold text-white shadow-sm transition-colors hover:bg-violet-500 disabled:opacity-60">
                       {busy === 'approve' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
                       {!f.version ? 'Approve and start' : held ? 'Approve anyway' : gate ? 'Being checked' : 'Approve this version'}
                     </button>
@@ -491,12 +479,10 @@ function LiveVersion({ version: v, cap, trust, pinned, approvedAt, onChange, bus
         {v.charter}
       </blockquote>
       <div className="divide-y divide-[var(--fd-line)] text-[13px]">
-        {v.checks.contract.length > 0 && (
+        {(v.checks.contract.length > 0 || (v.checks.off?.length ?? 0) > 0) && (
           <div className={row}>
             <span className={key}>Done when</span>
-            <ul className="min-w-0 flex-1 list-disc space-y-0.5 pl-4 text-zinc-300">
-              {v.checks.contract.map((c) => <li key={c}>{c}</li>)}
-            </ul>
+            <GoalChecklist checks={v.checks} />
           </div>
         )}
         <div className={row}><span className={key}>Starts</span><span className="text-zinc-300">{triggersText(v.triggers)}</span></div>
