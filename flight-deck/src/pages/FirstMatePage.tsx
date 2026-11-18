@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Anchor, BellDot, CalendarDays, Factory as FactoryIcon, Loader2, MoreHorizontal, PanelRightOpen, Pause, Play, Plus,
-  RefreshCw, Square, Trash2, Archive, X, ShieldCheck, Ship,
+  Activity, Anchor, BellDot, CalendarDays, Coins, Factory as FactoryIcon, Loader2, MoreHorizontal, PanelRightOpen, Pause,
+  Play, Plus, Power, RefreshCw, SlidersHorizontal, Square, Trash2, Archive, X, ShieldCheck, Ship,
 } from 'lucide-react'
 import {
   createFactory,
@@ -37,18 +37,24 @@ import { useFirstMateStore } from '../stores/firstMateStore'
 import { QueueMenu, type MenuEntry } from '../components/agents/queue/QueueMenu'
 import { FactoryDrawer } from '../components/firstMate/FactoryDrawer'
 import { EmptyBand, ErrorBox, Pill, Section, Switch, Toast, errText, type PillTone } from '../components/firstMate/ui'
+import { FullscreenButton } from '../components/library/libraryParts'
 
 // First Mate: standing jobs ("factories") that run for the user. Each has a
 // charter they approve, runs through Bat, and is checked every run. See
 // docs/first-mate-plan.md.
 //
-// On top, "Needs you": charters waiting for approval, factories over budget,
-// runs waiting on the owner. Then the factories, one row each, with Run now
-// and a ⋯ menu; a row opens its drawer (charter, runs, history). A deck with
-// First Mate off shows why, and its admins get the switch.
+// On top, four tiles: the factories, the runs going, this week's tokens, and
+// the owner's switch. Then "Needs you" (charters waiting for approval,
+// factories over budget, runs waiting on the owner), the factories as cards
+// with Run now and a ⋯ menu (a card opens its drawer: charter, runs, history),
+// and the week. Beside them on a wide screen: the owner's settings and, for
+// admins, the deck's switches. A deck with First Mate off shows why, and its
+// admins get the switch.
 //
 // `onClose`: shown in the kiosk's dialog, a close button in the header and
 // Escape closes it (not while the drawer or the New factory picker is open).
+
+const HEAD_BTN = 'flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-60'
 
 const STATE_TONE: Record<FactoryCard['state'], PillTone> = {
   draft: 'zinc', awaiting_charter: 'amber', running: 'green', paused: 'zinc', paused_budget: 'amber',
@@ -166,29 +172,29 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
 
   return (
     <div className="@container relative flex h-full min-h-0 flex-col bg-zinc-950 text-zinc-200">
-      <header className={`shrink-0 border-b transition-colors ${scrolled ? 'border-[var(--fd-line)]' : 'border-transparent'}`}>
-        <div className="mx-auto w-full max-w-4xl px-5 pb-4 pt-5 wide:px-8 wide:pb-5 wide:pt-7">
-          <div className="flex items-center gap-2">
-            <h2 className="min-w-0 flex-1 text-xl font-bold tracking-tight text-zinc-100">First Mate</h2>
-            <button onClick={() => void load()} disabled={loading} title="Check again" aria-label="Check again"
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-60">
-              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-            </button>
-            {onClose && (
-              <button onClick={onClose} title="Close" aria-label="Close"
-                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
-                <X className="h-4 w-4" />
-              </button>
-            )}
+      <header className={`shrink-0 border-b transition-colors ${scrolled ? 'border-[var(--fd-line)] bg-zinc-950/90 backdrop-blur' : 'border-transparent'}`}>
+        <div className="mx-auto flex w-full max-w-6xl items-center gap-3 px-5 py-4 wide:px-8 wide:py-5">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white shadow-sm">
+            <Ship className="h-5 w-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-xl font-bold leading-tight tracking-tight text-zinc-100">First Mate</h2>
+            <p className="truncate text-[13px] text-zinc-500">Standing jobs that run for you, each on a charter you approve, checked every time.</p>
           </div>
-          <p className="mt-0.5 max-w-2xl text-sm leading-relaxed text-zinc-500">
-            Standing jobs that run for you. Each one has a charter you approve, runs through Bat, and is checked every time.
-          </p>
+          <button onClick={() => void load()} disabled={loading} title="Check again" aria-label="Check again" className={HEAD_BTN}>
+            <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+          <FullscreenButton className={HEAD_BTN} />
+          {onClose && (
+            <button onClick={onClose} title="Close" aria-label="Close" className={HEAD_BTN}>
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto" onScroll={(e) => setScrolled(e.currentTarget.scrollTop > 4)}>
-        <div className="mx-auto w-full max-w-4xl space-y-9 px-5 pb-24 wide:px-8">
+        <div className="mx-auto w-full max-w-6xl space-y-8 px-5 pb-24 pt-1 wide:px-8">
           {error && <ErrorBox text={error} onDismiss={() => setError(null)} />}
           {!status && loading && (
             <div className="flex h-48 items-center justify-center"><Loader2 className="h-5 w-5 animate-spin text-zinc-500" /></div>
@@ -215,6 +221,10 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
 
           {status?.available && (
             <>
+              <Overview status={status} factories={factories} busy={busy === 'prefs'}
+                onSwitch={(on) => void act('prefs', () => savePrefs({ on }), on ? 'First Mate is on' : 'First Mate is off: running factories paused')} />
+              <div className="grid items-start gap-8 @4xl:grid-cols-[minmax(0,1fr)_19rem]">
+              <div className="min-w-0 space-y-9">
               {needs.length > 0 && (
                 <Section icon={BellDot} tone="amber" title="Needs you" count={needs.length}
                   hint="Nothing runs on a charter you haven't approved.">
@@ -243,14 +253,6 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                 </Section>
               )}
 
-              <Section icon={Ship} title="Your First Mate"
-                hint={status.prefs.on ? 'Schedules and new mail start your factories’ runs.' : 'Off: your factories run only when you press Run now.'}>
-                <YourFirstMate status={status} busy={busy === 'prefs'}
-                  onChange={(change) => void act('prefs', () => savePrefs(change),
-                    change.on === undefined ? 'Weekly budget saved' : change.on ? 'First Mate is on' : 'First Mate is off: running factories paused')}
-                  onNotice={setNotice} />
-              </Section>
-
               <Section icon={FactoryIcon} title="Factories"
                 hint={`${factories.length} of ${max}. Each run is a Bat run: its checks, its reviewers, its questions to you.`}
                 action={!picking && !atCap ? (
@@ -266,8 +268,8 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                 {factories.length === 0 && !picking ? (
                   <EmptyBand text="Set up your first standing job" onAdd={() => setPicking(true)} />
                 ) : factories.length > 0 && (
-                  <div className={`fd-card overflow-hidden ${picking ? 'mt-4' : ''}`}>
-                    <ul className="divide-y divide-[var(--fd-line)]">
+                  <div className={picking ? 'mt-4' : ''}>
+                    <ul className="space-y-3">
                       {factories.map((f) => (
                         <FactoryRow key={f.id} factory={f} busy={busy === f.id} autoOn={status.prefs.on}
                           onOpen={() => openAt(f.id)}
@@ -291,11 +293,20 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                 </Section>
               )}
 
-              {status.is_admin && (
-                <Section icon={ShieldCheck} title="This deck" hint="Only admins see this.">
-                  <div className="fd-card px-4 py-1.5"><DeckSettings status={status} busy={busy === 'deck'} onChange={(c) => void deckSwitch(c)} /></div>
+              </div>
+              <aside className="space-y-8 @4xl:sticky @4xl:top-2">
+                <Section icon={SlidersHorizontal} title="Your settings">
+                  <MateSettings status={status} busy={busy === 'prefs'}
+                    onChange={(change) => void act('prefs', () => savePrefs(change), 'Weekly budget saved')}
+                    onNotice={setNotice} />
                 </Section>
-              )}
+                {status.is_admin && (
+                  <Section icon={ShieldCheck} title="This deck" hint="Only admins see this.">
+                    <div className="fd-card px-4 py-1"><DeckSettings status={status} busy={busy === 'deck'} onChange={(c) => void deckSwitch(c)} /></div>
+                  </Section>
+                )}
+              </aside>
+              </div>
             </>
           )}
         </div>
@@ -344,7 +355,7 @@ function MateAgent({ row, onNotice }: { row: string; onNotice: (text: string) =>
   const cur = data?.current
   return (
     <div className={row}>
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0">
         <div className="text-sm font-medium text-zinc-200">Its agent</div>
         <div className="text-xs text-zinc-500">
           {!data ? 'Loading…'
@@ -355,19 +366,19 @@ function MateAgent({ row, onNotice }: { row: string; onNotice: (text: string) =>
         {error && <div role="alert" className="mt-1 text-xs text-red-700 dark:text-red-300">{error}</div>}
       </div>
       {data && (
-        <>
+        <div className="flex w-full items-center gap-2">
           <label className="sr-only" htmlFor="fm-agent">First Mate's agent</label>
           <select id="fm-agent" value={cur?.exists ? cur.slug : ''} disabled={busy} onChange={(e) => void pick(e.target.value)}
-            className="h-8 max-w-[11rem] rounded-full border border-[var(--fd-line)] bg-zinc-950 px-3 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
+            className="h-8 min-w-0 flex-1 rounded-full border border-[var(--fd-line)] bg-zinc-950 px-3 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
             <option value="">None</option>
             {data.agents.map((a) => <option key={a.slug} value={a.slug}>{a.name}</option>)}
           </select>
           {!cur?.exists && (
-            <button onClick={() => void make()} disabled={busy} className="fd-btn-quiet h-8 shrink-0 px-3 text-xs">
+            <button onClick={() => void make()} disabled={busy} className="fd-btn-quiet h-8 shrink-0 px-3 text-xs" title="Make an agent called First Mate">
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />} Make one
             </button>
           )}
-        </>
+        </div>
       )}
     </div>
   )
@@ -463,53 +474,92 @@ function Week({ onOpen }: { onOpen: (id: string) => void }) {
 
 const BUDGETS = [5_000_000, 10_000_000, 25_000_000, 50_000_000, 100_000_000, 250_000_000]
 
-function YourFirstMate({ status, busy, onChange, onNotice }: {
+/** The four tiles on top: factories, runs going, this week's tokens, and the
+ *  owner's switch (off: factories run only when Run now is pressed). */
+function Overview({ status, factories, busy, onSwitch }: {
   status: Status
+  factories: FactoryCard[]
   busy: boolean
-  onChange: (change: { on?: boolean; weekly_tokens?: number }) => void
-  onNotice: (text: string) => void
+  onSwitch: (on: boolean) => void
 }) {
-  const { on } = status.prefs
+  const live = factories.filter((f) => f.version > 0 && f.state !== 'retired')
+  const running = live.filter((f) => f.state === 'running').length
+  const going = factories.filter((f) => f.last_run && (f.last_run.status === 'queued' || f.last_run.status === 'running')).length
   const { used, budget } = status.week
   const pct = budget > 0 ? Math.min(100, Math.round((used / budget) * 100)) : 0
+  const { on } = status.prefs
+  const tile = 'fd-card relative flex min-w-0 flex-col gap-1 overflow-hidden px-4 py-3.5'
+  const label = 'flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500'
+  const value = 'text-2xl font-semibold tabular-nums leading-tight tracking-tight text-zinc-100'
+  return (
+    <div className="grid grid-cols-2 gap-3 @3xl:grid-cols-4">
+      <div className={tile}>
+        <span className={label}><FactoryIcon className="h-3.5 w-3.5" />Factories</span>
+        <span className={value}>{live.length}</span>
+        <span className="truncate text-xs text-zinc-500">{running} running{factories.length > live.length ? ` · ${factories.length - live.length} not live` : ''}</span>
+      </div>
+      <div className={tile}>
+        <span className={label}><Activity className="h-3.5 w-3.5" />Runs going</span>
+        <span className={`${value} flex items-center gap-2`}>
+          {going}
+          {going > 0 && <span className="relative flex h-2.5 w-2.5"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-60" /><span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-violet-500" /></span>}
+        </span>
+        <span className="truncate text-xs text-zinc-500">{going ? 'working now' : 'none right now'}</span>
+      </div>
+      <div className={tile}>
+        <span className={label}><Coins className="h-3.5 w-3.5" />This week</span>
+        <span className={value}>{tokensText(used).replace(' tokens', '')}</span>
+        <span className="truncate text-xs text-zinc-500">{budget > 0 ? `of ${tokensText(budget)}` : 'tokens · no weekly limit'}</span>
+        {budget > 0 && (
+          <span className="absolute inset-x-0 bottom-0 h-1 bg-zinc-800" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="This week's tokens">
+            <span className={`block h-full ${pct >= 100 ? 'bg-amber-500' : 'bg-violet-500'}`} style={{ width: `${pct}%` }} />
+          </span>
+        )}
+      </div>
+      <div className={`${tile} ${on ? 'ring-1 ring-inset ring-emerald-500/30' : ''}`}>
+        <span className={label}><Power className="h-3.5 w-3.5" />On their own</span>
+        <span className="flex items-center justify-between gap-2">
+          <span className={`text-2xl font-semibold leading-tight tracking-tight ${on ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-400'}`}>{on ? 'On' : 'Off'}</span>
+          <Switch on={on} disabled={busy} label="Run my factories on their own" onChange={onSwitch} />
+        </span>
+        <span className="text-xs leading-snug text-zinc-500">{on ? 'Schedules and new mail start runs.' : 'Only when you press Run now.'}</span>
+      </div>
+    </div>
+  )
+}
+
+/** The owner's settings: the weekly budget, First Mate's agent, and how far its checks agree with them. */
+function MateSettings({ status, busy, onChange, onNotice }: {
+  status: Status
+  busy: boolean
+  onChange: (change: { weekly_tokens?: number }) => void
+  onNotice: (text: string) => void
+}) {
+  const { budget } = status.week
   const unlimited = budget < 0
   const options = unlimited || BUDGETS.includes(budget) ? BUDGETS : [...BUDGETS, budget].sort((a, b) => a - b)
-  const row = 'flex items-center gap-4 py-2.5'
+  // A narrow column: each setting's words above its control.
+  const stack = 'flex flex-col items-start gap-2 py-3'
+  const row = 'flex items-start gap-3 py-3'
   return (
-    <div className="fd-card divide-y divide-[var(--fd-line)] px-4 py-1.5">
-      <div className={row}>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-zinc-200">Run my factories on their own</div>
+    <div className="fd-card divide-y divide-[var(--fd-line)] px-4 py-1">
+      <div className={stack}>
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-zinc-200">Weekly budget</div>
           <div className="text-xs text-zinc-500">
-            {on ? 'On their schedules and when new mail comes in. Turning it off pauses them and stops their runs.'
-              : 'Turn it on and running factories start on their schedules and on new mail.'}
+            {unlimited ? 'No limit: fine on a local model; on a paid API it can cost a lot.'
+              : 'Shared between your factories by their share. The week starts Monday.'}
           </div>
         </div>
-        <Switch on={on} disabled={busy} label="Run my factories on their own" onChange={(v) => onChange({ on: v })} />
+        <label className="sr-only" htmlFor="fm-budget">Weekly budget</label>
+        <select id="fm-budget" value={budget} disabled={busy}
+          onChange={(e) => onChange({ weekly_tokens: Number(e.target.value) })}
+          className="h-8 w-full rounded-full border border-[var(--fd-line)] bg-zinc-950 px-3 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
+          {options.map((n) => <option key={n} value={n}>{tokensText(n).replace(' tokens', '')} a week</option>)}
+          <option value={-1}>No weekly limit</option>
+        </select>
       </div>
-      <div className="py-2.5">
-        <div className="flex items-center gap-3">
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-zinc-200">This week</div>
-            <div className="text-xs text-zinc-500">
-              {unlimited
-                ? `${tokensText(used)} so far. No weekly limit: your factories run as long as their cap per run lets them. Fine on a local model; on a paid API it can cost a lot.`
-                : `${tokensText(used)} of ${tokensText(budget)}, shared between your factories by their share. The week starts Monday.`}
-            </div>
-          </div>
-          <label className="sr-only" htmlFor="fm-budget">Weekly budget</label>
-          <select id="fm-budget" value={budget} disabled={busy}
-            onChange={(e) => onChange({ weekly_tokens: Number(e.target.value) })}
-            className="h-8 rounded-full border border-[var(--fd-line)] bg-zinc-950 px-3 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
-            {options.map((n) => <option key={n} value={n}>{tokensText(n).replace(' tokens', '')} a week</option>)}
-            <option value={-1}>No weekly limit</option>
-          </select>
-        </div>
-        {!unlimited && <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-zinc-800" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="This week's tokens">
-          <div className={`h-full rounded-full ${pct >= 100 ? 'bg-amber-500' : 'bg-violet-500'}`} style={{ width: `${pct}%` }} />
-        </div>}
-      </div>
-      <MateAgent row={row} onNotice={onNotice} />
+      <MateAgent row={stack} onNotice={onNotice} />
       {status.calibration && (
         <div className={row}>
           <div className="min-w-0 flex-1">
@@ -626,12 +676,19 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete
     )
   }
 
+  const initial = (f.title.trim()[0] || '?').toUpperCase()
   return (
-    <li className="group relative flex gap-3 px-4 py-3 transition-colors hover:bg-[var(--fd-hover)]">
-      <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${
-        going ? 'bg-violet-500/15 text-violet-600 dark:text-violet-300'
-          : f.state === 'running' ? 'bg-emerald-500/12 text-emerald-600 dark:text-emerald-400' : 'bg-zinc-500/10 text-zinc-500'}`}>
-        {going ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : f.state === 'running' ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+    <li className={`group relative flex gap-3.5 overflow-hidden rounded-2xl border bg-[var(--fd-surface-raised)] p-4 transition-all hover:-translate-y-px hover:shadow-md ${
+      going ? 'border-violet-500/30' : 'border-[var(--fd-line)]'}`}>
+      <span className={`relative mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-sm font-semibold ${
+        going ? 'bg-violet-500/15 text-violet-700 dark:text-violet-300'
+          : f.state === 'running' ? 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300' : 'bg-zinc-500/10 text-zinc-500'}`}
+        title={going ? 'A run is going' : STATE_LABELS[f.state]}>
+        {initial}
+        <span className={`absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full ring-2 ring-[var(--fd-surface-raised)] ${
+          going ? 'bg-violet-500 text-white' : f.state === 'running' ? 'bg-emerald-500 text-white' : 'bg-zinc-400 text-white dark:bg-zinc-600'}`}>
+          {going ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : f.state === 'running' ? <Play className="h-2 w-2 fill-current" /> : <Pause className="h-2 w-2" />}
+        </span>
       </span>
       <div className="min-w-0 flex-1">
         <button onClick={onOpen} title="Open: its charter, runs and history"
@@ -654,7 +711,7 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete
       <div className="flex shrink-0 items-start gap-1">
         {canRun && (
           <button onClick={onRun} disabled={busy} title="Run now"
-            className="hidden h-8 items-center gap-1 rounded-full px-3 text-xs font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 wide:inline-flex">
+            className="hidden h-8 items-center gap-1 rounded-full border border-[var(--fd-line)] px-3 text-xs font-medium text-zinc-300 transition-colors hover:border-violet-500/40 hover:bg-violet-500/10 hover:text-violet-700 dark:hover:text-violet-200 wide:inline-flex">
             <Play className="h-3.5 w-3.5" /> Run now
           </button>
         )}
@@ -671,6 +728,11 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onRun, onState, onDelete
         </button>
         {anchor && <QueueMenu anchor={anchor} label={`${f.title}: actions`} items={menu} onClose={() => setAnchor(null)} />}
       </div>
+      {going && (
+        <span className="absolute inset-x-0 bottom-0 h-0.5 overflow-hidden bg-violet-500/15" aria-hidden>
+          <span className="fm-running-bar block h-full w-1/3 rounded-full bg-violet-500" />
+        </span>
+      )}
     </li>
   )
 }
