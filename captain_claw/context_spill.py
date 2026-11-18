@@ -144,10 +144,14 @@ def notes_path(project: str = "", subtask: str = "", session: str = "") -> str:
     folder as ``vfs:<project>/notes/<sid8>-<subtask>-notes.md`` — the session
     prefix keeps a continuation round (same folder, same s1/s2 ids) from
     appending to an earlier round's notes, and the suffix keeps it from sharing a
-    basename with a declared deliverable. Elsewhere ``notes.md``."""
+    basename with a declared deliverable. A Bat step's worker keeps them there
+    too (its step's id), so they outlive the worker: a retry of the step finds
+    them. Elsewhere ``notes.md``."""
     project = (project or os.environ.get("CLAW_VFS_PROJECT", "")).strip()
-    subtask = (subtask or os.environ.get("CLAW_VATRA_SUBTASK", "")).strip()
-    session = (session or os.environ.get("CLAW_VATRA_SESSION", "")).strip()
+    subtask = (subtask or os.environ.get("CLAW_VATRA_SUBTASK", "")
+               or os.environ.get("CLAW_BAT_SUBTASK", "")).strip()
+    session = (session or os.environ.get("CLAW_VATRA_SESSION", "")
+               or os.environ.get("CLAW_BAT_SESSION", "")).strip()
     if project and subtask:
         prefix = f"{_slug(session, 8)}-" if session else ""
         return f"vfs:{project}/notes/{prefix}{_slug(subtask, 60)}-notes.md"
