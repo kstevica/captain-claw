@@ -57,7 +57,7 @@ DUP_SHARE = 0.2            # a part whose items are 20%+ elsewhere already repea
 CORRECTIONS = "corrections.md"
 CORRECTIONS_MAX = 12
 CORRECTIONS_SHOWN = 1500
-_COUNT_KEYS = ("min_rows", "max_rows", "min_words", "max_words", "min_links", "headings")
+_COUNT_KEYS = ("min_rows", "max_rows", "min_per", "min_words", "max_words", "min_links", "headings")
 _TABLE_EXTS = (".csv", ".tsv")
 _DOC_EXTS = (".md", ".markdown", ".txt", ".html", ".htm", ".docx", ".rst")
 

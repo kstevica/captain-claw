@@ -105,6 +105,15 @@ def parse_contract(output: str) -> list[dict]:
     return out
 
 
+# A check script or pattern is kept whole or not at all: cut, it's broken code (a
+# run's three Python checks were cut mid-line at 400 characters and could only ever
+# fail). One too long for this goes to the reviewers instead.
+CMD_MAX = 4000
+PATTERN_MAX = 1000
+# What scripts used to be cut at: one exactly this long was cut, and can't run.
+_OLD_CMD_CUT = 400
+
+
 def _normalize(item, i: int) -> dict | None:
     if not isinstance(item, dict):
         return None
@@ -118,15 +127,16 @@ def _normalize(item, i: int) -> dict | None:
     ctype = str(check.get("type") or "").strip().casefold()
     norm: dict = {"type": "judge"}
     if ctype == "command" and str(check.get("cmd") or "").strip():
-        norm = {"type": "command", "cmd": str(check["cmd"]).strip()[:400]}
+        cmd = str(check["cmd"]).strip()
+        norm = {"type": "command", "cmd": cmd} if len(cmd) <= CMD_MAX else {"type": "judge"}
     elif ctype == "file_exists" and _relpath(check.get("path")):
         norm = {"type": "file_exists", "path": _relpath(check["path"])}
     elif ctype == "file_contains" and _relpath(check.get("path")) \
-            and str(check.get("pattern") or "").strip():
+            and 0 < len(str(check.get("pattern") or "").strip()) <= PATTERN_MAX:
         norm = {"type": "file_contains", "path": _relpath(check["path"]),
-                "pattern": str(check["pattern"])[:300]}
-    elif ctype == "no_pattern" and str(check.get("pattern") or "").strip():
-        norm = {"type": "no_pattern", "pattern": str(check["pattern"])[:300],
+                "pattern": str(check["pattern"])}
+    elif ctype == "no_pattern" and 0 < len(str(check.get("pattern") or "").strip()) <= PATTERN_MAX:
+        norm = {"type": "no_pattern", "pattern": str(check["pattern"]),
                 "glob": (str(check.get("glob") or "").strip() or "**/*")[:120]}
     elif ctype == "table":
         norm = _norm_table(check) or {"type": "judge"}
@@ -175,12 +185,17 @@ def _norm_table(check: dict) -> dict | None:
     if str(check.get("email_column") or "").strip():
         out["email_column"] = str(check["email_column"]).strip()[:80]
     pat = str(check.get("exclude_pattern") or "").strip()
-    if pat:
+    if pat and len(pat) <= PATTERN_MAX:
         try:
             re.compile(pat)
-            out["exclude_pattern"] = pat[:200]
+            out["exclude_pattern"] = pat
         except re.error:
             pass
+    per = check.get("min_per") if isinstance(check.get("min_per"), dict) else {}
+    per = {str(k).strip()[:80]: n for k, v in list(per.items())[:3]
+           if str(k).strip() and (n := _num(v, 1, 10_000_000, True)) is not None}
+    if per:
+        out["min_per"] = per
     allowed = check.get("allowed") if isinstance(check.get("allowed"), dict) else {}
     allowed = {str(k)[:80]: _names(v, 50) for k, v in list(allowed.items())[:5] if _names(v, 50)}
     if allowed:
@@ -287,6 +302,14 @@ def _check_table(repo: Path, check: dict, skip: tuple[str, ...] = ()) -> tuple[b
         off = [v for v in values(col) if v and v.lower() not in ok]
         if off:
             bad.append(f"{len(off)} {col} values outside {', '.join(allowed)} (e.g. {off[0]})")
+    for col, least in (check.get("min_per") or {}).items():
+        from collections import Counter
+        have = Counter(v.lower() for v in values(col) if v)
+        named = next((a for c, a in (check.get("allowed") or {}).items() if c.lower() == col.lower()), None)
+        groups = list(named) if named else sorted({v for v in values(col) if v}, key=str.lower)
+        short = [f"{g} {have.get(g.lower(), 0)}" for g in groups if have.get(g.lower(), 0) < least]
+        if short or not groups:
+            bad.append(f"fewer than {least} rows per {col}: " + (", ".join(short) if short else f"no {col} values"))
     return (not bad, f"`{rel}`: " + "; ".join(bad) if bad else "")
 
 
@@ -416,6 +439,24 @@ def measure(repo: Path, constraints: list[dict], skip: tuple[str, ...] = ()) -> 
                         out[str(c["id"])] = int(prof.get("words", 0))
         except Exception:  # noqa: BLE001 — a measure is a hint, never a failure
             continue
+    if not any((c.get("check") or {}).get("type") == "table" and str(c["id"]) in out for c in constraints or []):
+        # The amount sits in a script or a reviewer's rule ("leads.csv has 60 rows"): count
+        # the rows of the tables the rules name, so growth still shows.
+        named: list[str] = []
+        for c in constraints or []:
+            where = f"{c.get('text') or ''} {(c.get('check') or {}).get('cmd') or ''}"
+            named += [n for n in re.findall(r"[\w./-]+\.(?:csv|tsv)\b", where) if n not in named]
+        for name in named[:5]:
+            rel = _relpath(name)
+            path = repo / rel if rel else None
+            if path is None or not path.is_file() or rel.split("/", 1)[0] in skip:
+                continue
+            try:
+                prof = dp.profile_table(path)
+                if not prof.get("too_big"):
+                    out[f"rows:{rel}"] = int(prof.get("rows", 0))
+            except Exception:  # noqa: BLE001
+                continue
     return out
 
 
@@ -432,6 +473,12 @@ async def validate(repo: Path, constraints: list[dict], *,
         check = c.get("check") or {}
         ctype = check.get("type")
         entry = {"id": c["id"], "text": c["text"], "severity": c["severity"]}
+        # As stored: the old cut came after trimming, so it can end in a space.
+        if ctype == "command" and len(str(check.get("cmd") or "")) == _OLD_CMD_CUT:
+            entry["how"] = "judge"
+            entry["note"] = "its script was cut short when it was written, so the reviewers decide it"
+            res["unresolved"].append(entry)
+            continue
         try:
             if ctype == "command":
                 ok, note = await _check_command(repo, check, run)
