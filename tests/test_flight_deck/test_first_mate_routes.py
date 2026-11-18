@@ -300,7 +300,7 @@ async def test_delete_only_drafts_and_retired(deck):
         assert (await cl.delete(f"/fd/first-mate/factories/{draft['id']}", headers=_hdr(BOB))).json() == {"ok": True}
         f = await _approved(cl)
         r = await cl.delete(f"/fd/first-mate/factories/{f['id']}", headers=_hdr(BOB))
-        assert r.status_code == 400 and "retire" in r.json()["detail"]
+        assert r.status_code == 400 and "archive the factory before deleting it" in r.json()["detail"]
         await cl.post(f"/fd/first-mate/factories/{f['id']}/state", headers=_hdr(BOB), json={"state": "retired"})
         assert (await cl.delete(f"/fd/first-mate/factories/{f['id']}", headers=_hdr(BOB))).status_code == 200
         assert (await cl.get(f"/fd/first-mate/factories/{f['id']}", headers=_hdr(BOB))).status_code == 404

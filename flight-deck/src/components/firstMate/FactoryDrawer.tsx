@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronLeft, ChevronRight, Database, FlaskConical, Loader2, Maximize2, Minimize2, Play, ScrollText, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
+import { Archive, ArchiveRestore, ChevronLeft, ChevronRight, Database, FlaskConical, Loader2, Maximize2, Minimize2, Play, ScrollText, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
 import {
   approve,
   approveRun,
+  archiveFactory,
+  archiveFinishedRuns,
+  archiveRun,
+  listRuns,
   caseDraft,
   decline,
   rateRun,
@@ -73,6 +77,8 @@ function eventText(e: FactoryEvent): string {
     case 'updated': return `Changed ${Object.keys(d).join(', ').replace(/_/g, ' ')}`
     case 'run_started': return 'Run started'
     case 'run_continued': return 'Run continued where it stopped'
+    case 'archived': return d.paused ? 'Archived, and paused' : 'Archived'
+    case 'restored': return 'Restored to the list'
     case 'run_finished': return `Run ${RUN_LABELS[d.status as Run['status']]?.toLowerCase() ?? String(d.status ?? '')}`
     case 'case_added': return 'Test case added'
     case 'case_deleted': return 'Test case deleted'
@@ -130,6 +136,9 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
   const [form, setForm] = useState<Form | null>(null)
   const [note, setNote] = useState('')
   const [withData, setWithData] = useState(false)
+  // The Runs tab's archived view: the runs taken off it, to look at or restore.
+  const [showArchived, setShowArchived] = useState(false)
+  const [archivedList, setArchivedList] = useState<Run[] | null>(null)
   const [seed, setSeed] = useState<CaseSeed | null>(null)
   const seedUsed = useCallback(() => setSeed(null), [])
 
@@ -144,6 +153,14 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
     }
   }, [factoryId])
   useEffect(() => { void load() }, [load])
+  const loadArchived = useCallback(async () => {
+    try {
+      setArchivedList(await listRuns(factoryId, true))
+    } catch (e) {
+      setError(errText(e))
+    }
+  }, [factoryId])
+  useEffect(() => { if (showArchived) void loadArchived() }, [showArchived, loadArchived])
 
   // Escape closes the drawer only: taken first and marked handled, so the
   // dialog under it (the kiosk's) stays open. A viewer or table opened over it
@@ -187,7 +204,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
   const f = data
   const draft = f?.draft ?? null
   const dirty = !!(draft && form && !same(form, formOf(draft)))
-  const canRun = !!f?.live && ['running', 'paused', 'stopped'].includes(f.state) && !going
+  const canRun = !!f?.live && ['running', 'paused', 'stopped'].includes(f.state) && !going && !f.archived_at
 
   // A live factory with cases checks a new version before it goes live.
   const gate = f?.check?.purpose === 'approve' && f.check.version === draft?.version ? f.check : null
@@ -246,7 +263,21 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                 {f.live && <Pill tone="zinc">v{f.live.version}</Pill>}
               </div>
               <h2 className="mt-2 text-xl font-bold leading-snug tracking-tight text-zinc-100">{f.title}</h2>
-              {f.state_reason && <p className="mt-0.5 text-xs text-zinc-500">{f.state_reason}</p>}
+              {f.state_reason && f.state_reason !== 'archived' && <p className="mt-0.5 text-xs text-zinc-500">{f.state_reason}</p>}
+              {f.archived_at && (
+                <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-[var(--fd-line)] bg-zinc-500/[0.06] px-3 py-2.5">
+                  <Archive className="h-4 w-4 shrink-0 text-zinc-500" />
+                  <p className="min-w-0 flex-1 text-xs text-zinc-400">
+                    <span className="font-semibold text-zinc-200">Archived {whenText(f.archived_at)}.</span>{' '}
+                    It doesn't start on its own and isn't on your list; its runs and results are kept.
+                  </p>
+                  <button onClick={() => void act('restore', () => archiveFactory(factoryId, false),
+                    `${f.title} is back on your list, paused: resume it when you want it to run`)} disabled={!!busy}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--fd-line)] bg-[var(--fd-surface-raised)] px-3 text-xs font-medium text-zinc-200 transition-colors hover:border-violet-500/40">
+                    {busy === 'restore' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArchiveRestore className="h-3.5 w-3.5" />}Restore
+                  </button>
+                </div>
+              )}
             </>
           ) : <Loader2 className="mt-1 h-4 w-4 animate-spin text-zinc-500" />}
         </div>
@@ -392,12 +423,60 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                   }}
                   onClose={() => setWithData(false)} />
               )}
-              {f.runs.length === 0 ? (
+              {(() => {
+                const finished = f.runs.filter((r) => ['done', 'failed', 'cancelled'].includes(r.status)).length
+                const archivedCount = f.archived_runs ?? 0
+                if (!finished && !archivedCount && !showArchived) return null
+                return (
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="text-zinc-500">{showArchived ? 'Archived runs: off Runs and Results, kept whole.' : `${f.runs.length} on the list`}</span>
+                    <span className="flex-1" />
+                    {!showArchived && finished > 0 && (
+                      <button onClick={() => {
+                        if (window.confirm(`Archive ${finished} finished run${finished === 1 ? '' : 's'}? They leave Runs and Results; nothing is deleted.`)) {
+                          void act('archive-finished', () => archiveFinishedRuns(factoryId), `${finished} run${finished === 1 ? '' : 's'} archived`)
+                        }
+                      }} disabled={!!busy}
+                        className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[var(--fd-line)] px-2.5 font-medium text-zinc-400 transition-colors hover:border-violet-500/40 hover:text-zinc-200">
+                        {busy === 'archive-finished' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Archive className="h-3 w-3" />}Archive finished runs
+                      </button>
+                    )}
+                    {(archivedCount > 0 || showArchived) && (
+                      <button onClick={() => setShowArchived((v) => !v)} aria-pressed={showArchived}
+                        className={`inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 font-medium transition-colors ${showArchived
+                          ? 'border-violet-500/40 bg-violet-500/10 text-violet-700 dark:text-violet-200' : 'border-[var(--fd-line)] text-zinc-400 hover:text-zinc-200'}`}>
+                        <Archive className="h-3 w-3" />{showArchived ? 'Back to the list' : `Archived · ${archivedCount}`}
+                      </button>
+                    )}
+                  </div>
+                )
+              })()}
+              {showArchived ? (
+                archivedList === null ? (
+                  <p className="flex items-center gap-1.5 text-xs text-zinc-500"><Loader2 className="h-3 w-3 animate-spin" />Loading…</p>
+                ) : archivedList.length === 0 ? (
+                  <p className="text-zinc-500">No archived runs.</p>
+                ) : (
+                  <ul className="space-y-2.5">
+                    {archivedList.map((r) => (
+                      <RunItem key={r.id} run={r} busy={false} deciding={false} onStop={() => {}} continuing={false}
+                        onApprove={() => {}} onReject={() => {}} onRate={(kind) => void act(`rate:${r.id}`, () => rateRun(r.id, kind))}
+                        making={false} archived archiving={busy === `archive:${r.id}`}
+                        onArchive={() => void act(`archive:${r.id}`, async () => { await archiveRun(r.id, false); await loadArchived() },
+                          'Run restored to the list')} />
+                    ))}
+                  </ul>
+                )
+              ) : f.runs.length === 0 ? (
                 <p className="text-zinc-500">No runs yet.</p>
               ) : (
                 <ul className="space-y-2.5">
                   {f.runs.map((r) => (
                     <RunItem key={r.id} run={r} busy={busy === `stop:${r.id}`} deciding={busy === `decide:${r.id}`}
+                      archiving={busy === `archive:${r.id}`}
+                      onArchive={['done', 'failed', 'cancelled'].includes(r.status)
+                        ? () => void act(`archive:${r.id}`, () => archiveRun(r.id), 'Run archived: find it under Archived')
+                        : undefined}
                       onStop={() => void act(`stop:${r.id}`, () => stopRun(r.id), 'Run stopped')}
                       continuing={busy === `continue:${r.id}`}
                       onContinue={r.can_continue
@@ -633,10 +712,15 @@ const INTENT_DONE: Record<Exclude<Intent['status'], 'open'>, { tone: PillTone; l
   dropped: { tone: 'zinc', label: 'Not done' },
 }
 
-function RunItem({ run: r, busy, deciding, onStop, onContinue, continuing, onApprove, onReject, onRate, onMakeCase, making }: {
+function RunItem({ run: r, busy, deciding, onStop, onContinue, continuing, onApprove, onReject, onRate, onMakeCase, making,
+  onArchive, archiving = false, archived = false }: {
   run: Run
   busy: boolean
   deciding: boolean
+  /** Off Runs and Results (a finished run), or back (``archived``). */
+  onArchive?: () => void
+  archiving?: boolean
+  archived?: boolean
   onStop: () => void
   /** A stopped run that can go on where it stopped. */
   onContinue?: () => void
@@ -710,7 +794,15 @@ function RunItem({ run: r, busy, deciding, onStop, onContinue, continuing, onApp
             </button>
           </span>
         )}
-        {onContinue && (
+        {onArchive && (
+          <button onClick={onArchive} disabled={archiving}
+            title={archived ? 'Restore it to Runs and Results' : 'Archive: off Runs and Results, kept whole'}
+            aria-label={archived ? 'Restore this run' : 'Archive this run'}
+            className="flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
+            {archiving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : archived ? <ArchiveRestore className="h-3.5 w-3.5" /> : <Archive className="h-3.5 w-3.5" />}
+          </button>
+        )}
+        {onContinue && !archived && (
           <button onClick={onContinue} disabled={continuing}
             title="Go on where it stopped: finished steps stay finished, with your cap per run again"
             className="inline-flex h-7 items-center gap-1 rounded-full bg-violet-600 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60">

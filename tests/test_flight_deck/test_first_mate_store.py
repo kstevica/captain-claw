@@ -425,7 +425,7 @@ def test_delete_only_drafts_and_retired_and_their_sealed_cases(store):
     (sealed / "case.json").write_text("{}")
     with pytest.raises(fm.FirstMateError, match="owner"):
         store.delete(f["id"], CAROL)
-    with pytest.raises(fm.FirstMateError, match="retire"):
+    with pytest.raises(fm.FirstMateError, match="archive the factory before deleting it"):
         store.delete(f["id"], BOB)
     store.set_state(f["id"], "retired", "owner")
     assert store.delete(f["id"], BOB)

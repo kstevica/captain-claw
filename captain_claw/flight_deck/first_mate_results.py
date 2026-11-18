@@ -126,7 +126,7 @@ def _check_results(verdict: dict[str, Any]) -> list[dict[str, Any]]:
 async def factory_results(factory_id: str, *, limit: int = RUNS_SHOWN) -> list[dict[str, Any]]:
     """The factory's newest runs that left files, newest first."""
     out = []
-    for run in fms.get_store().list_runs(factory_id, limit=limit * 2):
+    for run in fms.get_store().list_runs(factory_id, limit=limit * 2, archived=False):
         got = await run_results(run, profile_now=len(out) < RUNS_PROFILED)
         if got and got["total"]:
             out.append(got)
@@ -137,7 +137,7 @@ async def factory_results(factory_id: str, *, limit: int = RUNS_SHOWN) -> list[d
 
 async def latest(factory_id: str) -> dict[str, Any] | None:
     """For a factory's card: its newest run's result, if it left one."""
-    for run in fms.get_store().list_runs(factory_id, limit=5):
+    for run in fms.get_store().list_runs(factory_id, limit=5, archived=False):
         got = await run_results(run)
         if got and got["main"]:
             top = got["main"][0]

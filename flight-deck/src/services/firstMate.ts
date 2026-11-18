@@ -124,6 +124,8 @@ export interface Run {
   proof?: { state?: 'confirmed' | 'nothing' | 'doubt' | 'unknown'; note?: string; sent?: number; approved?: number; actions?: string[] }
   /** How long it took, kept once it ended (an empty object before). */
   timing?: RunTiming | null
+  /** When it was archived ('' when it isn't). */
+  archived_at?: string
 }
 
 /** How long a run took, in seconds: in all, while at least one agent worked,
@@ -190,6 +192,8 @@ export interface Factory {
   template: string
   created_at: string
   updated_at: string
+  /** When it was archived (off your list, kept whole, restorable); '' when it isn't. */
+  archived_at?: string
   live: Version | null
   draft: Version | null
 }
@@ -315,6 +319,8 @@ export interface FactoryDetail extends Factory {
   run_cap: RunCap
   /** Extra data every run gets. */
   data: FactoryDataItem[]
+  /** How many of its runs are archived (off Runs and Results). */
+  archived_runs?: number
   versions: Version[]
   runs: Run[]
   events: FactoryEvent[]
@@ -460,8 +466,13 @@ export const draftFactory = (body: { words?: string; goal_id?: string }) =>
   call<Factory & { cases: number }>('/fd/first-mate/draft', json('POST', body))
 export const getTemplates = () => call<{ templates: Template[] }>('/fd/first-mate/templates').then((r) => r.templates)
 export const listFactories = (includeRetired = false) =>
-  call<{ factories: FactoryCard[] }>(`/fd/first-mate/factories${includeRetired ? '?include_retired=true' : ''}`)
+  call<{ factories: FactoryCard[]; archived_count: number }>(`/fd/first-mate/factories${includeRetired ? '?include_retired=true' : ''}`)
     .then((r) => r.factories)
+/** The list with how many are archived, or (``archived``) the archived and retired ones. */
+export const factoryList = (archived = false) =>
+  call<{ factories: FactoryCard[]; archived_count: number }>(`/fd/first-mate/factories${archived ? '?archived=true' : ''}`)
+/** Off your list (a running one is paused first), or back: kept whole either way. */
+export const archiveFactory = (id: string, archived = true) => call<Factory>(`${f(id)}/archive`, json('POST', { archived }))
 export const createFactory = (body: { template?: string; title?: string; charter?: string }) =>
   call<Factory>('/fd/first-mate/factories', json('POST', body))
 export const getFactory = (id: string) => call<FactoryDetail>(f(id))
@@ -515,7 +526,12 @@ export const getRunData = (runId: string) => call<RunData>(`${runPath(runId)}/da
 export const addRunData = (runId: string, ids: string[]) => call<RunData & { added: string[] }>(`${runPath(runId)}/data`, json('POST', { ids }))
 export const dropRunData = (runId: string, path: string) =>
   call<RunData>(`${runPath(runId)}/data?${new URLSearchParams({ path })}`, { method: 'DELETE' })
-export const listRuns = (id: string) => call<{ runs: Run[] }>(`${f(id)}/runs`).then((r) => r.runs)
+export const listRuns = (id: string, archived = false) =>
+  call<{ runs: Run[]; archived_runs: number }>(`${f(id)}/runs${archived ? '?archived=true' : ''}`).then((r) => r.runs)
+export const archiveRun = (runId: string, archived = true) =>
+  call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/archive`, json('POST', { archived }))
+export const archiveFinishedRuns = (id: string) =>
+  call<{ archived: number; archived_runs: number }>(`${f(id)}/runs/archive-finished`, { method: 'POST' })
 export const approveRun = (runId: string, ids?: number[]) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/approve`, json('POST', ids ? { ids } : {}))
 export const rejectRun = (runId: string) =>
