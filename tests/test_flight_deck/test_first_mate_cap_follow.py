@@ -185,7 +185,8 @@ async def deck_db(tmp_path: Path):
 async def test_bats_deck_settings(deck_db, monkeypatch):
     monkeypatch.delenv("FD_BAT_MAX_PARALLEL", raising=False)
     assert bat_routes.deck_settings() == {"max_parallel": 3, "step_ceiling": bat_routes._BAT_STEP_CEILING,
-                                          "idle_minutes": int(bat_routes._BAT_IDLE_S // 60)}
+                                          "idle_minutes": int(bat_routes._BAT_IDLE_S // 60),
+                                          "call_minutes": int(bat_routes._BAT_CALL_S // 60)}
     got = await bat_routes.save_settings({"max_parallel": 1, "idle_minutes": 30})
     assert got["max_parallel"] == 1 and got["idle_minutes"] == 30
     assert bat_loop._max_parallel() == 1 and bat_routes._idle_s() == 1800.0

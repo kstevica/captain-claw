@@ -10,6 +10,8 @@ export interface BatSettings {
   step_ceiling: number
   /** How long a step's worker may stay quiet before the step stops. */
   idle_minutes: number
+  /** How long one of Bat's own model calls (planning, checks, reviewers) may take. */
+  call_minutes: number
 }
 
 export interface BatSettingsView extends BatSettings {
