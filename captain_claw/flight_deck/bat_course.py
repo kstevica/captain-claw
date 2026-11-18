@@ -265,7 +265,7 @@ async def review(run: dict, what: str, verified: str, signals: list[str]) -> dic
     if signals:
         parts.append("# What Captain's checks noticed\n" + "\n".join(f"- {s}" for s in signals[:10]))
     async with _metered(run["id"], "course"):
-        prov, mt = _provider_call(creds, temperature=0.0, default_max=1024, cap=2048)
+        prov, mt = _provider_call(creds, temperature=0.0, default_max=8192, cap=16384)  # thinking included
         resp = await prov.complete(messages=[Message(role="system", content=_REVIEW_SYSTEM),
                                              Message(role="user", content="\n\n".join(parts))],
                                    temperature=0.0, max_tokens=mt)

@@ -39,7 +39,9 @@ INSTRUCTIONS = (
     "or the Line. Say so when asked.\n"
     "Keep answers short and concrete."
 )
-MAX_TOKENS = 3000
+# A thinking model spends most of its answer's budget thinking first: on the
+# Pi, about 3,000 tokens before a word of the draft, so 3,000 left it empty.
+MAX_TOKENS = 12_000
 
 
 GROUP = "First Mate"
@@ -127,7 +129,8 @@ async def create(store: fms.FirstMateStore, user: dict[str, Any]) -> dict[str, A
     return {"slug": res.slug, "name": used}
 
 
-async def ask(store: fms.FirstMateStore, owner_id: str, system: str, user: str) -> str | None:
+async def ask(store: fms.FirstMateStore, owner_id: str, system: str, user: str, *,
+              max_tokens: int = MAX_TOKENS) -> str | None:
     """One call on the owner's First Mate agent's model, or None when there is
     no such agent (the caller uses the owner's tier set). An agent that stops
     answering hands over to its fallback, the owner's tier."""
@@ -141,12 +144,12 @@ async def ask(store: fms.FirstMateStore, owner_id: str, system: str, user: str) 
         return None
     if reader.get("agent"):
         try:
-            reply = await agent_preset._agent_complete(reader, system, user, fms.norm_user(owner_id), MAX_TOKENS)
+            reply = await agent_preset._agent_complete(reader, system, user, fms.norm_user(owner_id), max_tokens)
             return reply.text or ""
         except agent_preset._AgentGoneError:
             reader = reader.get("fallback")
             if not reader:
                 return None
-    reply = await file_library.model_reply(reader, system, user, fms.norm_user(owner_id), max_tokens=MAX_TOKENS,
+    reply = await file_library.model_reply(reader, system, user, fms.norm_user(owner_id), max_tokens=max_tokens,
                                            request_timeout=120)
     return reply.text or ""
