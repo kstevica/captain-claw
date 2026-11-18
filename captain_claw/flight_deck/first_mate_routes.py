@@ -251,6 +251,8 @@ async def put_prefs(body: Any = Body(...), user: dict = Depends(allowed_user)):
         await first_mate_loop.switch_off(uid)
     elif saved["on"] and not was_on:
         await first_mate_loop.switch_on(uid)
+    if "run_tokens" in body:
+        await runs.sync_caps(uid)  # going runs on the default cap follow it now
     return saved
 
 
@@ -373,9 +375,12 @@ async def patch_factory(factory_id: str, body: Any = Body(...), user: dict = Dep
     if "goal_id" in body:
         _check_goal(body["goal_id"], user)
     try:
-        return fms.get_store().update_factory(factory_id, "owner", **body)
+        saved = fms.get_store().update_factory(factory_id, "owner", **body)
     except FirstMateError as exc:
         raise _err(exc) from None
+    if "run_tokens" in body:
+        await runs.sync_caps(_uid(user), factory_id)  # its going run follows the new cap now
+    return saved
 
 
 @router.delete("/fd/first-mate/factories/{factory_id}")

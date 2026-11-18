@@ -164,7 +164,7 @@ function CategoryChip({ id }: { id: string }) {
   )
 }
 
-function KindIcon({ kind, className = 'h-3.5 w-3.5' }: { kind: ColumnKind | undefined; className?: string }) {
+export function KindIcon({ kind, className = 'h-3.5 w-3.5' }: { kind: ColumnKind | undefined; className?: string }) {
   const Icon = KIND_ICON[kind || 'text'] || Type
   return <Icon className={`${className} shrink-0 text-zinc-500`} />
 }
@@ -450,7 +450,7 @@ export function DataLibrary({ phone = false, initialAgent, onClose, onOpenAgent,
   )
 }
 
-function SearchBox({ value, onChange, placeholder, small = false }: {
+export function SearchBox({ value, onChange, placeholder, small = false }: {
   value: string; onChange: (v: string) => void; placeholder: string; small?: boolean
 }) {
   return (
@@ -952,7 +952,7 @@ function SummaryPanel({ t, terms }: { t: DataTable; terms: string[] }) {
 // cell — one the agent changed meanwhile is never overwritten: the page
 // reloads with what is there now.
 
-type Col = { name: string; type: string }
+export type Col = { name: string; type: string }
 /** Where the open record panel is: one row (by id, so an edit that moves it
  *  keeps it open), a new row being typed in, or nothing. */
 type Panel = { kind: 'row'; id: number } | { kind: 'new' } | null
@@ -1297,7 +1297,7 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
 
 /** One value as it reads best: links and emails clickable, numbers and dates
  *  formatted, booleans as ticks, empty as a dash. */
-function Cell({ value, kind, type, terms, full = false }: {
+export function Cell({ value, kind, type, terms, full = false }: {
   value: unknown; kind?: ColumnKind; type: string; terms: string[]; full?: boolean
 }) {
   if (value === null || value === undefined || value === '') return <span className="text-zinc-600">—</span>
@@ -1487,7 +1487,7 @@ function FieldInput({ col, value, onChange, onSubmit, onPick, autoFocus = false 
 /** One cell being changed: saves on Enter, on Save or when you click away
  *  (only when it changed); Esc or Cancel leaves it as it was. A value that
  *  doesn't fit stays open with the reason. */
-function CellEditor({ col, value, compact = false, onSave, onDone }: {
+export function CellEditor({ col, value, compact = false, onSave, onDone }: {
   col: Col
   value: unknown
   compact?: boolean

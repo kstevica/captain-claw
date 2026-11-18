@@ -178,6 +178,64 @@ def bat_config(factory: dict[str, Any], version: dict[str, Any], run: dict[str, 
     return cfg
 
 
+async def sync_cap(bat_run: dict[str, Any]) -> bool:
+    """A going factory run follows its factory's cap per run as it is now: when
+    the owner changes it mid-run, the run's cap moves with it (no cap, or what
+    the run had used when it started or went on, plus the new cap). A run lowered
+    to its weekly share keeps that until the setting itself changes. A run from
+    before caps were followed (it didn't record the setting it started under) is
+    only ever raised. True when the cap moved. Never raises."""
+    try:
+        cfg = dict(bat_run.get("config") or {})
+        fid = str(cfg.get("factory_id") or "")
+        if not fid or cfg.get("source") == "captain_swarm":  # an improvement run has its own budget
+            return False
+        store = fms.get_store()
+        factory = store.get(fid)
+        if factory is None:
+            return False
+        setting = token_cap_for(store, factory, store.live(fid) or {})
+        known = cfg.get("cap_setting")
+        if known is not None and int(known) == setting:
+            return False
+        current = int(cfg.get("token_cap") or 0)
+        new = 0 if fms.unlimited(setting) else int(cfg.get("cap_base") or 0) + setting
+        if known is None and not ((new == 0 and current > 0) or new > current > 0):
+            return False
+        from captain_claw.flight_deck import bat_loop
+        bstore = bat_loop.get_store()
+        if bstore is None:
+            return False
+        await bstore.set_config(bat_run["id"], {**cfg, "token_cap": new, "cap_setting": setting})
+        await bstore.append_event(bat_run["id"], "note", "its factory's cap per run changed: "
+                                  + ("no token cap now" if new == 0 else f"a cap of {new:,} tokens now"))
+        return new != current
+    except Exception:  # noqa: BLE001 — the run keeps the cap it has
+        log.warning("first mate: couldn't follow a cap change", exc_info=True)
+        return False
+
+
+async def sync_caps(owner_id: str, factory_id: str | None = None) -> int:
+    """After the owner changed a cap (a factory's, or their default): every going
+    run of theirs (of that factory) follows it now. Returns how many moved."""
+    from captain_claw.flight_deck import bat_loop
+    store = fms.get_store()
+    bstore = bat_loop.get_store()
+    if bstore is None:
+        return 0
+    moved = 0
+    factories = [store.get(factory_id)] if factory_id else store.list_factories(fms.norm_user(owner_id))
+    for f in factories:
+        if f is None or f["owner_id"] != fms.norm_user(owner_id):
+            continue
+        for run in store.list_runs(f["id"], limit=5):
+            if run["status"] in fms.ACTIVE_RUN and run["runner"] == "bat" and run.get("child_id"):
+                b = await bstore.get_run(run["child_id"])
+                if b is not None and await sync_cap(b):
+                    moved += 1
+    return moved
+
+
 def token_cap_for(store: fms.FirstMateStore, factory: dict[str, Any], version: dict[str, Any]) -> int:
     """What one run may use: the factory's own cap per run, else its version's,
     else the owner's default."""
@@ -285,6 +343,10 @@ class BatRunner:
                                       token_cap=0 if fms.unlimited(token_cap) else used + int(token_cap))
         except ValueError as exc:
             raise FirstMateError(str(exc)) from None
+        b = await store.get_run(child_id)
+        if b is not None:  # its cap now counts from here (sync_cap)
+            await store.set_config(child_id, {**(b.get("config") or {}), "cap_base": used,
+                                              "cap_setting": int(token_cap)})
 
     async def progress(self, child_id: str, since: int = 0) -> dict[str, Any] | None:
         """The Bat run's steps, its events from ``since`` (the newest
@@ -411,11 +473,13 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
         examples = [c for c in first_mate_cases.cases(store, factory_id) if not c["sealed"] and c["id"] not in refs]
         brief = compose_brief(factory, version, note=note, context=context, rehearsal=kind in ("rehearsal", "check"),
                               examples=examples)
-    token_cap = token_cap_for(store, factory, version)
+    token_cap = setting = token_cap_for(store, factory, version)
     if max_tokens is not None and not fms.unlimited(max_tokens):
         token_cap = int(max_tokens) if fms.unlimited(token_cap) else max(1, min(token_cap, int(max_tokens)))
     run = store.start_run(factory_id, trigger=trigger, kind=kind, trigger_ref=refs, parent_run=parent_run,
                           version=run_version)
+    # The cap setting it starts under, so a change to it reaches the run (sync_cap).
+    extra = {"cap_setting": setting, "cap_base": 0, **(extra or {})}
     try:
         child = await runner.start(factory, version, run, brief, token_cap=token_cap, extra=extra)
     except Exception as exc:  # noqa: BLE001 — the run records why, the caller hears it

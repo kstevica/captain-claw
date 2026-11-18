@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Activity, Bot, Check, ChevronDown, Circle, FolderOpen, Loader2, Minus, X } from 'lucide-react'
 import { getRunProgress, type RunProgress as Progress } from '../../services/firstMate'
 import type { ProgressEvent } from '../../stores/basnaStore'
-import { RunFilesPanel } from '../basna/RunArtifacts'
+import { RunFiles } from './RunFiles'
 import { errText } from './ui'
 
 // What a run is doing, inside its row on the Runs tab: the plan's steps as they
@@ -217,8 +217,8 @@ export function RunProgress({ runId, going }: { runId: string; going: boolean })
         ) : <p className="px-1 text-xs text-zinc-500">Nothing yet.</p>}
       </Fold>
       {p.files && (
-        <Fold icon={FolderOpen} label="Files">
-          {() => <RunFilesPanel project={p.files} live={going} variant="tab" />}
+        <Fold icon={FolderOpen} label="Files and data">
+          {() => <RunFiles project={p.files} live={going} />}
         </Fold>
       )}
     </div>

@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 # Only its pure judges (organize_intent / explicit_mail_intent: a string in, a
@@ -57,6 +57,8 @@ from captain_claw.flight_deck.bat_store import RUNNING_STATES
 log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/fd/bat", tags=["bat"])
+# The deck's Bat settings, for admins (beside /fd/admin/first-mate/settings).
+admin_router = APIRouter(prefix="/fd/admin/bat", tags=["bat"])
 
 _WORKER_MARKER = "CLAW_BAT_WORKER"
 _BAT_MAX_RUNS_PER_OWNER = 3
@@ -77,6 +79,78 @@ def _env_int(name: str, default: int, lo: int, hi: int) -> int:
 #   no ceiling; only this long a silence (a hung model call) ends it.
 _BAT_STEP_CEILING = _env_int("FD_BAT_STEP_CEILING", 5000, 300, 100_000)
 _BAT_IDLE_S = 60.0 * _env_int("FD_BAT_IDLE_MINUTES", 15, 3, 240)
+
+# ── the deck's Bat settings (Console → Settings → Bat) ─────────────────
+# An admin sets them on the console; the FD_BAT_* environment values are only
+# the defaults. Kept in the deck's system settings and read when they change
+# and at start, so a run going now takes them up.
+SETTINGS_KEY = "fd:bat-settings"
+SETTING_RANGES = {"max_parallel": (1, 8), "step_ceiling": (300, 100_000), "idle_minutes": (3, 240)}
+_SETTINGS: dict[str, int] = {}
+
+
+def deck_defaults() -> dict[str, int]:
+    return {"max_parallel": bat_loop.env_max_parallel(), "step_ceiling": _BAT_STEP_CEILING,
+            "idle_minutes": int(_BAT_IDLE_S // 60)}
+
+
+def deck_settings() -> dict[str, int]:
+    return {**deck_defaults(), **_SETTINGS}
+
+
+def _clean_settings(raw: Any) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for key, (lo, hi) in SETTING_RANGES.items():
+        v = (raw or {}).get(key) if isinstance(raw, dict) else None
+        if isinstance(v, bool) or v is None:
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if lo <= n <= hi:
+            out[key] = n
+    return out
+
+
+def _apply_settings(clean: dict[str, int]) -> None:
+    _SETTINGS.clear()
+    _SETTINGS.update(clean)
+    bat_loop.set_max_parallel(clean.get("max_parallel"))
+
+
+async def load_settings() -> dict[str, int]:
+    """Take up the admin's settings (at start). Never raises: the defaults stand."""
+    try:
+        from captain_claw.flight_deck.auth import get_db
+        raw = await get_db().get_system_setting(SETTINGS_KEY)
+        _apply_settings(_clean_settings(json.loads(raw) if raw else {}))
+    except Exception:  # noqa: BLE001
+        log.warning("bat settings unreadable: the defaults stand")
+    return deck_settings()
+
+
+async def save_settings(patch: dict[str, Any]) -> dict[str, int]:
+    """An admin's change: checked against SETTING_RANGES, kept, and in force now."""
+    from captain_claw.flight_deck.auth import get_db
+    for key, value in (patch or {}).items():
+        if key not in SETTING_RANGES:
+            raise ValueError(f"unknown setting: {key}")
+        lo, hi = SETTING_RANGES[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+            raise ValueError(f"{key} must be a whole number from {lo} to {hi}")
+    merged = {**_SETTINGS, **patch}
+    await get_db().set_system_setting(SETTINGS_KEY, json.dumps(merged))
+    _apply_settings(_clean_settings(merged))
+    return deck_settings()
+
+
+def _step_ceiling() -> int:
+    return int(deck_settings()["step_ceiling"])
+
+
+def _idle_s() -> float:
+    return 60.0 * int(deck_settings()["idle_minutes"])
 _PANEL_SIZE = 3
 # A panel's refusal gets this many judgements (two fix rounds). After that, more
 # rounds won't settle it and the owner decides: Bat never calls a refused run done
@@ -1003,7 +1077,7 @@ def _bat_env(sid: str, step_key: str, owner: str) -> list[dict]:
         # and the in-turn context governor keeps it inside the model's window —
         # it folds old tool results into notes in the run's folder instead of
         # failing when the context fills.
-        {"key": "CLAW_FLOATING_BUDGET", "value": str(_BAT_STEP_CEILING)},
+        {"key": "CLAW_FLOATING_BUDGET", "value": str(_step_ceiling())},
         {"key": "CLAW_CTX_GOVERNOR", "value": "1"},
     ]
 
@@ -1258,6 +1332,8 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
     from captain_claw.flight_deck.auth import get_db
     from captain_claw.flight_deck import pricing
 
+    if _factory_run(run):  # between steps, a factory's run takes its factory's cap as it is now
+        await _cap_refresh(run)
     sid = run["id"]
     owner = run["owner_id"]
     key = step["step_key"]
@@ -1344,7 +1420,7 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
         # THIS run's plan (see _bat_automation).
         automation = _bat_automation(run)
         from captain_claw.flight_deck.basna_routes import _run_extend_floating
-        floating = _run_extend_floating.set(_BAT_IDLE_S)  # no time cap while it keeps working
+        floating = _run_extend_floating.set(_idle_s())  # no time cap while it keeps working
         try:
             res = await _dispatch_one(
                 port, auth, prompt, _STEP_TIMEOUT_S,
@@ -1882,6 +1958,18 @@ bat_loop.set_gate_check(_gate_check)
 human_ask.set_notifier(_notify_ask)
 
 
+async def _cap_refresh(run: dict) -> bool:
+    """A First Mate factory's run reads its factory's cap again before stopping
+    on it: the owner may have raised it or taken it off since."""
+    if not _factory_run(run):
+        return False
+    from captain_claw.flight_deck import first_mate_runs
+    return await first_mate_runs.sync_cap(run)
+
+
+bat_loop.set_cap_refresh(_cap_refresh)
+
+
 # ── routes ─────────────────────────────────────────────────────────────
 
 def _resolve(body: _BatAgentReq) -> str:
@@ -2296,3 +2384,30 @@ async def approve_plan(run_id: str, body: _ApproveReq, user: dict = Depends(get_
     except Exception:
         pass
     return {"ok": True, "approved": bool(body.approve)}
+
+
+# ── the deck's Bat settings (admins) ───────────────────────────────────
+
+def _require_admin_dep():
+    from captain_claw.flight_deck.admin_routes import require_admin
+    return require_admin
+
+
+@admin_router.get("/settings")
+async def get_deck_settings(admin: dict = Depends(_require_admin_dep())):
+    """How Bat runs on this deck: steps at the same time, a worker turn's step
+    ceiling, and the silence that ends a step. ``defaults`` are the FD_BAT_*
+    values the deck started with."""
+    return {**deck_settings(), "defaults": deck_defaults(),
+            "ranges": {k: list(v) for k, v in SETTING_RANGES.items()}}
+
+
+@admin_router.put("/settings")
+async def put_deck_settings(body: Any = Body(...), admin: dict = Depends(_require_admin_dep())):
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected a JSON object")
+    try:
+        saved = await save_settings(body)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {**saved, "defaults": deck_defaults(), "ranges": {k: list(v) for k, v in SETTING_RANGES.items()}}
