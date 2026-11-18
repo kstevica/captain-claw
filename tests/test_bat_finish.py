@@ -8,6 +8,8 @@ tests stub the model and the database, and use a real folder for the checks.
 from __future__ import annotations
 
 import asyncio
+import json
+import types
 import os
 import uuid
 
@@ -1315,3 +1317,106 @@ async def test_a_step_floats_its_time_and_step_budget_and_keeps_its_notes(store,
     assert seen["floating"] == bat_routes._BAT_IDLE_S > 0 and basna_routes._run_extend_floating.get() == 0.0
     assert seen["env"]["CLAW_FLOATING_BUDGET"] == str(bat_routes._BAT_STEP_CEILING)
     assert seen["env"]["CLAW_CTX_GOVERNOR"] == "1"
+
+
+# ── piece 4: steps sized for one turn ──────────────────────────────────
+
+async def test_a_step_too_big_twice_goes_to_the_fix_round(store):
+    rid = await _run(store, steps=[_step("a", 0, after=[]), _step("b", 1, after=["a"])])
+    calls, seen = [], []
+
+    async def runner(_run, step):
+        calls.append(step["step_key"])
+        if step["step_key"] == "a":
+            return {"ok": False, "error": "timed out"}
+        return {"ok": True, "output": "fine"}
+
+    async def replan(_run, steps, _verdict, _round):
+        seen.append({s["step_key"]: (s["status"], s["attempt"]) for s in steps})
+        return [{"title": "leads 1-50", "after": []}, {"title": "leads 51-100", "after": []}]
+
+    async def judge(_run, steps):
+        if all(s["status"] in ("done", "skipped") for s in steps):
+            return {"done": True, "reason": "good"}
+        return {"done": False, "reason": "failed: a", "failing": ["all planned steps completed"]}
+
+    bat_loop.set_replanner(replan)
+    assert await BatDriver(store, attempt_runner=runner, judge=judge, max_step_attempts=3).drive(rid) == "done"
+    assert calls[:2] == ["a", "a"] and calls.count("a") == 2  # not a third time: the fix round split it
+    assert seen[0]["a"] == ("failed", 3)
+    assert {"fix-1-1", "fix-1-2", "b"} <= set(calls)
+    assert bat_loop.size_failure("timed out") and bat_loop.size_failure("Context window exceeded")
+    assert not bat_loop.size_failure("nope") and not bat_loop.size_failure(None)
+
+
+async def test_one_size_failure_then_another_kind_keeps_its_tries(store):
+    rid = await _run(store, steps=[_step("a", 0)])
+    errors = iter(["timed out", "the site said 403", "fine"])
+    calls = []
+
+    async def runner(_run, step):
+        calls.append(step["step_key"])
+        err = next(errors)
+        return {"ok": True, "output": "done it"} if err == "fine" else {"ok": False, "error": err}
+
+    async def judge(_run, steps):
+        return {"done": all(s["status"] == "done" for s in steps), "reason": "", "failing": []}
+
+    assert await BatDriver(store, attempt_runner=runner, judge=judge, max_step_attempts=3).drive(rid) == "done"
+    assert calls == ["a", "a", "a"]
+
+
+class _PlanProv:
+    def __init__(self, reply):
+        self.reply, self.system, self.user = reply, "", ""
+
+    async def complete(self, *, messages, **_k):
+        self.system, self.user = messages[0].content, messages[1].content
+        return types.SimpleNamespace(content=self.reply)
+
+
+@pytest.fixture
+def plan_env(monkeypatch, tmp_path):
+    from captain_claw.flight_deck import auth, basna_routes, vfs_routes
+
+    class Db:
+        async def get_user_by_id(self, _id):
+            return {"id": "u1", "role": "user"}
+
+    async def tiers(_db, _owner):
+        return {"reason": {"model": "big"}}, []
+
+    env = {"prov": None}
+    monkeypatch.setattr(auth, "get_db", lambda: Db())
+    monkeypatch.setattr(basna_routes, "_load_owner_tiers", tiers)
+    monkeypatch.setattr(bat_routes, "_creds_for", lambda _tiers: {"model": "big"})
+    monkeypatch.setattr(basna_routes, "_provider_call", lambda *_a, **_k: (env["prov"], 256))
+    monkeypatch.setattr(vfs_routes, "_user_root", lambda owner: tmp_path / owner)
+    return env
+
+
+async def test_the_planner_plans_big_lists_by_batch(plan_env):
+    plan_env["prov"] = _PlanProv(json.dumps([{"step": f"leads batch {i}", "after": []} for i in range(14)]))
+    steps = await bat_routes._plan_steps({"id": "bat_x", "owner_id": "u1", "task": "Find 500 leads.", "config": {}})
+    assert len(steps) == 12
+    assert "split by batch, not by phase" in plan_env["prov"].system and "max 12" in plan_env["prov"].system
+
+
+async def test_the_fix_round_splits_a_step_too_big_from_its_note(plan_env, tmp_path):
+    run = {"id": "bat_0123456789ab", "owner_id": "u1", "task": "Find 500 leads."}
+    notes = tmp_path / "u1" / "bat-bat_0123" / "progress"
+    notes.mkdir(parents=True)
+    (notes / "step-3.md").write_text("Done: 150 of 500 in leads.csv.\nNext: US.")
+    steps = [{"step_key": "step-1", "title": "Criteria", "status": "done", "output": "criteria.md"},
+             {"step_key": "step-3", "title": "Collect 500 leads", "status": "failed", "error": "timed out"}]
+    plan_env["prov"] = _PlanProv(json.dumps([{"step": f"leads {i * 50 + 151}-{i * 50 + 200}"} for i in range(9)]))
+    plan = await bat_routes._bat_replan(run, steps, {"reason": "not done"}, 1)
+    assert len(plan) == bat_routes._MAX_SPLIT_STEPS == 8  # a split may write more than a fix
+    assert "too big for one worker: split what is left" in plan_env["prov"].system
+    assert "at most 8 items" in plan_env["prov"].system
+    assert "its progress note (vfs:bat-bat_0123/progress/step-3.md): Done: 150 of 500 in leads.csv. Next: US." \
+        in plan_env["prov"].user
+    # an ordinary fix keeps its smaller limit
+    plan_env["prov"] = _PlanProv(json.dumps(["a", "b", "c", "d", "e", "f"]))
+    steps[1] = {**steps[1], "error": "the site said 403"}
+    assert len(await bat_routes._bat_replan(run, steps, {"reason": "not done"}, 1)) == bat_routes._MAX_FIX_STEPS

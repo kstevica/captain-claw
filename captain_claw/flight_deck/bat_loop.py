@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import socket
 from typing import Any, Awaitable, Callable
 
@@ -106,6 +107,19 @@ def fix_steps(plan: list[dict], round_no: int, start_seq: int) -> list[dict]:
                     "brief": str(p.get("brief", "")), "seq": start_seq + i,
                     "round": round_no, "depends_on": after})
     return out
+
+
+# A failure that says the step was too big for one worker's turn: it ran out of
+# time, of context or of steps.
+_SIZE_FAILURE_RE = re.compile(
+    r"timed? ?out|time budget|context (?:window|length|size)|maximum context|too (?:long|large|big)"
+    r"|exceeds? the (?:available )?context|(?:iteration|step) budget",
+    re.IGNORECASE)
+
+
+def size_failure(error: str | None) -> bool:
+    """Did a step fail because it was too big for one worker's turn?"""
+    return bool(_SIZE_FAILURE_RE.search(error or ""))
 
 
 def rewire_failed(steps: list[dict], new_keys: list[str]) -> tuple[list[str], dict[str, list[str]]]:
@@ -729,8 +743,15 @@ class BatDriver:
             await self.store.append_event(run_id, "step", step.get("title") or key,
                                           agent=key, ok=True, usd=usd)
         else:
-            await self.store.upsert_step(
-                run_id, key, status="failed", error=str(res.get("error", ""))[:_OUTPUT_CAP])
+            error = str(res.get("error", ""))
+            fields: dict[str, Any] = {"status": "failed", "error": error[:_OUTPUT_CAP]}
+            if size_failure(error) and size_failure(step.get("error")):
+                # Too big for one turn twice in a row: a third try would go the same
+                # way. The fix round takes it over and splits what's left of it.
+                fields["attempt"] = max(self.max_step_attempts, attempt)
+                await self.store.append_event(run_id, "note", "too big for one turn twice: the fix round "
+                                              "splits what's left of it into smaller steps", agent=key)
+            await self.store.upsert_step(run_id, key, **fields)
             await self.store.append_event(run_id, "step", step.get("title") or key,
                                           agent=key, ok=False,
                                           detail=str(res.get("error", ""))[:200])
