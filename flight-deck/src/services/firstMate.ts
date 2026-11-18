@@ -7,6 +7,7 @@
 // signed-in user's own.
 
 import { fdFetch } from './notifications'
+import { useAuthStore } from '../stores/authStore'
 import type { ProgressEvent } from '../stores/basnaStore'
 
 export type FactoryState = 'draft' | 'awaiting_charter' | 'running' | 'paused' | 'paused_budget' | 'stopped' | 'retired'
@@ -243,9 +244,26 @@ export interface RunCap {
   inherited_from: 'charter' | 'default'
 }
 
+/** A file of extra data kept with a factory: every run gets a copy in its folder's extra/. */
+export interface FactoryDataItem {
+  id: string
+  name: string
+  size: number
+  type: string
+  /** Where it came from: "Pasted", "Files of Researcher", "Flight Deck · research", "Uploaded". */
+  origin: string
+  added_at: string
+}
+
+/** A file in one run's extra/ folder (a VFS folder: `project`, path `extra/<path>`). */
+export interface RunDataFile { path: string; name: string; size: number; mtime: number; origin: string }
+export interface RunData { files: RunDataFile[]; project: string; folder: string }
+
 export interface FactoryDetail extends Factory {
   /** Tokens one run may use. */
   run_cap: RunCap
+  /** Extra data every run gets. */
+  data: FactoryDataItem[]
   versions: Version[]
   runs: Run[]
   events: FactoryEvent[]
@@ -410,7 +428,28 @@ export const setState = (id: string, state: OwnerState, reason = '') =>
   call<Factory>(`${f(id)}/state`, json('POST', { state, reason }))
 export const setTrust = (id: string, level: Trust, pin?: boolean) =>
   call<Factory>(`${f(id)}/trust`, json('POST', pin === undefined ? { level } : { level, pin }))
-export const runNow = (id: string, note = '') => call<Run>(`${f(id)}/run`, json('POST', { note }))
+/** `data`: staged uploads (contextApi) for this run alone, beside the factory's own extra data. */
+export const runNow = (id: string, note = '', data: string[] = []) =>
+  call<Run>(`${f(id)}/run`, json('POST', data.length ? { note, data } : { note }))
+
+export const addFactoryData = (id: string, ids: string[]) =>
+  call<{ added: FactoryDataItem[]; items: FactoryDataItem[] }>(`${f(id)}/data`, json('POST', { ids }))
+export const dropFactoryData = (id: string, itemId: string) =>
+  call<{ items: FactoryDataItem[] }>(`${f(id)}/data/${encodeURIComponent(itemId)}`, { method: 'DELETE' })
+/** A link that opens (or downloads) one item: the sign-in token rides along, as file links do. */
+export function factoryDataUrl(id: string, itemId: string, download = false): string {
+  const { token, authEnabled } = useAuthStore.getState()
+  const q = new URLSearchParams()
+  if (download) q.set('download', 'true')
+  if (authEnabled && token) q.set('fd_token', token)
+  const qs = q.toString()
+  return `${f(id)}/data/${encodeURIComponent(itemId)}/file${qs ? `?${qs}` : ''}`
+}
+const runPath = (runId: string) => `/fd/first-mate/runs/${encodeURIComponent(runId)}`
+export const getRunData = (runId: string) => call<RunData>(`${runPath(runId)}/data`)
+export const addRunData = (runId: string, ids: string[]) => call<RunData & { added: string[] }>(`${runPath(runId)}/data`, json('POST', { ids }))
+export const dropRunData = (runId: string, path: string) =>
+  call<RunData>(`${runPath(runId)}/data?${new URLSearchParams({ path })}`, { method: 'DELETE' })
 export const listRuns = (id: string) => call<{ runs: Run[] }>(`${f(id)}/runs`).then((r) => r.runs)
 export const approveRun = (runId: string, ids?: number[]) =>
   call<Run>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/approve`, json('POST', ids ? { ids } : {}))

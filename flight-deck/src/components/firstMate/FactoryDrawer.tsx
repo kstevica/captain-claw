@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronLeft, ChevronRight, FlaskConical, Loader2, Maximize2, Minimize2, Play, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Database, FlaskConical, Loader2, Maximize2, Minimize2, Play, Square, ThumbsDown, ThumbsUp, X } from 'lucide-react'
 import {
   approve,
   approveRun,
@@ -41,13 +41,15 @@ import { Checks, pct, type CaseSeed } from './Checks'
 import { RunResult } from './RunResult'
 import { RunProgress } from './RunProgress'
 import { CapPicker } from './CapPicker'
+import { FactoryData, RunDataList } from './FactoryData'
+import { AddDataPanel } from '../context/AddData'
 
 // One factory, in a drawer over the page: its charter (the live version, and
 // the draft being written), its runs, and its history. Approving a draft is
 // the owner's own act, against the version they see: the server refuses an
 // approval once the draft changed under it.
 
-type Tab = 'charter' | 'runs' | 'record' | 'checks' | 'history'
+type Tab = 'charter' | 'data' | 'runs' | 'record' | 'checks' | 'history'
 
 const FULL_KEY = 'fd:fm-drawer-full'
 
@@ -125,6 +127,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
   const [busy, setBusy] = useState<string | null>(null)
   const [form, setForm] = useState<Form | null>(null)
   const [note, setNote] = useState('')
+  const [withData, setWithData] = useState(false)
   const [seed, setSeed] = useState<CaseSeed | null>(null)
   const seedUsed = useCallback(() => setSeed(null), [])
 
@@ -215,7 +218,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
       <aside
         role="dialog"
         aria-label={f ? `Factory: ${f.title}` : 'Factory'}
-        className={`fd-drawer fd-dialog flex h-full w-full flex-col overflow-hidden bg-zinc-950 ${full ? ''
+        className={`fd-drawer fd-dialog @container flex h-full w-full flex-col overflow-hidden bg-zinc-950 ${full ? ''
           : 'max-w-xl border-l border-[var(--fd-line)] wide:rounded-[var(--fd-radius-panel)] wide:border'}`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -249,6 +252,9 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
         {f && (
           <div role="tablist" className={`flex gap-1 overflow-x-auto px-5 pb-3 ${wrap}`}>
             <button role="tab" aria-selected={tab === 'charter'} className={tabCls('charter')} onClick={() => setTab('charter')}>Charter</button>
+            <button role="tab" aria-selected={tab === 'data'} className={tabCls('data')} onClick={() => setTab('data')}>
+              Data{f.data?.length ? ` · ${f.data.length}` : ''}
+            </button>
             <button role="tab" aria-selected={tab === 'runs'} className={tabCls('runs')} onClick={() => setTab('runs')}>
               Runs{f.runs.length ? ` · ${f.runs.length}` : ''}
             </button>
@@ -361,6 +367,17 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                   className="inline-flex h-9 items-center gap-1.5 rounded-full bg-violet-600 px-4 text-xs font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60">
                   {busy === 'run' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />} Run now
                 </button>
+                <button onClick={() => setWithData(true)} disabled={!canRun || !!busy}
+                  title={canRun ? 'Start a run with extra data for this run alone' : going ? 'A run is going' : 'Approve a charter first'}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-full border border-[var(--fd-line)] px-3.5 text-xs font-medium text-zinc-300 transition-colors hover:border-violet-500/40 hover:text-zinc-100 disabled:opacity-60">
+                  <Database className="h-3.5 w-3.5" /> Run with data…
+                </button>
+                {(f.data?.length ?? 0) > 0 && (
+                  <p className="w-full text-xs text-zinc-500">
+                    Every run gets the factory's {f.data.length} file{f.data.length === 1 ? '' : 's'} of extra data.{' '}
+                    <button onClick={() => setTab('data')} className="font-medium text-violet-700 hover:underline dark:text-violet-300">See them</button>
+                  </p>
+                )}
                 {f.live && (
                   <div className="flex w-full flex-wrap items-center gap-2 text-xs text-zinc-500">
                     <label htmlFor="fm-cap-runs">Each run may use</label>
@@ -369,6 +386,22 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                   </div>
                 )}
               </div>
+              {withData && (
+                <AddDataPanel title={`Run ${f.title} with extra data`}
+                  subtitle={f.data?.length
+                    ? `For this run alone, beside the factory's own ${f.data.length} file${f.data.length === 1 ? '' : 's'}.`
+                    : 'For this run alone. To give every run something, add it on the Data tab.'}
+                  action={(n) => (n ? `Run with ${n} file${n === 1 ? '' : 's'}` : 'Run with data')}
+                  onDone={async (staged) => {
+                    setError(null)
+                    await runNow(factoryId, note, staged.map((s) => s.id))
+                    setNote('')
+                    onNotice(`Run started with ${staged.length} file${staged.length === 1 ? '' : 's'} of extra data`)
+                    void load()
+                    onChanged()
+                  }}
+                  onClose={() => setWithData(false)} />
+              )}
               {f.runs.length === 0 ? (
                 <p className="text-zinc-500">No runs yet.</p>
               ) : (
@@ -390,6 +423,11 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                 </ul>
               )}
             </>
+          )}
+
+          {f && tab === 'data' && (
+            <FactoryData factoryId={factoryId} title={f.title} items={f.data ?? []} onNotice={onNotice}
+              onChanged={() => { void load(); onChanged() }} />
           )}
 
           {f && tab === 'record' && <Record detail={f} />}
@@ -697,6 +735,7 @@ function RunItem({ run: r, busy, deciding, onStop, onContinue, continuing, onApp
         )}
       </div>
       {r.waiting && r.note && <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">{r.note}</p>}
+      {traceable && open && <RunDataList runId={r.id} going={going} stopped={!!onContinue} />}
       {traceable && open && <RunProgress runId={r.id} going={going} />}
       {r.kind === 'carry_out' && r.proof?.state && (r.proof.note || (r.proof.actions?.length ?? 0) > 0) && (
         <div className={`mt-2 rounded-xl px-3 py-2 text-xs ${r.proof.state === 'doubt' ? 'bg-red-500/[0.07] text-red-700 dark:text-red-300' : 'bg-[var(--fd-hover)] text-zinc-400'}`}>

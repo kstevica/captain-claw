@@ -262,6 +262,7 @@ class BatRunner:
     owner's own runs."""
 
     kind = "bat"
+    takes_files = True  # extra data, copied into the run's folder before Bat plans
 
     @staticmethod
     def _store():
@@ -283,15 +284,24 @@ class BatRunner:
         return max(0, self._limit() - busy - 1)
 
     async def start(self, factory: dict[str, Any], version: dict[str, Any], run: dict[str, Any],
-                    brief: str, *, token_cap: int, extra: dict[str, Any] | None = None) -> str:
+                    brief: str, *, token_cap: int, extra: dict[str, Any] | None = None,
+                    files: list[tuple[str, Any, str]] | None = None) -> str:
         from captain_claw.flight_deck import bat_loop
         store = self._store()
         bat_id = f"bat_{uuid.uuid4().hex[:12]}"
+        if files:  # in its folder before the planner reads it
+            from captain_claw.flight_deck import first_mate_data
+            from captain_claw.flight_deck.bat_routes import _run_folder
+            await asyncio.to_thread(first_mate_data.place,
+                                    _run_folder({"id": bat_id, "owner_id": factory["owner_id"]}), files)
         await store.create_run(
             run_id=bat_id, owner_id=factory["owner_id"], title=f"{factory['title']}"[:60],
             task=brief, config={**bat_config(factory, version, run, token_cap=token_cap), **(extra or {})},
             origin={}, llm_usd_cap=0.0, status="planning")
         await store.append_event(bat_id, "note", f"a First Mate run of {factory['title']} ({run['id']})")
+        if files:
+            await store.append_event(bat_id, "note", f"{len(files)} file{'' if len(files) == 1 else 's'} of extra data "
+                                                     "from its owner, in extra/")
         try:
             await bat_loop.kick()
         except Exception:  # noqa: BLE001 — it starts on Bat's next tick
@@ -439,7 +449,8 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
                 note: str = "", context: list[dict[str, Any]] | None = None,
                 watch: bool = True, max_tokens: int | None = None, parent_run: str = "",
                 brief: str | None = None, extra: dict[str, Any] | None = None,
-                refs: list[str] | None = None, version: int | None = None) -> dict[str, Any]:
+                refs: list[str] | None = None, version: int | None = None,
+                data: list[str] | None = None, uploader: str = "") -> dict[str, Any]:
     """Start one run of a factory's live version through its runner.
 
     Refused (FirstMateError) when the factory isn't the owner's, has no
@@ -450,7 +461,10 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
     ``max_tokens`` lowers the run's token cap (the loop passes what is left of
     the factory's share this week); it never raises it. ``kind`` defaults to
     what the factory's trust says (:func:`kind_for`). A carry-out passes its
-    own ``brief`` and the Bat config it adds (``extra``: the approved grants)."""
+    own ``brief`` and the Bat config it adds (``extra``: the approved grants).
+
+    Every run gets the factory's extra data in its folder, and ``data`` (ids of
+    uploads ``uploader`` staged) adds more for this run alone."""
     store = fms.get_store()
     factory = store.get_owned(factory_id, owner_id)
     if factory is None:
@@ -462,6 +476,11 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
     if version is None:
         raise FirstMateError("no such version")
     runner = runner_for(version["runner"])
+    from captain_claw.flight_deck import crew_attach, first_mate_data
+    staged = crew_attach.staged(uploader or owner_id, data) if data else []
+    files = first_mate_data.factory_sources(factory_id) + first_mate_data.staged_sources(uploader or owner_id, staged)
+    if files and not getattr(runner, "takes_files", False):
+        raise FirstMateError("this factory's runner can't take extra data")
     if await runner.capacity(factory["owner_id"]) <= 0:
         raise FirstMateError("no free slot for another run right now: one is kept for your own runs. "
                              "Try again when one of your runs finishes")
@@ -481,7 +500,8 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
     # The cap setting it starts under, so a change to it reaches the run (sync_cap).
     extra = {"cap_setting": setting, "cap_base": 0, **(extra or {})}
     try:
-        child = await runner.start(factory, version, run, brief, token_cap=token_cap, extra=extra)
+        child = await runner.start(factory, version, run, brief, token_cap=token_cap, extra=extra,
+                                   **({"files": files} if files else {}))
     except Exception as exc:  # noqa: BLE001 — the run records why, the caller hears it
         log.warning("first mate: run didn't start", extra={"run": run["id"]}, exc_info=True)
         failed = store.finish_run(run["id"], "failed", error=f"couldn't start: {exc}"[:300])
@@ -490,6 +510,8 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
             await first_mate_line.run_finished(failed)
         raise FirstMateError(f"the run couldn't start: {exc}") from None
     run = store.mark_running(run["id"], child)
+    for item in staged:  # copied into the run's folder
+        crew_attach.drop_upload(uploader or owner_id, item["id"])
     if watch:
         _watch(run["id"])
     return run

@@ -1931,6 +1931,7 @@ from captain_claw.flight_deck import (
 from captain_claw.flight_deck import crew_runner
 from captain_claw.flight_deck.agent_forge import router as agent_forge_router
 from captain_claw.flight_deck.crew_routes import router as crew_router
+from captain_claw.flight_deck.context_routes import router as context_router
 from captain_claw.flight_deck.external_tools_routes import agent_router as external_tools_agent_router
 from captain_claw.flight_deck.external_tools_routes import catalog_router as external_tools_catalog_router
 from captain_claw.flight_deck import external_tool_proposals
@@ -1998,6 +1999,7 @@ app.include_router(deep_memory_router)
 app.include_router(hosting_router)
 app.include_router(code_router)
 app.include_router(crew_router)
+app.include_router(context_router)
 # Agents' routes first: /fd/external-tools/agent/... must never read as a tool called "agent".
 app.include_router(external_tools_agent_router)
 # Questions for the person (custom tools' and agents' ask_user): the agent's
