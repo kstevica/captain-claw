@@ -682,6 +682,12 @@ class FirstMateStore:
             # How long a finished run took: in all, its agents' work, waiting for its owner.
             if "timing" not in cols:
                 self._c().execute("ALTER TABLE fm_runs ADD COLUMN timing TEXT NOT NULL DEFAULT '{}'")
+            # Archived: off the owner's lists, kept whole, restorable ('' = not archived).
+            if "archived_at" not in cols:
+                self._c().execute("ALTER TABLE fm_runs ADD COLUMN archived_at TEXT NOT NULL DEFAULT ''")
+            fcols = {r["name"] for r in self._c().execute("PRAGMA table_info(fm_factories)")}
+            if "archived_at" not in fcols:
+                self._c().execute("ALTER TABLE fm_factories ADD COLUMN archived_at TEXT NOT NULL DEFAULT ''")
             # The owner's cap per run on the factory itself (0 = its charter's, else their default).
             cols = {r["name"] for r in self._c().execute("PRAGMA table_info(fm_factories)")}
             if "run_tokens" not in cols:
@@ -801,10 +807,19 @@ class FirstMateStore:
         f = self.get(factory_id)
         return f if f and f["owner_id"] == norm_user(owner_id) else None
 
-    def list_factories(self, owner_id: str, *, include_retired: bool = False) -> list[dict[str, Any]]:
+    def list_factories(self, owner_id: str, *, include_retired: bool = False,
+                       archived: bool | None = False) -> list[dict[str, Any]]:
+        """The owner's factories. ``archived``: False, those on their list; True,
+        the archived ones and the retired (the page's Archived view); None, all
+        (for what counts them all, such as last week's report)."""
         sql = "SELECT * FROM fm_factories WHERE owner_id = ?"
-        if not include_retired:
-            sql += " AND state != 'retired'"
+        if archived is True:
+            sql += " AND (archived_at != '' OR state = 'retired')"
+        else:
+            if archived is False:
+                sql += " AND archived_at = ''"
+            if not include_retired:
+                sql += " AND state != 'retired'"
         with self._lock:
             rows = self._c().execute(sql + " ORDER BY priority, created_at",
                                      (norm_user(owner_id),)).fetchall()
@@ -877,10 +892,10 @@ class FirstMateStore:
         fid = "fac_" + secrets.token_hex(8)
         with self._tx() as conn:
             count = int(conn.execute("SELECT COUNT(*) FROM fm_factories WHERE owner_id = ?"
-                                     " AND state != 'retired'", (owner,)).fetchone()[0])
+                                     " AND state != 'retired' AND archived_at = ''", (owner,)).fetchone()[0])
             if count >= cap:
                 raise FirstMateError(f"you already have {count} factories (at most {cap}); "
-                                     f"retire one first")
+                                     f"archive one first")
             conn.execute(
                 "INSERT INTO fm_factories (id, owner_id, title, state, draft_version, share, priority,"
                 " goal_id, template, created_at, updated_at) VALUES (?, ?, ?, 'draft', 1, ?, ?, ?, ?, ?, ?)",
@@ -1084,6 +1099,8 @@ class FirstMateStore:
                                      f"{state.replace('_', ' ')}")
             if state == "running" and not f["version"]:
                 raise FirstMateError("a factory runs only once its charter is approved")
+            if state == "running" and f.get("archived_at"):
+                raise FirstMateError("it's archived: restore it first")
             now = _iso(_utcnow())
             conn.execute("UPDATE fm_factories SET state = ?, state_reason = ?, updated_at = ? WHERE id = ?",
                          (state, reason, now, factory_id))
@@ -1139,15 +1156,54 @@ class FirstMateStore:
             raise FirstMateError("no such factory")
         return self.db_path.parent / "first_mate" / "sealed" / safe
 
+    def archive(self, factory_id: str, actor: str, *, on: bool = True) -> dict[str, Any]:
+        """Archive a factory, or restore it. Archived, it is off the owner's list and
+        doesn't count toward their factories; a running one is paused first, so
+        nothing starts on its own. Its versions, runs, results and history stay
+        whole. Restored, it comes back paused: the owner resumes it. Refused while
+        a run of it is going."""
+        with self._tx() as conn:
+            f = self._get_factory(conn, factory_id)
+            now = _iso(_utcnow())
+            if on:
+                if f.get("archived_at"):
+                    return self.view(factory_id)
+                going = conn.execute(f"SELECT COUNT(*) FROM fm_runs WHERE factory_id = ? AND status IN "
+                                     f"({','.join('?' * len(ACTIVE_RUN))})", (factory_id, *ACTIVE_RUN)).fetchone()[0]
+                if going:
+                    raise FirstMateError("a run of it is going: stop it or let it finish first")
+                state = "paused" if f["state"] in ("running", "paused_budget") else f["state"]
+                conn.execute("UPDATE fm_factories SET archived_at = ?, state = ?, state_reason = ?, updated_at = ? "
+                             "WHERE id = ?", (now, state, "archived" if state != f["state"] else f["state_reason"],
+                                              now, factory_id))
+                self._event(conn, factory_id, actor, "archived", {"paused": state != f["state"]})
+            else:
+                if not f.get("archived_at"):
+                    return self.view(factory_id)
+                if f["state"] != "retired":
+                    count = int(conn.execute("SELECT COUNT(*) FROM fm_factories WHERE owner_id = ? AND "
+                                             "state != 'retired' AND archived_at = ''", (f["owner_id"],)).fetchone()[0])
+                    cap = self.settings()["max_factories"]
+                    if count >= cap:
+                        raise FirstMateError(f"you already have {count} factories (at most {cap}); archive one first")
+                conn.execute("UPDATE fm_factories SET archived_at = '', updated_at = ? WHERE id = ?", (now, factory_id))
+                self._event(conn, factory_id, actor, "restored", {})
+        return self.view(factory_id)
+
     def delete(self, factory_id: str, by: str) -> bool:
         """Delete a factory for good, with its history and sealed cases. Only
-        a draft that never ran or a retired factory, and only by its owner."""
+        a draft that never ran, an archived or a retired factory, and only by its
+        owner."""
         with self._tx() as conn:
             f = self._get_factory(conn, factory_id)
             if norm_user(by) != f["owner_id"]:
                 raise FirstMateError("only the factory's owner can delete it")
-            if f["state"] not in ("draft", "awaiting_charter", "retired"):
-                raise FirstMateError("retire the factory before deleting it")
+            if f["state"] not in ("draft", "awaiting_charter", "retired") and not f.get("archived_at"):
+                raise FirstMateError("archive the factory before deleting it")
+            going = conn.execute(f"SELECT COUNT(*) FROM fm_runs WHERE factory_id = ? AND status IN "
+                                 f"({','.join('?' * len(ACTIVE_RUN))})", (factory_id, *ACTIVE_RUN)).fetchone()[0]
+            if going:
+                raise FirstMateError("a run of it is going: stop it or let it finish first")
             conn.execute("DELETE FROM fm_factories WHERE id = ?", (factory_id,))
         shutil.rmtree(self.sealed_dir(factory_id), ignore_errors=True)
         return True
@@ -1176,6 +1232,8 @@ class FirstMateStore:
             f = self._get_factory(conn, factory_id)
             if not f["version"]:
                 raise FirstMateError("a factory runs only once its charter is approved")
+            if f.get("archived_at"):
+                raise FirstMateError("it's archived: restore it first")
             allowed = ("running",) if trigger in _AUTOMATIC_TRIGGERS else _HAND_STATES
             if f["state"] not in allowed:
                 raise FirstMateError(f"a factory that is {f['state'].replace('_', ' ')} doesn't start "
@@ -1289,8 +1347,13 @@ class FirstMateStore:
         with self._lock:
             return self._run(self._c().execute("SELECT * FROM fm_runs WHERE id = ?", (str(run_id or ""),)).fetchone())
 
-    def list_runs(self, factory_id: str, limit: int = 50, kinds: tuple[str, ...] | None = None) -> list[dict[str, Any]]:
+    def list_runs(self, factory_id: str, limit: int = 50, kinds: tuple[str, ...] | None = None,
+                  archived: bool | None = None) -> list[dict[str, Any]]:
+        """``archived``: None, every run (what scores, reports and trust count);
+        False, those on the page; True, the archived ones."""
         sql, args = "SELECT * FROM fm_runs WHERE factory_id = ?", [factory_id]
+        if archived is not None:
+            sql += " AND archived_at != ''" if archived else " AND archived_at = ''"
         if kinds:
             sql += f" AND kind IN ({','.join('?' * len(kinds))})"
             args.extend(kinds)
@@ -1298,6 +1361,36 @@ class FirstMateStore:
             rows = self._c().execute(sql + " ORDER BY created_at DESC, id LIMIT ?",
                                      (*args, max(1, min(int(limit), 500)))).fetchall()
         return [self._run(r) for r in rows]
+
+    def archive_run(self, run_id: str, *, on: bool = True) -> dict[str, Any]:
+        """A finished run off the factory's Runs and Results, kept whole; or back."""
+        with self._tx() as conn:
+            run = self._run(conn.execute("SELECT * FROM fm_runs WHERE id = ?", (run_id,)).fetchone())
+            if run is None:
+                raise FirstMateError("no such run")
+            if on and run["status"] not in TERMINAL_RUN:
+                raise FirstMateError("only a finished run can be archived: stop it or let it finish first")
+            conn.execute("UPDATE fm_runs SET archived_at = ? WHERE id = ?", (_iso(_utcnow()) if on else "", run_id))
+        return self.get_run(run_id)
+
+    def archive_finished(self, factory_id: str) -> int:
+        """Every finished run of a factory off its lists. Returns how many."""
+        with self._tx() as conn:
+            cur = conn.execute(f"UPDATE fm_runs SET archived_at = ? WHERE factory_id = ? AND archived_at = '' "
+                               f"AND status IN ({','.join('?' * len(TERMINAL_RUN))})",
+                               (_iso(_utcnow()), factory_id, *TERMINAL_RUN))
+            return int(cur.rowcount or 0)
+
+    def archived_runs(self, factory_id: str) -> int:
+        with self._lock:
+            return int(self._c().execute("SELECT COUNT(*) FROM fm_runs WHERE factory_id = ? AND archived_at != ''",
+                                         (factory_id,)).fetchone()[0])
+
+    def archived_factories(self, owner_id: str) -> int:
+        with self._lock:
+            return int(self._c().execute("SELECT COUNT(*) FROM fm_factories WHERE owner_id = ? AND "
+                                         "(archived_at != '' OR state = 'retired')",
+                                         (norm_user(owner_id),)).fetchone()[0])
 
     def active_runs(self, owner_id: str | None = None) -> list[dict[str, Any]]:
         """Runs still going: one owner's, or everyone's (for the loop)."""

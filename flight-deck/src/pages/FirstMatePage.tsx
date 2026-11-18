@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  Activity, Anchor, Archive, BellDot, CalendarDays, Coins, Factory as FactoryIcon, Loader2, MoreHorizontal, PanelRightOpen, Pause, Play, Plus, Power, RefreshCw, ShieldCheck, Ship, SlidersHorizontal, Square, Trash2, Trophy, X,
+  Activity, Anchor, Archive, ArchiveRestore, BellDot, CalendarDays, ChevronDown, Coins, Factory as FactoryIcon, Loader2, MoreHorizontal, PanelRightOpen, Pause, Play, Plus, Power, RefreshCw, ShieldCheck, Ship, SlidersHorizontal, Square, Trash2, Trophy, X,
 } from 'lucide-react'
 import {
   createFactory,
@@ -12,6 +12,8 @@ import {
   getStatus,
   getTemplates,
   listFactories,
+  factoryList,
+  archiveFactory,
   runNow,
   saveDeckSettings,
   savePrefs,
@@ -63,6 +65,8 @@ const STATE_TONE: Record<FactoryCard['state'], PillTone> = {
 export function FirstMatePage({ onClose }: { onClose?: () => void }) {
   const [status, setStatusData] = useState<Status | null>(null)
   const [factories, setFactories] = useState<FactoryCard[]>([])
+  const [archivedCount, setArchivedCount] = useState(0)
+  const [archivedKey, setArchivedKey] = useState(0)  // the Archived list reads again when it changes
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
@@ -79,7 +83,13 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
     try {
       const s = await getStatus()
       setStatusData(s)
-      setFactories(s.available ? await listFactories() : [])
+      if (s.available) {
+        const got = await factoryList()
+        setFactories(got.factories)
+        setArchivedCount(got.archived_count)
+      } else {
+        setFactories([])
+      }
       setError(null)
     } catch (e) {
       setError(errText(e))
@@ -94,6 +104,12 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
     const t = setTimeout(() => setNotice(null), 5000)
     return () => clearTimeout(t)
   }, [notice])
+
+  /** The list and how many are archived, again: after an archive, a restore or a delete. */
+  const refresh = useCallback(() => {
+    void factoryList().then((got) => { setFactories(got.factories); setArchivedCount(got.archived_count) }).catch(() => {})
+    setArchivedKey((k) => k + 1)
+  }, [])
 
   // A run going somewhere: look again now and then, so its row moves on.
   const going = factories.some((f) => f.last_run && (f.last_run.status === 'queued' || f.last_run.status === 'running'))
@@ -275,6 +291,8 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                           onResults={() => openAt(f.id, 'results')}
                           onRun={() => void act(f.id, () => runNow(f.id), `${f.title}: run started`)}
                           onState={(s) => void act(f.id, () => setState(f.id, s), `${f.title}: ${STATE_LABELS[s].toLowerCase()}`)}
+                          onArchive={() => void act(f.id, async () => { await archiveFactory(f.id); refresh() },
+                            `${f.title} archived: restore it from Archived any time`)}
                           onDelete={() => {
                             if (window.confirm(`Delete “${f.title}” for good, with its history?`)) {
                               void act(f.id, () => deleteFactory(f.id), `${f.title} deleted`)
@@ -283,6 +301,17 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                       ))}
                     </ul>
                   </div>
+                )}
+                {archivedCount > 0 && (
+                  <ArchivedFactories key={archivedKey} count={archivedCount} busy={busy}
+                    onOpen={(id) => openAt(id)}
+                    onRestore={(f) => void act(f.id, async () => { await archiveFactory(f.id, false); refresh() },
+                      `${f.title} is back on your list, paused: resume it when you want it to run`)}
+                    onDelete={(f) => {
+                      if (window.confirm(`Delete “${f.title}” for good, with its runs, results and history?`)) {
+                        void act(f.id, async () => { await deleteFactory(f.id); refresh() }, `${f.title} deleted`)
+                      }
+                    }} />
                 )}
               </Section>
 
@@ -315,7 +344,7 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
       {notice && <Toast text={notice} onDismiss={() => setNotice(null)} />}
       {opened && (
         <FactoryDrawer factoryId={opened} initialTab={openedTab} onClose={() => setOpened(null)}
-          onChanged={() => { void listFactories().then(setFactories).catch(() => {}) }}
+          onChanged={refresh}
           onNotice={setNotice} />
       )}
     </div>
@@ -607,7 +636,7 @@ function DeckSettings({ status, busy, onChange, className = '' }: {
   )
 }
 
-function FactoryRow({ factory: f, busy, autoOn, onOpen, onResults, onRun, onState, onDelete }: {
+function FactoryRow({ factory: f, busy, autoOn, onOpen, onResults, onRun, onState, onArchive, onDelete }: {
   factory: FactoryCard
   busy: boolean
   /** The owner's switch: off, nothing starts on its own, so no "next run". */
@@ -615,6 +644,8 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onResults, onRun, onStat
   onOpen: () => void
   /** Its Results tab. */
   onResults: () => void
+  /** Off the list, kept whole, restorable. */
+  onArchive: () => void
   onRun: () => void
   onState: (s: OwnerState) => void
   onDelete: () => void
@@ -634,10 +665,11 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onResults, onRun, onStat
     ] : ['paused', 'stopped', 'paused_budget'].includes(f.state) ? [
       { label: 'Resume', icon: Play, onSelect: () => onState('running') },
     ] : []),
-    ...(f.state !== 'draft' && f.state !== 'awaiting_charter' && f.state !== 'retired'
-      ? [{ label: 'Retire', icon: Archive, onSelect: () => onState('retired') }] : []),
+    'divider',
+    ...(!going ? [{ label: 'Archive', icon: Archive, onSelect: onArchive,
+      title: 'Off your list and paused, its runs and results kept: restore it any time' }] : []),
     ...(['draft', 'awaiting_charter', 'retired'].includes(f.state)
-      ? ['divider' as const, { label: 'Delete', icon: Trash2, danger: true, onSelect: onDelete }] : []),
+      ? [{ label: 'Delete', icon: Trash2, danger: true, onSelect: onDelete }] : []),
   ]
 
   const meta: React.ReactNode[] = []
@@ -856,6 +888,66 @@ function NewFactory({ busy, drafting, draftError, onCreate, onDescribe, onCancel
         </form>
       )}
       <p className="text-xs text-zinc-500">A new factory starts as a draft. Nothing runs until you approve its charter.</p>
+    </div>
+  )
+}
+
+/** The archived (and retired) factories, folded under the list: open one, restore it, or delete it. */
+function ArchivedFactories({ count, busy, onOpen, onRestore, onDelete }: {
+  count: number
+  busy: string | null
+  onOpen: (id: string) => void
+  onRestore: (f: FactoryCard) => void
+  onDelete: (f: FactoryCard) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [list, setList] = useState<FactoryCard[] | null>(null)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    if (!open || list) return
+    factoryList(true).then((got) => setList(got.factories)).catch((e) => setError(errText(e)))
+  }, [open, list])
+  return (
+    <div className="mt-4">
+      <button onClick={() => setOpen((o) => !o)} aria-expanded={open}
+        className="inline-flex items-center gap-2 rounded-full border border-[var(--fd-line)] px-3 py-1.5 text-xs font-medium text-zinc-400 transition-colors hover:border-violet-500/40 hover:text-zinc-200">
+        <Archive className="h-3.5 w-3.5" />Archived · {count}
+        <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="fd-fade mt-3">
+          {error && <p className="text-xs text-red-700 dark:text-red-300">{error}</p>}
+          {!list && !error && <p className="flex items-center gap-1.5 text-xs text-zinc-500"><Loader2 className="h-3 w-3 animate-spin" />Loading…</p>}
+          {list && (
+            <ul className="divide-y divide-[var(--fd-line)] overflow-hidden rounded-2xl border border-dashed border-[var(--fd-line)]">
+              {list.map((f) => (
+                <li key={f.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-500/10 text-xs font-semibold text-zinc-500">
+                    {(f.title.trim()[0] || '?').toUpperCase()}
+                  </span>
+                  <button onClick={() => onOpen(f.id)} className="min-w-0 flex-1 text-left">
+                    <span className="block truncate text-sm font-medium text-zinc-300">{f.title}</span>
+                    <span className="block truncate text-[11px] text-zinc-500">
+                      {f.state === 'retired' && !f.archived_at ? 'Retired' : `Archived ${f.archived_at ? whenText(f.archived_at) : ''}`}
+                      {f.last_run ? ` · last run ${RUN_LABELS[f.last_run.status].toLowerCase()} ${f.last_run.ended_at ? whenText(f.last_run.ended_at) : ''}` : ''}
+                    </span>
+                  </button>
+                  {f.archived_at && (
+                    <button onClick={() => onRestore(f)} disabled={busy === f.id}
+                      className="inline-flex h-8 items-center gap-1.5 rounded-full border border-[var(--fd-line)] px-3 text-xs font-medium text-zinc-300 transition-colors hover:border-violet-500/40 hover:text-zinc-100">
+                      {busy === f.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ArchiveRestore className="h-3.5 w-3.5" />}Restore
+                    </button>
+                  )}
+                  <button onClick={() => onDelete(f)} disabled={busy === f.id} title="Delete for good" aria-label={`Delete ${f.title}`}
+                    className="flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-300">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
     </div>
   )
 }

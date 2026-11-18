@@ -189,7 +189,7 @@ async def test_approve_does_its_one_op(store, db, stalled, monkeypatch):
     assert store.get(hungry["id"])["share"] == 2
     asked: list[str] = []
 
-    async def model(owner, system, user):
+    async def model(owner, system, user, max_tokens=0):
         asked.append(user)
         return json.dumps(ANSWER)
 

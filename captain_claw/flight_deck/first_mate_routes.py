@@ -168,11 +168,13 @@ def _with_intents(store: fms.FirstMateStore, runs_: list[dict[str, Any]]) -> lis
             for r in runs_]
 
 
-async def _runs_shown(store: fms.FirstMateStore, factory_id: str, limit: int) -> list[dict[str, Any]]:
-    """A factory's runs as the page lists them, newest first; the newest, if it
-    stopped, says whether it can go on where it stopped (``can_continue``)."""
-    listed = _with_intents(store, store.list_runs(factory_id, limit=limit, kinds=fms.WORK_KINDS))
-    if listed and listed[0]["status"] in ("failed", "cancelled"):
+async def _runs_shown(store: fms.FirstMateStore, factory_id: str, limit: int,
+                      archived: bool = False) -> list[dict[str, Any]]:
+    """A factory's runs as the page lists them (not archived ones, or only those),
+    newest first; the newest, if it stopped, says whether it can go on where it
+    stopped (``can_continue``)."""
+    listed = _with_intents(store, store.list_runs(factory_id, limit=limit, kinds=fms.WORK_KINDS, archived=archived))
+    if listed and not archived and listed[0]["status"] in ("failed", "cancelled"):
         try:
             can = not await runs.why_not_continue(listed[0])
         except Exception:  # noqa: BLE001 — the page still lists its runs
@@ -306,22 +308,25 @@ async def list_templates(user: dict = Depends(allowed_user)):
 # ── factories ──────────────────────────────────────────────────────────
 
 @router.get("/fd/first-mate/factories")
-async def list_factories(include_retired: bool = False, user: dict = Depends(allowed_user)):
+async def list_factories(include_retired: bool = False, archived: bool = False, user: dict = Depends(allowed_user)):
+    """The owner's factories on their list, or (``archived``) the archived and
+    retired ones; ``archived_count`` says how many those are."""
     uid = _uid(user)
     await runs.refresh_owner(uid)
     store = fms.get_store()
     now = fms._utcnow()
     week = _week(store, uid, now)
     from captain_claw.flight_deck import first_mate_results
-    cards = [_card(store, store.view(f["id"]), week, now)
-             for f in store.list_factories(uid, include_retired=include_retired)]
+    listed = store.list_factories(uid, archived=True) if archived else \
+        store.list_factories(uid, include_retired=include_retired)
+    cards = [_card(store, store.view(f["id"]), week, now) for f in listed]
     for card in cards:  # its newest result, a click from the page
         try:
             card["latest_result"] = await first_mate_results.latest(card["id"])
         except Exception:  # noqa: BLE001 — the list never fails on it
             log.warning("first mate: couldn't read a factory's latest result", exc_info=True)
             card["latest_result"] = None
-    return {"factories": cards}
+    return {"factories": cards, "archived_count": store.archived_factories(uid)}
 
 
 @router.post("/fd/first-mate/factories")
@@ -356,6 +361,7 @@ async def get_factory(factory_id: str, user: dict = Depends(allowed_user)):
     return {**view,
             "versions": store.versions(factory_id),
             "runs": await _runs_shown(store, factory_id, 20),
+            "archived_runs": store.archived_runs(factory_id),
             "check": store.active_check(factory_id),
             "run_cap": runs.run_cap(store, view, store.live(factory_id)),
             "data": fm_data.items(factory_id),
@@ -859,13 +865,53 @@ async def stop_check(factory_id: str, user: dict = Depends(allowed_user)):
 
 
 @router.get("/fd/first-mate/factories/{factory_id}/runs")
-async def list_runs(factory_id: str, limit: int = 50, user: dict = Depends(allowed_user)):
+async def list_runs(factory_id: str, limit: int = 50, archived: bool = False, user: dict = Depends(allowed_user)):
     _mine(factory_id, user)
     store = fms.get_store()
     for run in store.list_runs(factory_id, limit=max(1, min(limit, 200))):
         if run["status"] in fms.ACTIVE_RUN:
             await runs.refresh(run["id"])
-    return {"runs": await _runs_shown(store, factory_id, max(1, min(limit, 200)))}
+    return {"runs": await _runs_shown(store, factory_id, max(1, min(limit, 200)), archived=archived),
+            "archived_runs": store.archived_runs(factory_id)}
+
+
+# ── archiving: off the lists, kept whole, restorable ───────────────────
+
+def _flag(body: Any) -> bool:
+    body = _object(body)
+    _only(body, ("archived",))
+    on = body.get("archived", True)
+    if not isinstance(on, bool):
+        raise HTTPException(400, "archived must be true or false")
+    return on
+
+
+@router.post("/fd/first-mate/factories/{factory_id}/archive")
+async def archive_factory(factory_id: str, body: Any = Body(default={}), user: dict = Depends(allowed_user)):
+    """``{"archived": true}`` archives it (a running one is paused first);
+    false restores it, paused."""
+    _mine(factory_id, user)
+    try:
+        return fms.get_store().archive(factory_id, "owner", on=_flag(body))
+    except FirstMateError as exc:
+        raise _err(exc) from None
+
+
+@router.post("/fd/first-mate/runs/{run_id}/archive")
+async def archive_run(run_id: str, body: Any = Body(default={}), user: dict = Depends(allowed_user)):
+    _own_run(run_id, user)
+    try:
+        return fms.get_store().archive_run(run_id, on=_flag(body))
+    except FirstMateError as exc:
+        raise _err(exc) from None
+
+
+@router.post("/fd/first-mate/factories/{factory_id}/runs/archive-finished")
+async def archive_finished_runs(factory_id: str, user: dict = Depends(allowed_user)):
+    """Every finished run of the factory off its Runs and Results."""
+    _mine(factory_id, user)
+    store = fms.get_store()
+    return {"archived": store.archive_finished(factory_id), "archived_runs": store.archived_runs(factory_id)}
 
 
 @router.post("/fd/first-mate/runs/{run_id}/approve")

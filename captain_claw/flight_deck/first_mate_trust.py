@@ -106,7 +106,7 @@ def labelled(store: fms.FirstMateStore, factory_id: str) -> list[dict[str, Any]]
 def calibration(store: fms.FirstMateStore, owner_id: str) -> dict[str, Any]:
     """How well the deck's verdict agrees with the owner's labels."""
     rows: list[dict[str, Any]] = []
-    for f in store.list_factories(owner_id, include_retired=True):
+    for f in store.list_factories(owner_id, include_retired=True, archived=None):
         rows += labelled(store, f["id"])
     rows.sort(key=lambda r: r["at"], reverse=True)
     rows = rows[:LABEL_WINDOW]

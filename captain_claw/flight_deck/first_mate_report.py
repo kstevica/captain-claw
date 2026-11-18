@@ -135,7 +135,7 @@ def build(store: fms.FirstMateStore, owner_id: str, start: datetime, end: dateti
     now = now or fms._utcnow()
     owner = fms.norm_user(owner_id)
     prefs = store.prefs(owner)
-    factories = [f for f in store.list_factories(owner) if f["version"]
+    factories = [f for f in store.list_factories(owner, archived=None) if f["version"]
                  and datetime.fromisoformat(f["created_at"]) < end]
     share = first_mate_loop.shares(prefs, factories)
     cal = first_mate_trust.calibration(store, owner)
