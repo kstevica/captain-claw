@@ -45,6 +45,7 @@ _CONTEXT_OVERFLOW_HINTS = (
     "context_length_exceeded", "context length", "context window", "maximum context",
     "prompt is too long", "input is too long", "too many tokens", "exceeds the context",
     "exceed context", "exceeds context", "input token count", "n_ctx",
+    "exceeds the available context", "exceed_context_size", "context size",
 )
 
 
@@ -69,6 +70,33 @@ def _budget_extends(
     if not recent_progress:
         return False
     return remaining_work or soft_limit < free_limit or not judge_available
+
+
+def _floating_ceiling() -> int:
+    """A spawner's floating step budget (``CLAW_FLOATING_BUDGET``, Bat's workers):
+    a turn that keeps making progress keeps going, up to this far ceiling. 0 when
+    not set."""
+    import os
+    try:
+        value = int(str(os.environ.get("CLAW_FLOATING_BUDGET", "")).strip() or 0)
+    except ValueError:
+        return 0
+    return max(0, min(value, 100_000))
+
+
+def _turn_limits(planned: int) -> tuple[int, int]:
+    """A turn's hard ceiling and the point up to which progress alone extends it
+    (past it, Jev decides where set up). Generous by design: 4x planned, at most
+    300. With a floating budget, progress alone extends it all the way to that
+    budget's ceiling: cutting a working turn off is the worse failure, and the
+    stuck detector, not this budget, stops one going nowhere."""
+    hard = max(planned, min(300, planned * 4))
+    free = planned * 2
+    floating = _floating_ceiling()
+    if floating:
+        hard = max(hard, floating)
+        free = hard
+    return hard, free
 
 
 def _stuck_warmup(base_iterations: int, soft_iterations: int) -> int:
@@ -2384,12 +2412,12 @@ class AgentOrchestrationMixin:
         # ceiling — 4x planned, capped at 300 (was 2x / 200) — is the backstop
         # for runaway loops. Spinning without progress is stopped sooner by
         # the stuck detector (max_stagnant_iterations), not by this budget.
-        hard_turn_iterations = max(planned_turn_iterations, min(300, planned_turn_iterations * 4))
+        # Up to free_extension_limit a turn that is making progress is extended
+        # with no judge; past it Jev (where set up) decides each extension. A
+        # floating budget (CLAW_FLOATING_BUDGET) moves both out to its ceiling.
+        hard_turn_iterations, free_extension_limit = _turn_limits(planned_turn_iterations)
         soft_turn_iterations = planned_turn_iterations
         extension_step = max(6, min(30, max(1, planned_turn_iterations // 2)))
-        # Up to here a turn that is making progress is extended with no judge;
-        # past it Jev (where set up) decides each extension.
-        free_extension_limit = planned_turn_iterations * 2
         max_stagnant_iterations = 6
         stagnant_iterations = 0
         progress_window: list[bool] = []

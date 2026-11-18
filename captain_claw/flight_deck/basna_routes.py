@@ -116,16 +116,24 @@ _EXTEND_CAP_X = 3.0         # ceiling multiplier over the configured budget
 
 
 def _extend_deadline(now: float, hard_deadline: float | None,
-                     last_activity: float, *, unbounded: bool = False) -> float | None:
+                     last_activity: float, *, unbounded: bool = False,
+                     floating: float = 0.0) -> float | None:
     """The extended deadline for a still-active agent at its budget wall, or
     ``None`` when no extension is warranted (idle past the activity window, or
     the hard ceiling reached — a hung agent still times out).
 
     ``unbounded`` (Vatra runs): no ceiling and no activity requirement — a worker
     that is still connected always gets another slice. The user ends it with the
-    run's Stop (which kills the workers) or the agent's Skip."""
+    run's Stop (which kills the workers) or the agent's Skip.
+
+    ``floating`` (Bat runs: seconds): no ceiling while the agent keeps working —
+    any event within the last ``floating`` seconds earns another slice — so a
+    long step on a slow local model isn't cut at an hour; one quiet that long
+    (a hung model call) still ends."""
     if unbounded:
         return now + _EXTEND_SLICE_S
+    if floating > 0:
+        return now + _EXTEND_SLICE_S if now - last_activity <= floating else None
     if hard_deadline is None or now >= hard_deadline:
         return None
     if now - last_activity > _EXTEND_ACTIVITY_S:
@@ -139,6 +147,10 @@ def _extend_deadline(now: float, hard_deadline: float | None,
 # (Basna, Code, flows, plans) keeps the bounded min(3× budget, 3600s) ceiling.
 _run_extend_unbounded: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "basna_run_extend_unbounded", default=False)
+# Per-run floating extension (Bat): how long an agent may stay quiet and still
+# get more time, in seconds; 0 = the bounded rule above.
+_run_extend_floating: contextvars.ContextVar[float] = contextvars.ContextVar(
+    "basna_run_extend_floating", default=0.0)
 
 
 def _safe_name(name: str) -> str:
@@ -2687,6 +2699,7 @@ async def _send_chat_and_collect(
     import websockets
     uri = f"ws://localhost:{port}/ws" + (f"?token={token}" if token else "")
     unbounded = _run_extend_unbounded.get()
+    floating = _run_extend_floating.get()
     # State persists across reconnects: the task is sent exactly once, and a
     # dropped long-poll socket resumes listening rather than restarting the turn.
     answer = ""
@@ -2820,7 +2833,7 @@ async def _send_chat_and_collect(
                 ping_interval=20, ping_timeout=30,
             ) as ws:
                 await asyncio.wait_for(ws.recv(), timeout=15)  # welcome
-                if unbounded:
+                if unbounded or floating > 0:
                     failures = 0
                 if not sent:
                     # Drain any pre-existing session replay BEFORE sending our task,
@@ -2878,7 +2891,7 @@ async def _send_chat_and_collect(
                         # has no ceiling: the agent keeps going until it finishes
                         # or the user stops the run / skips the agent.
                         ext = _extend_deadline(now, hard_deadline, last_activity,
-                                               unbounded=unbounded)
+                                               unbounded=unbounded, floating=floating)
                         if ext is not None:
                             deadline = ext
                             base = started_at if started_at is not None else now
@@ -2891,6 +2904,11 @@ async def _send_chat_and_collect(
                                         f"time budget reached and {state} — extended to "
                                         f"{int(deadline - base)}s (no cap: Stop the run or "
                                         f"Skip the agent to end it)")
+                            elif floating > 0:
+                                _record("dispatch_extend",
+                                        f"time budget reached but the agent is still working — "
+                                        f"extended to {int(deadline - base)}s (no cap while it keeps "
+                                        f"working; {int(floating // 60)} min quiet ends it)")
                             else:
                                 _record("dispatch_extend",
                                         f"time budget reached but the agent is still working — "
@@ -2920,7 +2938,7 @@ async def _send_chat_and_collect(
             failures += 1
             if sent and answer.strip():
                 return answer.strip(), actions
-            if (not unbounded and deadline is not None
+            if (not unbounded and not floating and deadline is not None
                     and asyncio.get_event_loop().time() >= deadline):
                 if error_sink is not None:
                     error_sink["timed_out"] = True

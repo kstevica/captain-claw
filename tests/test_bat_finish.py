@@ -1291,3 +1291,27 @@ def test_a_bat_workers_prompt_never_trips_the_basna_relay(monkeypatch):
     monkeypatch.setenv("CLAW_BAT_WORKER", "1")
     assert _detect_basna_run(prompt) is None
 
+
+
+async def test_a_step_floats_its_time_and_step_budget_and_keeps_its_notes(store, attempt_env, monkeypatch):
+    """A Bat step's worker gets a floating step budget and the context governor,
+    and its turn a floating time limit (no cap while it keeps working)."""
+    from captain_claw.flight_deck import basna_routes
+    rid = await _run(store, steps=[_step("a", 0)], cap=100.0)
+    seen: dict = {}
+
+    async def spawn(*_a, extra_env=None, **_k):
+        seen["env"] = {e["key"]: e["value"] for e in extra_env or []}
+        return {"ok": True, "port": 4567, "auth": "x", "slug": "worker-1", "message": ""}
+
+    async def dispatch(_port, _auth, _prompt, _timeout, **_k):
+        seen["floating"] = basna_routes._run_extend_floating.get()
+        return {"ok": True, "output": "the answer", "model": "priced-model"}
+
+    monkeypatch.setattr(bat_routes, "_spawn_bat_worker", spawn)
+    monkeypatch.setattr(basna_routes, "_dispatch_one", dispatch)
+    res = await bat_routes._bat_attempt(await store.get_run(rid), (await store.list_steps(rid))[0])
+    assert res["ok"]
+    assert seen["floating"] == bat_routes._BAT_IDLE_S > 0 and basna_routes._run_extend_floating.get() == 0.0
+    assert seen["env"]["CLAW_FLOATING_BUDGET"] == str(bat_routes._BAT_STEP_CEILING)
+    assert seen["env"]["CLAW_CTX_GOVERNOR"] == "1"

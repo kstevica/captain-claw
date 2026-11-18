@@ -61,6 +61,22 @@ router = APIRouter(prefix="/fd/bat", tags=["bat"])
 _WORKER_MARKER = "CLAW_BAT_WORKER"
 _BAT_MAX_RUNS_PER_OWNER = 3
 _STEP_TIMEOUT_S = 1800.0
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(os.environ.get(name, "") or default)))
+    except ValueError:
+        return default
+
+
+# Bat is the stubborn finisher: a step that keeps working keeps going.
+# - Its worker's step budget floats: progress alone extends the turn, up to this
+#   far ceiling (the agent's stuck detector stops one going nowhere).
+# - Its time floats past _STEP_TIMEOUT_S while the worker shows activity, with
+#   no ceiling; only this long a silence (a hung model call) ends it.
+_BAT_STEP_CEILING = _env_int("FD_BAT_STEP_CEILING", 5000, 300, 100_000)
+_BAT_IDLE_S = 60.0 * _env_int("FD_BAT_IDLE_MINUTES", 15, 3, 240)
 _PANEL_SIZE = 3
 # A panel's refusal gets this many judgements (two fix rounds). After that, more
 # rounds won't settle it and the owner decides: Bat never calls a refused run done
@@ -872,6 +888,12 @@ def _bat_env(sid: str, step_key: str, owner: str) -> list[dict]:
         {"key": "CLAW_BAT_SUBTASK", "value": step_key},
         {"key": "CLAW_BAT_OWNER", "value": owner},
         {"key": "CLAW_VFS_PROJECT", "value": project},
+        # A step's one long turn: progress keeps it going (floating step budget),
+        # and the in-turn context governor keeps it inside the model's window —
+        # it folds old tool results into notes in the run's folder instead of
+        # failing when the context fills.
+        {"key": "CLAW_FLOATING_BUDGET", "value": str(_BAT_STEP_CEILING)},
+        {"key": "CLAW_CTX_GOVERNOR", "value": "1"},
     ]
 
 
@@ -1208,11 +1230,16 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
         # Mail-write / organize grants come only from the owner's approval of
         # THIS run's plan (see _bat_automation).
         automation = _bat_automation(run)
-        res = await _dispatch_one(
-            port, auth, prompt, _STEP_TIMEOUT_S,
-            on_action=_on_action, on_usage=_on_usage, agent_name=key, automation=automation,
-            usage_sink=so_far,
-        )
+        from captain_claw.flight_deck.basna_routes import _run_extend_floating
+        floating = _run_extend_floating.set(_BAT_IDLE_S)  # no time cap while it keeps working
+        try:
+            res = await _dispatch_one(
+                port, auth, prompt, _STEP_TIMEOUT_S,
+                on_action=_on_action, on_usage=_on_usage, agent_name=key, automation=automation,
+                usage_sink=so_far,
+            )
+        finally:
+            _run_extend_floating.reset(floating)
         cost = step_cost(_RUN_USAGE.get(usage_key, []), worker_model)
         tokens = int((cost.get("tokens") or {}).get("total_tokens", 0) or 0)
         if tokens and cost.get("usd") is None and store and float(run.get("llm_usd_cap") or 0) > 0:

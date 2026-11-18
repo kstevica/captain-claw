@@ -1138,6 +1138,15 @@ _CONTEXT_OVERFLOW_RES = (
         r"`max_new_tokens` must be <= (?P<cap>\d+)\. given: (?P<prompt>\d+)"
         r" `inputs` tokens and (?P<req>\d+) `max_new_tokens`"
     ),
+    # llama.cpp server ("the request exceeds the available context size", type
+    # exceed_context_size_error), as JSON or a Python repr of it; it gives the
+    # prompt and the window, not the output budget.
+    re.compile(
+        r"n_prompt_tokens['\"]?\s*:\s*(?P<prompt>\d+)[^{}]{0,80}?n_ctx['\"]?\s*:\s*(?P<cap>\d+)"
+    ),
+    re.compile(
+        r"n_ctx['\"]?\s*:\s*(?P<cap>\d+)[^{}]{0,80}?n_prompt_tokens['\"]?\s*:\s*(?P<prompt>\d+)"
+    ),
 )
 # Headroom left under the server's own count, so a healed request never fills
 # the window to the last token, and the smallest budget worth a retry — below
@@ -1171,7 +1180,7 @@ def _context_overflow(msg: str) -> _ContextOverflow | None:
             prompt_tokens = int(groups["prompt"])
         return _ContextOverflow(
             capacity=int(groups["cap"]),
-            requested=int(groups["req"]),
+            requested=int(groups.get("req") or 0),  # 0: the server didn't say
             prompt_tokens=prompt_tokens,
             prompt_floor=int(groups.get("prompt") or 0),
         )
