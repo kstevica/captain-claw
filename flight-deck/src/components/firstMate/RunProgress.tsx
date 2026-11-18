@@ -1,8 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Bot, Check, ChevronDown, Database, FolderOpen, ListChecks, Loader2, Minus, X, type LucideIcon } from 'lucide-react'
+import { Activity, Bot, Check, ChevronDown, Database, FolderOpen, ListChecks, Loader2, Minus, NotebookPen, X, type LucideIcon } from 'lucide-react'
 import { getRunProgress, type RunProgress as Progress } from '../../services/firstMate'
 import type { ProgressEvent } from '../../stores/basnaStore'
-import { RunFiles } from './RunFiles'
+import { RunFiles, RunNotes } from './RunFiles'
+import { useRunFolder } from './useRunFolder'
 import { TimingChips } from './FactoryResults'
 import { RunDataList } from './FactoryData'
 import { useRunData } from './useRunData'
@@ -12,14 +13,15 @@ import { Pill, errText, type PillTone } from './ui'
 // What a run is doing, inside its row on the Runs tab: how far it got (a bar with one
 // segment per step), then tabs across the whole width: its steps with their progress
 // notes, the agents that worked on it (one per step; Bat removes each when its step
-// ends), the latest activity, its files, and the extra data it was given. Reads again
+// ends), the latest activity, its files, the workers' notes, and the extra data it was
+// given. Reads again
 // every few seconds while the run is going.
 
 const POLL_MS = 4000
 const KEEP = 400
 
 type StepState = 'done' | 'running' | 'failed' | 'skipped' | 'pending'
-type Tab = 'steps' | 'agents' | 'activity' | 'files' | 'data'
+type Tab = 'steps' | 'agents' | 'activity' | 'files' | 'notes' | 'data'
 
 function stateOf(status: string): StepState {
   if (status === 'done') return 'done'
@@ -143,6 +145,7 @@ export function RunProgress({ runId, going, stopped }: { runId: string; going: b
   const [error, setError] = useState('')
   const [tab, setTab] = useState<Tab>('steps')
   const data = useRunData(runId)
+  const folder = useRunFolder(p?.files ?? '', going && (tab === 'files' || tab === 'notes'))
   const next = useRef(0)
 
   useEffect(() => {
@@ -202,7 +205,7 @@ export function RunProgress({ runId, going, stopped }: { runId: string; going: b
   const current = steps.find((s) => stateOf(s.status) === 'running')
   const activity = events.filter((e) => e.stage !== 'usage')
   const dataCount = data.data?.files.length ?? 0
-  const shown: Tab = tab === 'files' && !p.files ? 'steps' : tab
+  const shown: Tab = (tab === 'files' || tab === 'notes') && !p.files ? 'steps' : tab
 
   return (
     <div className="mt-3 overflow-hidden rounded-2xl border border-[var(--fd-line)] bg-[var(--fd-hover)]">
@@ -237,11 +240,12 @@ export function RunProgress({ runId, going, stopped }: { runId: string; going: b
         )}
       </div>
 
-      <div role="tablist" aria-label="This run" className="flex gap-1 overflow-x-auto border-y border-[var(--fd-line)] bg-[var(--fd-surface-raised)] px-3 py-2">
+      <div role="tablist" aria-label="This run" className="flex flex-wrap gap-1 border-y border-[var(--fd-line)] bg-[var(--fd-surface-raised)] px-3 py-2">
         <TabButton icon={ListChecks} label="Steps" count={steps.length} on={shown === 'steps'} onClick={() => setTab('steps')} />
         <TabButton icon={Bot} label="Agents" count={agents.length} on={shown === 'agents'} onClick={() => setTab('agents')} />
         <TabButton icon={Activity} label="Activity" count={activity.length} on={shown === 'activity'} onClick={() => setTab('activity')} />
-        {p.files && <TabButton icon={FolderOpen} label="Files" on={shown === 'files'} onClick={() => setTab('files')} />}
+        {p.files && <TabButton icon={FolderOpen} label="Files" count={folder.results.length} on={shown === 'files'} onClick={() => setTab('files')} />}
+        {p.files && <TabButton icon={NotebookPen} label="Notes" count={folder.notes.length} on={shown === 'notes'} onClick={() => setTab('notes')} />}
         <TabButton icon={Database} label="Extra data" count={dataCount} on={shown === 'data'} onClick={() => setTab('data')} />
       </div>
 
@@ -283,7 +287,8 @@ export function RunProgress({ runId, going, stopped }: { runId: string; going: b
         {shown === 'activity' && (activity.length
           ? <Log events={activity.slice(-150)} tall showStep />
           : <p className="text-xs text-zinc-500">Nothing yet.</p>)}
-        {shown === 'files' && p.files && <RunFiles project={p.files} live={going} />}
+        {shown === 'files' && p.files && <RunFiles folder={folder} live={going} />}
+        {shown === 'notes' && p.files && <RunNotes folder={folder} />}
         {shown === 'data' && <RunDataList runId={runId} going={going} stopped={stopped} state={data} />}
       </div>
     </div>
