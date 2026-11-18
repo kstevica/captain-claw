@@ -466,10 +466,12 @@ class BatStore:
     async def demote_running_steps(self, run_id: str) -> int:
         """On adopt after a crash, a step left 'running' never completed — demote
         it to 'pending' so the driver re-runs it (avoids the plans.py wedge where
-        a 'running' step is never picked up again)."""
+        a 'running' step is never picked up again). The same for a step cut off
+        by a stop or a cap. Its cut-off attempt is given back: an interruption
+        isn't a failure, so it doesn't use up the step's tries."""
         db = await self._ensure_db()
         cur = await db.execute(
-            "UPDATE bat_steps SET status = 'pending', updated_at = ?"
+            "UPDATE bat_steps SET status = 'pending', attempt = MAX(attempt - 1, 0), updated_at = ?"
             " WHERE run_id = ? AND status = 'running'",
             (_now(), run_id),
         )
