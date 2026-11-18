@@ -79,19 +79,27 @@ def _env_int(name: str, default: int, lo: int, hi: int) -> int:
 #   no ceiling; only this long a silence (a hung model call) ends it.
 _BAT_STEP_CEILING = _env_int("FD_BAT_STEP_CEILING", 5000, 300, 100_000)
 _BAT_IDLE_S = 60.0 * _env_int("FD_BAT_IDLE_MINUTES", 15, 3, 240)
+# How long one of Bat's own model calls (planning, its checks, the reviewers) may
+# take. A thinking model on one machine writes ~90 tokens a second: 16k tokens of
+# thinking alone is three minutes, past the provider's own 180 s, so the call was
+# cut off and asked again from the start.
+_BAT_CALL_S = 60.0 * _env_int("FD_BAT_CALL_MINUTES", 20, 3, 120)
+# What one of them may write, thinking included.
+CALL_TOKENS = 32_768
 
 # ── the deck's Bat settings (Console → Settings → Bat) ─────────────────
 # An admin sets them on the console; the FD_BAT_* environment values are only
 # the defaults. Kept in the deck's system settings and read when they change
 # and at start, so a run going now takes them up.
 SETTINGS_KEY = "fd:bat-settings"
-SETTING_RANGES = {"max_parallel": (1, 8), "step_ceiling": (300, 100_000), "idle_minutes": (3, 240)}
+SETTING_RANGES = {"max_parallel": (1, 8), "step_ceiling": (300, 100_000), "idle_minutes": (3, 240),
+                  "call_minutes": (3, 120)}
 _SETTINGS: dict[str, int] = {}
 
 
 def deck_defaults() -> dict[str, int]:
     return {"max_parallel": bat_loop.env_max_parallel(), "step_ceiling": _BAT_STEP_CEILING,
-            "idle_minutes": int(_BAT_IDLE_S // 60)}
+            "idle_minutes": int(_BAT_IDLE_S // 60), "call_minutes": int(_BAT_CALL_S // 60)}
 
 
 def deck_settings() -> dict[str, int]:
@@ -151,6 +159,20 @@ def _step_ceiling() -> int:
 
 def _idle_s() -> float:
     return 60.0 * int(deck_settings()["idle_minutes"])
+
+
+def call_timeout() -> float:
+    """Seconds one of Bat's own model calls may take (the admin's setting)."""
+    return 60.0 * int(deck_settings()["call_minutes"])
+
+
+def think_call(creds: dict, *, temperature: float, default_max: int = 16_384):
+    """One of Bat's own model calls: room for a thinking model to think (``CALL_TOKENS``,
+    or the tier's own output limit when that's lower), and the admin's time limit
+    instead of the provider's 180 s. Returns ``(provider, max_tokens)``."""
+    from captain_claw.flight_deck.basna_routes import _provider_call
+    return _provider_call(creds, temperature=temperature, default_max=default_max, cap=CALL_TOKENS,
+                          request_timeout=call_timeout())
 _PANEL_SIZE = 3
 # A panel's refusal gets this many judgements (two fix rounds). After that, more
 # rounds won't settle it and the owner decides: Bat never calls a refused run done
@@ -1038,7 +1060,7 @@ async def _ensure_contract(run: dict, creds: dict | None, has_shell: bool) -> No
     from captain_claw.llm import Message
     rules: list[dict] = []
     try:
-        prov, mt = _provider_call(creds, temperature=0.0, default_max=4096, cap=16384)
+        prov, mt = think_call(creds, temperature=0.0)
         resp = await prov.complete(messages=[
             Message(role="system", content=_CONTRACT_SYSTEM.replace("COMMAND_SHAPE", _COMMAND_SHAPE if has_shell else "")),
             Message(role="user", content=str(run.get("task", ""))[:8000]),
@@ -1083,7 +1105,7 @@ async def _shape_contract(run: dict, creds: dict | None, has_shell: bool) -> Non
     from captain_claw.llm import Message
     shaped: list[dict] = []
     try:
-        prov, mt = _provider_call(creds, temperature=0.0, default_max=4096, cap=16384)
+        prov, mt = think_call(creds, temperature=0.0)
         listing = "\n".join(f'- id "{r["id"]}": {r["text"]}' for r in rules)
         resp = await prov.complete(messages=[
             Message(role="system", content=_SHAPE_SYSTEM.replace("COMMAND_SHAPE", _COMMAND_SHAPE if has_shell else "")),
@@ -1151,7 +1173,7 @@ async def _audit_failed_checks(run: dict, failed: list[dict], creds: dict, folde
     evidence = await asyncio.to_thread(_evidence_block, folder, excerpts=5)
     try:
         async with _metered(run["id"], "audit"):
-            prov, mt = _provider_call(creds, temperature=0.0, default_max=4096, cap=16384)
+            prov, mt = think_call(creds, temperature=0.0)
             resp = await prov.complete(messages=[
                 Message(role="system", content=_AUDIT_SYSTEM),
                 Message(role="user", content=f"# Task\n{str(run.get('task', ''))[:4000]}\n\n# Failed checks\n{listing}\n\n{evidence}"),
@@ -1507,7 +1529,7 @@ async def _plan_steps(run: dict) -> list[dict]:
                 return steps
             # no usable archetype plan → fall through to the plain decomposition
         if creds:
-            prov, mt = _provider_call(creds, temperature=0.2, default_max=4096, cap=16384)
+            prov, mt = think_call(creds, temperature=0.2)
             resp = await prov.complete(messages=[
                 Message(role="system", content=(
                     "Break the user's goal into the smallest ordered list of concrete, independently "
@@ -1543,7 +1565,7 @@ async def _plan_with_archetypes(run: dict, db, creds: dict) -> list[dict]:
     valid = {a["id"] for a in archetypes}
     catalog = "\n".join(f"- {a['id']}: {a.get('role', '')} — {str(a.get('description', ''))[:120]}"
                         for a in archetypes[:40])
-    prov, mt = _provider_call(creds, temperature=0.2, default_max=4096, cap=16384)
+    prov, mt = think_call(creds, temperature=0.2)
     resp = await prov.complete(messages=[
         Message(role="system", content=(
             "Break the user's goal into the smallest ordered list of concrete, independently checkable "
@@ -1802,7 +1824,7 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
             async def vote(deliverable_text: str, task: str, idx: int) -> dict:
                 lens = lenses[idx % len(lenses)]
                 shown = "\n\n".join(p for p in (receipt, rules, deliverable_text[:8000], evidence) if p)
-                prov, mt = _provider_call(creds, temperature=0.0, default_max=2048, cap=8192)
+                prov, mt = think_call(creds, temperature=0.0)
                 resp = await prov.complete(messages=[
                     Message(role="system", content=_VOTE_SYSTEM),
                     Message(role="user", content=_vote_prompt(lens, task, shown)),
@@ -1906,7 +1928,7 @@ async def _bat_replan(run: dict, steps: list[dict], verdict: dict, round_no: int
         if creds:
             so_far = "\n".join(_replan_line(run, s) for s in steps)
             async with _metered(run["id"], f"replan-{round_no}"):
-                prov, mt = _provider_call(creds, temperature=0.2, default_max=4096, cap=16384)
+                prov, mt = think_call(creds, temperature=0.2)
                 resp = await prov.complete(messages=[
                     Message(role="system", content=_replan_system(limit)),
                     Message(role="user", content=(f"# Goal\n{str(run.get('task', ''))[:4000]}\n\n"

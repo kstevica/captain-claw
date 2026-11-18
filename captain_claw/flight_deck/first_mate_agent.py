@@ -150,6 +150,7 @@ async def ask(store: fms.FirstMateStore, owner_id: str, system: str, user: str, 
             reader = reader.get("fallback")
             if not reader:
                 return None
+    from captain_claw.flight_deck.bat_routes import call_timeout
     reply = await file_library.model_reply(reader, system, user, fms.norm_user(owner_id), max_tokens=max_tokens,
-                                           request_timeout=120)
+                                           request_timeout=call_timeout())
     return reply.text or ""

@@ -238,8 +238,8 @@ def conventions_findings(run: dict, folder: Path) -> list[str]:
 async def review(run: dict, what: str, verified: str, signals: list[str]) -> dict[str, str] | None:
     """On course, drifting or off course, with a correction; None without a model."""
     from captain_claw.flight_deck.auth import get_db
-    from captain_claw.flight_deck.basna_routes import _load_owner_tiers, _provider_call
-    from captain_claw.flight_deck.bat_routes import _creds_for, _metered, _run_folder
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+    from captain_claw.flight_deck.bat_routes import _creds_for, _metered, _run_folder, think_call
     from captain_claw.llm import Message
     try:
         tiers, _ = await _load_owner_tiers(get_db(), run["owner_id"])
@@ -265,7 +265,7 @@ async def review(run: dict, what: str, verified: str, signals: list[str]) -> dic
     if signals:
         parts.append("# What Captain's checks noticed\n" + "\n".join(f"- {s}" for s in signals[:10]))
     async with _metered(run["id"], "course"):
-        prov, mt = _provider_call(creds, temperature=0.0, default_max=8192, cap=16384)  # thinking included
+        prov, mt = think_call(creds, temperature=0.0, default_max=8192)  # thinking included
         resp = await prov.complete(messages=[Message(role="system", content=_REVIEW_SYSTEM),
                                              Message(role="user", content="\n\n".join(parts))],
                                    temperature=0.0, max_tokens=mt)
