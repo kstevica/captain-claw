@@ -97,10 +97,11 @@ class Model:
     """Stands in for the owner's model: answers in turn from ``answers``."""
 
     def __init__(self, monkeypatch, *answers):
-        self.answers, self.asked = list(answers), []
+        self.answers, self.asked, self.budgets = list(answers), [], []
 
-        async def ask(owner, system, user):
+        async def ask(owner, system, user, max_tokens=drafting.DRAFT_TOKENS):
             self.asked.append(user)
+            self.budgets.append(max_tokens)
             got = self.answers.pop(0) if self.answers else ""
             if isinstance(got, Exception):
                 raise got
@@ -250,3 +251,18 @@ async def test_the_tools_draft_action(store, db, monkeypatch):
     assert got["ok"] and got["text"].startswith('Drafted "Invoice replies". It waits for your approval')
     assert "It came with 1 sealed test cases." in got["text"]
     assert store.get(got["id"])["state"] == "awaiting_charter"
+
+
+async def test_a_cut_off_answer_gets_more_room(store, db, monkeypatch):
+    """A thinking model spent its budget thinking: the first answer is cut off (or
+    empty), and the second try says why and has twice the room."""
+    cut = json.dumps(ANSWER)[:300]
+    model = Model(monkeypatch, cut, ANSWER)
+    got = await drafting.draft(store, BOB, "Reply to invoice questions from clients, as drafts for me to send.")
+    assert got["title"] == "Invoice replies"
+    assert model.budgets == [drafting.DRAFT_TOKENS, drafting.RETRY_TOKENS]
+    assert "the draft was cut off before its end" in model.asked[1] and "keep your thinking short" in model.asked[1]
+    model = Model(monkeypatch, "[]", "")
+    with pytest.raises(FirstMateError, match="came back empty"):
+        await drafting.draft(store, BOB, "Reply to invoice questions from clients, as drafts for me to send.")
+    assert drafting.DRAFT_TOKENS >= 12_000 and "Keep your thinking short" in drafting.SYSTEM

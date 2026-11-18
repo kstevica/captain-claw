@@ -157,7 +157,7 @@ async def test_asking_the_agents_model(store, monkeypatch):
     monkeypatch.setattr(taskboard_triage, "reader_for", reader_for)
     monkeypatch.setattr(agent_preset, "_agent_complete", agent_complete)
     monkeypatch.setattr(file_library, "model_reply", model_reply)
-    assert await mate.ask(store, BOB, "system", "user") == "agent says (3000)" and seen == ["bob-mate"]
+    assert await mate.ask(store, BOB, "system", "user") == f"agent says ({mate.MAX_TOKENS})" and seen == ["bob-mate"]
 
     async def gone(*a, **kw):
         raise agent_preset._AgentGoneError("stopped")
@@ -170,7 +170,7 @@ async def test_drafting_uses_the_agent(store, monkeypatch):
     store.set_prefs(BOB, {"agent": "bob-mate"})
     asked: list[str] = []
 
-    async def ask(st, owner, system, user):
+    async def ask(st, owner, system, user, max_tokens=0):
         asked.append(owner)
         return json.dumps(ANSWER)
 

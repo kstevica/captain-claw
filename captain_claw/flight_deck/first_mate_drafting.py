@@ -30,6 +30,10 @@ from captain_claw.flight_deck.first_mate_store import FirstMateError
 log = logging.getLogger(__name__)
 
 WORDS_MAX = 2000
+# What a draft may spend, thinking included (a thinking model thinks first), and on
+# the try after an answer that came back empty or cut off.
+DRAFT_TOKENS = 12_000
+RETRY_TOKENS = 24_000
 DONE_WHEN_MAX = 6
 DRAFT_CASES_MAX = 3
 SENDS_PER_RUN = 3
@@ -47,12 +51,16 @@ SYSTEM = """You set up a standing job (a "factory") that an assistant runs again
 - "may_organize_mail": true only when it must label, archive or move mail.
 - "cases": 0 to 3 test cases for jobs that react to an input such as an email or a request: realistic inputs this job might get, each {"title": ..., "input": ..., "good_result": [1 to 3 lines]}. [] for other jobs.
 
-Never let it spend money or open accounts. Return ONLY the JSON object."""
+Never let it spend money or open accounts. Keep your thinking short: only the JSON matters. Return ONLY the JSON object."""
 
 
 def _parse(text: str) -> dict[str, Any]:
     raw = (text or "").strip()
     start, end = raw.find("{"), raw.rfind("}")
+    if not raw or raw in ("[]", "{}"):
+        raise FirstMateError("the answer came back empty (a thinking model can spend its whole budget thinking)")
+    if start >= 0 and end <= start:
+        raise FirstMateError("the draft was cut off before its end")
     if start < 0 or end <= start:
         raise FirstMateError("the draft wasn't JSON")
     try:
@@ -104,11 +112,12 @@ def fields_of(data: dict[str, Any]) -> dict[str, Any]:
             "cases": cases[:DRAFT_CASES_MAX]}
 
 
-async def _ask_model(owner: str, system: str, user: str) -> str:
+async def _ask_model(owner: str, system: str, user: str, max_tokens: int = DRAFT_TOKENS) -> str:
     """One call on the owner's First Mate agent's model when they picked one
-    (first_mate_agent), else on their own tier set, the best tier first."""
+    (first_mate_agent), else on their own tier set, the best tier first.
+    ``max_tokens`` includes a thinking model's thinking."""
     from captain_claw.flight_deck import first_mate_agent
-    got = await first_mate_agent.ask(fms.get_store(), owner, system, user)
+    got = await first_mate_agent.ask(fms.get_store(), owner, system, user, max_tokens=max_tokens)
     if got is not None:
         return got
     from captain_claw.flight_deck.auth import get_db
@@ -119,9 +128,9 @@ async def _ask_model(owner: str, system: str, user: str) -> str:
     creds = _creds_for(tiers, prefer=("reason", "balanced", "fast"))
     if not creds:
         raise FirstMateError("no model to draft with: set up a tier set first")
-    prov, max_tokens = _provider_call(creds, temperature=0.3, default_max=3000, cap=6000)
+    prov, budget = _provider_call(creds, temperature=0.3, default_max=max_tokens, cap=max_tokens)
     resp = await prov.complete(messages=[Message(role="system", content=system), Message(role="user", content=user)],
-                               temperature=0.3, max_tokens=max_tokens)
+                               temperature=0.3, max_tokens=budget)
     return resp.content or ""
 
 
@@ -150,10 +159,12 @@ async def draft(store: fms.FirstMateStore, owner_id: str, words: str, *, goal: d
     user = f"What they want:\n{words}"
     fields = None
     last_error = ""
+    budget = DRAFT_TOKENS
     for _ in range(2):
-        prompt = user if not last_error else f"{user}\n\nYour last answer couldn't be used: {last_error}. Try again."
+        prompt = user if not last_error else (f"{user}\n\nYour last answer couldn't be used: {last_error}. Answer with "
+                                              "the JSON object only, and keep your thinking short.")
         try:
-            text = await _ask_model(owner, SYSTEM, prompt)
+            text = await _ask_model(owner, SYSTEM, prompt, max_tokens=budget)
         except FirstMateError:
             raise  # no model to ask: asking again changes nothing
         except Exception as exc:  # noqa: BLE001 — no model answer is no draft, never a half one
@@ -163,6 +174,7 @@ async def draft(store: fms.FirstMateStore, owner_id: str, words: str, *, goal: d
             break
         except FirstMateError as exc:
             last_error = str(exc)
+            budget = RETRY_TOKENS  # an answer that ran out of room gets more of it
     if fields is None:
         raise FirstMateError(f"couldn't draft it: {last_error}")
     note = f"Drafted from the goal: {goal.get('title', '')}"[:fms.NOTE_MAX] if goal else "Drafted from your words"
