@@ -22,6 +22,10 @@ anything noticed. So each step that makes something is checked before it counts:
 3. **Acting, without asking anyone** (a factory's run never waits):
    - a broken rule sends the step round again with why (``bat_loop``; its last try
      is kept, with the finding noted);
+   - a step that came back short of the amount it was asked for, while its own
+     report shows more it could have tried, goes round once more to keep going
+     from its progress note (a run's workers had called 4 of 25 an "honest
+     shortfall" after 15 minutes, with candidates still on their list);
    - a correction goes into ``shared/corrections.md``, which every later step's
      prompt shows above its conventions, and the final reviewers see too;
    - a note says what was found.
@@ -48,6 +52,7 @@ log = structlog.get_logger(__name__)
 
 MIN_STEPS = 3
 SHORT_SHARE = 0.6          # a part under 60% of what its step asked for came back short
+SHORT_MARK = "came back short"
 DUP_SHARE = 0.2            # a part whose items are 20%+ elsewhere already repeats work
 CORRECTIONS = "corrections.md"
 CORRECTIONS_MAX = 12
@@ -64,8 +69,13 @@ _REVIEW_SYSTEM = (
     "collects or covers, where things come from, quality, format), or off_course (the work no longer serves "
     "the goal). When drifting or off course, write a correction for the NEXT steps: one or two short, "
     "concrete imperative sentences (\"Skip university staff; collect people who publicly promote AI tools.\"). "
-    "Don't ask for more than the goal asks. Reply ONLY with JSON: "
-    '{"state": "on_course|drifting|off_course", "why": "<one sentence>", "correction": "<for the next steps, or empty>"}'
+    "Don't ask for more than the goal asks, and never restate one of its numbers differently: quote an amount "
+    "exactly as the goal's amounts below give it, or leave numbers out. Also say whether the step stopped "
+    "early: it was asked for an amount, came back clearly short of it, and its own report shows it could "
+    "have gone on (candidates, leads or sources it noted but didn't try), not a real wall (sources that ran "
+    "dry, sites that block it). Reply ONLY with JSON: "
+    '{"state": "on_course|drifting|off_course", "why": "<one sentence>", "correction": "<for the next steps, or '
+    'empty>", "stopped_early": true|false}'
 )
 
 
@@ -157,7 +167,7 @@ def script_findings(run: dict, step: dict, folder: Path, changed: list[tuple[flo
             soft += [f"{rel}: {f}" for f in dp.flags(prof)]
             asked = _asked(step.get("title") or "")
             if asked and not last_step and prof.get("rows", 0) < asked * SHORT_SHARE:
-                soft.append(f"{rel} came back short: {prof.get('rows', 0)} of the {asked} its step asked for")
+                soft.append(f"{rel} {SHORT_MARK}: {prof.get('rows', 0)} of the {asked} its step asked for")
             if last_step or "/" in rel:
                 continue
             others = [p for p in top if p.name not in mine and p.name != rel]
@@ -235,8 +245,9 @@ def conventions_findings(run: dict, folder: Path) -> list[str]:
 
 # ── the model's look ───────────────────────────────────────────────────
 
-async def review(run: dict, what: str, verified: str, signals: list[str]) -> dict[str, str] | None:
-    """On course, drifting or off course, with a correction; None without a model."""
+async def review(run: dict, what: str, verified: str, signals: list[str]) -> dict[str, Any] | None:
+    """On course, drifting or off course, with a correction, and whether the step
+    stopped early; None without a model."""
     from captain_claw.flight_deck.auth import get_db
     from captain_claw.flight_deck.basna_routes import _load_owner_tiers
     from captain_claw.flight_deck.bat_routes import _creds_for, _metered, _run_folder, think_call
@@ -255,6 +266,11 @@ async def review(run: dict, what: str, verified: str, signals: list[str]) -> dic
         conv = ""
     fixes = read_corrections(folder)
     parts = [f"# The goal\n{str(run.get('task', ''))[:4000]}"]
+    amounts = [str(r.get("text") or "") for r in (run.get("config") or {}).get("contract") or []
+               if re.search(r"\d", str(r.get("text") or ""))]
+    if amounts:
+        parts.append("# The goal's amounts (quote these exactly, never another number)\n"
+                     + "\n".join(f"- {a}" for a in amounts[:8]))
     if conv:
         parts.append(f"# The run's conventions\n{conv}")
     if fixes:
@@ -278,8 +294,10 @@ async def review(run: dict, what: str, verified: str, signals: list[str]) -> dic
     state = str(got.get("state") or "").strip().lower()
     if state not in ("on_course", "drifting", "off_course"):
         return None
+    early = got.get("stopped_early")
     return {"state": state, "why": str(got.get("why") or "").strip()[:300],
-            "correction": str(got.get("correction") or "").strip()[:400] if state != "on_course" else ""}
+            "correction": str(got.get("correction") or "").strip()[:400] if state != "on_course" else "",
+            "stopped_early": early is True or str(early).strip().lower() == "true"}
 
 
 async def _shape_again(run: dict) -> dict:
@@ -335,7 +353,7 @@ async def check_step(run: dict, step: dict, started_at: float, last_try: bool) -
     left = [s for s in others if s["status"] in ("pending", "running")]
     before_last = (len(steps) >= 4 and len(left) == 1 and left[0]["status"] == "pending"
                    and int(left[0].get("seq") or 0) >= last_seq)
-    verdict: dict[str, str] | None = None
+    verdict: dict[str, Any] | None = None
     if soft or wrote_conventions or before_last:
         if wrote_conventions:
             what = (f"The first step (\"{title}\") just wrote the run's conventions above. Do they fit the goal: the "
@@ -354,6 +372,11 @@ async def check_step(run: dict, step: dict, started_at: float, last_try: bool) -
         except Exception as e:  # noqa: BLE001 — the scripts' findings still count
             log.warning("bat course review failed", run_id=run.get("id"), error=str(e))
     redo = bool(hard) and not last_try
+    # Short of its amount with more it could have tried: once more, from its progress
+    # note. Only on a first try, never for the last step (it adds nothing new).
+    short = [f for f in soft if SHORT_MARK in f]
+    again_short = (bool(short) and bool(verdict and verdict.get("stopped_early")) and not hard and not last_try
+                   and not is_last and int(step.get("attempt") or 1) <= 1)
     if verdict and verdict["correction"]:
         if add_correction(folder, f"after {key}", verdict["correction"]):
             await store.append_event(run["id"], "note", f"course check after {key}: {verdict['state'].replace('_', ' ')} "
@@ -366,4 +389,14 @@ async def check_step(run: dict, step: dict, started_at: float, last_try: bool) -
         await store.append_event(run["id"], "note", (f"{key} goes round again: " if redo else
                                                      f"{key} kept on its last try, with: ") + "; ".join(hard)[:600],
                                  agent=key)
+    if again_short:
+        why = "; ".join(short)[:600]
+        await store.append_event(run["id"], "note", f"{key} goes round again: it stopped short with more "
+                                 f"to try ({why})", agent=key)
+        return {"redo": True, "why": why, "state": (verdict or {}).get("state", ""),
+                "error": (f"This step came back short of the amount it asks for ({why}), and its own report lists "
+                          "candidates or sources it didn't get to. Keep going: pick up from your progress note, work "
+                          "through what it left for later and find new candidates, until the step's amount is "
+                          "reached or the sources truly run out. Keep the same criteria; add only what meets "
+                          "them, and say how many you checked.")}
     return {"redo": redo, "why": "; ".join(hard)[:1500], "state": (verdict or {}).get("state", "")}

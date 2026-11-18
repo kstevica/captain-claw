@@ -160,6 +160,22 @@ def failure_key(verdict: dict) -> str:
     return "\n".join(sorted(str(n) for n in names))
 
 
+def progress_mark(verdict: dict) -> int | None:
+    """How much the work holds of what's asked in amounts (rows, words), summed;
+    None when the judge measured nothing."""
+    measured = verdict.get("measured") or {}
+    vals = [int(v) for v in measured.values() if isinstance(v, (int, float))]
+    return sum(vals) if vals else None
+
+
+def still_growing(marks: list[int | None]) -> bool:
+    """Whether the amounts grew across these rounds: the last measured is more than
+    the first. A rule that keeps failing while rows pile up is work in progress, not
+    a stall."""
+    known = [m for m in marks if m is not None]
+    return len(known) >= 2 and known[-1] > known[0]
+
+
 # ── default (placeholder) handlers — replaced in Phase 3 ──────────────
 
 async def _default_attempt_runner(run: dict, step: dict) -> dict:
@@ -648,7 +664,12 @@ class BatDriver:
         seen = list(cfg.get("failure_keys") or [])
         key = failure_key(verdict)
         seen.append(key)
-        if key and seen[-(_STALL_FIX_ROUNDS + 1):] == [key] * (_STALL_FIX_ROUNDS + 1):
+        # One mark per judged round, beside its key (a run from before marks has none).
+        marks = list(cfg.get("progress_marks") or [])
+        marks = [None] * max(0, len(seen) - 1 - len(marks)) + marks[-(len(seen) - 1):] if len(seen) > 1 else []
+        marks.append(progress_mark(verdict))
+        window = _STALL_FIX_ROUNDS + 1
+        if key and seen[-window:] == [key] * window and not still_growing(marks[-window:]):
             return f"no progress: the same checks failed after {_STALL_FIX_ROUNDS} fix rounds: {reason}"
         try:
             plan = await _REPLANNER(run, steps, verdict, rounds)
@@ -662,6 +683,7 @@ class BatDriver:
         cfg = dict((await self.store.get_run(run_id) or run).get("config") or {})
         cfg["rounds"] = rounds
         cfg["failure_keys"] = seen
+        cfg["progress_marks"] = marks
         await self.store.set_config(run_id, cfg)
         start = max((int(s.get("seq", 0)) for s in steps), default=-1) + 1
         new = fix_steps(plan, rounds, start)
@@ -812,7 +834,8 @@ class BatDriver:
                 log.warning("bat step check failed", run_id=run_id, step=key, error=str(e))
                 check = None
             if check and check.get("redo"):
-                res = {"ok": False, "error": f"Captain checked this step's work and it isn't on course: {check.get('why', '')}"}
+                res = {"ok": False, "error": check.get("error")
+                       or f"Captain checked this step's work and it isn't on course: {check.get('why', '')}"}
         if res.get("ok"):
             await self.store.upsert_step(
                 run_id, key, status="done",

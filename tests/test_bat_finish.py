@@ -276,6 +276,56 @@ async def test_the_same_failure_after_two_fix_rounds_is_no_progress(store):
     assert made == [1, 2]  # judged three times, fixed twice
 
 
+async def test_a_rule_failing_while_its_rows_grow_is_work_not_a_stall(store):
+    """What a real lead run needed: 18 of ~100 rows, then more each fix round. The same
+    rule failed every time, and Bat called it no progress after two rounds."""
+    rid = await _run(store, steps=[_step("a", 0)])
+    rows = iter([18, 41, 66, 88])
+    made = []
+
+    async def replan(_run, _steps, _verdict, round_no):
+        made.append(round_no)
+        return [{"title": f"add 20 more, batch {round_no}", "after": []}]
+
+    async def judge(_run, _steps):
+        n = next(rows, None)
+        if n is None:
+            return {"done": True, "reason": "good"}
+        return {"done": False, "reason": f"{n} rows, fewer than 90", "failing": ["acceptance: ~100 rows"],
+                "measured": {"fm2": n}}
+
+    bat_loop.set_replanner(replan)
+    assert await BatDriver(store, attempt_runner=_ok_runner(), judge=judge).drive(rid) == "done"
+    assert made == [1, 2, 3, 4]
+    assert (await store.get_run(rid))["config"]["progress_marks"] == [18, 41, 66, 88]
+
+
+async def test_the_same_rule_with_rows_standing_still_is_no_progress(store):
+    rid = await _run(store, steps=[_step("a", 0)])
+    made = []
+
+    async def replan(_run, _steps, _verdict, round_no):
+        made.append(round_no)
+        return [{"title": f"try {round_no}", "after": []}]
+
+    async def judge(_run, _steps):
+        return {"done": False, "reason": "18 rows, fewer than 90", "failing": ["acceptance: ~100 rows"],
+                "measured": {"fm2": 18}}
+
+    bat_loop.set_replanner(replan)
+    assert await BatDriver(store, attempt_runner=_ok_runner(), judge=judge).drive(rid) == "error"
+    assert (await store.get_run(rid))["stopped_reason"].startswith("no progress")
+    assert made == [1, 2]
+
+
+def test_progress_marks():
+    assert bl.progress_mark({"measured": {"a": 3, "b": 4}}) == 7
+    assert bl.progress_mark({}) is None
+    assert bl.still_growing([None, 18, 30]) and bl.still_growing([18, 18, 19])
+    assert not bl.still_growing([18, 18, 18]) and not bl.still_growing([None, None, 20])
+    assert not bl.still_growing([30, 25, 28])
+
+
 async def test_changing_failures_run_until_the_round_ceiling(store):
     rid = await _run(store, steps=[_step("a", 0)])
     n = 0
@@ -848,6 +898,35 @@ async def test_a_failed_file_check_blocks_done_without_asking_the_panel(store, j
     assert [p[:5] for p in judge_env["prompts"]] == ["AUDIT"]  # a second look at the check, no votes
     assert verdict["failing"] == ["acceptance: report.md exists"]
     assert "does not exist" in verdict["det_criticals"][0]
+
+
+async def test_the_judge_measures_the_amounts_its_rules_ask_for(store, judge_env):
+    (judge_env["folder"] / "leads.csv").write_text("Firm,Email\nA,a@a.example\nB,b@b.example\nC,c@c.example\n")
+    (judge_env["folder"] / "summary.md").write_text("# Summary\n\nTwelve words of summary go right here in this short test document.\n")
+    run, steps = await _judged_run(store, [
+        _rule("~100 rows", {"type": "table", "path": "leads.csv", "min_rows": 90}),
+        {**_rule("a summary of 400 words", {"type": "document", "path": "summary.md", "min_words": 400}), "id": "a2"},
+        {**_rule("columns", {"type": "table", "path": "leads.csv", "columns": ["Firm"]}), "id": "a3"},
+    ])
+    verdict = await bat_routes._bat_judge(run, steps)
+    assert not verdict["done"]
+    assert verdict["measured"]["a1"] == 3 and verdict["measured"]["a2"] > 10 and "a3" not in verdict["measured"]
+
+
+def test_a_planned_amount_is_a_target_not_a_limit():
+    """"Find, vet, and record up to 25 firms": workers stopped at 4 and called it honest."""
+    assert bat_routes.firm_amounts("Find, vet, and record up to 25 boutique consultancies: check seen.csv") == \
+        "Find, vet, and record 25 boutique consultancies: check seen.csv"
+    assert bat_routes.firm_amounts("Write a summary of up to 300 words") == "Write a summary of up to 300 words"
+    plan = bat_routes._parse_plan(json.dumps([{"step": "Collect up to 50 leads from directories"}]), "t")
+    assert plan[0]["title"] == "Collect 50 leads from directories"
+    fix = bat_routes._parse_fix_plan(json.dumps([{"step": "Add up to 20 more research shops", "after": []}]))
+    assert fix[0]["title"] == "Add 20 more research shops"
+    assert 'never "up to' in bat_routes._STEP_SIZE and 'never "up to"' in bat_routes._REPLAN_SYSTEM
+
+
+def test_a_factory_worker_keeps_going_until_the_sources_run_out():
+    assert "a shortfall is for when the sources run out" in bat_routes._FACTORY_STEP_SYSTEM
 
 
 async def test_a_check_at_fault_goes_to_the_reviewers_and_stays_there(store, judge_env):

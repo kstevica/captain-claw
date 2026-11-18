@@ -213,6 +213,48 @@ async def test_the_conventions_and_the_last_step_get_a_look(bat, model):
     assert any(n == "course check after step-3: on course" for n in notes)
 
 
+async def test_a_short_step_with_more_to_try_goes_round_once(bat, model):
+    """A real run: 4 of 25 rows after 15 minutes, called an "honest shortfall", with
+    fifteen candidates still listed for later."""
+    run = await _run(bat, steps=5)
+    f = _folder(run)
+    started = time.time()
+    (f / "batch_02.csv").write_text("Name,Email,Source\n" + "".join(
+        f"P{i},p{i}@org{i}.example,https://org{i}.example/team\n" for i in range(12)))
+    model["answer"] = {"state": "drifting", "why": "12 of 50", "correction": "", "stopped_early": True}
+    step = {"step_key": "step-2", "title": "Find 50 leads, segment 1", "seq": 1, "attempt": 1,
+            "output": "12 leads; honest shortfall. Not yet tried: 15 firms on the list in progress/step-2.md"}
+    got = await bat_course.check_step(run, step, started, last_try=False)
+    assert got["redo"] is True and "came back short: 12 of the 50" in got["why"]
+    assert "Keep going: pick up from your progress note" in got["error"]
+    notes = [e["message"] for e in await bat.list_events("bat_course0001") if e["stage"] == "note"]
+    assert any(n.startswith("step-2 goes round again: it stopped short with more to try") for n in notes)
+    # the goal's own amounts go to the review, so a correction can't invent another
+    assert "# The goal's amounts (quote these exactly, never another number)\n- At least 500 leads" in model["seen"][-1]
+    assert '"stopped_early"' in bat_course._REVIEW_SYSTEM
+    # once only: the second try is kept, short or not
+    again = await bat_course.check_step(run, {**step, "attempt": 2}, started, last_try=False)
+    assert again["redo"] is False
+    # a real wall isn't stopping early
+    model["answer"] = {"state": "drifting", "why": "sources ran dry", "correction": "", "stopped_early": False}
+    assert (await bat_course.check_step(run, step, started, last_try=False))["redo"] is False
+    # nor is a step on its last try
+    model["answer"]["stopped_early"] = True
+    assert (await bat_course.check_step(run, step, started, last_try=True))["redo"] is False
+
+
+async def test_a_step_that_got_its_amount_never_goes_round_for_it(bat, model):
+    run = await _run(bat, steps=5)
+    f = _folder(run)
+    started = time.time()
+    (f / "batch_02.csv").write_text("Name,Email,Source\n" + "".join(
+        f"P{i},p{i}@org{i}.example,https://org{i}.example/team\n" for i in range(45)))
+    model["answer"] = {"state": "on_course", "why": "fine", "correction": "", "stopped_early": True}
+    got = await bat_course.check_step(run, {"step_key": "step-2", "title": "Find 50 leads, segment 1", "seq": 1,
+                                            "attempt": 1, "output": "45 leads"}, started, last_try=False)
+    assert got["redo"] is False
+
+
 # ── in Bat's loop, and on First Mate ────────────────────────────────────
 
 async def test_the_loop_retries_a_step_the_check_sends_back(bat, monkeypatch):
@@ -238,6 +280,26 @@ async def test_the_loop_retries_a_step_the_check_sends_back(bat, monkeypatch):
     fails = [json.loads(e["data"]) if isinstance(e["data"], str) else e["data"]
              for e in await bat.list_events("bat_loopchk01") if e["stage"] == "step"]
     assert any(d.get("ok") is False and "isn't on course: university staff" in d.get("detail", "") for d in fails)
+
+
+async def test_the_loop_tells_a_retry_what_the_check_said(bat, monkeypatch):
+    await bat.create_run(run_id="bat_loopchk02", owner_id="u1", title="t", task="t", status="running", config={"steps": []})
+    await bat.upsert_step("bat_loopchk02", "s1", title="S1", status="pending", seq=0)
+
+    async def check(run, step, started_at, last_try):
+        return {"redo": step["attempt"] == 1, "why": "short", "error": "Keep going: 4 of 25, 15 candidates left"}
+
+    async def runner(_run, step):
+        return {"ok": True, "output": "done"}
+
+    async def judge(_run, _steps):
+        return {"done": True, "reason": "good"}
+
+    monkeypatch.setattr(bat_loop, "_STEP_CHECK", check)
+    assert await BatDriver(bat, attempt_runner=runner, judge=judge, max_step_attempts=2).drive("bat_loopchk02") == "done"
+    fails = [json.loads(e["data"]) if isinstance(e["data"], str) else e["data"]
+             for e in await bat.list_events("bat_loopchk02") if e["stage"] == "step"]
+    assert any(d.get("ok") is False and d.get("detail", "").startswith("Keep going: 4 of 25") for d in fails)
 
 
 def test_first_mate_says_it_corrected_course():
