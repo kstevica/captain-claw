@@ -337,6 +337,40 @@ def us_state(text: str) -> str:
     return ""
 
 
+# Places outside the US a listing may name (countries, provinces, big cities), never
+# a name a US place shares on its own (London, Paris, Athens, Georgia, Victoria).
+_FOREIGN = (
+    "Canada", "Ontario", "Quebec", "British Columbia", "Alberta", "Manitoba", "Nova Scotia", "Toronto",
+    "Vancouver", "Montreal", "Calgary", "Ottawa", "United Kingdom", "UK", "England", "Scotland", "Wales",
+    "Ireland", "Dublin", "Australia", "Sydney", "Melbourne", "Brisbane", "New Zealand", "Auckland", "India",
+    "Mumbai", "Bengaluru", "Bangalore", "New Delhi", "Hyderabad", "Pune", "Chennai", "Pakistan", "Karachi",
+    "Lahore", "Bangladesh", "Dhaka", "United Arab Emirates", "UAE", "Dubai", "Abu Dhabi", "Saudi Arabia",
+    "Riyadh", "Qatar", "Doha", "Morocco", "Casablanca", "Egypt", "Cairo", "Nigeria", "Lagos", "Kenya",
+    "Nairobi", "South Africa", "Johannesburg", "Cape Town", "Germany", "Berlin", "Munich", "France", "Spain",
+    "Madrid", "Barcelona", "Italy", "Milan", "Netherlands", "Amsterdam", "Belgium", "Brussels",
+    "Switzerland", "Zurich", "Geneva", "Austria", "Vienna", "Sweden", "Stockholm", "Norway", "Oslo",
+    "Denmark", "Copenhagen", "Finland", "Helsinki", "Poland", "Warsaw", "Portugal", "Lisbon", "Turkey",
+    "Istanbul", "Israel", "Tel Aviv", "Singapore", "Hong Kong", "China", "Shanghai", "Beijing", "Japan",
+    "Tokyo", "South Korea", "Seoul", "Philippines", "Manila", "Indonesia", "Jakarta", "Malaysia",
+    "Kuala Lumpur", "Thailand", "Bangkok", "Vietnam", "Brazil", "São Paulo", "Sao Paulo", "Mexico",
+    "Argentina", "Buenos Aires", "Colombia", "Chile", "Peru",
+)
+_FOREIGN_RE = re.compile(r"(?<![\w-])(" + "|".join(re.escape(p) for p in sorted(_FOREIGN, key=len, reverse=True))
+                         + r")(?![\w-])")
+_US_MARK = re.compile(r"(?<![\w-])(United States|USA|U\.S\.A?\.?|US-based)(?![\w-])")
+
+
+def foreign_place(text: str) -> str:
+    """The place outside the US a text names, when it names nothing in the US (no
+    state, no "United States"); "" otherwise. For a firm's listing: one named in
+    Ontario or Dubai, and nowhere American, isn't a US firm."""
+    t = text or ""
+    if _US_MARK.search(t) or us_state(t):
+        return ""
+    m = _FOREIGN_RE.search(t)
+    return m.group(1) if m else ""
+
+
 _LINK = re.compile(r"https?://[^\s<>()\"'\]]+")
 
 

@@ -330,6 +330,16 @@ and CaptainFeature got invented values. Fixed:
   (or copy another's) are written for it; a file the charter points to for
   information is reference, never a source; the item is a noun, not a list.
 
+The third run read firms' own sites, but kept 0 of 39 in ten minutes: Bat's own
+shaping call looped with thinking on (137k characters), so no goal became a check and
+the list file fell back to `results.csv`; and the LinkedIn searches brought firms from
+Canada, the UK, Morocco, the UAE, New Zealand and India, each read before the judging
+call dropped it. Fixed: shaping runs with thinking off and an 8k limit; the list file
+comes from the charter when nothing else named it (also on a recipe written before);
+for a US list every search names the place; each item keeps its own search result, and
+one whose listing names a place outside the US, and nothing American, goes before any
+page is read.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
