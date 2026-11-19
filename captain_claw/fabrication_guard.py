@@ -1886,6 +1886,33 @@ _HANDOFF_FAILED_RE = re.compile(
 _DELEG_NOT_RE = re.compile(
     r"(?i)\b(?:not|never|no|nobody|none|neither|nije|nisu|nisam|nitko|without)\b|n't\b"
 )
+# Short negations counted only inside the claim's own clause: "…, niti sam
+# promijenio raspored" is negated, "Ne brini, zakazao sam cron" is not.
+_CLAUSE_NOT_RE = re.compile(
+    r"(?i)\b(?:niti|ni|ne|ni[šs]ta|nikad|nikada|nijedan\w*|nikakv\w*)\b"
+)
+# Where a clause starts inside a sentence.
+_CLAUSE_SEP_RE = re.compile(r"[,;:—–(]")
+# A counterfactual opening its sentence: "Da sam postavio cron, … bi udarao u
+# CAPTCHA" ("Had I set up the cron, it would …"), "Had I scheduled it, …".
+_COUNTERFACTUAL_LEAD_RE = re.compile(r"(?i)^[\s>*_•\-–—]*(?:da|had)\s*$")
+_CONDITIONAL_RE = re.compile(r"(?i)\b(?:bi|bih|bismo|biste|would|'d)\b")
+
+
+def _negated(before: str, match: str) -> bool:
+    """Whether a claim is negated: in the match itself, just before it, or
+    anywhere earlier in its own clause."""
+    clause = _CLAUSE_SEP_RE.split(before)[-1][-60:]
+    return bool(_DELEG_NOT_RE.search(match) or _DELEG_NOT_RE.search(before[-25:])
+                or _DELEG_NOT_RE.search(clause) or _CLAUSE_NOT_RE.search(clause)
+                or _CLAUSE_NOT_RE.search(match))
+
+
+def _counterfactual(before: str, sentence: str, match: str) -> bool:
+    """Whether a claim is the condition of a hypothetical ("Da sam …, … bi …")."""
+    if not _COUNTERFACTUAL_LEAD_RE.match(before):
+        return False
+    return bool(_CONDITIONAL_RE.search(sentence[len(before) + len(match):]))
 _DELEG_EARLIER_RE = re.compile(
     r"(?i)\b(?:earlier|previously|before|last\s+(?:time|turn|run|phase|week|night)|"
     r"yesterday|in\s+(?:the\s+)?(?:previous|last|earlier)\b|(?:\d+|a\s+few|several)\s+"
@@ -1931,7 +1958,7 @@ def _delegation_claims(reply: str, names: Iterable[str] = ()) -> list[_Delegatio
         for m in regex.finditer(text):
             before, sentence = _sentence_around(text, m.start(), m.end())
             span = before + m.group()
-            if (_DELEG_NOT_RE.search(m.group()) or _DELEG_NOT_RE.search(before[-25:])
+            if (_negated(before, m.group()) or _counterfactual(before, sentence, m.group())
                     or _DELEG_EARLIER_RE.search(sentence) or _DELEG_IF_RE.search(before)
                     or _is_question(text, m.end()) or _RETRACTION_RE.search(sentence)):
                 continue
@@ -2107,7 +2134,7 @@ def _schedule_claims(reply: str) -> list[tuple[str, bool]]:
             before, sentence = _sentence_around(text, m.start(), m.end())
             if regex is _SCHED_I_CLAIM_RE and not re.search(r"(?i)\b" + _SCHED_WORD, sentence):
                 continue
-            if (_DELEG_NOT_RE.search(before[-25:]) or _DELEG_NOT_RE.search(m.group())
+            if (_negated(before, m.group()) or _counterfactual(before, sentence, m.group())
                     or _DELEG_EARLIER_RE.search(sentence) or _DELEG_IF_RE.search(before)
                     or _is_question(text, m.end())):
                 continue

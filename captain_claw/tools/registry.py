@@ -276,12 +276,42 @@ class Tool(ABC):
         """
         # Basic validation - could use Pydantic for more robust validation
         required = self.parameters.get("required", [])
+        hint = self.usage_hint()
+        if required and isinstance(arguments, dict) and set(arguments) == {"raw"}:
+            # The provider handed over a string that wasn't JSON (cut off, or
+            # malformed): none of the arguments arrived.
+            raise ToolExecutionError(
+                self.name,
+                "the arguments were not valid JSON (cut off or malformed), so none of "
+                f"them arrived. Re-issue the call in full with valid JSON. {hint}".rstrip(),
+            )
         for field in required:
             if field not in arguments:
+                # The model may have called the tool by its name alone (Eco mode
+                # lists some tools without their definitions): say what it takes,
+                # so one retry gets it right instead of a guess.
                 raise ToolExecutionError(
                     self.name,
-                    f"Missing required argument: {field}",
+                    f"Missing required argument: {field}. {hint}".rstrip(),
                 )
+
+    def usage_hint(self, max_values: int = 15) -> str:
+        """The tool's required arguments for an error message, with the values
+        an ``enum`` allows, e.g. ``Required: action (one of: create, check);
+        path (string).``"""
+        params = self.parameters if isinstance(self.parameters, dict) else {}
+        props = params.get("properties") or {}
+        parts: list[str] = []
+        for field in params.get("required") or []:
+            spec = props.get(field) if isinstance(props.get(field), dict) else {}
+            enum = spec.get("enum")
+            if isinstance(enum, list) and enum:
+                shown = ", ".join(str(v) for v in enum[:max_values])
+                more = ", …" if len(enum) > max_values else ""
+                parts.append(f"{field} (one of: {shown}{more})")
+            else:
+                parts.append(f"{field} ({spec.get('type') or 'value'})")
+        return f"Required: {'; '.join(parts)}." if parts else ""
 
 
 class ToolPolicy(BaseModel):
