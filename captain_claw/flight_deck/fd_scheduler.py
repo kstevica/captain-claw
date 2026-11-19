@@ -1842,9 +1842,14 @@ async def delivery_options(request: Request) -> JSONResponse:
     caller = _require_scheduler_caller(request)
     email = await _email_route(caller.owner)
     tg = bool(_owner_telegram_chat(caller.owner))
+    from captain_claw.flight_deck import idle_pause
+
+    # Days without the owner before their tasks pause (0: never) — the window says so.
+    idle = idle_pause.idle_days() if idle_pause.active() else 0
     return JSONResponse({
         "chat": {"available": True},
         "email": email,
         "telegram": {"available": tg,
                      "reason": "" if tg else "Link Telegram in Connections → Telegram to get results there."},
+        "idle_pause_days": idle,
     }, headers=_NO_CACHE)
