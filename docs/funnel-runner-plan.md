@@ -1,6 +1,6 @@
 # List funnel: a cheaper way to build a list
 
-Status: phase 1 built (branch `feat/list-funnel`, not merged). Bat stays the
+Status: phases 1 and 2 built (branch `feat/list-funnel`, PR #668, not merged). Bat stays the
 default; the funnel is a second way to run a factory whose result is a list, so
 the same charter can run both ways and be compared.
 
@@ -234,7 +234,22 @@ Each phase ends merged, with tests, and a live check on a test deck (isolated
    check skip, fallback to Bat when there's no list check). Tests: extraction on
    saved page text, one group end to end with stub search, fetch and model, cap
    stop, the checks dropping a row whose email isn't on its page.
-2. **Leftovers and merge.** Maybe lists, the small agent step with a capped
+2. **Leftovers and merge. BUILT** (5 more tests, 15 in all). A funnel plan with
+   groups or an amount has a finishing step before the merge (none with
+   `config.funnel_leftovers = "none"`). It is a Bat worker, given only the
+   nearly-there items of the groups still short (up to 30, `shared/funnel/finish-items.csv`,
+   in the step's "What to work on"), writing rows to `shared/funnel/finish.csv`; with
+   nothing short or nothing close it ends at once and says why. Every agent step of
+   a funnel run (the finishing step, the fix rounds') works in 64k of context
+   (`config.funnel_agent_context`; capped, never raised above the tier's). The merge
+   reads each cited page of the agent's rows again and keeps only rows that pass the
+   recipe's checks (and fit their group), then writes the list, `exclusions.md`
+   (every item dropped: where in the funnel and why) and `summary.md` (per group,
+   what's short and why, how items went stage by stage, the checks, sources, files).
+   Items carry their stage (`filter`, `read`, `judge`, `check`, `full`, `duplicate`,
+   `kept`, `maybe`, `agent`, `agent-check`); `shared/funnel/counts.json` keeps the
+   per-group numbers live for phase 3's strip. The judge's reviewers are told what code
+   already checked in every row. Planned as: Maybe lists, the small agent step with a capped
    context, the merge (leads.csv, exclusions.md, summary.md, funnel.json), the
    judge seeing the code's checks. Tests: a short group gets one agent step with
    its maybe list; the merge; judge input.

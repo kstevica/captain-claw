@@ -196,12 +196,14 @@ async def _run(store, contract, cfg=None, rid="bat_funnel0001"):
 
 
 async def _go(store, run, steps):
-    """Run the planned steps in order, as Bat's loop would, with the fresh run."""
+    """Run the planned funnel steps in order, as Bat's loop would, with the fresh run.
+    The finishing step (an agent's) is left out: its tests run it on their own."""
     out = []
     for s in steps:
         fresh = await store.get_run(run["id"])
-        res = await bat_routes._bat_attempt(fresh, s)
-        out.append(res)
+        if (funnel.step_kind(fresh, s) or {}).get("kind") == "finish":
+            continue
+        out.append(await bat_routes._bat_attempt(fresh, s))
     return out
 
 
@@ -236,6 +238,7 @@ async def test_an_offline_list_needs_no_web(deck):
     deck["decide"] = decide
     steps = await funnel.plan(run)
     assert [s["title"] for s in steps] == ["Go through `extra/contacts.csv` for persons and check each",
+                                           "Finish what's still short from the nearly-there items",
                                            "Put the list together in people.csv"]
     assert (folder / funnel.RECIPE).is_file() and "Each row is one person" in (folder / "shared" / "conventions.md").read_text()
     work, merged = await _go(deck["store"], run, steps)
@@ -243,14 +246,14 @@ async def test_an_offline_list_needs_no_web(deck):
     assert work["ok"] and work["output"].startswith("1 kept of 3. Short: its sources ran out.")
     assert "Looked at 4 items: 1 kept, 1 maybe" in work["output"]
     assert (folder / "people.csv").read_text().splitlines() == ["Name,Email,Team", "Ana,ana@acme.example,a"]
-    dropped = (folder / "exclusions.csv").read_text()
+    dropped = (folder / "exclusions.md").read_text()
     assert "matches what's excluded" in dropped and "bo@wrong.example" in dropped and "isn't in what was read" in dropped
     assert "di@delta.example" in (folder / funnel.MAYBE).read_text()
     statuses = [r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)]
     assert sorted(statuses) == ["dropped", "dropped", "kept", "maybe"]  # the duplicate was never looked at twice
     note = (folder / "progress" / "step-1.md").read_text()
     assert "Kept so far: 1 of 3" in note and "1 kept, 1 maybe, 2 dropped" in note
-    assert merged["output"].startswith("`people.csv`: 1 rows of 3.")
+    assert merged["output"].startswith("`people.csv`: 1 rows of 3.") and "`exclusions.md`: 2 dropped" in merged["output"]
     # run again (a restart, a Continue): nothing is looked at twice
     again = await bat_routes._bat_attempt(await deck["store"].get_run(run["id"]), steps[0])
     assert "Looked at 0 items" in again["output"] and deck["asked"].count("decide:3") == 1
@@ -346,7 +349,8 @@ async def test_a_web_list_checks_size_first_and_proves_its_sources(deck):
     recent = _months_back(3)
     _web_deck(deck, recent)
     steps = await funnel.plan(run)
-    assert [s["title"] for s in steps] == ["Find and check 2 x", "Put the list together in firms.csv"]
+    assert [s["title"] for s in steps] == ["Find and check 2 x", "Finish what's still short from the nearly-there items",
+                                           "Put the list together in firms.csv"]
     work, merged = await _go(deck["store"], run, steps)
     tools = deck["tools"]
     fetched = [u for k, u in tools.calls if k == "fetch"]
@@ -366,6 +370,7 @@ async def test_a_web_list_checks_size_first_and_proves_its_sources(deck):
     kinds = {e["message"] for e in events}
     assert {"web_search", "web_fetch", "decide"} <= kinds
     assert merged["output"].startswith("`firms.csv`: 1 rows of 4. x 1 of 2; y 0 of 2.")
+    assert (folder / "summary.md").is_file() and json.loads((folder / funnel.COUNTS).read_text())["groups"]["x"]["read"] == 1
 
 
 async def test_a_date_outside_its_window_is_dropped(deck):
@@ -431,3 +436,136 @@ async def test_a_run_the_funnel_cant_build_is_planned_as_any_bat_run(deck, monke
 
     monkeypatch.setattr(funnel, "plan", funnel_plan)
     assert (await bat_routes._bat_planner(run))[0]["title"] == "funnel"
+
+
+# ── phase 2: finishing what's short ────────────────────────────────────
+
+def _finish_step(steps):
+    return next(s for s in steps if s["title"].startswith("Finish"))
+
+
+async def test_the_finishing_step_works_only_on_the_nearly_there(deck):
+    run, folder = await _run(deck["store"], PEOPLE, rid="bat_funnel0010")
+    (folder / "extra" / "contacts.csv").write_text(
+        "Name,Email,Team\nAna,ana@acme.example,a\nDi,di@delta.example,b\nEd,ed@echo.example,b\n")
+    deck["recipe"] = {"item": "person", "sources": [{"kind": "file", "path": "extra/contacts.csv"}]}
+    deck["decide"] = lambda items: [
+        {"id": i, "verdict": "keep", "row": {"Name": f["Name"], "Email": f["Email"], "Team": f["Team"]}}
+        if f["Name"] == "Ana" else {"id": i, "verdict": "maybe", "reason": f"no page for {f['Name']}",
+                                    "row": {"Team": f["Team"]}} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    fresh = await deck["store"].get_run(run["id"])
+    prep = funnel.prepare_finish(fresh, _finish_step(steps))
+    work = prep["work"]
+    assert "Still short: the list 2 more." in work and "2 items came close" in work
+    assert "- Di: no page for Di" in work and "don't look for new ones" in work  # a list with no groups
+    assert [m["name"] for m in funnel._read_csv(folder / funnel.FINISH_ITEMS)] == ["Di", "Ed"]
+    assert (folder / funnel.FINISH).read_text().strip() == "Name,Email,Team"  # the shape its rows take
+    # nothing for it: the run says so, or nothing is short, or nothing came close
+    off = {**fresh, "config": {**fresh["config"], "funnel_leftovers": "none"}}
+    assert "leave a short group as it is" in funnel.prepare_finish(off, _finish_step(steps))["result"]["output"]
+    (folder / funnel.MAYBE).unlink()
+    assert "Nothing nearly there to finish" in funnel.prepare_finish(fresh, _finish_step(steps))["result"]["output"]
+    for _ in range(2):
+        funnel._append_csv(folder / funnel.ROWS, ["Name", "Email", "Team", "_group"],
+                           {"Name": "N", "Email": f"n{_}@x.example", "Team": "a"})
+    assert funnel.prepare_finish(fresh, _finish_step(steps))["result"]["output"] == "Nothing to finish: no group is short."
+    # a run whose settings say none plans no finishing step
+    run2, _ = await _run(deck["store"], PEOPLE, cfg={"funnel_leftovers": "none"}, rid="bat_funnel0011")
+    (bat_routes._run_folder(run2) / "extra" / "contacts.csv").write_text("Name,Email,Team\nAna,ana@acme.example,a\n")
+    assert not any(s["title"].startswith("Finish") for s in await funnel.plan(run2))
+
+
+async def test_bat_runs_the_finishing_step_as_a_small_worker(deck, monkeypatch):
+    run, folder = await _run(deck["store"], PEOPLE, rid="bat_funnel0012")
+    (folder / "extra" / "contacts.csv").write_text("Name,Email,Team\nDi,di@delta.example,b\n")
+    deck["recipe"] = {"item": "person", "sources": [{"kind": "file", "path": "extra/contacts.csv"}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "maybe", "reason": "no page"} for i, _ in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    seen = {}
+
+    class SpawnedError(Exception):
+        pass
+
+    async def spawn(stub, user, **kw):
+        seen.update(kw)
+        raise SpawnedError()
+
+    monkeypatch.setattr(bat_routes, "_spawn_bat_worker", spawn)
+    with pytest.raises(SpawnedError):
+        await bat_routes._bat_attempt(await deck["store"].get_run(run["id"]), _finish_step(steps))
+    assert seen["max_context"] == funnel.AGENT_CONTEXT
+    # a fix round's step in a funnel run is small too; in any other run it isn't
+    seen.clear()
+    with pytest.raises(SpawnedError):
+        await bat_routes._bat_attempt(await deck["store"].get_run(run["id"]), {"step_key": "fix-1-1", "title": "Fix", "seq": 9})
+    assert seen["max_context"] == funnel.AGENT_CONTEXT
+    assert funnel.agent_context({"config": {}}) == 0
+    assert funnel.agent_context({"config": {"engine": "funnel", "funnel_agent_context": 32000}}) == 32000
+    prompt = bat_routes._build_step_prompt(run, {"step_key": "step-2", "title": "Finish", "work": "# What to work on\nX"}, [])
+    assert "# What to work on\nX" in prompt and "# Why this step exists" not in prompt
+
+
+async def test_the_worker_context_is_capped_never_raised(monkeypatch):
+    from captain_claw.flight_deck import server as srv
+    got = []
+
+    async def spawn(cfg, request, user):
+        got.append(cfg.max_context)
+        return type("R", (), {"ok": False, "slug": "s", "message": "no"})()
+
+    monkeypatch.setattr(srv, "spawn_process", spawn)
+    monkeypatch.setattr(srv, "_load_process_registry", lambda: {})
+    monkeypatch.setattr(bat_routes, "_teardown", lambda slugs: None)
+    tiers = {"fast": {"provider": "x", "model": "m", "input_ctx": 160000}}
+    for cap in (0, 64000, 500000):
+        await bat_routes._spawn_bat_worker(None, {"id": "u"}, name="n", tier="fast", tiers=tiers, env_vars=[],
+                                           extra_env=[], **({"max_context": cap} if cap else {}))
+    assert got == [160000, 64000, 160000]
+
+
+async def test_the_merge_rechecks_the_finishing_steps_rows(deck):
+    run, folder = await _run(deck["store"], CONTRACT, rid="bat_funnel0013")
+    recent = _months_back(3)
+    _web_deck(deck, recent)
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    deck["tools"].pages["https://delta.example/contact"] = "Reach us: team@delta.example"
+    deck["tools"].pages["https://eps.example/contact"] = "No email here."
+    cols = ["Firm", "Website", "Segment", "Email", "EmailSourceURL", "SignalDate"]
+    for row in (
+        ["Delta", "https://delta.example", "x", "team@delta.example", "https://delta.example/contact", recent],
+        ["Eps", "https://eps.example", "x", "ceo@eps.example", "https://eps.example/contact", recent],
+        ["Alpha", "https://alpha.example", "x", "hello@alpha.example", "https://alpha.example/contact", recent],
+    ):
+        funnel._append_csv(folder / funnel.FINISH, cols, dict(zip(cols, row)))
+    merged = await bat_routes._bat_attempt(await deck["store"].get_run(run["id"]), steps[-1])
+    assert "The finishing step added 1 (and 1 that failed a check)" in merged["output"]
+    rows = funnel._read_csv(folder / "firms.csv")
+    assert [r["Firm"] for r in rows] == ["Alpha", "Delta"]  # Alpha once, Delta's email on its page
+    stages = {r["key"]: (r["stage"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert stages["delta.example"][0] == "agent"
+    assert stages["eps.example"][0] == "agent-check" and "isn't in https://eps.example/contact" in stages["eps.example"][1]
+    summary = (folder / "summary.md").read_text()
+    assert "| x | 2 | 2 | - |" in summary and "| y | 0 | 2 | 2 |" in summary
+    assert "The finishing step added 1 row that passed the same checks" in summary
+    assert "Email appears in the page or file it came from (the one in EmailSourceURL)" in summary
+    excl = (folder / "exclusions.md").read_text()
+    assert "| Beta | x | read |" in excl and "| Eps | x | agent-check |" in excl
+    # merged again (a retry): nothing is added twice
+    again = await bat_routes._bat_attempt(await deck["store"].get_run(run["id"]), steps[-1])
+    assert "finishing step added" not in again["output"]
+    assert len(funnel._read_csv(folder / "firms.csv")) == 2
+
+
+async def test_the_judge_hears_what_code_checked(deck):
+    run, folder = await _run(deck["store"], CONTRACT, rid="bat_funnel0014")
+    _web_deck(deck, _months_back(3))
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    note = funnel.judge_note(await deck["store"].get_run(run["id"]))
+    assert note.startswith("## The list funnel's own checks") and "SignalDate is a date" in note
+    assert "It looked at 3 items and kept 1" in note
+    assert funnel.judge_note({"config": {}}) == ""

@@ -50,8 +50,13 @@ RECIPE = "shared/recipe.json"
 STATE = "shared/funnel"
 ITEMS = f"{STATE}/items.csv"      # every item looked at: what became of it, and why
 ROWS = f"{STATE}/rows.csv"        # the kept rows, the merge's input
-MAYBE = f"{STATE}/maybe.csv"      # nearly there: for an agent step to finish (phase 2)
+MAYBE = f"{STATE}/maybe.csv"      # nearly there: what the finishing step works on
 QUERIES = f"{STATE}/queries.json"  # searches made, queries used, new-query rounds
+FINISH = f"{STATE}/finish.csv"            # rows the finishing agent adds, checked at the merge
+FINISH_ITEMS = f"{STATE}/finish-items.csv"  # the nearly-there items it's given
+COUNTS = f"{STATE}/counts.json"    # per group: how items went, stage by stage (for the run panel)
+SUMMARY = "summary.md"
+EXCLUSIONS = "exclusions.md"
 
 SEARCH_BUDGET = 1000
 FETCH_CHARS = 6000
@@ -62,11 +67,18 @@ READ_CHARS = 12_000  # what one item's judging call reads of its pages, in all
 MORE_PAGES = 10      # list pages found in search results, followed per step
 DECIDE_TOKENS = 8192
 NOTE_EVERY = 10
+FINISH_MAX = 30          # nearly-there items one finishing step is given
+AGENT_CONTEXT = 64_000   # a funnel run's agent steps work in this much context (config funnel_agent_context)
 
 SOURCE_KINDS = ("search", "page", "links", "file", "document")
 FILTER_OPS = ("regex", "not_regex", "in", "not_in", "min", "max", "size_max", "size_min")
 CHECK_OPS = ("required", "in", "regex", "in_evidence", "within_months", "min", "max")
-_ITEM_COLS = ["key", "group", "status", "reason", "source", "step", "at"]
+_ITEM_COLS = ["key", "name", "group", "status", "stage", "reason", "source", "step", "at"]
+_MAYBE_COLS = ["key", "name", "group", "fields", "why", "sources"]
+# Where an item left the funnel: code's filters, after reading, the judging call, a
+# code check, its group already full, a duplicate; or kept, maybe, or the finishing
+# agent's (kept, or refused when its cited page didn't bear it out).
+STAGES = ("filter", "read", "judge", "check", "full", "duplicate", "kept", "maybe", "agent", "agent-check")
 _GROUP_COL = "_group"
 _SKIP_SITES = ("linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com",
                "wikipedia.org", "crunchbase.com", "zoominfo.com", "rocketreach.co", "bbb.org", "yelp.com",
@@ -493,6 +505,8 @@ async def plan(run: dict) -> list[dict] | None:
     for g in tagged:
         n = recipe["groups"].get(g) or 0
         add(f"Find and check {n} {g}" if n else f"Find and check {g}", "work", g)
+    if leftovers_on(run) and (recipe["groups"] or recipe.get("target")):
+        add("Finish what's still short from the nearly-there items", "finish")
     add(f"Put the list together in {recipe['output']}", "merge")
     await bat_routes.merge_config(run["id"], {"funnel_steps": kinds})
     if store is not None:
@@ -928,7 +942,7 @@ class Work:
             self.counts["looked"] += 1
             why = self.passes(item)
             if why:
-                await self.record(item, "dropped", why)
+                await self.record(item, "dropped", why, stage="filter")
                 continue
             wave.append(item)
             if len(wave) >= CONCURRENCY:
@@ -942,7 +956,7 @@ class Work:
         for it in wave:
             why = self.passes(it, it.get("found") or {})
             if why:
-                await self.record(it, "dropped", why)
+                await self.record(it, "dropped", why, stage="read")
                 continue
             self.pending.append(it)
             if len(self.pending) >= self.recipe.get("decide_batch", 1):
@@ -1043,87 +1057,48 @@ class Work:
                 row = {c: " ".join(str((v.get("row") or {}).get(c) or "").split()) for c in self.recipe["columns"]}
                 problem = self.check(row, it)
                 if problem:
-                    await self.record(it, "dropped", f"check: {problem}")
+                    await self.record(it, "dropped", f"check: {problem}", stage="check")
                     continue
                 group = row.get(self.recipe["group_by"], "") if self.recipe["group_by"] else ""
                 group = next((g for g in self.recipe["groups"] if g.lower() == group.lower()), group) or self.group
                 if self.quota(group) and self.kept.get(group, 0) >= self.quota(group):
-                    await self.record(it, "dropped", f"{group} is already full")
+                    await self.record(it, "dropped", f"{group} is already full", group=group, stage="full")
                     continue
                 key = norm_key(row.get(self.recipe["key"], "")) if self.recipe["key"] in row else it["key"]
                 if key and key != it["key"] and key in self.seen:
-                    await self.record(it, "dropped", "already looked at under another name")
+                    await self.record(it, "dropped", "already looked at under another name", stage="duplicate")
                     continue
                 self.seen.add(key)
                 self.kept[group] = self.kept.get(group, 0) + 1
                 _append_csv(self.folder / ROWS, self.recipe["columns"] + [_GROUP_COL], {**row, _GROUP_COL: group})
                 await self.record(it, "kept", reason or "meets the rules", group=group)
             elif verdict == "maybe":
-                await self.record(it, "maybe", reason or "a fact it needs wasn't found")
-                _append_csv(self.folder / MAYBE, ["key", "fields", "why", "sources"],
-                            {"key": it["key"], "fields": json.dumps(it["fields"], ensure_ascii=False),
+                hint = str((v.get("row") or {}).get(self.recipe["group_by"]) or "") if self.recipe["group_by"] else ""
+                group = self.group or next((g for g in self.recipe["groups"] if g.lower() == hint.lower()), "")
+                await self.record(it, "maybe", reason or "a fact it needs wasn't found", group=group)
+                name = it["fields"].get("name") or next(iter(it["fields"].values()), "")
+                _append_csv(self.folder / MAYBE, _MAYBE_COLS,
+                            {"key": it["key"], "name": name, "group": group,
+                             "fields": json.dumps(it["fields"], ensure_ascii=False),
                              "why": reason, "sources": " ".join(e["source"] for e in it.get("evidence") or [])})
             else:
                 await self.record(it, "dropped", reason or "breaks a rule")
 
     def check(self, row: dict[str, str], item: dict) -> str:
         """Why a row the model kept fails the recipe's checks by code, or ""."""
-        texts = {e["source"]: e["text"] for e in item.get("evidence") or []}
-        every = "\n".join(texts.values())
-        for c in self.recipe["checks"]:
-            col, op = c["column"], c["op"]
-            v = row.get(col, "")
-            if op == "required":
-                if not v:
-                    return f"{col} is empty"
-                continue
-            if not v:
-                continue
-            if op == "in" and v.lower() not in {str(x).lower() for x in c.get("value") or []}:
-                return f"{col} '{v}' isn't one of the allowed values"
-            if op == "regex":
-                try:
-                    if not re.search(str(c.get("value")), v, re.I):
-                        return f"{col} '{v}' doesn't match"
-                except re.error:
-                    continue
-            if op == "in_evidence":
-                src = row.get(c.get("source_column", ""), "") if c.get("source_column") else ""
-                where = texts.get(src) if src and src in texts else None
-                if where is None and src:
-                    where = next((t for s, t in texts.items() if s.rstrip("/") == src.rstrip("/")), None)
-                if src and where is None:
-                    return f"{col}'s source {src} isn't a page Captain read"
-                if not fx.in_text(v, where if where is not None else every):
-                    return f"{col} '{v[:60]}' isn't in " + (src if src else "what was read")
-            if op == "within_months":
-                ago = fx.months_ago(v[:10])
-                try:
-                    limit = float(c.get("value"))
-                except (TypeError, ValueError):
-                    continue
-                if ago is None:
-                    return f"{col} '{v}' isn't a date"
-                if ago > limit or ago < -1:
-                    return f"{col} {v} is outside the last {int(limit)} months"
-            if op in ("min", "max"):
-                try:
-                    n, lim = float(re.sub(r"[^\d.-]", "", v)), float(c.get("value"))
-                except (TypeError, ValueError):
-                    continue
-                if (op == "min" and n < lim) or (op == "max" and n > lim):
-                    return f"{col} {v} is {'under' if op == 'min' else 'over'} {c.get('value')}"
-        return ""
+        return check_row(self.recipe, row, {e["source"]: e["text"] for e in item.get("evidence") or []})
 
-    async def record(self, item: dict, status: str, reason: str, group: str = "") -> None:
+    async def record(self, item: dict, status: str, reason: str, group: str = "", stage: str = "") -> None:
         self.counts["kept" if status == "kept" else status if status == "maybe" else "dropped"] += 1
         if status == "dropped":
             short = re.sub(r"\(.*?\)|'[^']*'|\d[\d,.-]*", "", reason).strip()[:60]
             self.reasons[short] = self.reasons.get(short, 0) + 1
         name = item["fields"].get("name") or next(iter(item["fields"].values()), "") or item.get("key", "")
         _append_csv(self.folder / ITEMS, _ITEM_COLS,
-                    {"key": item.get("key", ""), "group": group or self.group, "status": status, "reason": reason,
-                     "source": item.get("origin", ""), "step": self.key, "at": time.strftime("%Y-%m-%d %H:%M")})
+                    {"key": item.get("key", ""), "name": str(name)[:120], "group": group or self.group,
+                     "status": status, "stage": stage or (status if status in ("kept", "maybe") else "judge"),
+                     "reason": reason, "source": item.get("origin", ""), "step": self.key,
+                     "at": time.strftime("%Y-%m-%d %H:%M")})
         line = f"{status} {str(name)[:60]}" + (f" ({group})" if group and not self.group else "") + f": {reason}"
         self.recent = (self.recent + [line])[-8:]
         await self._event("decide", line)
@@ -1179,6 +1154,10 @@ class Work:
         p = self.folder / "progress" / f"{bat_routes._step_file(self.key)}.md"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:
+            write_counts(self.folder, self.recipe)
+        except OSError:
+            log.debug("funnel: couldn't write its counts", exc_info=True)
 
     def result(self) -> dict:
         c = self.counts
@@ -1203,15 +1182,264 @@ class Work:
         return {"ok": True, "output": out, "usd": 0.0, "tokens": 0, "error": ""}
 
 
+# ── checks ─────────────────────────────────────────────────────────────
+
+def check_row(recipe: dict[str, Any], row: dict[str, str], texts: dict[str, str], *,
+              unsourced_ok: bool = False) -> str:
+    """Why a row fails the recipe's checks by code, or "". ``texts`` is what was read,
+    by link. A value that must be in its source is looked for on the page its source
+    column names (any page read, when the check names no source column; skipped then
+    with ``unsourced_ok``, for rows whose pages Captain didn't read itself)."""
+    every = "\n".join(texts.values())
+    for c in recipe["checks"]:
+        col, op = c["column"], c["op"]
+        v = row.get(col, "")
+        if op == "required":
+            if not v:
+                return f"{col} is empty"
+            continue
+        if not v:
+            continue
+        if op == "in" and v.lower() not in {str(x).lower() for x in c.get("value") or []}:
+            return f"{col} '{v}' isn't one of the allowed values"
+        if op == "regex":
+            try:
+                if not re.search(str(c.get("value")), v, re.I):
+                    return f"{col} '{v}' doesn't match"
+            except re.error:
+                continue
+        if op == "in_evidence":
+            src = row.get(c.get("source_column", ""), "") if c.get("source_column") else ""
+            if not src and unsourced_ok:
+                continue
+            where = texts.get(src) if src and src in texts else None
+            if where is None and src:
+                where = next((t for s, t in texts.items() if s.rstrip("/") == src.rstrip("/")), None)
+            if src and where is None:
+                return f"{col}'s source {src} isn't a page Captain read"
+            if not fx.in_text(v, where if where is not None else every):
+                return f"{col} '{v[:60]}' isn't in " + (src if src else "what was read")
+        if op == "within_months":
+            ago = fx.months_ago(v[:10])
+            try:
+                limit = float(c.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if ago is None:
+                return f"{col} '{v}' isn't a date"
+            if ago > limit or ago < -1:
+                return f"{col} {v} is outside the last {int(limit)} months"
+        if op in ("min", "max"):
+            try:
+                n, lim = float(re.sub(r"[^\d.-]", "", v)), float(c.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if (op == "min" and n < lim) or (op == "max" and n > lim):
+                return f"{col} {v} is {'under' if op == 'min' else 'over'} {c.get('value')}"
+    return ""
+
+
+def kept_per_group(folder: Path) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for r in _read_csv(folder / ROWS):
+        g = r.get(_GROUP_COL, "")
+        out[g] = out.get(g, 0) + 1
+    return out
+
+
+def shortfall(folder: Path, recipe: dict[str, Any]) -> dict[str, int]:
+    """How many more each group needs (``""``: the whole list, when it has no groups)."""
+    kept = kept_per_group(folder)
+    if recipe["groups"]:
+        return {g: n - kept.get(g, 0) for g, n in recipe["groups"].items() if n and kept.get(g, 0) < n}
+    target = int(recipe.get("target") or 0)
+    total = sum(kept.values())
+    return {"": target - total} if target and total < target else {}
+
+
+def counts(folder: Path, recipe: dict[str, Any]) -> dict[str, Any]:
+    """How items went, per group and stage, for the run panel and the summary."""
+    groups: dict[str, dict[str, int]] = {}
+    for r in _read_csv(folder / ITEMS):
+        g = groups.setdefault(r.get("group", ""), {"looked": 0, **{st: 0 for st in STAGES}})
+        g["looked"] += 1
+        stage = r.get("stage") or ("kept" if r.get("status") == "kept" else "maybe" if r.get("status") == "maybe"
+                                   else "judge")
+        if stage in g:
+            g[stage] += 1
+    kept = kept_per_group(folder)
+    for name, quota in (recipe["groups"] or {}).items():
+        groups.setdefault(name, {"looked": 0, **{st: 0 for st in STAGES}})
+    for name, g in groups.items():
+        g["quota"] = int((recipe["groups"] or {}).get(name) or 0)
+        g["on_list"] = kept.get(name, 0)
+    try:
+        searches = int(json.loads((folder / QUERIES).read_text(encoding="utf-8")).get("searches") or 0)
+    except (OSError, ValueError):
+        searches = 0
+    return {"groups": groups, "target": int(recipe.get("target") or 0), "searches": searches,
+            "updated": time.strftime("%Y-%m-%d %H:%M")}
+
+
+def write_counts(folder: Path, recipe: dict[str, Any]) -> dict[str, Any]:
+    got = counts(folder, recipe)
+    (folder / COUNTS).parent.mkdir(parents=True, exist_ok=True)
+    (folder / COUNTS).write_text(json.dumps(got, indent=1), encoding="utf-8")
+    return got
+
+
+# ── finishing what's short (an agent step) ─────────────────────────────
+
+def leftovers_on(run: dict) -> bool:
+    """Whether a group still short gets a finishing agent step (``config.funnel_leftovers``
+    ``agent``, the default, or ``none``)."""
+    return str((run.get("config") or {}).get("funnel_leftovers") or "agent").lower() != "none"
+
+
+def agent_context(run: dict) -> int:
+    """The context a funnel run's agent steps get (the finishing step, the fix rounds'),
+    so their calls stay small; 0 for a run that isn't the funnel's."""
+    cfg = run.get("config") or {}
+    if cfg.get("engine") != ENGINE:
+        return 0
+    return _int(cfg.get("funnel_agent_context"), 16_000, 1_000_000, AGENT_CONTEXT)
+
+
+def prepare_finish(run: dict, step: dict) -> dict:
+    """The finishing step's work: ``{"work": text}`` for its agent, or ``{"result": ...}``
+    when there's nothing for it (nothing short, nothing nearly there, or the run's
+    settings leave a short group as it is)."""
+    from captain_claw.flight_deck import bat_routes
+
+    def done(text: str) -> dict:
+        return {"result": {"ok": True, "output": text, "usd": 0.0, "tokens": 0, "error": ""}}
+
+    folder = bat_routes._run_folder(run)
+    recipe = load_recipe(folder)
+    if recipe is None:
+        return done("Nothing to finish: the funnel's recipe is missing.")
+    if not leftovers_on(run):
+        return done("Nothing to finish: the run's settings leave a short group as it is.")
+    short = shortfall(folder, recipe)
+    if not short:
+        return done("Nothing to finish: no group is short.")
+    on_list = {norm_key(r.get(recipe["key"], "")) for r in _read_csv(folder / ROWS)} if recipe["key"] else set()
+    items = [m for m in _read_csv(folder / MAYBE)
+             if (m.get("group", "") in short or not m.get("group") or "" in short) and m.get("key") not in on_list]
+    items.sort(key=lambda m: -short.get(m.get("group", ""), 0))
+    items = items[:FINISH_MAX]
+    words = "; ".join(f"{g or 'the list'} {n} more" for g, n in short.items())
+    if not items:
+        return done(f"Nothing nearly there to finish ({words}). What's still short goes to the judge's "
+                    "fix rounds.")
+    target = folder / FINISH_ITEMS
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=_MAYBE_COLS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(items)
+    finish = folder / FINISH
+    if not finish.is_file():
+        with finish.open("w", encoding="utf-8", newline="") as fh:
+            csv.writer(fh).writerow(recipe["columns"])
+    project = bat_routes._project_of(run)
+    sourced = [c for c in recipe["checks"] if c["op"] == "in_evidence" and c.get("source_column")]
+    lines = [
+        "# What to work on",
+        f"The list funnel went through its sources. Still short: {words}.",
+        f"{len(items)} items came close: each seems to fit, but a fact the rules need wasn't found. They are in "
+        f"vfs:{project}/{FINISH_ITEMS} (with why, and the pages already read). For each, the shortest group first:",
+        "1. find what was missing (search; read the item's own pages);",
+        f"2. if it meets every rule in shared/conventions.md, add its row to vfs:{project}/{FINISH}, with the "
+        "columns exactly as in its first line, one row per item;",
+    ]
+    if sourced:
+        lines.append("3. in " + ", ".join(sorted({c["source_column"] for c in sourced}))
+                     + " put the link of the exact page the value is on: Captain reads that page again and drops "
+                     "a row whose value isn't there.")
+    lines += ["Stop once the short groups are full. Work only on these items: don't look for new ones, don't add "
+              f"one already on the list, and don't change any other file in {STATE}/.", "", "The items:"]
+    for m in items:
+        group = f" ({m['group']})" if m.get("group") else " (no group yet)" if recipe["groups"] else ""
+        lines.append(f"- {m.get('name') or m.get('key')}{group}: {m.get('why') or ''}")
+    return {"work": "\n".join(lines)}
+
+
 # ── the merge ──────────────────────────────────────────────────────────
 
-def merge(folder: Path, recipe: dict[str, Any]) -> dict:
-    """The kept rows as the list (its columns in order, no two with the same key),
-    and every dropped item with why (``exclusions.csv``)."""
-    rows = _read_csv(folder / ROWS)
+async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> tuple[int, int, int]:
+    """The rows the finishing agent added, checked as the funnel's own are: by the
+    recipe's checks, with the pages their source columns cite read again. Rows that
+    pass join the list; the rest go to the items dropped, with why. Returns
+    ``(added, refused, unsourced)``: unsourced rows passed checks that couldn't look
+    at a page (no source column to cite)."""
+    rows = _read_csv(folder / FINISH)
+    if not rows:
+        return 0, 0, 0
+    done = {r.get("key") for r in _read_csv(folder / ITEMS) if r.get("stage") in ("agent", "agent-check")}
+    kept = kept_per_group(folder)
+    on_list = {norm_key(r.get(recipe["key"], "")) for r in _read_csv(folder / ROWS)} if recipe["key"] else set()
+    sources = sorted({c["source_column"] for c in recipe["checks"] if c["op"] == "in_evidence" and c.get("source_column")})
+    unsourced_check = any(c["op"] == "in_evidence" and not c.get("source_column") for c in recipe["checks"])
+    tools: Tools | None = None
+    pages: dict[str, str] = {}
+    added = refused = unsourced = 0
+    try:
+        for raw in rows:
+            row = {c: " ".join(str(raw.get(c) or "").split()) for c in recipe["columns"]}
+            key = norm_key(row.get(recipe["key"], "")) if recipe["key"] in row else ""
+            key = key or norm_key(next((v for v in row.values() if v), ""))
+            if not key or key in done or key in on_list:
+                continue
+            done.add(key)
+            group = row.get(recipe["group_by"], "") if recipe["group_by"] else ""
+            group = next((g for g in recipe["groups"] if g.lower() == group.lower()), group)
+            name = next((v for v in row.values() if v), key)
+            texts: dict[str, str] = {}
+            for col in sources:
+                url = row.get(col, "")
+                if not url.startswith(("http://", "https://")):
+                    continue
+                if url not in pages:
+                    if tools is None:
+                        tools = make_tools(run, step)
+                    ok, text = await tools.fetch(url)
+                    pages[url] = text[:FETCH_CHARS * 4] if ok else ""
+                if pages[url]:
+                    texts[url] = pages[url]
+            problem = check_row(recipe, row, texts, unsourced_ok=True)
+            if not problem and recipe["groups"] and recipe["groups"].get(group) and kept.get(group, 0) >= recipe["groups"][group]:
+                problem = f"{group} is already full"
+            item = {"key": key, "name": str(name)[:120], "group": group, "source": "finishing step",
+                    "step": step.get("step_key", ""), "at": time.strftime("%Y-%m-%d %H:%M")}
+            if problem:
+                refused += 1
+                _append_csv(folder / ITEMS, _ITEM_COLS, {**item, "status": "dropped", "stage": "agent-check",
+                                                         "reason": f"added by the finishing step, but {problem}"})
+                continue
+            added += 1
+            if unsourced_check and not sources:
+                unsourced += 1
+            kept[group] = kept.get(group, 0) + 1
+            on_list.add(key)
+            _append_csv(folder / ROWS, recipe["columns"] + [_GROUP_COL], {**row, _GROUP_COL: group})
+            _append_csv(folder / ITEMS, _ITEM_COLS, {**item, "status": "kept", "stage": "agent",
+                                                     "reason": "added by the finishing step; its pages read again"})
+    finally:
+        if tools is not None:
+            await tools.close()
+    return added, refused, unsourced
+
+
+def _md(s: Any) -> str:
+    return " ".join(str(s or "").split()).replace("|", "\\|")
+
+
+def write_list(folder: Path, recipe: dict[str, Any]) -> list[dict[str, str]]:
+    """The kept rows as the list: its columns in order, no two with the same key."""
     cols = recipe["columns"]
     out, seen = [], set()
-    for r in rows:
+    for r in _read_csv(folder / ROWS):
         k = norm_key(r.get(recipe["key"], "")) if recipe["key"] in cols else ""
         if k and k in seen:
             continue
@@ -1224,23 +1452,112 @@ def merge(folder: Path, recipe: dict[str, Any]) -> dict:
         w = csv.DictWriter(fh, fieldnames=cols)
         w.writeheader()
         w.writerows(out)
+    return out
+
+
+def write_exclusions(folder: Path, recipe: dict[str, Any]) -> int:
     dropped = [r for r in _read_csv(folder / ITEMS) if r.get("status") == "dropped"]
-    with (folder / "exclusions.csv").open("w", encoding="utf-8", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["key", "group", "reason", "source"], extrasaction="ignore")
-        w.writeheader()
-        w.writerows(dropped)
+    lines = [f"# Dropped {recipe['item']}s", "", f"{len(dropped)} looked at and left off the list, with why.", "",
+             "| Item | Group | Where | Why | Found at |", "|---|---|---|---|---|"]
+    lines += [f"| {_md(r.get('name') or r.get('key'))} | {_md(r.get('group'))} | {_md(r.get('stage'))} | "
+              f"{_md(r.get('reason'))} | {_md(r.get('source'))} |" for r in dropped]
+    (folder / EXCLUSIONS).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return len(dropped)
+
+
+_STAGE_WORDS = {"filter": "ruled out by code", "read": "ruled out after reading", "judge": "judged out",
+                "check": "failed a check", "full": "group already full", "duplicate": "duplicates"}
+
+
+def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
+                  finished: tuple[int, int, int], budget: int) -> str:
+    """``summary.md``: how many, how short and why, how items went, how rows were
+    checked, and where everything is."""
+    got = write_counts(folder, recipe)
+    groups, target = got["groups"], got["target"]
+    item = recipe["item"]
+    lines = [f"# {recipe['output']}: summary", "",
+             f"{rows} {item}{'' if rows == 1 else 's'} on the list" + (f" of {target} wanted" if target else "")
+             + ". Built by the list funnel: code searched, read and checked; a model judged each item once.", ""]
+    short = shortfall(folder, recipe)
+    if recipe["groups"]:
+        lines += ["## Per group", "", "| Group | On the list | Wanted | Short |", "|---|---|---|---|"]
+        for g, n in recipe["groups"].items():
+            have = groups.get(g, {}).get("on_list", 0)
+            lines.append(f"| {_md(g)} | {have} | {n or '-'} | {short.get(g, 0) or '-'} |")
+        lines.append("")
+    if short:
+        maybe = sum(1 for m in _read_csv(folder / MAYBE))
+        why = (f"the run's {budget} searches were used" if got["searches"] >= budget
+               else "the sources ran out of items that pass")
+        lines += ["## Short", "", "; ".join(f"{g or 'the list'}: {n} more" for g, n in short.items())
+                  + f". Why: {why}." + (f" {maybe} came close (`{MAYBE}`)." if maybe else ""), ""]
+    lines += ["## How items went", "", "| Group | Looked at | " + " | ".join(_STAGE_WORDS.values())
+              + " | Maybe | Kept | Added by the finishing step |", "|---" * (len(_STAGE_WORDS) + 5) + "|"]
+    for g, c in groups.items():
+        lines.append(f"| {_md(g) or '-'} | {c['looked']} | " + " | ".join(str(c.get(st, 0)) for st in _STAGE_WORDS)
+                     + f" | {c.get('maybe', 0)} | {c.get('kept', 0)} | {c.get('agent', 0)} |")
+    checks = [c for c in recipe["checks"] if c["op"] != "required"]
+    lines += ["", "## Checked in every row, by code", ""]
+    lines += [f"- {c['column']} {_check_words(c)}" for c in checks] or ["- (no checks beyond the required columns)"]
+    added, refused, unsourced = finished
+    if added or refused:
+        lines += ["", f"The finishing step added {added} row{'' if added == 1 else 's'} that passed the same checks, "
+                  "their cited pages read again" + (f" ({unsourced} with no page to cite)" if unsourced else "")
+                  + f"; {refused} it added didn't pass and were dropped."]
+    src = [f"`{s['path']}`" if s.get("path") else s.get("url") or f"{len(s.get('queries') or [])} planned searches"
+           for s in recipe["sources"]]
+    lines += ["", "## Sources", "", ", ".join(src) + f". Searches made: {got['searches']} of {budget}.", "",
+              "## Files", "", f"- `{recipe['output']}`: the list",
+              f"- `{EXCLUSIONS}`: every {item} dropped, where and why ({dropped})",
+              f"- `{ITEMS}`: everything looked at", f"- `{MAYBE}`: the ones that came close",
+              f"- `{RECIPE}`: the recipe the run followed"]
+    text = "\n".join(lines) + "\n"
+    (folder / SUMMARY).write_text(text, encoding="utf-8")
+    return text
+
+
+async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> dict:
+    """The list, from the funnel's rows and the finishing step's that pass its checks;
+    ``exclusions.md``; ``summary.md``."""
+    finished = await check_finish(run, step, folder, recipe)
+    out = await asyncio.to_thread(write_list, folder, recipe)
+    dropped = await asyncio.to_thread(write_exclusions, folder, recipe)
+    budget = _int((run.get("config") or {}).get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
+    await asyncio.to_thread(write_summary, folder, recipe, len(out), dropped, finished, budget)
     per = ""
     if recipe["groups"]:
-        counts = {g: 0 for g in recipe["groups"]}
-        for r in rows:
-            g = r.get(_GROUP_COL, "")
-            counts[g] = counts.get(g, 0) + 1
-        per = " " + "; ".join(f"{g} {counts.get(g, 0)}" + (f" of {n}" if n else "") for g, n in recipe["groups"].items()) + "."
-    maybe = len(_read_csv(folder / MAYBE))
+        kept = kept_per_group(folder)
+        per = " " + "; ".join(f"{g} {kept.get(g, 0)}" + (f" of {n}" if n else "") for g, n in recipe["groups"].items()) + "."
+    added, refused, _ = finished
     text = (f"`{recipe['output']}`: {len(out)} rows" + (f" of {recipe['target']}" if recipe.get("target") else "")
-            + f".{per} `exclusions.csv`: {len(dropped)} items dropped, with why."
-            + (f" {maybe} nearly there in `{MAYBE}`." if maybe else ""))
+            + f".{per}" + (f" The finishing step added {added} (and {refused} that failed a check)." if added or refused else "")
+            + f" `{EXCLUSIONS}`: {dropped} dropped, with why. `{SUMMARY}`: how it went.")
     return {"ok": True, "output": text, "usd": 0.0, "tokens": 0, "error": ""}
+
+
+def judge_note(run: dict) -> str:
+    """For the judge's reviewers: what code already checked in every row of a funnel
+    run's list, so they weigh the rules no check covers. "" for other runs."""
+    if (run.get("config") or {}).get("engine") != ENGINE:
+        return ""
+    from captain_claw.flight_deck import bat_routes
+    folder = bat_routes._run_folder(run)
+    recipe = load_recipe(folder)
+    if recipe is None:
+        return ""
+    checks = [c for c in recipe["checks"] if c["op"] != "required"]
+    got = counts(folder, recipe)
+    looked = sum(g["looked"] for g in got["groups"].values())
+    kept = sum(g.get("kept", 0) + g.get("agent", 0) for g in got["groups"].values())
+    lines = ["## The list funnel's own checks",
+             f"Every row on `{recipe['output']}` passed these, by code, before it was kept"
+             + (" (rows the finishing step added had their cited pages read again):" if any(
+                 g.get("agent", 0) for g in got["groups"].values()) else ":")]
+    lines += [f"- {c['column']} {_check_words(c)}" for c in checks] or ["- the required columns are filled"]
+    lines.append(f"It looked at {looked} items and kept {kept}; `{EXCLUSIONS}` says why each other one went. "
+                 "Rules these checks don't cover are yours to judge.")
+    return "\n".join(lines)
 
 
 async def attempt(run: dict, step: dict) -> dict:
@@ -1252,7 +1569,7 @@ async def attempt(run: dict, step: dict) -> dict:
     if recipe is None:
         return {"ok": False, "error": f"the list funnel's recipe ({RECIPE}) is missing", "usd": 0.0, "tokens": 0}
     if kind.get("kind") == "merge":
-        return await asyncio.to_thread(merge, folder, recipe)
+        return await merge(run, step, folder, recipe)
     work = Work(run, step, recipe, folder, kind.get("group", ""))
     try:
         return await work.run_step()

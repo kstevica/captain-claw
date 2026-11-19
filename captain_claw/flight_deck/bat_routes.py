@@ -727,6 +727,8 @@ def _build_step_prompt(run: dict, step: dict, prior: list[dict], human_input: st
     factory = _factory_run(run)
     lines = [_FACTORY_STEP_SYSTEM if factory else _STEP_SYSTEM, f"\n# Goal\n{run.get('task', '')}",
              f"\n# Your step\n{step.get('title') or step.get('step_key')}"]
+    if (step.get("work") or "").strip():  # what a step works on, given at its start (the list funnel's)
+        lines.append(f"\n{step['work']}")
     if (step.get("brief") or "").strip():
         lines.append(f"\n# Why this step exists\nThe work was checked and these problems were found. "
                      f"Fix them, and report the whole result, not only what changed.\n{step['brief']}")
@@ -1388,7 +1390,7 @@ def _bat_env(sid: str, step_key: str, owner: str) -> list[dict]:
 
 async def _spawn_bat_worker(request, user, *, name: str, tier: str,
                             tiers: dict | None, env_vars: list[dict] | None,
-                            extra_env: list[dict]) -> dict:
+                            extra_env: list[dict], max_context: int = 0) -> dict:
     from captain_claw.flight_deck.server import AgentConfig, _load_process_registry, spawn_process
     lt = (tiers or {}).get(tier) or {}
     provider = lt.get("provider") or ""
@@ -1396,7 +1398,9 @@ async def _spawn_bat_worker(request, user, *, name: str, tier: str,
     key = lt.get("api_key") or ""
     base_url = lt.get("base_url") or ""
     max_tokens = int(lt.get("output_ctx") or 0) or 32768
-    max_context = int(lt.get("input_ctx") or 0)
+    tier_context = int(lt.get("input_ctx") or 0)
+    # A smaller context when asked (a list funnel run's agent steps), never a larger one.
+    max_context = min(tier_context, max_context) if tier_context and max_context else (max_context or tier_context)
     worker_tools = _bat_worker_tools(None, AgentConfig().tools)
     worker_env = (env_vars or []) + extra_env + [{"key": _WORKER_MARKER, "value": "1"}]
     base = dict(name=name, description="Bat worker", cognitive_mode="neutra",
@@ -1802,8 +1806,15 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
 
     if _factory_run(run):  # between steps, a factory's run takes its factory's cap as it is now
         await _cap_refresh(run)
-    if funnel.step_kind(run, step):  # the list funnel's own step: code and short calls, no worker turn
+    kind = funnel.step_kind(run, step)
+    if kind and kind.get("kind") != "finish":  # the list funnel's own step: code and short calls, no worker turn
         return await funnel.attempt(run, step)
+    if kind:  # its finishing step: a worker on the nearly-there items, or nothing to do
+        prep = await asyncio.to_thread(funnel.prepare_finish, run, step)
+        if "result" in prep:
+            return prep["result"]
+        step = {**step, "work": prep["work"]}
+    small = funnel.agent_context(run)  # a funnel run's agent steps work in a smaller context
     sid = run["id"]
     owner = run["owner_id"]
     key = step["step_key"]
@@ -1835,7 +1846,8 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
         name = f"bat-{sid[:8]}-{key}"[:60]
         try:
             worker = await _spawn_bat_worker(
-                stub, user, name=name, tier=tier, tiers=tiers, env_vars=env_vars, extra_env=bat_env)
+                stub, user, name=name, tier=tier, tiers=tiers, env_vars=env_vars, extra_env=bat_env,
+                **({"max_context": small} if small else {}))
         except HTTPException as e:  # a plan's agent or spawn limit
             return {"ok": False, "error": f"could not spawn worker: {e.detail}", "spawn_refused": True}
         if not worker["ok"]:
@@ -1976,11 +1988,14 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
             block = deliverable_profile.render(profile)
             if block:
                 evidence = f"{block}\n\n{evidence}"
-            from captain_claw.flight_deck import bat_course
+            from captain_claw.flight_deck import bat_course, funnel
             fixes = bat_course.read_corrections(_run_folder(run))
             if fixes:
                 evidence += ("\n\n## Course corrections Captain gave during the run (check they were followed)\n"
                              + "\n".join(f"- {c}" for c in fixes))
+            checked = await asyncio.to_thread(funnel.judge_note, run)
+            if checked:
+                evidence += f"\n\n{checked}"
         except Exception as e:  # noqa: BLE001 — the reviewers still see the files
             log.warning("bat deliverable profile failed", run_id=sid, error=str(e))
         try:
