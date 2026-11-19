@@ -1126,3 +1126,53 @@ async def test_a_slow_call_skips_what_it_was_for_and_the_step_goes_on(deck):
     assert funnel._plain_error(httpx.ReadTimeout("x")) == "a call got no answer in time"
     assert not bat_loop.size_failure(funnel._plain_error(httpx.ReadTimeout("x")))
     assert not bat_loop.size_failure(funnel._plain_error(RuntimeError("request timed out")))
+
+
+# ── an item's own site ─────────────────────────────────────────────────
+
+def test_a_site_is_an_items_own_only_when_its_address_names_it():
+    own = funnel.site_names_item
+    assert own("Darby Consulting", "darbyconsulting.com") and own("NERA Economic Consulting", "nera.com")
+    assert own("2 Visions", "2visions.com") and own("Aryo Consulting Group", "aryocg.com")
+    assert own("Boston Consulting Group", "bcg.com") and own("Red Cup Agency", "red-cup.co.uk")
+    assert own("U.S. Consulting Services, Inc.", "usconsultingservices.com")  # weak words: two of them
+    assert not own("U.S. Consulting Services, Inc.", "acmeconsulting.com")
+    for article in ("forbes.com", "advisorindex.com", "syncgtm.com", "example.com"):
+        assert not own("Darby Consulting", article), article
+    assert not own("Darby Consulting", "") and not own("", "darby.com")
+    # any language: accents aside, and a name with no Latin letters by the result's title
+    assert own("Bistro Čarobnjak", "carobnjak.hr") and own("Kuća Đurđević", "djurdjevic.hr")
+    assert own("Kuća Đurđević", "kucadurdevic.hr") and own("Müller", "mueller.de") and own("Müller", "muller.de")
+    assert own("Ristorante Nonna Lucía", "nonnalucia.it") and not own("Müller", "schmidt.de")
+    assert own("Ресторан Дубрава", "dubrava.rs", "Ресторан Дубрава — почетна")
+    assert not own("Ресторан Дубрава", "news.example", "Најбољи ресторани у граду")
+    assert funnel.name_words("Bistro Čarobnjak") == ["bistro", "carobnjak"]
+
+
+async def test_a_page_about_an_item_is_never_taken_for_its_site(deck):
+    """Firms got Forbes, a marketplace, a contact-list site or a directory as their own
+    site: a result whose title named them. Then no email was "on its own site"."""
+    run, folder = await _run(deck["store"], CONTRACT, rid="bat_ownsite01")
+    deck["recipe"] = {"item": "US knowledge firm lead", "site_column": "Website",
+                      "sources": [{"kind": "search", "group": "x", "country": "US", "queries": ["x firms list"]}],
+                      "gather": [{"kind": "fetch", "url": "{Website}", "paths": [""]}], "extract": ["emails"]}
+    deck["extract"] = lambda user: {"items": [{"name": "Darby Consulting", "fields": {"Firm": "Darby Consulting"}},
+                                              {"name": "Censeo Partners", "fields": {"Firm": "Censeo Partners"}}]}
+    forbes = "[QUERY: q]\n\n1. The best boutique firms: Darby Consulting\n   URL: https://www.forbes.com/lists/x\n   Snippet: -\n"
+    deck["tools"] = _Tools(
+        pages={"https://darbyconsulting.example": "Darby Consulting. hello@darbyconsulting.example",
+               "https://www.forbes.com/": "Forbes"},
+        results={"x firms list": "list results",
+                 '"Darby Consulting" United States': forbes + "\n2. Darby Consulting | Home\n"
+                 "   URL: https://darbyconsulting.example/\n   Snippet: -\n",
+                 '"Censeo Partners" United States': forbes.replace("Darby Consulting", "Censeo Partners")})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "maybe", "reason": "x"} for i, _f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    searched = [q for k, q in deck["tools"].calls if k == "search"]
+    assert '"Darby Consulting" United States' in searched  # the item phrase ("US knowledge firm lead") left out
+    fetched = [u for k, u in deck["tools"].calls if k == "fetch"]
+    assert fetched == ["https://darbyconsulting.example"]  # never forbes.com
+    fields = {json.loads(m["fields"])["Firm"]: json.loads(m["fields"]) for m in funnel._read_csv(folder / funnel.MAYBE)}
+    assert fields["Darby Consulting"]["Website"] == "https://darbyconsulting.example"
+    assert "Website" not in fields["Censeo Partners"]  # no site of its own found: none, not Forbes

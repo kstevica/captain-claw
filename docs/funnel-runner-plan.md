@@ -404,6 +404,15 @@ slow or broken call now skips what it was for (those results, that item) and the
 goes on; a step that still stops says so in words Bat doesn't read as a size failure,
 and picks up where it left off on its next try.
 
+The first run with rule tiers sorted the charter as meant (only the dated AI signal
+soft), but 7 of its first 16 drops were firms whose site lookup took someone else's
+page for theirs: a Forbes article, a marketplace, a contact-list site, a directory,
+each a result whose title named the firm. A result is now an item's own site only when
+its address names the item (a distinctive word of the name in the domain, or its
+initials), accents aside and either spelling ("Đurđević" → durdevic or djurdjevic, "Müller" → muller or mueller); a name with no Latin letters is matched by the result's title instead. With none found it has no site, and its judging call says so. The lookup
+leaves out a long item phrase ("US knowledge firm lead"), and more contact-list and
+marketplace sites are never an item's own.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
