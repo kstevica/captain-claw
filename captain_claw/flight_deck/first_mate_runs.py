@@ -327,8 +327,10 @@ class BatRunner:
             out.update(status="done", verdict="pass", result=final_first(await self._steps(child_id), b.get("truth") or ""))
         elif status == "error":
             reason = b.get("stopped_reason") or ""
-            out.update(status="failed", verdict="fail", result=final_first(await self._steps(child_id), b.get("truth") or ""),
-                       note=STOP_WORDS.get(reason, reason or "Bat stopped it"))
+            made = await made_before_stop(b)
+            out.update(status="failed", verdict="fail",
+                       result=made + final_first(await self._steps(child_id), b.get("truth") or ""),
+                       note=stop_words(reason))
         elif status == "cancelled":
             out.update(status="cancelled", note=b.get("stopped_reason") or "stopped")
         return out
@@ -439,6 +441,42 @@ STOP_WORDS = {
     "llm_token_cap_reached": "It used all the tokens one run may use (the factory's cap per run).",
     "llm_usd_cap_reached": "It reached its spending cap for one run.",
 }
+STOP_NOTE_MAX = 300
+NO_PROGRESS = "Its fix rounds stopped getting it further, so it stopped short."
+
+
+def stop_words(reason: str) -> str:
+    """A stopped run's note: its stop reason in words. Bat's "no progress: the same
+    checks failed after 2 fix rounds: <the whole verdict, script and all>" says which
+    rule kept failing, and nothing more."""
+    reason = str(reason or "").strip()
+    if reason in STOP_WORDS:
+        return STOP_WORDS[reason]
+    if reason.startswith("no progress"):
+        what = reason.split("fix rounds:", 1)[-1] if "fix rounds:" in reason else ""
+        what = what.replace("deterministic critical check(s) failed:", "").split(" (`", 1)[0]
+        what = " ".join(what.split()).removeprefix("acceptance: ")
+        return (f"{NO_PROGRESS} Still not met: {what}" if what else NO_PROGRESS)[:STOP_NOTE_MAX]
+    return reason[:STOP_NOTE_MAX] or "Bat stopped it"
+
+
+async def made_before_stop(bat_run: dict[str, Any]) -> str:
+    """What a run that stopped had made, as Captain counts it against the charter's
+    amounts ("`leads.csv`: 54 rows of 60 (6 more)"), on top of its result; "" when no
+    rule asks for an amount it can count. A stopped run led with its last worker's
+    words ("reply continue…"), which said nothing about the 54 rows in its folder."""
+    try:
+        from captain_claw.flight_deck import bat_routes, code_contract
+        lines = await asyncio.to_thread(code_contract.standing, bat_routes._run_folder(bat_run),
+                                        list((bat_run.get("config") or {}).get("contract") or []),
+                                        bat_routes.WORK_DIRS)
+    except Exception:  # noqa: BLE001 — the result shows without it
+        log.warning("first mate: couldn't count what a stopped run made", exc_info=True)
+        return ""
+    if not lines:
+        return ""
+    return ("**What it made before it stopped** (Captain counted it):\n" + "\n".join(f"- {ln}" for ln in lines)
+            + "\n\nIts files are in the run's folder.\n\n---\n\n")
 
 RUNNERS: dict[str, Runner] = {"bat": BatRunner()}
 
@@ -690,15 +728,16 @@ def final_first(steps: list[dict[str, Any]], truth: str) -> str:
     """A Bat run's result as First Mate shows it: what its last step delivered
     (the merge, the final list) first, the earlier steps after it. Bat's own
     text has them in order, so its first step came first."""
-    done = sorted((s for s in steps if s.get("status") == "done" and (s.get("output") or "").strip()),
+    from captain_claw.flight_deck.bat_loop import step_report
+    done = sorted((s for s in steps if s.get("status") == "done" and step_report(s.get("output"))),
                   key=lambda s: int(s.get("seq") or 0))
     if len(done) < 2:
-        return truth
+        return step_report(truth)
     last, earlier = done[-1], done[:-1]
     head = last.get("title") or last.get("step_key") or "Result"
-    parts = [f"## {head}\n\n{last['output'].strip()}", f"---\n\n**Earlier steps ({len(earlier)})**"]
+    parts = [f"## {head}\n\n{step_report(last['output'])}", f"---\n\n**Earlier steps ({len(earlier)})**"]
     for s in earlier:
-        parts.append(f"### {s.get('title') or s.get('step_key')}\n\n{s['output'].strip()}")
+        parts.append(f"### {s.get('title') or s.get('step_key')}\n\n{step_report(s['output'])}")
     note = truth.split("\n\n", 1)[0] if truth.startswith("> ") else ""  # what the reviewers said, kept on top
     return "\n\n".join(([note] if note else []) + parts)
 

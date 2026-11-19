@@ -460,6 +460,108 @@ def measure(repo: Path, constraints: list[dict], skip: tuple[str, ...] = ()) -> 
     return out
 
 
+# The amounts a rule's own words ask for, when no table check carries them (a script,
+# a reviewer's rule): "60 unique rows", "15 per segment", "25 in each segment".
+_ROWS_WORDS = re.compile(r"\b(\d{1,6})\s+(?:unique\s+|data\s+)?(?:rows|items|leads|entries|records)\b", re.I)
+_PER_WORDS = re.compile(r"\b(\d{1,5})\s+(?:[a-z]+\s+){0,2}?(?:per|in each|for each)\s+([a-z][\w-]{1,30})", re.I)
+STANDING_MAX = 8
+
+
+def _table_rows(path: Path) -> tuple[list[str], list[dict]]:
+    with path.open(encoding="utf-8-sig", errors="replace", newline="") as fh:
+        reader = csv.DictReader(fh, delimiter="\t" if path.suffix.lower() == ".tsv" else ",")
+        rows = list(reader)
+        return [c for c in (reader.fieldnames or []) if c], rows
+
+
+def _per_line(rel: str, cols: list[str], rows: list[dict], col: str, least: int, allowed: list[str]) -> str:
+    """``rel`` Segment: a 9 of 15 (6 more); b 15 of 15 (full)…, or "" without such a column."""
+    from collections import Counter
+    want = col.strip().lower()
+    key = next((c for c in cols if c.strip().lower() == want), None) \
+        or next((c for c in cols if c.strip().lower().rstrip("s") == want.rstrip("s")), None)
+    if not key:
+        return ""
+    vals = [str(r.get(key) or "").strip() for r in rows]
+    have = Counter(v.lower() for v in vals if v)
+    groups = list(allowed) or sorted({v for v in vals if v}, key=str.lower)
+    if not groups:
+        return f"`{rel}` {key}: no values yet (each needs {least})"
+    parts = []
+    for g in groups[:12]:
+        n = have.get(g.lower(), 0)
+        parts.append(f"{g} {n} of {least} ({'full' if n >= least else f'{least - n} more'})")
+    return f"`{rel}` {key}: " + "; ".join(parts)
+
+
+def standing(repo: Path, constraints: list[dict], skip: tuple[str, ...] = ()) -> list[str]:
+    """Where the result stands on the amounts the rules ask for, a line each: a table's
+    rows against what it needs, and each group's count against its share ("`leads.csv`
+    Segment: boutique consultancies 9 of 15 (6 more); research/analysis shops 15 of 15
+    (full)"). For whoever plans the next round, so it adds to the groups that are short
+    and leaves the full ones alone. A table check's ``min_rows``/``min_per`` first;
+    without one, the rules' own words read against the tables they name. Never raises."""
+    out: list[str] = []
+    tables: dict[str, tuple[list[str], list[dict]]] = {}
+
+    def read(path: Path, rel: str):
+        if rel not in tables:
+            try:
+                tables[rel] = _table_rows(path)
+            except (OSError, csv.Error, UnicodeError):
+                tables[rel] = ([], [])
+        return tables[rel]
+
+    def add(line: str) -> None:
+        if line and line not in out:
+            out.append(line)
+
+    counted = False
+    for c in constraints or []:
+        check = c.get("check") or {}
+        if check.get("type") != "table" or not (check.get("min_rows") or check.get("min_per")):
+            continue
+        try:
+            path, rel = _target(repo, check, (".csv", ".tsv"), skip)
+            if path is None:
+                add(f"`{rel or 'the table'}` isn't there yet")
+                continue
+            cols, rows = read(path, rel)
+            counted = True
+            if check.get("min_rows"):
+                need = int(check["min_rows"])
+                add(f"`{rel}`: {len(rows)} rows of {need} ({'enough' if len(rows) >= need else f'{need - len(rows)} more'})")
+            allowed = {k.lower(): v for k, v in (check.get("allowed") or {}).items()}
+            for col, least in (check.get("min_per") or {}).items():
+                add(_per_line(rel, cols, rows, col, int(least), allowed.get(col.lower(), [])))
+        except Exception:  # noqa: BLE001 — a count is a hint, never a failure
+            continue
+    if not counted:
+        for c in constraints or []:
+            check = c.get("check") or {}
+            where = f"{c.get('text') or ''} {check.get('cmd') or ''}"
+            rows_m, per_m = _ROWS_WORDS.search(where), _PER_WORDS.findall(where)
+            if not (rows_m or per_m):
+                continue
+            try:
+                name = next(iter(re.findall(r"[\w./-]+\.(?:csv|tsv)\b", where)), "")
+                rel = _relpath(name) if name else ""
+                path = (repo / rel) if rel else _main_file(repo, (".csv", ".tsv"), skip)
+                if path is None or not path.is_file() or (rel and rel.split("/", 1)[0] in skip):
+                    continue
+                rel = rel or path.name
+                cols, rows = read(path, rel)
+                if rows_m:
+                    need = int(rows_m.group(1))
+                    add(f"`{rel}`: {len(rows)} rows of {need} "
+                        f"({'enough' if len(rows) >= need else f'{need - len(rows)} more'})")
+                for least, col in per_m:
+                    add(_per_line(rel, cols, rows, col, int(least), []))
+            except Exception:  # noqa: BLE001
+                continue
+    return out[:STANDING_MAX]
+
+
 async def validate(repo: Path, constraints: list[dict], *,
                    runner: CommandRunner | None = None, skip: tuple[str, ...] = ()) -> dict:
     """Deterministic pass over the repo. Returns

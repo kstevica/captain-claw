@@ -54,6 +54,7 @@ MIN_STEPS = 3
 SHORT_SHARE = 0.6          # a part under 60% of what its step asked for came back short
 SHORT_MARK = "came back short"
 DUP_SHARE = 0.2            # a part whose items are 20%+ elsewhere already repeats work
+MERGED_SHARE = 0.8         # a list holding 80%+ of two others is made from them (a merge)
 CORRECTIONS = "corrections.md"
 CORRECTIONS_MAX = 12
 CORRECTIONS_SHOWN = 1500
@@ -154,6 +155,23 @@ def _asked(title: str) -> int:
     return n if 1 <= n <= 5000 else 0
 
 
+def _merged_lists(keys: dict[str, set[str]]) -> set[str]:
+    """The lists made from the run's other lists (the final list a merge step builds):
+    each holds nearly all of two or more of them and is bigger than each. Repeating
+    their items is what they are for, so they aren't "other parts": counted as one,
+    the merged list made a step that rewrote its own part look like a repeat of it."""
+    out: set[str] = set()
+    for name, mine in keys.items():
+        if not mine:
+            continue
+        held = sum(1 for other, theirs in keys.items()
+                   if other != name and theirs and len(mine) > len(theirs)
+                   and len(mine & theirs) >= max(2, len(theirs) * MERGED_SHARE))
+        if held >= 2:
+            out.add(name)
+    return out
+
+
 def _conventions_step(step: dict) -> bool:
     from captain_claw.flight_deck.bat_routes import is_conventions_step
     return is_conventions_step(step)
@@ -172,6 +190,7 @@ def script_findings(run: dict, step: dict, folder: Path, changed: list[tuple[flo
     has_conventions = (folder / "shared" / "conventions.md").is_file()
     top = [f for f in folder.iterdir() if f.is_file() and f.suffix.lower() in _TABLE_EXTS] if folder.is_dir() else []
     mine = {rel for _, rel, _, _ in changed}
+    keys: dict[str, set[str]] | None = None  # each top-level list's items, read once when needed
     verified: list[str] = []
     for _, rel, path, _ in changed:
         ext = path.suffix.lower()
@@ -198,11 +217,15 @@ def script_findings(run: dict, step: dict, folder: Path, changed: list[tuple[flo
                 if head and common and tuple(head) != common:
                     hard.append(f"{rel} has columns ({', '.join(head)}) unlike the run's other lists "
                                 f"({', '.join(common)}): follow shared/conventions.md")
-            mine_keys = _key_values(path)
-            if mine_keys and others:
+            if keys is None:
+                keys = {p.name: _key_values(p) for p in top}
+            merged = _merged_lists(keys)
+            mine_keys = keys.get(rel) if rel in keys else _key_values(path)
+            parts = [p for p in others if p.name not in merged]
+            if mine_keys and parts and rel not in merged:
                 seen: set[str] = set()
-                for p in others:
-                    seen |= _key_values(p)
+                for p in parts:
+                    seen |= keys.get(p.name, set())
                 again = mine_keys & seen
                 if len(again) >= max(3, len(mine_keys) * DUP_SHARE):
                     hard.append(f"{len(again)} of the {len(mine_keys)} items in {rel} are already in other parts: "
