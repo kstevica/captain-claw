@@ -15,7 +15,8 @@ not invisible:
   and straight into its file while it is down (nothing else writes it then);
 * run now wakes the agent, or starts it as a scheduled task would, then asks it.
 
-Only people use these routes, and only for their own agents (an admin, any).
+Only people use these routes, and only for their own agents — an admin too
+(and, for an admin, agents without an owner); never another person's.
 """
 
 from __future__ import annotations
@@ -72,13 +73,18 @@ def _require_person(request: Request) -> _SchedulerCaller:
 
 
 def _caller_agents(caller: _SchedulerCaller) -> dict[str, dict]:
-    """slug → registry entry of every process agent the caller may see."""
+    """slug → registry entry of every process agent whose jobs the caller may
+    see: their own (an admin: also agents without an owner) — never another
+    person's, admin or not."""
     registry = _srv()._load_process_registry()
     if caller.sees_all:
         return dict(registry)
-    if not caller.owner:
-        return {}
-    return {s: e for s, e in registry.items() if str(e.get("owner") or "") == caller.owner}
+    out: dict[str, dict] = {}
+    for slug, entry in registry.items():
+        owner = str((entry or {}).get("owner") or "") if isinstance(entry, dict) else ""
+        if (owner and owner == caller.owner) or (not owner and caller.sees_system):
+            out[slug] = entry
+    return out
 
 
 def _agent_for(caller: _SchedulerCaller, slug: str) -> dict:

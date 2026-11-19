@@ -745,13 +745,19 @@ class SchedulerStore:
             return _run_row(r) if r else None
 
     def list_runs(
-        self, *, owner_id: str | None = None, job_id: str = "", q: str = "",
+        self, *, owner_id: str | list[str] | None = None, job_id: str = "", q: str = "",
         limit: int = 50, before_id: int = 0,
     ) -> list[dict[str, Any]]:
-        """Newest first. ``owner_id`` None = everyone's (an admin); ``q``
-        matches the result text or the task's name, case-insensitively."""
+        """Newest first. ``owner_id`` None = everyone's (an auth-off deck's one
+        user), a list = any of those owners; ``q`` matches the result text or
+        the task's name, case-insensitively."""
         where, args = ["1 = 1"], []
-        if owner_id is not None:
+        if isinstance(owner_id, list):
+            if not owner_id:
+                return []
+            where.append(f"owner_id IN ({', '.join('?' * len(owner_id))})")
+            args.extend(owner_id)
+        elif owner_id is not None:
             where.append("owner_id = ?")
             args.append(owner_id)
         if job_id:
@@ -1520,10 +1526,14 @@ _AGENT_AUTH_MASK = "********"
 @dataclass(frozen=True)
 class _SchedulerCaller:
     owner: str      # owner stamped on jobs it creates ("" = system)
-    sees_all: bool  # an admin, or the one trusted user of an auth-off deck
+    sees_all: bool  # the one trusted user of an auth-off deck: every job is theirs
     # A person (user JWT, or an auth-off request carrying no agent headers) —
     # the prompts it writes are human-written; an internal caller's are not.
     is_human: bool = True
+    # An admin: their own jobs, and the deck's ownerless ones (system jobs,
+    # legacy rows, agents without an owner) — never another person's. Other
+    # people's scheduled tasks are theirs alone, admin or not.
+    sees_system: bool = False
 
 
 # Headers only an agent / internal caller sends (compared case-insensitively).
@@ -1557,7 +1567,7 @@ def _require_scheduler_caller(request: Request) -> _SchedulerCaller:
     Scheduler jobs deliver to the owner's WhatsApp/Telegram, so the routes must
     never be open. Accept any of:
       * a valid Flight Deck user JWT (the SchedulerPage UI) — that user's own
-        jobs, or every job for an admin;
+        jobs (an admin: also the ownerless system ones, never another person's);
       * a trusted internal caller — the shared agent secret (X-Agent-Secret),
         or a loopback request when not in lockdown (intentions.py materializing
         a job on the same host);
@@ -1595,7 +1605,8 @@ def _require_scheduler_caller(request: Request) -> _SchedulerCaller:
             raise HTTPException(status_code=401, detail="invalid or expired session token")
         return _SchedulerCaller(
             owner=str(payload["sub"]),
-            sees_all=payload.get("role", "user") == "admin",
+            sees_all=False,
+            sees_system=payload.get("role", "user") == "admin",
         )
 
     internal = False
@@ -1625,11 +1636,14 @@ def _require_scheduler_caller(request: Request) -> _SchedulerCaller:
 
 
 def _caller_may_access(caller: _SchedulerCaller, job: dict[str, Any]) -> bool:
-    """Admins reach every job; anyone else only jobs stamped with their own
-    (non-empty) owner — so ownerless legacy/system jobs are admin-only."""
+    """Jobs stamped with the caller's own (non-empty) owner; an admin also the
+    ownerless legacy/system ones. Never another person's — admin or not."""
     if caller.sees_all:
         return True
-    return bool(caller.owner) and str(job.get("owner_id") or "") == caller.owner
+    owner = str(job.get("owner_id") or "")
+    if not owner:
+        return caller.sees_system
+    return bool(caller.owner) and owner == caller.owner
 
 
 def _job_for_caller(job_id: str, caller: _SchedulerCaller) -> dict[str, Any]:
@@ -1653,7 +1667,8 @@ def _public_job(job: dict[str, Any], stats: dict[str, dict[str, Any]] | None = N
 
 
 def _check_agent_access(caller: _SchedulerCaller, body: dict[str, Any]) -> None:
-    """A caller's job may only drive its own agent (an admin's, any)."""
+    """A caller's job may only drive its own agent (or one without an owner);
+    an admin's too — another person's agent is theirs to schedule."""
     slug = str(body.get("agent_slug") or "").strip()
     if caller.sees_all or not slug:
         return
@@ -1691,10 +1706,10 @@ async def list_jobs(request: Request) -> JSONResponse:
     caller = _require_scheduler_caller(request)
     if caller.sees_all:
         rows = get_store().list()
-    elif caller.owner:
-        rows = get_store().list(owner_id=caller.owner)
     else:
-        rows = []
+        rows = get_store().list(owner_id=caller.owner) if caller.owner else []
+        if caller.sees_system:
+            rows += get_store().list(owner_id="")
     stats = get_store().run_stats()
     return JSONResponse([_public_job(r, stats) for r in rows], headers=_NO_CACHE)
 
@@ -1799,11 +1814,14 @@ async def list_runs(
     caller = _require_scheduler_caller(request)
     if job_id:
         _job_for_caller(job_id, caller)
-    if not caller.sees_all and not caller.owner:
-        return JSONResponse([], headers=_NO_CACHE)
+    if caller.sees_all:
+        owners: list[str] | None = None
+    else:
+        owners = ([caller.owner] if caller.owner else []) + ([""] if caller.sees_system else [])
+        if not owners:
+            return JSONResponse([], headers=_NO_CACHE)
     rows = get_store().list_runs(
-        owner_id=None if caller.sees_all else caller.owner,
-        job_id=job_id, q=q[:200], limit=limit, before_id=before,
+        owner_id=owners, job_id=job_id, q=q[:200], limit=limit, before_id=before,
     )
     return JSONResponse(rows, headers=_NO_CACHE)
 

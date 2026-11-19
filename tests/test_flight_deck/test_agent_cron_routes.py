@@ -124,8 +124,8 @@ def test_owner_sees_their_agents_jobs_only(deck):
     assert job["agent_state"] == "off"
     assert job["running"] is False
 
-    everyone = c.get("/scheduler/agent-jobs", headers=_bearer(ADMIN, role="admin")).json()
-    assert {j["agent_slug"] for j in everyone} == {"alice-agent", "bob-agent"}
+    # An admin doesn't see other people's agents' jobs either.
+    assert c.get("/scheduler/agent-jobs", headers=_bearer(ADMIN, role="admin")).json() == []
 
 
 def test_agents_without_a_file_or_table_list_nothing(deck):
@@ -220,9 +220,10 @@ def test_another_persons_agent_is_not_found(deck):
     assert c.delete(f"/scheduler/agent-jobs/alice-agent/{jid}", headers=h).status_code == 404
     assert c.get(f"/scheduler/agent-jobs/alice-agent/{jid}/runs", headers=h).status_code == 404
     assert _run(_load(_db(deck, "alice-agent"), jid)).enabled is True
-    # An admin reaches it.
+    # Nor does an admin: it is Alice's.
     r = c.post(f"/scheduler/agent-jobs/alice-agent/{jid}/pause", headers=_bearer(ADMIN, role="admin"))
-    assert r.status_code == 200
+    assert r.status_code == 404
+    assert _run(_load(_db(deck, "alice-agent"), jid)).enabled is True
 
 
 def test_unknown_job_or_action_or_odd_id(deck):
