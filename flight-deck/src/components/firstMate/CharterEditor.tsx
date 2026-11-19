@@ -221,7 +221,7 @@ export type HowItRuns = 'bat' | 'funnel'
 
 const HOW: { value: HowItRuns; label: string; icon: typeof Bot; hint: string }[] = [
   { value: 'bat', label: 'Agents', icon: Bot,
-    hint: 'Workers search and reason in long turns. For research, documents, anything that isn\u2019t a list.' },
+    hint: 'Workers search and reason in long turns. For research, documents, anything that isn’t a list.' },
   { value: 'funnel', label: 'List funnel', icon: Filter,
     hint: 'Code searches, reads and checks; a model judges each item once. Far fewer tokens for lists, files you give it included.' },
 ]
@@ -238,7 +238,7 @@ export function RunnerPicker({ value, leftovers, onChange, listy }: {
   return (
     <Field label="How it runs"
       hint={value === 'funnel' && !listy
-        ? 'Works when the result is a list; a run that isn\u2019t one goes to agents anyway.'
+        ? 'Works when the result is a list; a run that isn’t one goes to agents anyway.'
         : 'Agents for open work; the list funnel when the result is a list of rows.'}>
       <div role="radiogroup" aria-label="How it runs" className="grid gap-2 @2xl:grid-cols-2">
         {HOW.map((h) => {
@@ -264,7 +264,7 @@ export function RunnerPicker({ value, leftovers, onChange, listy }: {
         <label className="mt-2 flex cursor-pointer items-start gap-2 text-[11px] text-zinc-400">
           <input type="checkbox" checked={leftovers} onChange={(e) => onChange(value, e.target.checked)}
             className="mt-0.5 h-3.5 w-3.5 accent-violet-600" />
-          <span>Finish what\u2019s short with an agent: it checks only the items that came close, in a small context.</span>
+          <span>Finish what’s short with an agent: it checks only the items that came close, in a small context.</span>
         </label>
       )}
     </Field>
