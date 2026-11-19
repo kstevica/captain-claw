@@ -452,3 +452,18 @@ def test_forgetting_on_a_deck_without_first_mate_creates_nothing(tmp_path, monke
     monkeypatch.setenv("FD_DATA_DIR", str(tmp_path))
     assert fm.forget_user(BOB) == 0
     assert not (tmp_path / "first_mate.db").exists() and fm._STORE is None
+
+
+def test_a_new_factory_starts_with_the_cap_picked_last(tmp_path):
+    s = fm.FirstMateStore(tmp_path / "fm.db")
+    first = s.create("u1", title="A", charter="Do a.")
+    assert first["run_tokens"] == 0  # nothing picked yet: the owner's default
+    s.update_factory(first["id"], "owner", run_tokens=fm.UNLIMITED)
+    assert s.create("u1", title="B", charter="Do b.")["run_tokens"] == fm.UNLIMITED
+    s.update_factory(first["id"], "owner", run_tokens=8_000_000)
+    assert s.create("u1", title="C", charter="Do c.")["run_tokens"] == 8_000_000
+    assert s.create("u2", title="D", charter="Do d.")["run_tokens"] == 0  # someone else's pick isn't theirs
+    s.update_factory(first["id"], "deck", run_tokens=5_000_000)  # not the owner's pick: not remembered
+    assert s.create("u1", title="E", charter="Do e.")["run_tokens"] == 8_000_000
+    s.update_factory(first["id"], "owner", run_tokens=0)  # back to their default
+    assert s.create("u1", title="F", charter="Do f.")["run_tokens"] == 0

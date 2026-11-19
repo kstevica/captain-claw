@@ -185,12 +185,9 @@ def _norm_table(check: dict) -> dict | None:
     if str(check.get("email_column") or "").strip():
         out["email_column"] = str(check["email_column"]).strip()[:80]
     pat = str(check.get("exclude_pattern") or "").strip()
-    if pat and len(pat) <= PATTERN_MAX:
-        try:
-            re.compile(pat)
-            out["exclude_pattern"] = pat
-        except re.error:
-            pass
+    keep = [v for vals in (check.get("allowed") or {}).values() if isinstance(vals, list) for v in vals]
+    if pat and len(pat) <= PATTERN_MAX and sane_exclude(pat, keep):
+        out["exclude_pattern"] = pat
     per = check.get("min_per") if isinstance(check.get("min_per"), dict) else {}
     per = {str(k).strip()[:80]: n for k, v in list(per.items())[:3]
            if str(k).strip() and (n := _num(v, 1, 10_000_000, True)) is not None}
@@ -201,6 +198,37 @@ def _norm_table(check: dict) -> dict | None:
     if allowed:
         out["allowed"] = allowed
     return out if len(out) > 2 or out.get("path") else None
+
+
+# Values a row of almost any list holds: an exclusion pattern that matches most of them
+# excludes everything ("^(?!([A-Z]{2})$).*$", meant as "State is two letters", dropped
+# every firm a run looked at).
+_ORDINARY = ("Acme Consulting LLC", "https://www.example.com/about", "jane.doe@example.com", "2025-03-14",
+             "Austin, TX", "11-50", "boutique consultancies", "Jane Doe", "personal", "Onboarding")
+
+
+def sane_exclude(pattern: str, keep: list[str] | tuple[str, ...] = ()) -> bool:
+    """Whether an exclusion pattern rules out only some rows: it compiles, it doesn't
+    match most ordinary values (a name, a site, an email, a date, a place), and it
+    matches none of ``keep`` (the list's own groups and allowed values)."""
+    try:
+        rx = re.compile(str(pattern or ""), re.I)
+    except re.error:
+        return False
+    if not pattern or sum(1 for v in _ORDINARY if rx.search(v)) * 2 >= len(_ORDINARY):
+        return False
+    forms = [str(k) for k in keep if str(k).strip()]
+    forms += [" ".join(_one(w) for w in f.replace("/", " ").split()) for f in forms]  # "agencies" → "agency"
+    return not any(rx.search(f) for f in forms)
+
+
+def _one(word: str) -> str:
+    w = word.lower()
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3] + "y"
+    if w.endswith(("ches", "shes", "sses", "xes")):
+        return w[:-2]
+    return w[:-1] if w.endswith("s") and not w.endswith("ss") else w
 
 
 def _norm_document(check: dict) -> dict | None:
@@ -292,7 +320,8 @@ def _check_table(repo: Path, check: dict, skip: tuple[str, ...] = ()) -> tuple[b
             top, k = (Counter(doms).most_common(1) or [("", 0)])[0]
             if k > max(1, len(emails) * check["max_domain_share"]):
                 bad.append(f"{k} emails on {top} alone (allowed {round(check['max_domain_share'] * 100)}%)")
-    if check.get("exclude_pattern"):
+    keep = [v for vals in (check.get("allowed") or {}).values() for v in vals]
+    if check.get("exclude_pattern") and sane_exclude(check["exclude_pattern"], keep):
         rx = re.compile(check["exclude_pattern"], re.I)
         hit = [r for r in rows if any(rx.search(str(v or "")) for v in r.values())]
         if hit:

@@ -351,6 +351,15 @@ directories, databases, rankings), the item is read from the charter's own ask
 the name with the item and the place, and a directory or social site isn't skipped
 when it's the list's own kind of page (a "LinkedIn URL" column).
 
+The fourth run shaped its checks in 11 seconds, then dropped all 31 items it found:
+shaping had turned "State is two letters" into an exclusion pattern that matches every
+value that *is* two letters, and the recipe ruled out firm names with "agency" on a
+list of agencies. Fixed: an exclusion pattern (in shaping, at check time, and in a
+recipe's filters) is tried on a set of ordinary values first (a firm name, a site, an
+email, a date, a city, a size band, a person's name) and dropped when it rules out half
+of them, any value the checks allow, or a group's own name (its singular too), or when
+it doesn't compile.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

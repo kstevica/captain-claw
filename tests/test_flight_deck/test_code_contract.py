@@ -323,3 +323,20 @@ def test_rows_show_even_when_a_script_or_a_reviewer_holds_the_amount(tmp_path):
     rules.append({"id": "fm3", "text": "at least 60 rows", "severity": "major",
                   "check": {"type": "table", "path": "leads.csv", "min_rows": 60}})
     assert code_contract.measure(tmp_path, rules) == {"fm3": 3}
+
+
+def test_an_exclusion_that_matches_everything_is_no_exclusion(tmp_path):
+    """Shaping wrote "State is two letters" as /^(?!([A-Z]{2})$).*$/: every firm a run looked at matched it."""
+    assert not code_contract.sane_exclude(r"^(?!([A-Z]{2})$).*$")
+    assert not code_contract.sane_exclude(".*") and not code_contract.sane_exclude("[") and not code_contract.sane_exclude("")
+    assert code_contract.sane_exclude(r"(?i)(university|government)") and code_contract.sane_exclude(r"\.edu\b")
+    # nor one that rules out the list's own groups ("agency" on a list of agencies)
+    assert not code_contract.sane_exclude(r"(?i)(university|agency)", ["marketing/content agencies"])
+    shaped = code_contract.parse_contract(json.dumps({"constraints": [{"id": "a", "text": "x", "check": {
+        "type": "table", "path": "leads.csv", "exclude_pattern": r"^(?!([A-Z]{2})$).*$",
+        "allowed": {"EmailType": ["personal", "shared"]}}}]}))
+    assert "exclude_pattern" not in shaped[0]["check"] and shaped[0]["check"]["allowed"]
+    # one stored before the guard is passed over when the list is checked
+    (tmp_path / "leads.csv").write_text("Firm,State\nAcme,TX\n")
+    ok, note = code_contract._check_table(tmp_path, {"type": "table", "path": "leads.csv", "exclude_pattern": r"^(?!([A-Z]{2})$).*$"})
+    assert ok, note

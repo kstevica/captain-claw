@@ -195,10 +195,14 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
         src = _source(s, groups)
         if src:
             recipe["sources"].append(src)
+    from captain_claw.flight_deck.code_contract import sane_exclude
+    keep = list(groups) + [v for vals in base["allowed"].values() for v in vals]
     for f in raw.get("filters") or []:
         if isinstance(f, dict) and f.get("op") in FILTER_OPS and str(f.get("column") or "").strip():
+            if f["op"] == "not_regex" and not sane_exclude(str(f.get("value") or ""), keep):
+                continue  # it would rule out every item, or a group's own (an "agency" filter on a list of agencies)
             recipe["filters"].append({"column": str(f["column"]).strip()[:80], "op": f["op"], "value": f.get("value")})
-    if base["exclude"]:
+    if base["exclude"] and sane_exclude(base["exclude"], keep):
         recipe["filters"].append({"column": "*", "op": "not_regex", "value": base["exclude"]})
     for g in raw.get("gather") or []:
         if not isinstance(g, dict):
@@ -711,6 +715,7 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
                 if isinstance(raw, dict):
                     recipe = normalize_recipe(raw, base)
                     if recipe["sources"]:
+                        why = ""  # an earlier try's trouble is past
                         break
                     why = "its recipe named no source to take items from"
                 else:
