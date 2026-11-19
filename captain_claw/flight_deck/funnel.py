@@ -92,7 +92,17 @@ STAGES = ("filter", "read", "judge", "check", "full", "duplicate", "kept", "mayb
 _GROUP_COL = "_group"
 _SKIP_SITES = ("linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com",
                "wikipedia.org", "crunchbase.com", "zoominfo.com", "rocketreach.co", "bbb.org", "yelp.com",
-               "clutch.co", "glassdoor.com", "indeed.com", "apollo.io", "dnb.com", "bloomberg.com")
+               "clutch.co", "glassdoor.com", "indeed.com", "apollo.io", "dnb.com", "bloomberg.com",
+               "upcity.com", "designrush.com", "goodfirms.co", "expertise.com", "manta.com", "yellowpages.com",
+               "mapquest.com", "signalhire.com", "craft.co", "owler.com", "pitchbook.com", "tiktok.com",
+               "pinterest.com", "medium.com", "reddit.com", "google.com", "bing.com", "amazon.com",
+               "sortlist.com", "themanifest.com", "agencyspotter.com", "chamberofcommerce.com", "buzzfile.com",
+               "opencorporates.com", "bizapedia.com", "cbinsights.com", "tracxn.com", "builtin.com")
+REFERENCE_CHARS = 3000   # what a judging call reads of the run's reference files, in all
+CHARTER_CHARS = 3500     # and of the owner's charter (the columns' own rules)
+# Words a group shares with others: a group's searches name it by the rest.
+_GROUP_STOP = {"firms", "firm", "shops", "shop", "agencies", "agency", "boutiques", "boutique", "companies",
+               "company", "services", "service", "groups", "group", "small", "and", "the", "for", "with"}
 
 
 # ── the recipe ─────────────────────────────────────────────────────────
@@ -174,7 +184,7 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
     if not output.lower().endswith(".csv"):
         output = output.rsplit(".", 1)[0] + ".csv"
     recipe: dict[str, Any] = {
-        "item": str(raw.get("item") or "item").strip()[:60] or "item",
+        "item": _short_item(raw.get("item")),
         "output": output, "columns": columns, "about": {c: about.get(c, "") for c in columns},
         "key": key, "site_column": site, "group_by": group_by, "groups": groups,
         "target": base["target"] or _int(raw.get("target"), 0, 1_000_000, 0),
@@ -218,7 +228,14 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
         if col and col in columns and not any(x["column"] == col and x["op"] == "required" for x in recipe["checks"]):
             recipe["checks"].append({"column": col, "op": "required"})
     recipe["decide_batch"] = _int(raw.get("decide_batch"), 1, 25, 1 if recipe["gather"] else 10)
+    recipe["reference"] = [r for r in (_rel(x) for x in raw.get("reference") or []) if r][:6]
     return recipe
+
+
+def _short_item(v: Any) -> str:
+    """What one row is, as a noun ("small US knowledge firm"), never a sentence with lists."""
+    text = re.split(r"\s*[(\[,;:—–]\s*|\s+-\s+", str(v or "").strip())[0]
+    return " ".join(text.split())[:40] or "item"
 
 
 def _source(s: Any, groups: dict[str, int]) -> dict[str, Any] | None:
@@ -257,6 +274,96 @@ def _country(v: Any) -> str:
     if re.fullmatch(r"[a-z]{2}", s):
         return s.upper()
     return _COUNTRY_NAMES.get(s, "")
+
+
+def reference_text(folder: Path, recipe: dict[str, Any]) -> str:
+    """What every judging call reads besides the item: the recipe's reference files,
+    and the run's other given documents (not its tables, not what earlier runs checked,
+    not a links file), up to REFERENCE_CHARS in all."""
+    paths = [p for p in recipe.get("reference") or []]
+    extra = folder / "extra"
+    if extra.is_dir():
+        for p in sorted(extra.iterdir()):
+            rel = f"extra/{p.name}"
+            if (p.is_file() and not p.name.startswith(".") and p.suffix.lower() in fx.DOC_EXTS
+                    and p.name != LEDGER_FILE and not _links_count(p) and rel not in paths):
+                paths.append(rel)
+    out, room = [], REFERENCE_CHARS
+    for rel in paths:
+        if room <= 200:
+            break
+        try:
+            text = " ".join(fx.read_document(folder / rel).split())
+        except (OSError, ValueError):
+            continue
+        out.append(f"[{rel}] {text[:room]}")
+        room -= len(out[-1])
+    return "\n".join(out)
+
+
+def charter_checks(task: str, columns: list[str]) -> list[dict[str, Any]]:
+    """A column's fixed values, as the charter lists them ("CaptainFeature is exactly
+    one of: A, B, C."), anywhere in its text, as checks: they hold even when drafting
+    dropped the goal that said so."""
+    out = []
+    text = str(task or "")
+    for col in columns:
+        m = re.search(r"(?<![\w-])" + re.escape(col) + r"\s+is\s+(?:exactly\s+)?one\s+of\s*:?\s*([^.\n]+)",
+                      text, re.I)
+        if not m:
+            continue
+        vals = [v.strip(" '\"") for v in re.split(r",|;|\s+or\s+", m.group(1)) if v.strip(" '\"")]
+        vals = [re.sub(r"^and\s+", "", v, flags=re.I) for v in vals]
+        if len(vals) >= 2 and all(len(v) <= 60 for v in vals):
+            out.append({"column": col, "op": "in", "value": vals})
+    return out
+
+
+def _group_words(group: str) -> list[str]:
+    return [w[:6] for w in re.findall(r"[a-z]+", group.lower()) if len(w) >= 4 and w not in _GROUP_STOP]
+
+
+def _group_queries(group: str, place: str, size: re.Match | None) -> list[str]:
+    qs = [f"{group} directory {place}", f"list of {group} {place}", f"top {group} {place}",
+          f"{group} association member directory {place}", f"small {group} {place}"]
+    if size:
+        qs.append(f'site:linkedin.com/company {group} {place} "{size.group(1)}-{size.group(2)} employees"')
+    return [" ".join(q.split()) for q in qs]
+
+
+def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -> dict[str, Any]:
+    """What code puts right in a model's recipe: a group's searches that never name it
+    (copied from another group) are written for it; a file the charter points to for
+    information is reference, not a source; the charter's fixed value lists become
+    checks."""
+    text = " ".join(str(task or "").split())
+    place = "United States" if re.search(r"\b(US|USA|U\.S\.|United States)\b", text) else ""
+    size = _SIZE.search(text)
+    seen_lists: list[list[str]] = []
+    for s in recipe["sources"]:
+        if s["kind"] != "search" or not s.get("group"):
+            continue
+        words = _group_words(s["group"])
+        joined = " ".join(s["queries"]).lower()
+        if (words and not any(w in joined for w in words)) or s["queries"] in seen_lists:
+            s["queries"] = _group_queries(s["group"], place, size)
+            s["about"] = s["about"] or s["group"]
+        seen_lists.append(s["queries"])
+    refs = list(recipe.get("reference") or [])
+    for s in list(recipe["sources"]):
+        path = s.get("path") or ""
+        name = Path(path).name if path else ""
+        pointed = name and re.search(r"\b(?:is|are|described|explained|listed|see)\b[^.]{0,40}?"
+                                     + re.escape(name), text, re.I)
+        if s["kind"] == "document" and (path in refs or pointed):
+            recipe["sources"].remove(s)
+            if path not in refs:
+                refs.append(path)
+    recipe["reference"] = refs
+    for c in charter_checks(text, recipe["columns"]):
+        if not any(x["column"] == c["column"] and x["op"] == "in" for x in recipe["checks"]):
+            recipe["checks"].append(c)
+    return recipe
 
 
 def render(template: str, item: dict[str, str], site_column: str = "") -> str | None:
@@ -349,7 +456,8 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
  "decide": "<the owner's rules for an item, short, in their words>",
  "checks": [{"column": "<column>", "op": "required|in|regex|in_evidence|within_months|min|max",
              "value": ..., "source_column": "<column with the link it came from>"}],
- "decide_batch": <items per judging call: 1 when each item has pages to read, up to 20 for short rows>}
+ "decide_batch": <items per judging call: 1 when each item has pages to read, up to 20 for short rows>,
+ "reference": ["<files that describe something the rows need (your product, rules, a price list), not items>"]}
 
 Rules:
 - Use the owner's own files and links first; they cost nothing to read. Search only when the list has to be
@@ -361,6 +469,9 @@ Rules:
 - checks: "in_evidence" for every value copied from a source (an email, a date, a quote) with the column that
   holds its link; "within_months" for a date window; "in" for fixed values.
 - An offline list (a file or documents only) has no searches and no gather unless the rules need the web.
+- A file the goal points to for information (what the owner's product is, house rules) is "reference", never a
+  source: no items are taken from it, and every judging call reads it.
+- Each group's searches name that group; never copy one group's searches to another.
 - Never invent a file or a link that isn't in what you're shown."""
 
 
@@ -471,12 +582,8 @@ def web_recipe(base: dict[str, Any], task: str) -> dict[str, Any] | None:
     sources = []
     for g in groups:
         what = g or f"{item}s"
-        qs = [f"{what} directory {place}", f"list of {what} {place}", f"top {what} {place}",
-              f"{what} association member directory {place}", f"small {what} {place}"]
-        if size:
-            qs.append(f'site:linkedin.com/company {what} {place} "{size.group(1)}-{size.group(2)} employees"')
         sources.append({"kind": "search", "group": g, "country": country, "count": 20,
-                        "queries": [" ".join(q.split()) for q in qs], "about": f"{what} {place}".strip()})
+                        "queries": _group_queries(what, place, size), "about": f"{what} {place}".strip()})
     site = next((c for c in cols if re.search(r"website|domain|homepage|site\b|url", c, re.I)
                  and not re.search(r"source", c, re.I)), "")
     name = next((c for c in cols if c != site and not re.search(r"mail|url|source|date|segment|state", c, re.I)), "")
@@ -562,6 +669,13 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
             how = "web searches built from its checks" if all(
                 s["kind"] == "search" for s in recipe["sources"]) else "the folder's own files"
             why = f"set up from {how} ({why})" if why else ""
+    if recipe is not None:
+        recipe = tidy_recipe(recipe, str(run.get("task", "")), folder)
+        if not recipe["sources"]:  # its only source was a file to read for information
+            web = web_recipe(from_contract(list(cfg.get("contract") or [])), str(run.get("task", "")))
+            if web is not None:
+                recipe = tidy_recipe({**web, "reference": recipe.get("reference") or []}, str(run.get("task", "")), folder)
+                why = (why + "; " if why else "") + "its only file is reference, so it searches the web"
     if recipe is None or not recipe["columns"] or not recipe["sources"]:
         return None, why or ("no columns for the list" if recipe is not None else "nothing to build a list from")
     (folder / STATE).mkdir(parents=True, exist_ok=True)
@@ -764,7 +878,9 @@ Reply ONLY with a JSON array, one object per item, in order:
 [{"id": <its id>, "verdict": "keep|maybe|drop", "reason": "<one short line>",
   "row": {"<column>": "<value>"}}]
 keep: it meets every rule and the row is filled from the facts. maybe: it seems to fit but a fact the rules need
-wasn't in what was read. drop: it breaks a rule. Dates as YYYY-MM-DD, or YYYY-MM when there's no day.
+wasn't in what was read; also when nothing read came from the item's own website, unless a fact shown breaks a
+rule. drop: it breaks a rule. A column with a fixed set of values takes one of them exactly. Dates as YYYY-MM-DD,
+or YYYY-MM when there's no day.
 Keep your thinking short."""
 
 
@@ -779,6 +895,8 @@ class Work:
         self.budget = _int(self.cfg.get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
         self.items_max = _int(self.cfg.get("funnel_items_max"), 1, 1_000_000, ITEMS_MAX)
         self.thinking = str(self.cfg.get("funnel_thinking") or "off").lower() == "on"
+        self.charter = " ".join(str(run.get("task") or "").split())[:CHARTER_CHARS]
+        self.reference = reference_text(folder, recipe)
         self.more_pages: list[str] = []
         self.tools: Tools | None = None
         self.creds: dict | None = None
@@ -990,11 +1108,18 @@ class Work:
         return out
 
     def item_key(self, item: dict) -> str:
-        f = {k.lower(): v for k, v in item["fields"].items()}
+        """What names an item: its key column, else its own site, else its name. A link
+        on a directory or a social site (its LinkedIn page) is never its own site."""
+        f = {k.lower(): str(v or "") for k, v in item["fields"].items()}
         key = self.recipe["key"]
         site = self.recipe.get("site_column") or ""
-        v = f.get(key.lower(), "") if key and key != "domain" else ""
-        v = v or f.get(site.lower(), "") or f.get("url", "") or f.get("website", "") or f.get("name", "")
+
+        def own(v: str) -> str:
+            d = fx.domain_of(v) if re.match(r"^(https?://|www\.)", v.strip(), re.I) else ""
+            return "" if d and any(fx.same_site(d, s) for s in _SKIP_SITES) else v
+
+        v = own(f.get(key.lower(), "")) if key and key != "domain" else ""
+        v = v or own(f.get(site.lower(), "")) or own(f.get("url", "")) or own(f.get("website", "")) or f.get("name", "")
         return norm_key(v)
 
     def passes(self, item: dict, found: dict[str, list[tuple[str, str]]] | None = None) -> str:
@@ -1087,6 +1212,8 @@ class Work:
         evidence = [{"source": item["origin"], "text": item.get("text") or
                      "\n".join(f"{k}: {v}" for k, v in item["fields"].items() if v)}]
         site = self.recipe.get("site_column") or ""
+        if site and not self._site_of(item) and any(g["kind"] == "fetch" for g in self.recipe["gather"]):
+            await self.find_site(item, evidence)
         item["evidence"], item["found"] = evidence, self.facts(item, evidence)
         for g in self.recipe["gather"]:
             if self.passes(item, item["found"]):
@@ -1118,6 +1245,47 @@ class Work:
                     if ok and text.strip():
                         evidence.append({"source": u, "text": text[:FETCH_CHARS]})
             item["found"] = self.facts(item, evidence)
+
+    def _site_of(self, item: dict) -> str:
+        site = (self.recipe.get("site_column") or "").lower()
+        f = {k.lower(): str(v or "").strip() for k, v in item["fields"].items()}
+        for k in (site, "website", "url", "site", "homepage", "domain"):
+            v = f.get(k, "")
+            d = fx.domain_of(v) if v else ""
+            if d and "." in d and not any(fx.same_site(d, s) for s in _SKIP_SITES):
+                return v
+        return ""
+
+    async def find_site(self, item: dict, evidence: list[dict]) -> None:
+        """An item found on a directory or a LinkedIn page has no site of its own to
+        read: one search for its name, and the first result on a site of its own whose
+        title or address carries the name's words."""
+        f = item["fields"]
+        name = str(f.get("name") or f.get(self.recipe["key"]) or next(iter(f.values()), "")).strip()
+        if not name or self.queries["searches"] >= self.budget:
+            return
+        words = [w for w in re.findall(r"[a-z0-9]+", name.lower())
+                 if len(w) >= 3 and w not in {"the", "and", "inc", "llc", "ltd", "group", "partners", "company",
+                                              "consulting", "co", "corp", "firm", "associates", "services"}]
+        place = {"US": "United States", "GB": "UK"}.get(next(
+            (s.get("country") for s in self.recipe["sources"] if s.get("country")), ""), "")
+        q = f'"{name}" {place} official website'.replace("  ", " ")
+        ok, text = await (await self._tools()).search(q, 8)
+        self.queries["searches"] += 1
+        self._save_queries()
+        await self._event("web_search", f"query={q}")
+        if not ok:
+            return
+        for r in fx.search_results(text):
+            d = fx.domain_of(r["url"])
+            if not d or any(fx.same_site(d, s) for s in _SKIP_SITES):
+                continue
+            where = f"{d} {r['title']}".lower()
+            if words and not any(w in where for w in words):
+                continue
+            f[self.recipe["site_column"]] = f"https://{d}"
+            evidence.append({"source": r["url"], "text": r["text"]})
+            return
 
     def facts(self, item: dict, evidence: list[dict]) -> dict[str, list[tuple[str, str]]]:
         """What code finds in what was read: each extractor's values, with the page."""
@@ -1158,7 +1326,10 @@ class Work:
         try:
             got = await self._ask("decide", DECIDE_SYSTEM,
                                   f"# Rules\n{self.recipe['decide'] or '(take every item that fits the list)'}\n\n"
-                                  f"# Columns\n{cols}{groups}\n\n# Items\n" + "\n\n".join(lines), items=len(batch))
+                                  + (f"# The goal, in the owner's words (what each column takes)\n{self.charter}\n\n"
+                                     if self.charter else "")
+                                  + (f"# Reference\n{self.reference}\n\n" if self.reference else "")
+                                  + f"# Columns\n{cols}{groups}\n\n# Items\n" + "\n\n".join(lines), items=len(batch))
         except Exception as e:  # noqa: BLE001 — these go back for the next call
             log.warning("funnel decide call failed", run_id=self.run["id"], error=str(e))
             got = None
