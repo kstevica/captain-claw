@@ -247,22 +247,65 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
     return recipe
 
 
+UNSHOWN = "not shown in what was read, and nothing read says it breaks the rule"
+# A rule about something measured (a count, an amount, a date, a rating): many items
+# never publish it, so not finding it is no proof it's broken.
+_MEASURED = re.compile(r"\d|\b(?:employees?|people|staff|headcount|team size|size|revenue|turnover|sales|profit|"
+                       r"funding|raised|valuation|budget|price|cost|fees?|rates?|founded|since|years?|months?|"
+                       r"age|old|recent|dated|rating|rated|stars?|reviews?|score|members?|followers?|users?|"
+                       r"customers?|clients?|downloads?|seats?|capacity|citations?|cited)\b", re.I)
+# What a list can't be used without: a way to reach the item.
+_CONTACT = re.compile(r"e-?mail|inbox|phone|contact|address|reach", re.I)
+
+
+def _stems(text: str) -> set[str]:
+    words = re.findall(r"[a-z]+", re.sub(r"([a-z])([A-Z])", r"\1 \2", str(text or "")).lower())
+    return {w[:5] for w in words if len(w) >= 4 and w not in _GROUP_STOP | {"shown", "page", "pages", "with", "from"}}
+
+
+def _rule_columns(text: str, recipe: dict[str, Any]) -> list[str]:
+    """The list's columns a rule is about, by their words ("2-50 employees shown on
+    LinkedIn" → Employees, EmployeesSourceURL), when the setup gave none."""
+    words = _stems(text)
+    return [c for c in recipe["columns"] if _stems(c) & words]
+
+
+def _protected(rule: dict[str, Any], recipe: dict[str, Any]) -> bool:
+    """A must that is never loosened: every must, but one about something measured (a
+    count, an amount, a date, a rating) that many items never publish. Even then it
+    stays when it's about where the item is (a place) or how to reach it (an email, a
+    phone), or about the list's key, group or site column. Unshown, a protected must
+    leaves the item nearly there, never loose."""
+    text = rule["rule"]
+    fixed = {recipe["key"], recipe["group_by"], recipe.get("site_column") or ""} - {""}
+    if not _MEASURED.search(text) or _CONTACT.search(text) or fx.places_named(text):
+        return True
+    return bool(set(rule.get("columns") or []) & fixed) or any(_CONTACT.search(c) for c in rule.get("columns") or [])
+
+
 def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
     """The owner's rules for an item, as the setup model sorted them: a must (an item
     that breaks it is dropped) or a prefer rule with a looser reading (used only when
-    rows run short). A prefer rule without a looser reading is a must; the columns a
-    prefer rule fills never include the key or the group (they stay required)."""
+    rows run short). A prefer rule without a looser reading is a must. Every rule
+    names the columns it's about (inferred from its words when the setup gave none);
+    the key and the group never loosen. A must is ``protected`` when it's about what
+    the item is, where it is, or how to reach it; any other must, unshown, may be met
+    by "not shown" when rows run short, as a prefer rule by its looser reading."""
     out: list[dict[str, Any]] = []
     fixed = {recipe["key"], recipe["group_by"]}
     for r in raw if isinstance(raw, list) else []:
         if not isinstance(r, dict) or not str(r.get("rule") or "").strip():
             continue
+        text = " ".join(str(r["rule"]).split())[:300]
         looser = " ".join(str(r.get("looser") or "").split())[:300]
         kind = "prefer" if str(r.get("kind") or "").lower() == "prefer" and looser else "must"
-        rule: dict[str, Any] = {"rule": " ".join(str(r["rule"]).split())[:300], "kind": kind}
-        if kind == "prefer":
+        given = [c for c in _names(r.get("columns")) if c in recipe["columns"]]
+        rule: dict[str, Any] = {"rule": text, "kind": kind, "columns": given or _rule_columns(text, recipe)}
+        if kind == "must":
+            rule["protected"] = _protected(rule, recipe)
+        rule["columns"] = [c for c in rule["columns"] if c not in fixed]
+        if looser:
             rule["looser"] = looser
-            rule["columns"] = [c for c in _names(r.get("columns")) if c in recipe["columns"] and c not in fixed]
         out.append(rule)
         if len(out) >= RULES_MAX:
             break
@@ -273,12 +316,22 @@ def soft_rules(recipe: dict[str, Any]) -> list[dict[str, Any]]:
     return [r for r in recipe.get("rules") or [] if r.get("kind") == "prefer"]
 
 
+def loosenable(recipe: dict[str, Any]) -> list[dict[str, Any]]:
+    """The rules a row on a looser reading may miss: the prefer rules, and the musts
+    that aren't protected (met by "not shown" when nothing read shows them broken)."""
+    return [r for r in recipe.get("rules") or [] if r.get("kind") == "prefer" or not r.get("protected", True)]
+
+
+def looser_of(rule: dict[str, Any]) -> str:
+    return rule.get("looser") or UNSHOWN
+
+
 def loosen_on(run: dict, recipe: dict[str, Any] | None = None) -> bool:
     """Whether rows on a looser reading may fill a group that runs short
     (``config.funnel_loosen``: ``short``, the default, or ``never``), and the recipe
-    has a soft rule to loosen."""
+    has a rule to loosen."""
     on = str((run.get("config") or {}).get("funnel_loosen") or "short").lower() != "never"
-    return on and (recipe is None or bool(soft_rules(recipe)))
+    return on and (recipe is None or bool(loosenable(recipe)))
 
 
 def _short_item(v: Any) -> str:
@@ -586,7 +639,7 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
  "decide": "<the owner's rules for an item, short, in their words>",
  "rules": [{"rule": "<one of the owner's rules for an item>", "kind": "must|prefer",
             "looser": "<prefer only: the loosest reading that still serves the goal>",
-            "columns": ["<prefer only: the columns this rule fills>"]}],
+            "columns": ["<the columns this rule is about>"]}],
  "checks": [{"column": "<column>", "op": "required|in|regex|in_evidence|within_months|min|max",
              "value": ..., "source_column": "<column with the link it came from>"}],
  "decide_batch": <items per judging call: 1 when each item has pages to read, up to 20 for short rows>,
@@ -608,19 +661,24 @@ Rules:
   place, every search names it (the country, or a state or city in it).
 - Never invent a file or a link that isn't in what you're shown.
 - rules: split the owner's rules for an item, one per line, into two kinds. "must" is what makes an item the
-  right kind of thing at all: its type or category, its place, its size range, the owner's explicit exclusions,
-  and what the list is useless without (a way to reach it on a contact list, the price on a price list).
-  "prefer" is evidence many good items never publish or a few pages rarely show: recent activity, dated news or
-  posts, a signal of interest, a rating, a certification, an exact count. Give each prefer rule its looser
-  reading: a wider time window, any mention undated, another kind of page (the item's social or directory
-  profile), or the column left empty. Rows on a looser reading are used only when a group runs short, after
-  every strict row. Never make a prefer rule of anything the owner wrote as "only", "never", "exactly" or an
-  exclusion, and never loosen a safety rule (don't guess an email, don't fill in forms). Examples:
-  "a dated AI or efficiency signal in the last 24 months" → prefer, looser "any mention of AI or automation on its
-  site or its social page, dated or not; the date column left empty when undated"; "2-50 employees" → must;
-  "a founder's or a shared email on its own site" on a contact list → must; "vegan restaurants in Zagreb rated
-  4.5 or more" → vegan and Zagreb must, the rating prefer, looser "rated 4.0 or more, or no rating found";
-  "papers on X since 2022 with code" → topic and year must, code prefer, looser "no code link, column empty"."""
+  right kind of thing at all: its type or category, its place, the owner's explicit exclusions, and what the list
+  is useless without (a way to reach it on a contact list, the price on a price list). "prefer" is evidence many
+  good items never publish or a few pages rarely show: recent activity, dated news or posts, a signal of
+  interest, a rating, a certification, a count or an amount (people, revenue, members, a founding year). Give
+  each prefer rule its looser reading: a wider time window, any mention undated, another kind of page (any page
+  that states it: a directory, a profile, a register), or not shown at all. Unshown is not broken: an item is
+  dropped for a rule only when what was read shows it breaks it.
+- A rule that asks for a fact AND the page it must be shown on ("2-50 employees shown on LinkedIn or its team
+  page", "revenue under $10M per its filings") is two rules: the exclusion is a must ("not shown to have more
+  than 50 people"), the shown proof is a prefer, looser "stated on any page, or not shown". Rows on a looser
+  reading are used only when a group runs short, after every strict row. Never make a prefer rule of what the
+  owner wrote as "only", "never", "exactly" or an exclusion, nor of a way to reach the item, and never loosen a
+  safety rule (don't guess an email, don't fill in forms). Examples: "a dated AI or efficiency signal in the last
+  24 months" → prefer, looser "any mention of AI or automation on its site or its social page, dated or not; the
+  date column left empty when undated"; "a founder's or a shared email on its own site" on a contact list →
+  must; "vegan restaurants in Zagreb rated 4.5 or more" → vegan and Zagreb must, the rating prefer, looser
+  "rated 4.0 or more, or no rating found"; "papers on X since 2022 with code" → topic and year must, code
+  prefer, looser "no code link, column empty"; "founded before 2015" → prefer, looser "founding year not shown"."""
 
 
 def _folder_listing(folder: Path) -> str:
@@ -911,12 +969,12 @@ def rules_note(recipe: dict[str, Any], run: dict) -> str:
     rules = recipe.get("rules") or []
     if not rules:
         return ""
-    must = [r["rule"] for r in rules if r["kind"] == "must"]
-    soft = soft_rules(recipe)
+    soft = loosenable(recipe)
+    must = [r["rule"] for r in rules if r not in soft]
     text = "Rules: must — " + ("; ".join(must) if must else "(none)") + "."
     if soft and loosen_on(run, recipe):
         text += " Loosened only when a group runs short — " + "; ".join(
-            f"{r['rule']} (looser: {r['looser']})" for r in soft) + "."
+            f"{r['rule']} (looser: {looser_of(r)})" for r in soft) + "."
     elif soft:
         text += " Also kept strictly (the factory never loosens) — " + "; ".join(r["rule"] for r in soft) + "."
     return text[:1500]
@@ -1702,9 +1760,11 @@ class Work:
             reason = " ".join(str(v.get("reason") or "").split())[:200]
             if verdict == "loose" and not self.loosen:
                 verdict = "maybe"  # no looser reading in this run: it's nearly there
+            loosened = self._loosened(v.get("loosened")) if verdict == "loose" else []
+            if verdict == "loose" and not loosened:
+                verdict = "maybe"  # it named only rules that never loosen: what it lacks must still be found
             if verdict in ("keep", "loose"):
                 row = {c: " ".join(str((v.get("row") or {}).get(c) or "").split()) for c in self.recipe["columns"]}
-                loosened = self._loosened(v.get("loosened")) if verdict == "loose" else []
                 relax = {c for r in loosened for c in r.get("columns") or []}
                 problem = check_row(self.recipe, row, {e["source"]: e["text"] for e in it.get("evidence") or []},
                                     relax=relax)
@@ -1749,24 +1809,34 @@ class Work:
         """The rule tiers for a judging call, when rows may be on a looser reading."""
         if not self.loosen:
             return ""
-        must = [r["rule"] for r in self.recipe.get("rules") or [] if r["kind"] == "must"]
+        rules = self.recipe.get("rules") or []
+        soft = loosenable(self.recipe)
+        fixed = [r["rule"] for r in rules if r not in soft]
         lines = ["# Rule tiers"]
-        if must:
-            lines += ["Must (an item that breaks one is dropped):"] + [f"- {r}" for r in must]
-        lines += ["Prefer, each with a looser reading:"]
-        lines += [f"- {r['rule']} — looser: {r['looser']}" for r in soft_rules(self.recipe)]
-        lines += ['Verdict "loose": the item meets every must rule, and each prefer rule it doesn\'t meet as written '
-                  'it meets by its looser reading. Name those rules in "loosened": ["<rule>", ...]; a column the '
-                  'looser reading gives no value for stays empty. "keep" only when every rule is met as written.']
+        if fixed:
+            lines += ["Never loosened (what the item is, where it is, how to reach it): an item that breaks one is "
+                      "dropped; one that doesn't show it is maybe:"] + [f"- {r}" for r in fixed]
+        lines += ["May be met by a looser reading:"]
+        lines += [f"- {r['rule']} — looser: {looser_of(r)}" for r in soft]
+        lines += ['Verdict "loose": the item meets every never-loosened rule, and each other rule it doesn\'t meet as '
+                  'written it meets by its looser reading. Unshown is not broken: a fact what was read simply doesn\'t '
+                  'show, with nothing read saying the item breaks the rule, is met by "not shown". An item shown to '
+                  'break a rule is still dropped. Name the rules met loosely in "loosened": ["<rule>", ...]; a column '
+                  'the looser reading gives no value for stays empty. "keep" only when every rule is met as written.']
         return "\n".join(lines) + "\n\n"
 
     def _loosened(self, named: Any) -> list[dict[str, Any]]:
-        """The soft rules a loose verdict names (all of them when it names none it has)."""
-        soft = soft_rules(self.recipe)
+        """The rules a loose verdict names that may be met loosely (the prefer rules
+        when it names none of the rules at all; none when it names only rules that
+        never loosen)."""
+        soft = loosenable(self.recipe)
         said = [" ".join(str(x).split()).lower() for x in named or [] if str(x).strip()] \
             if isinstance(named, list) else []
-        got = [r for r in soft if any(x and (x in r["rule"].lower() or r["rule"].lower() in x) for x in said)]
-        return got or soft
+        named_rules = [r for r in self.recipe.get("rules") or []
+                       if any(x and (x in r["rule"].lower() or r["rule"].lower() in x) for x in said)]
+        if not named_rules:
+            return soft_rules(self.recipe) or soft
+        return [r for r in named_rules if r in soft]
 
     async def record(self, item: dict, status: str, reason: str, group: str = "", stage: str = "") -> None:
         self.counts[status if status in ("kept", "maybe", "loose") else "dropped"] += 1
@@ -2277,11 +2347,12 @@ def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
                   + f". Why: {why}." + (f" {maybe} came close (`{MAYBE}`)." if maybe else ""), ""]
     loose = loose_on_list(folder)
     if loose:
-        soft = soft_rules(recipe)
+        soft = loosenable(recipe)
         lines += ["## On a looser reading", "",
-                  f"{len(loose)} row{'' if len(loose) == 1 else 's'} meet every must rule but a soft rule only by its "
-                  "looser reading, used because a group ran short of rows that meet every rule as written:", ""]
-        lines += [f"- {r['rule']} — looser: {r['looser']}" for r in soft] + ["", "| Item | Group | Why |", "|---|---|---|"]
+                  f"{len(loose)} row{'' if len(loose) == 1 else 's'} meet every rule that never loosens, but some "
+                  "rules only by their looser reading (often: a fact the item doesn't publish), used because a group "
+                  "ran short of rows that meet every rule as written:", ""]
+        lines += [f"- {r['rule']} — looser: {looser_of(r)}" for r in soft] + ["", "| Item | Group | Why |", "|---|---|---|"]
         lines += [f"| {_md(r.get('name') or r.get('key'))} | {_md(r.get('group'))} | {_md(r.get('reason'))} |"
                   for r in loose]
         lines.append("")
@@ -2360,10 +2431,10 @@ def judge_note(run: dict) -> str:
     lines.append(f"It looked at {looked} items and kept {kept}; `{EXCLUSIONS}` says why each other one went. "
                  "Rules these checks don't cover are yours to judge.")
     if loose:
-        lines += ["", f"{len(loose)} rows meet a soft rule only by its looser reading. The factory lets the run use "
+        lines += ["", f"{len(loose)} rows meet some rules only by their looser reading. The factory lets the run use "
                       "them when a group runs short of rows that meet every rule as written, so they aren't faults "
                       "to fix; their empty columns are the ones those rules fill:"]
-        lines += [f"- {r['rule']} — looser: {r['looser']}" for r in soft_rules(recipe)]
+        lines += [f"- {r['rule']} — looser: {looser_of(r)}" for r in loosenable(recipe)]
         lines.append("Those rows: " + ", ".join(r.get("name") or r.get("key", "") for r in loose[:40]) + ".")
     return "\n".join(lines)
 
