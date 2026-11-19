@@ -1213,7 +1213,7 @@ FIRM_LEADS = [{"id": "fm1", "text": "leads.csv; at least 3", "check": {
     "type": "table", "path": "leads.csv", "min_rows": 3, "unique": ["Firm"],
     "columns": ["Firm", "Website", "State", "Employees", "EmployeesSourceURL", "Email", "EmailSourceURL",
                 "SignalDate", "Signal"]}}]
-LEAD_RULES = [  # as a setup model sorted a real charter: the shown size kept as a must
+FIRM_LEADS_RULES = [  # as a setup model sorted a real charter: the shown size kept as a must
     {"rule": "US knowledge firm headquartered in the US", "kind": "must"},
     {"rule": "2-50 employees shown by its LinkedIn company page size band or its own team page", "kind": "must"},
     {"rule": "not a university or government body", "kind": "must"},
@@ -1226,7 +1226,7 @@ def test_only_a_must_about_something_measured_may_go_unshown():
     """A run dropped 45 of 87 firms for "no employee count shown": not found was read as
     broken. Any list: a count, an amount, a date or a rating many items never publish
     may go unshown on a looser reading; what an item is, where, and how to reach it may not."""
-    r = funnel.normalize_recipe({"rules": LEAD_RULES}, funnel.from_contract(FIRM_LEADS))
+    r = funnel.normalize_recipe({"rules": FIRM_LEADS_RULES}, funnel.from_contract(FIRM_LEADS))
     loosen = {x["rule"][:24] for x in funnel.loosenable(r)}
     assert loosen == {"2-50 employees shown by ", "something dated in the l"}
     size = r["rules"][1]
@@ -1249,7 +1249,7 @@ async def test_a_fact_a_firm_doesnt_publish_is_no_reason_to_drop_it(deck):
         "B,https://b.example,NY,,info@b.example,AI pilot\nC,https://c.example,CA,9,,AI pilot\n"
         "D,https://d.example,WA,,info@d.example,\nE,https://e.example,OR,120,info@e.example,AI pilot\n")
     deck["recipe"] = {"item": "firm", "key": "Firm", "sources": [{"kind": "file", "path": "extra/firms.csv"}],
-                      "decide": "US firms, 2-50 people shown, an email on the site, interest in AI.", "rules": LEAD_RULES,
+                      "decide": "US firms, 2-50 people shown, an email on the site, interest in AI.", "rules": FIRM_LEADS_RULES,
                       "checks": [{"column": "Employees", "op": "min", "value": 2},
                                  {"column": "Employees", "op": "max", "value": 50},
                                  {"column": "EmployeesSourceURL", "op": "required"}, {"column": "Email", "op": "required"}]}
@@ -1280,3 +1280,68 @@ async def test_a_fact_a_firm_doesnt_publish_is_no_reason_to_drop_it(deck):
     assert got["A"][0] == "kept" and got["B"][0] == got["D"][0] == "loose"
     assert got["C"][0] == "maybe"  # it named only a rule that never loosens
     assert got["E"][0] == "dropped" and "Employees 120 is over 50" in got["E"][1]
+
+
+# ── free text against fixed values ─────────────────────────────────────
+
+def test_a_listings_words_are_never_held_to_a_fixed_value(tmp_path):
+    """A run dropped 226 of 264 firms before reading them: "Segment is Boutique consulting
+    firm" didn't equal "boutique consultancies" exactly. A list column's fixed values are
+    the judging call's to set; the row's check holds them."""
+    r = funnel.normalize_recipe({"filters": [
+        {"column": "Segment", "op": "in", "value": ["x", "y"]},
+        {"column": "segment", "op": "not_in", "value": ["z"]},
+        {"column": "Country", "op": "in", "value": ["United States"]},
+        {"column": "Employees", "op": "max", "value": 50},
+        {"column": "size_band", "op": "size_max", "value": 50}]}, funnel.from_contract(CONTRACT))
+    assert [(f["column"], f["op"]) for f in r["filters"]] == [("Country", "in"), ("Employees", "max"),
+                                                              ("size_band", "size_max")]
+    assert {"column": "Segment", "op": "in", "value": ["x", "y"]} in r["checks"]  # still held on the row
+    w = funnel.Work({"id": "r", "config": {}}, {"step_key": "step-1"}, r, tmp_path, group="x")
+    item = lambda **f: {"fields": {"name": "A", **f}, "key": "a"}  # noqa: E731
+    assert w.passes(item(Country="United States of America")) == ""  # it shares a word with a value it may take
+    assert w.passes(item(Country="Canada")) == "Country is Canada"
+    assert w.passes(item(Employees="11-50")) == ""  # a range, never "1150"
+    assert w.passes(item(Employees="51-200")).startswith("Employees is 51-200")
+    assert funnel.number_span("11 to 50 employees") == (11, 50) and funnel.number_span("1,001+")[0] == 1001
+    assert funnel.number_span("$2.5M") == (2.5, 2.5) and funnel.number_span("none") is None
+    checks = {"checks": [{"column": "Employees", "op": "max", "value": 50}, {"column": "Employees", "op": "min", "value": 2}]}
+    assert funnel.check_row(checks, {"Employees": "11-50"}, {}) == ""
+    assert funnel.check_row(checks, {"Employees": "51-200"}, {}) == "Employees 51-200 is over 50"
+    assert funnel.check_row(checks, {"Employees": "1"}, {}) == "Employees 1 is under 2"
+
+
+async def test_a_maybe_that_lacks_only_unshown_facts_is_loose(deck):
+    """The judging call kept answering maybe for "meets every rule; employee count not
+    shown". It now names what it couldn't see, and code decides: loose when each of
+    those may go unshown, maybe when a rule that never loosens is among them."""
+    assert funnel.DECIDE_LOOSE.startswith(funnel.DECIDE_SYSTEM[:200]) and '"missing"' in funnel.DECIDE_LOOSE
+    assert "keep|loose|maybe|drop" in funnel.DECIDE_LOOSE and "loose" not in funnel.DECIDE_SYSTEM
+    run, folder = await _run(deck["store"], FIRM_LEADS, rid="bat_missing01")
+    (folder / "extra" / "firms.csv").write_text(
+        "Firm,Website,State,Email\nA,https://a.example,TX,info@a.example\nB,https://b.example,NY,\n"
+        "C,https://c.example,CA,info@c.example\nD,https://d.example,WA,info@d.example\n")
+    deck["recipe"] = {"item": "firm", "key": "Firm", "sources": [{"kind": "file", "path": "extra/firms.csv"}],
+                      "decide": "US firms, 2-50 people shown, an email on the site.", "rules": FIRM_LEADS_RULES,
+                      "checks": [{"column": "EmployeesSourceURL", "op": "required"}, {"column": "Email", "op": "required"}]}
+    size = "2-50 employees shown by its LinkedIn company page size band or its own team page"
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            if f["Firm"] == "A":  # only the size isn't shown
+                out.append({"id": i, "verdict": "maybe", "row": f, "missing": [size]})
+            elif f["Firm"] == "B":  # no email either: that never loosens
+                out.append({"id": i, "verdict": "maybe", "row": f, "missing": [size, "own website prints"]})
+            elif f["Firm"] == "C":  # names nothing it lacks
+                out.append({"id": i, "verdict": "maybe", "row": f, "reason": "unsure"})
+            else:  # D: no row to put on the list
+                out.append({"id": i, "verdict": "maybe", "missing": [size]})
+        return out
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got == {"A": "loose", "B": "maybe", "C": "maybe", "D": "maybe"}
+    assert "Employees" in funnel._read_csv(folder / funnel.LOOSE)[0] and funnel._read_csv(folder / funnel.LOOSE)[0]["Firm"] == "A"
