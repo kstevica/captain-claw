@@ -15,7 +15,9 @@ the governor on (``CLAW_CTX_GOVERNOR=1``, or ``context.turn_governor``):
   worker) fetching that URL again gets the saved copy's pointer and a short
   preview instead of the whole page a second time.
 
-Everything here is a no-op with the governor off.
+With the governor off, only ``cap_tool_result`` applies: one result keeps at
+most a quarter of the window inline (half for a step's parallel calls), the
+rest saved the same way, so a result is never too big to be seen at all.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ import os
 import re
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +53,16 @@ _INLINE_SHARE = 0.10
 _INLINE_MIN_TOKENS = 4_000
 _INLINE_MAX_TOKENS = 24_000
 _MIN_REQUESTED_CHARS = 4_000
+# Without the governor (the default) a tool result used to go in whole: a
+# 500-page PDF fetched through web_fetch was bigger than the room left in the
+# window, so the packer dropped it before the model ever saw it — and the
+# model's re-fetch was then refused as a duplicate. Now one result keeps at
+# most this share of the window inline (a step's parallel results share
+# _PLAIN_STEP_SHARE between them) and the full text goes to a file it can page.
+_PLAIN_SHARE = 0.25
+_PLAIN_STEP_SHARE = 0.5
+_PLAIN_MIN_TOKENS = 4_000
+_PLAIN_MAX_TOKENS = 48_000
 # A saved page older than this is fetched again rather than reused.
 _DEDUPE_MAX_AGE_S = 24 * 3600
 _DEDUPE_PREVIEW_CHARS = 4_000
@@ -302,6 +315,54 @@ def spill_tool_result(agent: Any, tool: str, arguments: dict[str, Any] | None,
                 "result could not be saved; narrow the request to see them]")
     log.info("Tool result spilled", tool=tool, chars=len(content), inline=cap, pointer=pointer)
     return spill_view(tool, key, content, pointer, cap)
+
+
+def plain_cap_tokens(agent: Any = None, calls_in_step: int = 1) -> int:
+    """Tokens one tool result may keep inline when the governor is off: a
+    quarter of the window, and half of it shared by a step's parallel calls."""
+    budget = real_context_budget(agent) or 160_000
+    cap = min(_PLAIN_MAX_TOKENS, int(budget * _PLAIN_SHARE))
+    calls = max(1, int(calls_in_step or 1))
+    if calls > 1:
+        cap = min(cap, int(budget * _PLAIN_STEP_SHARE / calls))
+    return max(_PLAIN_MIN_TOKENS, cap)
+
+
+def cap_tool_result(agent: Any, tool: str, arguments: dict[str, Any] | None, content: str,
+                    *, cap_tokens: int, count_tokens: Callable[[str], int]) -> str:
+    """Keep a tool result that outgrows *cap_tokens* as its head plus a pointer.
+
+    The full text is saved to the agent's private spill dir (``read`` points
+    at its own file instead), so the model can page through the rest with
+    ``read``. Counted with the agent's own token counter — the packer's — so a
+    dense text (numbers, diacritics) is measured as the packer will see it.
+    """
+    if not isinstance(content, str) or not content or cap_tokens <= 0:
+        return content
+    if is_governed_output(content):
+        return content
+    try:
+        tokens = int(count_tokens(content))
+    except Exception:  # noqa: BLE001 — sizing must never break a call
+        tokens = len(content) // 4
+    if tokens <= cap_tokens:
+        return content
+    # Characters that fit, from the measured density, with a little slack.
+    chars = max(_MIN_REQUESTED_CHARS, int(len(content) * cap_tokens / max(1, tokens) * 0.95))
+    args = arguments or {}
+    key = _key_for(tool, args)
+    pointer: str | None = None
+    if tool == "read" and isinstance(args.get("path"), str) and args["path"].strip():
+        pointer = args["path"].strip()   # already a file: page it with offset/limit
+    else:
+        pointer = save_source(agent, tool, key, content, shared=False)
+    log.info("Tool result capped", tool=tool, tokens=tokens, cap_tokens=cap_tokens,
+             inline_chars=chars, pointer=pointer)
+    if not pointer:
+        return (content[:chars] + f"\n\n... [{len(content) - chars} more chars cut to fit the "
+                "context window — the full result could not be saved; narrow the request "
+                "(a page range, fewer rows) to see the rest]")
+    return spill_view(tool, key, content, pointer, chars)
 
 
 # ── page de-duplication ──────────────────────────────────────────────

@@ -385,11 +385,16 @@ class AgentContextGovernorMixin:
                     used_tokens += c
                 else:
                     dropped += 1
-        rest = [p for p in free if "_live_notes" not in candidate_messages[p]]
-        room = max(0, history_budget - used_tokens)
         window = getattr(self, "_turn_window", None)
         if not isinstance(window, dict):
             window = {"floor": None, "prior": None}
+        # Steps an earlier cut left out as bigger than the whole room: they
+        # stay out, so the held tail doesn't outgrow the room on their account.
+        skipped = set(window.get("plain_skip") or ())
+        rest = [p for p in free if "_live_notes" not in candidate_messages[p]
+                and not (candidate_sidx[p] is not None and candidate_sidx[p] in skipped)]
+        dropped += len(free) - len(rest) - sum(1 for p in free if "_live_notes" in candidate_messages[p])
+        room = max(0, history_budget - used_tokens)
 
         def _tail(floor: int) -> list[int]:
             start = next((i for i, p in enumerate(rest)
@@ -414,12 +419,19 @@ class AgentContextGovernorMixin:
                 groups[-1].append(pos)
         low = max(0, int(self._GOVERNOR_LOW * history_budget) - used_tokens)
         kept_groups: list[list[int]] = []
+        too_big: list[list[int]] = []
         acc = 0
         for group in reversed(groups):
             c = sum(cost(p) for p in group)
+            if c > room:
+                # A step bigger than the whole room can never be sent: leave it
+                # out and keep going, the steps before it still fit. (Ending the
+                # cut here kept only the steps after it — on the call after a
+                # huge fetch, the newest step alone, every earlier step of the
+                # turn gone with the fetch.)
+                too_big.append(group)
+                continue
             if acc + c > room:
-                if not kept_groups:
-                    continue         # one step bigger than the whole room: skip it, keep older ones
                 break
             if kept_groups and acc + c > low:
                 break
@@ -428,10 +440,24 @@ class AgentContextGovernorMixin:
         kept = [p for g in kept_groups for p in g]
         floor = next((candidate_sidx[p] for p in kept if candidate_sidx[p] is not None), None)
         window["plain_floor"] = floor
+        if too_big:
+            skipped.update(candidate_sidx[p] for g in too_big for p in g if candidate_sidx[p] is not None)
+            window["plain_skip"] = sorted(skipped)
+            if groups and too_big[0] is groups[-1]:
+                log.warning("Newest step is bigger than the context window; left out",
+                            messages=len(groups[-1]), room=room)
         self._turn_window = window
+        kept_set = set(kept)
+        left_out = [candidate_messages[p] for p in rest if p not in kept_set]
         log.info("Context window cut", dropped_messages=len(rest) - len(kept),
                  kept_messages=len(kept), history_after=used_tokens + acc,
-                 budget=history_budget, recut=held is not None)
+                 budget=history_budget, recut=held is not None,
+                 too_big=sum(len(g) for g in too_big))
+        # The model can't see those results any more: asking again is not a
+        # duplicate.
+        forget = getattr(self, "_forget_dropped_call_guards", None)
+        if left_out and callable(forget):
+            forget(left_out)
         selected.update(kept)
         return used_tokens + acc, dropped + len(rest) - len(kept)
 
