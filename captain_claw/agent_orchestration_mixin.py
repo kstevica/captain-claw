@@ -2835,9 +2835,14 @@ class AgentOrchestrationMixin:
                 _intent_tools = _eco_select_tools_by_intent(effective_user_input or "")
                 # Also include tools already used in this turn or recent
                 # session history (the LLM may want to call them again).
+                # The duplicate guard's keys are "<tool>|<target>": the tool
+                # name is the part before the bar (the whole key never
+                # matched a name, so a tool called blind this turn — its
+                # definition withheld — stayed without one on the retry).
                 _turn_used: set[str] = set()
                 if hasattr(self, "_turn_tool_call_counts"):
-                    _turn_used = set(self._turn_tool_call_counts.keys())
+                    _turn_used = {str(_sig).split("|", 1)[0]
+                                  for _sig in self._turn_tool_call_counts}
                 # Include tools used in recent session messages so the LLM
                 # retains access to tools it used in prior turns (e.g.
                 # google_mail for drafting after datastore lookup).

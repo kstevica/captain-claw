@@ -297,6 +297,11 @@ def filter_results(paths: list[str]) -> list[str]:
     return out
 
 
+# A local file given where a web address belongs: file://…, an absolute or
+# home path, or a workspace path such as saved/… or ./page.html.
+_LOCAL_FILE_URL_RE = re.compile(r"(?i)^(?:file:|/|~|\.{1,2}/|saved/|[\w.-]+/[\w./-]*\.html?$)")
+
+
 def url_ok(value: str) -> bool:
     """A web address (or a bare host): never file://, view-source:, chrome:…"""
     text = str(value or "").strip()
@@ -428,7 +433,16 @@ def _check_value(field: str, kind: str, value: str, arguments: dict, base: Path)
     if "\x00" in value:
         return PATH_REFUSED + f"{field} must be a plain text path"
     if kind == "url":
-        return None if url_ok(value) else PATH_REFUSED + f"{field} must be a web address (http or https)"
+        if url_ok(value):
+            return None
+        refusal = PATH_REFUSED + f"{field} must be a web address (http or https)"
+        if _LOCAL_FILE_URL_RE.match(value.strip()):
+            # The agent wants to look at a page it built (cohort001: three
+            # refusals in a row, then it gave up). Say what it can do instead.
+            refusal += (". A file can't be opened in the browser on this deck: check it with "
+                        "`read` (its HTML or text), and the person opens it from the chat's "
+                        "file card — or, when they ask for a link, make one with `public_link`")
+        return refusal
     if kind == "rel":
         from captain_claw import vfs
 

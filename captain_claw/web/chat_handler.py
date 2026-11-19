@@ -35,10 +35,26 @@ _CONTINUATION_RE = re.compile(
     r"continue|go\s*on|more|keep\s*going|proceed|next|"
     r"go\s*ahead|do\s*it|yes|ok|okay|sure|yep|yea|yeah|"
     r"sounds?\s*good|that'?s?\s*(fine|good|great|correct|right)|"
-    r"perfect|exactly|confirmed?"
+    r"perfect|exactly|confirmed?|thanks?|thank\s*you|"
+    # Croatian: yes / go on / carry on / fine / great / thanks.
+    r"da|može|moze|nastavi|nastavljaj|dalje|još|jos|naprijed|samo\s*naprijed|idemo|"
+    r"ajde|hajde|važi|vazi|u\s*redu|ok\s*je|dobro|super|odlično|odlicno|"
+    r"potvrđujem|potvrdjujem|slažem\s*se|slazem\s*se|može\s*tako|moze\s*tako|"
+    r"hvala(?:\s+(?:ti|vam|puno|lijepa))?"
     r")[\s!.\-,]*$",
     re.IGNORECASE,
 )
+# A "name" that is the instruction itself, or the model saying there is none:
+# "Name the task", "Nazovi zadatak", "Write task name", "NEMA task" (cohort001
+# usage rows, 2026-11). Such a name is dropped for the message's own words.
+_ECHO_NAME_RE = re.compile(
+    r"(?i)^(?:name|write|give|naziv|nazovi|napi[šs]i|opis|imenuj)\b.{0,30}\b"
+    r"(?:task|zadat\w*|name|naziv)\b"
+    r"|^(?:nema|none|no|n/?a|null|untitled|task|zadatak|naziv)"
+    r"(?:\s+(?:task|zadat\w*|name|naziv\w*))?\s*$"
+)
+# Words a message needs before it is worth a naming call of its own.
+_MIN_NAMING_WORDS = 2
 
 # Recent user prompts kept for context when naming continuations.
 _MAX_RECENT_PROMPTS = 3
@@ -48,6 +64,24 @@ def _is_continuation(text: str) -> bool:
     """Return True if *text* looks like a continuation/affirmation."""
     stripped = text.strip().rstrip("!.,")
     return bool(_CONTINUATION_RE.match(stripped)) and len(stripped) < 60
+
+
+def _fallback_task_name(text: str) -> str:
+    """The message's own first words, when the model's name is no name."""
+    words = re.sub(r"[`*_#>\[\]()\"]+", " ", str(text or "")).split()
+    if len(words) < _MIN_NAMING_WORDS:
+        return ""
+    name = " ".join(words[:6]).strip(" .,:;!?-")
+    return name[:60].rsplit(" ", 1)[0] if len(name) > 60 else name
+
+
+def _usable_task_name(name: str, user_text: str) -> str:
+    """*name*, or the message's first words when the model echoed its
+    instruction or said there is no task."""
+    cleaned = str(name or "").strip().strip("\"'.").strip()
+    if not cleaned or _ECHO_NAME_RE.search(cleaned):
+        return _fallback_task_name(user_text)
+    return cleaned
 
 
 async def _generate_task_name(
@@ -88,6 +122,14 @@ async def _generate_task_name(
             return ""
 
         from litellm import acompletion
+
+        # Nothing to name: a single word, or a "go on" / "thanks" with no
+        # earlier task to name instead — the model only echoed the instruction.
+        _continues = _is_continuation(user_text)
+        if ((_continues and not recent_prompts)
+                or (not _continues and len(str(user_text or "").split()) < _MIN_NAMING_WORDS)):
+            log.info("Task naming: skipped (nothing to name)")
+            return ""
 
         # Build the naming prompt.
         if _is_continuation(user_text) and recent_prompts:
@@ -165,6 +207,11 @@ async def _generate_task_name(
                 raise
             resp = await acompletion(**kwargs)
         name = (resp.choices[0].message.content or "").strip().strip('"\'.')
+        # A continuation names the task it continues; fall back on the last
+        # real message, not on "da".
+        fallback_text = (recent_prompts[-1] if _is_continuation(user_text) and recent_prompts
+                         else user_text)
+        name = _usable_task_name(name, fallback_text)
         if restore is not None and name:
             name = (await restore(name)).strip()
         # Safety: truncate if the model got chatty
@@ -2249,6 +2296,15 @@ async def _run_agent(
         # The turn is over: a task name held for it (a self-hosted model) runs now.
         if naming_after_turn is not None:
             naming_after_turn.set()
+        elif naming_task is not None and not naming_task.done():
+            naming_task.cancel()   # too late to label this turn's calls
+        # The name labels this turn's calls only: a cron run or an automation
+        # turn after it was booked under the last chat's name (473 calls
+        # under one name on one agent).
+        try:
+            agent._current_task_name = ""  # type: ignore[attr-defined]
+        except Exception:
+            pass
         try:
             agent._suppress_memory_context = False  # type: ignore[attr-defined]
             agent._suppress_rephrase = False  # type: ignore[attr-defined]
