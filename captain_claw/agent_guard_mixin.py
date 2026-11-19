@@ -581,8 +581,21 @@ class AgentGuardMixin:
                     max_tokens=max_tokens,
                     on_chunk=_on_chunk,
                 )
-        except Exception:
+        except Exception as _call_exc:
             _error_occurred = True
+            # A failed call is a row too (no tokens, the error's class as the
+            # finish reason): only successes were ever written, so every row
+            # read error=0 and a deck's failures could not be counted.
+            self._record_usage_to_db(
+                interaction_label=interaction_label,
+                messages=messages,
+                response=None,
+                tools_enabled=bool(tools),
+                max_tokens=max_tokens,
+                latency_ms=int((_time.monotonic() - _t0) * 1000),
+                error=True,
+                finish_reason=f"error:{type(_call_exc).__name__}",
+            )
             raise
         else:
             if _label not in _REASONING_EXEMPT_LABELS:
@@ -692,13 +705,16 @@ class AgentGuardMixin:
         max_tokens: int | None,
         latency_ms: int,
         error: bool,
+        finish_reason: str | None = None,
     ) -> None:
-        """Fire-and-forget persist of LLM usage to SQLite."""
+        """Fire-and-forget persist of LLM usage to SQLite. A failed call comes
+        with ``response=None``, ``error=True`` and its own ``finish_reason``."""
         try:
             usage = getattr(response, "usage", {}) or {}
-            model_name = str(getattr(response, "model", "") or "")
+            model_name = str(getattr(response, "model", "") or getattr(self.provider, "model", "") or "")
             provider_name = str(getattr(self.provider, "provider", "") or "")
-            finish_reason = str(getattr(response, "finish_reason", "") or "")
+            if finish_reason is None:
+                finish_reason = str(getattr(response, "finish_reason", "") or "")
             content = str(getattr(response, "content", "") or "")
             session_id = self._current_session_slug() if self.session else None
             task_name = str(getattr(self, "_current_task_name", "") or "")
@@ -713,7 +729,7 @@ class AgentGuardMixin:
 
             # Calibrate the context trace: what the provider billed as input
             # for this main-turn call, next to the estimate made before it.
-            if interaction_label.startswith("turn_"):
+            if interaction_label.startswith("turn_") and response is not None:
                 window = getattr(self, "last_context_window", None)
                 if isinstance(window, dict):
                     from captain_claw.llm import input_tokens_total
