@@ -340,6 +340,17 @@ for a US list every search names the place; each item keeps its own search resul
 one whose listing names a place outside the US, and nothing American, goes before any
 page is read.
 
+Then made general (any place, any kind of item): the target is any country the
+charter names (by name, short form, big city or province, a US state; by demonym only
+when it names no place, and no guess when it names one the table doesn't know), and a
+search names it when it doesn't (the engine's own country is set only where it takes
+one, e.g. not Croatia); a listing that names another country and none of the list's is
+dropped before reading, for any target. Fallback searches are neutral (lists,
+directories, databases, rankings), the item is read from the charter's own ask
+("Find 40 vegan restaurants in Zagreb" → "vegan restaurant"), a site lookup searches
+the name with the item and the place, and a directory or social site isn't skipped
+when it's the list's own kind of page (a "LinkedIn URL" column).
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

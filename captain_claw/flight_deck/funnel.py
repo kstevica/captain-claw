@@ -319,8 +319,15 @@ def charter_checks(task: str, columns: list[str]) -> list[dict[str, Any]]:
     return out
 
 
-_US_QUERY = re.compile(r"(?<![\w-])(US|USA|U\.S\.|United States|America|American)(?![\w-])|"
-                       + "|".join(re.escape(n) for n in fx.US_STATES.values()))
+def _search_country(code: str) -> str:
+    """The country a search engine can be told (``web_search`` drops what its engine
+    doesn't take, e.g. Brave has no Croatia): the code, or "" to search everywhere and
+    let the words name the place."""
+    try:
+        from captain_claw.tools.web_search import _BRAVE_COUNTRIES
+    except Exception:  # noqa: BLE001
+        return code
+    return code if code in _BRAVE_COUNTRIES else ""
 
 
 def fix_output(recipe: dict[str, Any], task: str) -> bool:
@@ -341,8 +348,11 @@ def _group_words(group: str) -> list[str]:
 
 
 def _group_queries(group: str, place: str, size: re.Match | None) -> list[str]:
-    qs = [f"{group} directory {place}", f"list of {group} {place}", f"top {group} {place}",
-          f"{group} association member directory {place}", f"small {group} {place}"]
+    """Searches for pages that list many of a group's items, any kind of item: lists,
+    directories, databases, rankings. A company-size band adds a search for company
+    pages with that band."""
+    qs = [f"list of {group} {place}", f"{group} {place}", f"best {group} {place}", f"{group} directory {place}",
+          f"{group} database {place}", f"top {group} {place}"]
     if size:
         qs.append(f'site:linkedin.com/company {group} {place} "{size.group(1)}-{size.group(2)} employees"')
     return [" ".join(q.split()) for q in qs]
@@ -354,7 +364,9 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
     information is reference, not a source; the charter's fixed value lists become
     checks."""
     text = " ".join(str(task or "").split())
-    place = "United States" if re.search(r"\b(US|USA|U\.S\.|United States)\b", text) else ""
+    places = fx.target_places(text)
+    recipe["places"] = places
+    place = fx.place_name(places[0]) if len(places) == 1 else ""
     size = _SIZE.search(text)
     fix_output(recipe, text)
     seen_lists: list[list[str]] = []
@@ -367,11 +379,13 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
             s["queries"] = _group_queries(s["group"], place, size)
             s["about"] = s["about"] or s["group"]
         seen_lists.append(s["queries"])
-    if place == "United States":  # a search that names no place finds firms anywhere
+    if place:  # one place: a search that names none finds items anywhere
+        code = places[0]
         for s in recipe["sources"]:
             if s["kind"] == "search":
-                s["queries"] = [q if _US_QUERY.search(q) else f"{q} United States" for q in s["queries"]]
-                s["country"] = s.get("country") or "US"
+                s["queries"] = [q if any(c == code for c, _ in fx.places_named(q)) else f"{q} {place}"
+                                for q in s["queries"]]
+                s["country"] = _search_country(code)
     refs = list(recipe.get("reference") or [])
     for s in list(recipe["sources"]):
         path = s.get("path") or ""
@@ -484,8 +498,8 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
 
 Rules:
 - Use the owner's own files and links first; they cost nothing to read. Search only when the list has to be
-  found on the web, and then write 10-25 searches per group that find lists of the right items (directories,
-  associations, "N-M employees" pages, rankings), not one item each.
+  found on the web, and then write 10-25 searches per group that find pages listing many of the right items
+  (directories, catalogues, databases, rankings, "best of" and category pages), not one item each.
 - Gather only what the checks and the rules need, and put the cheapest test first: a size band from a search
   snippet ("size_max" filter) before reading pages.
 - Templates name columns in braces ({Firm}, {Website}) or {domain}.
@@ -578,6 +592,25 @@ _SIZE = re.compile(r"(\d{1,4})\s*(?:-|–|—|to)\s*(\d{1,6})\s+(?:employees|peo
 _MONTHS = re.compile(r"(?:last|within|past)\s+(\d{1,3})\s+months", re.I)
 
 
+_ASK = re.compile(r"\b(?:find|list|collect|gather|compile|research|identify|source|build a list of|make a list of)"
+                  r"\s+(?:(?:about|at least|up to|some|all|the|\d+)\s+)*([a-z][a-z/&'-]*(?:\s+[a-z][a-z/&'-]*){0,4}?)"
+                  r"(?=\s+(?:in|from|that|which|who|with|for|across|on|near|around|and list|,)\b|[.,;:]|$)", re.I)
+
+
+def item_from(text: str) -> str:
+    """What one row of the list is, from the charter's own ask ("Find 40 vegan
+    restaurants in Zagreb" → "vegan restaurant"), as a short singular noun; "item"
+    when it doesn't say."""
+    m = _ASK.search(text or "")
+    if m:
+        words = [w for w in m.group(1).split() if not fx.places_named(w) and w.lower() not in ("small", "new")]
+        if words:
+            words[-1] = _singular(words[-1])
+            return " ".join(words)[:40]
+    noun = _NOUNS.search(text or "")
+    return _singular(noun.group(1)) if noun else "item"
+
+
 def _singular(word: str) -> str:
     w = word.lower()
     for plural, one in (("ies", "y"), ("people", "person"), ("businesses", "business")):
@@ -596,11 +629,10 @@ def web_recipe(base: dict[str, Any], task: str) -> dict[str, Any] | None:
     if not cols:
         return None
     text = " ".join(str(task or "").split())
-    noun = _NOUNS.search(text)
-    item = _singular(noun.group(1)) if noun else "item"
-    country = "US" if re.search(r"\b(US|USA|U\.S\.|United States)\b", text) else \
-        "GB" if re.search(r"\b(UK|United Kingdom|Britain)\b", text) else ""
-    place = {"US": "United States", "GB": "UK"}.get(country, "")
+    item = item_from(text)
+    places = fx.target_places(text)
+    place = fx.place_name(places[0]) if len(places) == 1 else ""
+    country = _search_country(places[0]) if len(places) == 1 else ""
     size = _SIZE.search(text)
     groups = list(base["groups"]) or [""]
     sources = []
@@ -627,7 +659,7 @@ def web_recipe(base: dict[str, Any], task: str) -> dict[str, Any] | None:
     date_col = next((c for c in cols if re.search(r"date", c, re.I)), "")
     if months and date_col:
         checks.append({"column": date_col, "op": "within_months", "value": int(months.group(1))})
-    extract = ["emails", "dates", "size_band"] + (["us_state"] if country == "US" else [])
+    extract = ["emails", "dates"] + (["size_band"] if size else []) + (["us_state"] if "US" in places else [])
     return normalize_recipe({"item": item, "site_column": site, "sources": sources, "gather": gather,
                              "filters": filters, "extract": extract, "checks": checks, "decide": text[:3000]}, base)
 
@@ -791,6 +823,16 @@ def _append_csv(path: Path, cols: list[str], row: dict[str, Any]) -> None:
         w.writerow({c: ("" if row.get(c) is None else str(row.get(c))) for c in cols})
 
 
+def skip_sites(recipe: dict[str, Any]) -> tuple[str, ...]:
+    """The directory and social sites that aren't an item's own: all of them, but one
+    the list's own site column is about (a "LinkedIn" column, a "GitHub repo" link, an
+    "Amazon URL"): that site is where its items live."""
+    site = (recipe.get("site_column") or "").lower()
+    about = (recipe.get("about") or {}).get(recipe.get("site_column") or "", "").lower()
+    words = f"{site} {about}"
+    return tuple(s for s in _SKIP_SITES if not re.search(r"(?<![a-z])" + re.escape(s.split(".")[0]) + r"(?![a-z])", words))
+
+
 def _own_result(results: list[dict[str, str]], name: str, url: str) -> str:
     """An item's own search result (its title, link and snippet), so code reads what
     was said of it alone, not of the other results beside it."""
@@ -935,7 +977,8 @@ class Work:
         self.items_max = _int(self.cfg.get("funnel_items_max"), 1, 1_000_000, ITEMS_MAX)
         self.thinking = str(self.cfg.get("funnel_thinking") or "off").lower() == "on"
         self.charter = " ".join(str(run.get("task") or "").split())[:CHARTER_CHARS]
-        self.us_only = any(s.get("country") == "US" for s in recipe["sources"])
+        self.places = list(recipe.get("places") or sorted({s["country"] for s in recipe["sources"] if s.get("country")}))
+        self.skip_sites = skip_sites(recipe)
         self.reference = reference_text(folder, recipe)
         self.more_pages: list[str] = []
         self.tools: Tools | None = None
@@ -1159,7 +1202,7 @@ class Work:
 
         def own(v: str) -> str:
             d = fx.domain_of(v) if re.match(r"^(https?://|www\.)", v.strip(), re.I) else ""
-            return "" if d and any(fx.same_site(d, s) for s in _SKIP_SITES) else v
+            return "" if d and any(fx.same_site(d, s) for s in self.skip_sites) else v
 
         v = own(f.get(key.lower(), "")) if key and key != "domain" else ""
         v = v or own(f.get(site.lower(), "")) or own(f.get("url", "")) or own(f.get("website", "")) or f.get("name", "")
@@ -1171,10 +1214,10 @@ class Work:
         the US (for a US list) goes before any page is read; a size band is tested once
         it's found."""
         f = {k.lower(): v for k, v in item["fields"].items()}
-        if found is None and self.us_only:
-            where = fx.foreign_place(f"{item.get('text') or ''}\n" + " ".join(map(str, f.values())))
+        if found is None and self.places:
+            where = fx.foreign_place(f"{item.get('text') or ''}\n" + " ".join(map(str, f.values())), self.places)
             if where:
-                return f"outside the US (its listing says {where})"
+                return f"not in {' or '.join(fx.place_phrase(c) for c in self.places)} (its listing says {where})"
         for flt in self.recipe["filters"]:
             col, op, val = flt["column"], flt["op"], flt.get("value")
             if op in ("size_max", "size_min"):
@@ -1227,7 +1270,7 @@ class Work:
                 self.seen.add(key)
                 self.counts["known"] += 1
                 continue
-            if self.recipe.get("site_column") and any(fx.same_site(key, s) for s in _SKIP_SITES):
+            if self.recipe.get("site_column") and any(fx.same_site(key, s) for s in self.skip_sites):
                 continue  # items with sites of their own: a directory or a social page isn't one
             item["key"] = key
             self.seen.add(key)
@@ -1301,7 +1344,7 @@ class Work:
         for k in (site, "website", "url", "site", "homepage", "domain"):
             v = f.get(k, "")
             d = fx.domain_of(v) if v else ""
-            if d and "." in d and not any(fx.same_site(d, s) for s in _SKIP_SITES):
+            if d and "." in d and not any(fx.same_site(d, s) for s in self.skip_sites):
                 return v
         return ""
 
@@ -1316,9 +1359,9 @@ class Work:
         words = [w for w in re.findall(r"[a-z0-9]+", name.lower())
                  if len(w) >= 3 and w not in {"the", "and", "inc", "llc", "ltd", "group", "partners", "company",
                                               "consulting", "co", "corp", "firm", "associates", "services"}]
-        place = {"US": "United States", "GB": "UK"}.get(next(
-            (s.get("country") for s in self.recipe["sources"] if s.get("country")), ""), "")
-        q = f'"{name}" {place} official website'.replace("  ", " ")
+        place = fx.place_name(self.places[0]) if len(self.places) == 1 else ""
+        kind = self.recipe["item"] if self.recipe["item"] != "item" else ""
+        q = " ".join(f'"{name}" {kind} {place}'.split())
         ok, text = await (await self._tools()).search(q, 8)
         self.queries["searches"] += 1
         self._save_queries()
@@ -1327,7 +1370,7 @@ class Work:
             return
         for r in fx.search_results(text):
             d = fx.domain_of(r["url"])
-            if not d or any(fx.same_site(d, s) for s in _SKIP_SITES):
+            if not d or any(fx.same_site(d, s) for s in self.skip_sites):
                 continue
             where = f"{d} {r['title']}".lower()
             if words and not any(w in where for w in words):
