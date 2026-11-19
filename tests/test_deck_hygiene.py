@@ -183,18 +183,27 @@ def test_the_log_goes_to_a_rotating_file_with_structlog_lines(tmp_path, monkeypa
     old_level = root.level
     root.setLevel(logging.INFO)             # as _configure_fd_logging does
     old_sink = cc_logging._system_log_sink
+    import structlog
+
+    old_structlog = structlog.get_config()
     try:
         path = fd_logfile.install(tmp_path)
         assert path == tmp_path / "logs" / fd_logfile.LOG_NAME
         assert fd_logfile.install(tmp_path) == path       # once per process
         logging.getLogger("flight_deck").info("deck says %s", "hello")
         cc_logging._system_log_sink("\x1b[2m2026-11-19\x1b[0m [info] Spend ledger read calls=7")
+        # A module's structlog logger, as Flight Deck uses it (structlog never
+        # configured there): on a live deck these reached only the terminal.
+        cc_logging.get_logger("captain_claw.flight_deck.google_oauth_routes").warning(
+            "Google sign-in refused for good", owner="u1", error="invalid_grant")
         for h in root.handlers:
             h.flush()
         text = path.read_text()
         assert "deck says hello" in text
         assert "2026-11-19 [info] Spend ledger read calls=7" in text and "\x1b[" not in text
+        assert "Google sign-in refused for good" in text and "error=invalid_grant" in text
     finally:
+        structlog.configure(**old_structlog)
         for h in list(root.handlers):
             if h not in before:
                 root.removeHandler(h)
