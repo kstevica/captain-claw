@@ -104,7 +104,9 @@ _SKIP_SITES = ("linkedin.com", "facebook.com", "twitter.com", "x.com", "instagra
                "mapquest.com", "signalhire.com", "craft.co", "owler.com", "pitchbook.com", "tiktok.com",
                "pinterest.com", "medium.com", "reddit.com", "google.com", "bing.com", "amazon.com",
                "sortlist.com", "themanifest.com", "agencyspotter.com", "chamberofcommerce.com", "buzzfile.com",
-               "opencorporates.com", "bizapedia.com", "cbinsights.com", "tracxn.com", "builtin.com")
+               "opencorporates.com", "bizapedia.com", "cbinsights.com", "tracxn.com", "builtin.com",
+               "leadiq.com", "theorg.com", "thumbtack.com", "lusha.com", "contactout.com", "cognism.com",
+               "seamless.ai", "kompass.com", "angi.com", "houzz.com", "bark.com", "fiverr.com", "upwork.com")
 REFERENCE_CHARS = 3000   # what a judging call reads of the run's reference files, in all
 CHARTER_CHARS = 3500     # and of the owner's charter (the columns' own rules)
 # Words a group shares with others: a group's searches name it by the rest.
@@ -930,6 +932,35 @@ def name_words(name: str) -> list[str]:
     return list(dict.fromkeys(strong or [w for w in words if len(w) >= 2]))
 
 
+_INITIALS_SKIP = frozenset({"the", "and", "of", "llc", "inc", "ltd", "co", "corp", "plc", "gmbh"})
+_SECOND_LEVEL = frozenset({"co", "com", "org", "net", "ac", "gov", "edu", "or", "ne"})
+
+
+def site_names_item(name: str, domain: str) -> bool:
+    """Whether a site's address is the item's own: a distinctive word of its name is in
+    the domain (darbyconsulting.com, nera.com, 2visions.com), or the domain is its
+    initials (bcg.com). A page that only mentions it (an article on forbes.com, a
+    listing on a directory) never is, whatever its title says."""
+    labels = [x for x in str(domain or "").lower().removeprefix("www.").split(".") if x]
+    if len(labels) < 2:
+        return False
+    labels = labels[:-1]
+    if len(labels) >= 2 and labels[-1] in _SECOND_LEVEL:
+        labels = labels[:-1]  # example.co.uk
+    core = "".join(labels).replace("-", "")
+    words = re.findall(r"[a-z0-9]+", str(name or "").lower())
+    strong = [w for w in words if len(w) >= 3 and w not in _NAME_STOP]
+    if strong:
+        if any(w in core for w in strong):
+            return True
+    else:
+        weak = [w for w in words if len(w) >= 2]
+        if weak and sum(1 for w in weak if w in core) >= min(2, len(weak)):
+            return True
+    initials = "".join(w[0] for w in words if w not in _INITIALS_SKIP)
+    return len(initials) >= 2 and (core == initials or (len(initials) >= 3 and core.startswith(initials)))
+
+
 def names_item(words: list[str], url: str, title: str) -> bool:
     """Whether a search result is about the item: its address and title carry the
     item's name (every word of a one- or two-word name; at least half, and two, of a
@@ -1511,16 +1542,16 @@ class Work:
 
     async def find_site(self, item: dict, evidence: list[dict]) -> None:
         """An item found on a directory or a LinkedIn page has no site of its own to
-        read: one search for its name, and the first result on a site of its own whose
-        title or address carries the name's words."""
+        read: one search for its name, and the first result whose address is its own
+        (``site_names_item``). None found: it has no site, and its judging call says
+        so, rather than read someone else's page about it."""
         f = item["fields"]
         name = self._name_of(item)
         if not name or self.queries["searches"] >= self.budget:
             return
-        words = name_words(name)
         place = fx.place_name(self.places[0]) if len(self.places) == 1 else ""
-        kind = self.recipe["item"] if self.recipe["item"] != "item" else ""
-        q = " ".join(f'"{name}" {kind} {place}'.split())
+        kind = self.recipe["item"] if self.recipe["item"] != "item" and len(self.recipe["item"].split()) <= 2 else ""
+        q = " ".join(f'"{name}" {kind} {place}'.split())  # a long item phrase ("US knowledge firm lead") only blurs it
         ok, text = await (await self._tools()).search(q, 8)
         self.queries["searches"] += 1
         self._save_queries()
@@ -1529,10 +1560,7 @@ class Work:
             return
         for r in fx.search_results(text):
             d = fx.domain_of(r["url"])
-            if not d or any(fx.same_site(d, s) for s in self.skip_sites):
-                continue
-            where = f"{d} {r['title']}".lower()
-            if words and not any(w in where for w in words):
+            if not d or any(fx.same_site(d, s) for s in self.skip_sites) or not site_names_item(name, d):
                 continue
             f[self.recipe["site_column"]] = f"https://{d}"
             evidence.append({"source": r["url"], "text": r["text"]})
