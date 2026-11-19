@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Gauge, Plus, Copy, Trash2, Users, Check, Wand2, KeyRound, Eye, EyeOff, Zap, Pencil,
   AlertTriangle, Layers, Server, Image as ImageIcon, Brain, Hammer, Upload,
@@ -250,14 +250,7 @@ export function ModelsPage() {
           <Card bodyClassName="p-5 space-y-5">
             <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
               <div className="min-w-0 flex-1">
-                <label className="sr-only" htmlFor="fd-console-set-name">Set name</label>
-                <input
-                  id="fd-console-set-name"
-                  value={active.name}
-                  onChange={(e) => renameSet(active.id, e.target.value)}
-                  placeholder="Name this set"
-                  className="w-full rounded-lg border border-transparent bg-transparent px-2 py-1 -ml-2 text-xl font-semibold tracking-tight text-zinc-100 hover:border-zinc-800 focus:border-violet-500/50 focus:outline-none"
-                />
+                <SetName key={active.id} name={active.name} onRename={(name) => renameSet(active.id, name)} />
                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                   <Pill tone="violet" icon={Check} title="Your own agents, Agent Forge and Basna use this set">In use by you</Pill>
                   {isTeam(active) && (changedSincePublish
@@ -378,6 +371,65 @@ export function ModelsPage() {
 }
 
 // ── A set ──
+
+// The selected set's name: a heading with a Rename button; Enter or leaving
+// the field keeps the new name, Esc (or an empty name) keeps the old one.
+function SetName({ name, onRename }: { name: string; onRename: (name: string) => void }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(name)
+  const done = useRef(false)
+  const start = () => { setDraft(name); done.current = false; setEditing(true) }
+  const finish = (keep: boolean) => {
+    if (done.current) return
+    done.current = true
+    const v = draft.trim()
+    if (keep && v && v !== name) onRename(v)
+    setEditing(false)
+  }
+  if (editing) {
+    return (
+      <div className="flex items-center gap-2">
+        <input
+          autoFocus
+          value={draft}
+          maxLength={80}
+          aria-label="Set name"
+          onChange={(e) => setDraft(e.target.value)}
+          onFocus={(e) => e.currentTarget.select()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') { e.preventDefault(); finish(true) }
+            if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false) }
+          }}
+          onBlur={() => finish(true)}
+          className="w-full max-w-md rounded-lg border border-violet-500/50 bg-zinc-950 px-2 py-1 -ml-2 text-xl font-semibold tracking-tight text-zinc-100 focus:outline-none focus:ring-2 focus:ring-violet-500/15"
+        />
+        <Button
+          variant="primary"
+          icon={Check}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => finish(true)}
+          disabled={!draft.trim()}
+        >
+          Save
+        </Button>
+      </div>
+    )
+  }
+  return (
+    <div className="flex min-h-[38px] min-w-0 items-center gap-1.5">
+      <h2 className="truncate text-xl font-semibold tracking-tight text-zinc-100" title={name}>{name || 'Unnamed set'}</h2>
+      <button
+        type="button"
+        onClick={start}
+        title="Rename this set"
+        aria-label="Rename this set"
+        className="flex shrink-0 items-center gap-1 rounded-lg px-1.5 py-1 text-xs font-medium text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-violet-500"
+      >
+        <Pencil className="h-3.5 w-3.5" /> Rename
+      </button>
+    </div>
+  )
+}
 
 function SetCard({ set, selected, team, stale, onSelect }: {
   set: TierSet
