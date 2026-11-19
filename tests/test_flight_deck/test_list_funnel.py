@@ -1176,3 +1176,32 @@ async def test_a_page_about_an_item_is_never_taken_for_its_site(deck):
     fields = {json.loads(m["fields"])["Firm"]: json.loads(m["fields"]) for m in funnel._read_csv(folder / funnel.MAYBE)}
     assert fields["Darby Consulting"]["Website"] == "https://darbyconsulting.example"
     assert "Website" not in fields["Censeo Partners"]  # no site of its own found: none, not Forbes
+
+
+# ── searches for a group ───────────────────────────────────────────────
+
+def test_a_slashed_group_is_searched_by_each_part():
+    """Groups 2-4 of a run searched "list of research/analysis shops United States":
+    the owner's label, slash and all."""
+    assert funnel._group_phrases("research/analysis shops", "firm") == [
+        "research shops", "research firms", "analysis shops", "analysis firms"]
+    assert funnel._group_phrases("marketing/content agencies", "firm") == ["marketing agencies", "content agencies"]
+    assert funnel._group_phrases("vegan/vegetarian restaurants", "restaurant") == [
+        "vegan restaurants", "vegetarian restaurants"]
+    assert funnel._group_phrases("legal/accounting boutiques", "US knowledge firm lead") == [
+        "legal boutiques", "accounting boutiques"]  # a long item phrase isn't a noun to borrow
+    assert funnel._group_phrases("boutique consultancies", "company") == ["boutique consultancies"]
+    qs = funnel._group_queries("research/analysis shops", "United States", None, "firm")
+    assert qs[:4] == ["list of research shops United States", "list of research firms United States",
+                      "list of analysis shops United States", "list of analysis firms United States"]
+    assert not any("/" in q for q in qs) and len(qs) == len(set(qs)) <= 24
+    # a model's own searches for a group count when they use a word for it ("law" for "legal")
+    r = funnel.normalize_recipe({"sources": [
+        {"kind": "search", "group": "x", "queries": ["boutique law firm directory", "CPA firms list"]},
+        {"kind": "search", "group": "y", "queries": ["boutique law firm directory", "CPA firms list"]}]},
+        {**funnel.from_contract(CONTRACT), "groups": {"x": 2, "y": 2}})
+    r["sources"][0]["group"] = "legal/accounting boutiques"
+    r["sources"][1]["group"] = "research/analysis shops"  # a copy of another group's: written for it
+    funnel.tidy_recipe(r, "Find firms.")
+    assert r["sources"][0]["queries"] == ["boutique law firm directory", "CPA firms list"]
+    assert r["sources"][1]["queries"][:2] == ["list of research shops", "list of analysis shops"]  # item: "item"
