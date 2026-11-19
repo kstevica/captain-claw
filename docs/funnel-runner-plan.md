@@ -360,6 +360,16 @@ email, a date, a city, a size band, a person's name) and dropped when it rules o
 of them, any value the checks allow, or a group's own name (its singular too), or when
 it doesn't compile.
 
+The fifth run's recipe slipped one past that test: "keep only what starts with two
+letters or a date", tried ignoring case, matches few ordinary values, yet it dropped
+firms named "P&S …", "U.S. …" and "C-Suite …". An "everything except X" pattern (one
+that starts by looking ahead for what it must not see) is now never an exclusion. The
+same run dropped two firms as "201-500 people" read off LinkedIn News: with no site of
+their own found, their LinkedIn page stayed their site, and the recipe's pages ("about",
+"news", "contact") were read off LinkedIn's root. On a directory or social site only the
+item's own page is read now. And a size counts only from the item's own listing, its own
+pages, or a search result whose address and title carry its name.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

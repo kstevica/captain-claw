@@ -204,18 +204,25 @@ def _norm_table(check: dict) -> dict | None:
 # excludes everything ("^(?!([A-Z]{2})$).*$", meant as "State is two letters", dropped
 # every firm a run looked at).
 _ORDINARY = ("Acme Consulting LLC", "https://www.example.com/about", "jane.doe@example.com", "2025-03-14",
-             "Austin, TX", "11-50", "boutique consultancies", "Jane Doe", "personal", "Onboarding")
+             "Austin, TX", "11-50", "boutique consultancies", "Jane Doe", "personal", "Onboarding",
+             "P&S Partners", "U.S. Advisors", "C-Suite Group", "3 Bridges Studio")
+# "Everything except X": a pattern that starts by looking ahead for what it must NOT
+# see. That's a format rule, never an exclusion ("^(?!([A-Z]{2}|\d{4}-\d{2}))" dropped
+# firms named "P&S …", "U.S. …" and "C-Suite …").
+_ALL_BUT = re.compile(r"^(?:\^|\\A)?(?:\(\?:|\()*\(\?!")
 
 
 def sane_exclude(pattern: str, keep: list[str] | tuple[str, ...] = ()) -> bool:
-    """Whether an exclusion pattern rules out only some rows: it compiles, it doesn't
-    match most ordinary values (a name, a site, an email, a date, a place), and it
-    matches none of ``keep`` (the list's own groups and allowed values)."""
+    """Whether an exclusion pattern rules out only some rows: it compiles, it isn't an
+    "everything except X" rule, it doesn't match most ordinary values (a name, a site,
+    an email, a date, a place), and it matches none of ``keep`` (the list's own groups
+    and allowed values)."""
     try:
         rx = re.compile(str(pattern or ""), re.I)
     except re.error:
         return False
-    if not pattern or sum(1 for v in _ORDINARY if rx.search(v)) * 2 >= len(_ORDINARY):
+    if not pattern or _ALL_BUT.match(str(pattern)) \
+            or sum(1 for v in _ORDINARY if rx.search(v)) * 2 >= len(_ORDINARY):
         return False
     forms = [str(k) for k in keep if str(k).strip()]
     forms += [" ".join(_one(w) for w in f.replace("/", " ").split()) for f in forms]  # "agencies" → "agency"

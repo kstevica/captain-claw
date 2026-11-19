@@ -914,6 +914,58 @@ def test_a_filter_that_rules_out_everything_is_dropped():
                             {"column": "size_band", "op": "size_max", "value": 50}]
 
 
+def test_what_names_an_item_on_a_page():
+    assert funnel.name_words("P&S International Strategies, LLC") == ["international", "strategies"]
+    assert funnel.name_words("U.S. Consulting Services, Inc.") == ["consulting", "services", "inc"]
+    words = funnel.name_words("Consultancy Services LLC (USA)")
+    assert funnel.names_item(words, "https://www.linkedin.com/company/consultancy-services-usa", "Consultancy Services LLC")
+    assert not funnel.names_item(words, "https://www.linkedin.com/news", "LinkedIn News")
+    assert not funnel.names_item(words, "https://www.example.com/usa", "Top firms in the USA")  # one word of two
+    long = funnel.name_words("USBC US Business Consulting and Investments, LLC")
+    assert funnel.names_item(long, "https://usbc.example/", "USBC Business Advisors")
+    assert not funnel.names_item(long, "https://news.example/", "Business news") and not funnel.names_item([], "u", "t")
+
+
+async def test_a_size_read_off_a_page_about_something_else_is_no_size(deck):
+    """Two firms were dropped as "201-500 people" read off LinkedIn News, a result of
+    their own size search that wasn't about them."""
+    run, folder = await _run(deck["store"], CONTRACT, rid="bat_sizeof001")
+    recent = _months_back(3)
+    _web_deck(deck, recent)
+    news = "\n2. LinkedIn News\n   URL: https://www.linkedin.com/news\n   Snippet: Big Co (201-500 employees) hires\n"
+    deck["tools"].results.update({
+        '"Alpha" site:linkedin.com/company': "[QUERY: q]\n" + news,  # nothing of its own: no size, read on
+        '"Gamma" site:linkedin.com/company': "[QUERY: q]\n" + news + _result("Gamma", "https://linkedin.com/company/gamma",
+                                                                           "2-10 employees").split("\n", 1)[1]})
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    why = {r["key"]: r["reason"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert not any(w.startswith("201-500") for w in why.values()), why
+    assert why["beta.example"].startswith("51-200 people")  # its own page still counts
+    assert "isn't in https://gamma.example/contact" in why["gamma.example"]  # read and judged, not cut on size
+    assert [r["Firm"] for r in funnel._read_csv(folder / funnel.ROWS)] == ["Alpha"]
+
+
+async def test_a_firm_left_with_its_linkedin_page_has_only_that_page_read(deck):
+    """No site of its own found, a firm kept its LinkedIn page as its site, and the
+    recipe's pages ("news", "contact") were read off LinkedIn's root: linkedin.com/news
+    gave it another company's size."""
+    run, folder = await _run(deck["store"], CONTRACT, rid="bat_skipsite1")
+    deck["recipe"] = {**WEB_RECIPE, "gather": [{"kind": "fetch", "url": "{Website}", "paths": ["", "news", "contact"]}]}
+    page = "https://www.linkedin.com/company/zeta-advisors"
+    deck["extract"] = lambda user: {"items": [{"name": "Zeta Advisors", "url": page,
+                                               "fields": {"Firm": "Zeta Advisors", "Website": page}}]}
+    deck["tools"] = _Tools(pages={page: "Zeta Advisors. Company size 11-50 employees.",
+                                  "https://www.linkedin.com/news": "Big Co (201-500 employees) is hiring"},
+                           results={"x firms list": "list results"})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "maybe", "reason": "no site of its own"} for i, _f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert [u for k, u in deck["tools"].calls if k == "fetch"] == [page]
+    item = funnel._read_csv(folder / funnel.ITEMS)[0]
+    assert item["status"] == "maybe" and "201-500" not in item["reason"]
+
+
 async def test_a_retried_setup_leaves_no_stale_note(deck, monkeypatch):
     run, folder = await _run(deck["store"], PEOPLE, rid="bat_retry0001")
     (folder / "extra" / "contacts.csv").write_text("Name,Email,Team\nAna,ana@a.example,a\n")
