@@ -472,7 +472,7 @@ async def test_the_finishing_step_works_only_on_the_nearly_there(deck):
                            {"Name": "N", "Email": f"n{_}@x.example", "Team": "a"})
     assert funnel.prepare_finish(fresh, _finish_step(steps))["result"]["output"] == "Nothing to finish: no group is short."
     # a run whose settings say none plans no finishing step
-    run2, _ = await _run(deck["store"], PEOPLE, cfg={"funnel_leftovers": "none"}, rid="bat_funnel0011")
+    run2, _ = await _run(deck["store"], PEOPLE, cfg={"funnel_leftovers": "none"}, rid="bat_other0011")
     (bat_routes._run_folder(run2) / "extra" / "contacts.csv").write_text("Name,Email,Team\nAna,ana@acme.example,a\n")
     assert not any(s["title"].startswith("Finish") for s in await funnel.plan(run2))
 
@@ -588,3 +588,95 @@ async def test_items_earlier_runs_checked_arent_looked_at_again(deck):
     assert "Skipped 1 that earlier runs already checked." in work["output"]
     assert [r["Name"] for r in funnel._read_csv(folder / funnel.ROWS)] == ["Bo"]
     assert "Skipped 1 that earlier runs already checked." in (folder / "progress" / "step-1.md").read_text()
+
+
+# ── thinking off, and a fallback for web lists ─────────────────────────
+
+CHARTER = ("Find small US knowledge firms that are likely to want Captain, and list them in leads.csv. Four "
+           "segments, 10 firms in each. A firm counts only if it is headquartered in the US; it has 2–50 employees; "
+           "it published something dated in the last 24 months that shows interest in AI; its own website prints "
+           "an email address.")
+LEADS = [{"id": "fm1", "text": "leads.csv: 15 columns; 10 per Segment", "check": {
+    "type": "table", "path": "leads.csv",
+    "columns": ["Firm", "Website", "Segment", "State", "Employees", "EmployeesSourceURL", "Email", "EmailType",
+                "EmailSourceURL", "SignalDate", "SignalURL", "Signal"],
+    "min_rows": 40, "min_per": {"Segment": 10}, "allowed": {"Segment": ["consultancies", "research shops"]},
+    "unique": ["Website"]}}]
+
+
+def test_a_web_list_without_a_models_recipe():
+    r = funnel.web_recipe(funnel.from_contract(LEADS), CHARTER)
+    assert r["item"] == "firm" and r["site_column"] == "Website" and r["key"] == "Website"
+    assert [s["group"] for s in r["sources"]] == ["consultancies", "research shops"]
+    q = r["sources"][0]["queries"]
+    assert r["sources"][0]["country"] == "US" and "consultancies directory United States" in q
+    assert 'site:linkedin.com/company consultancies United States "2-50 employees"' in q
+    assert r["filters"] == [{"column": "size_band", "op": "size_max", "value": 50}]
+    assert r["gather"][0] == {"kind": "search", "query": '"{Firm}" site:linkedin.com/company', "count": 5}
+    assert r["gather"][1]["url"] == "{Website}" and "contact" in r["gather"][1]["paths"]
+    assert {"column": "Email", "op": "in_evidence", "source_column": "EmailSourceURL"} in r["checks"]
+    assert {"column": "SignalDate", "op": "within_months", "value": 24} in r["checks"]
+    assert not any(c["column"] in ("Employees", "Signal") and c["op"] == "in_evidence" for c in r["checks"])
+    assert "us_state" in r["extract"] and r["decide"].startswith("Find small US knowledge firms")
+    assert funnel.web_recipe(funnel.from_contract([]), CHARTER) is None  # no columns, no list
+
+
+def test_a_few_links_are_reference_not_a_list(tmp_path):
+    folder = tmp_path / "run"
+    (folder / "extra").mkdir(parents=True)
+    links = folder / "extra" / "links-1.md"
+    links.write_text("# Links\n\n1. [Web](https://captain.example)\n2. [Repo](https://code.example/captain)\n")
+    base = funnel.from_contract(LEADS)
+    assert funnel.default_recipe(folder, base) is None
+    r = funnel.fallback_recipe(folder, base, CHARTER)
+    assert {s["kind"] for s in r["sources"]} == {"search"}
+    links.write_text("# Links\n\n" + "".join(f"{i}. [Firm {i}](https://firm{i}.example)\n" for i in range(1, 8)))
+    assert funnel.default_recipe(folder, base)["sources"] == [{"kind": "links", "path": "extra/links-1.md",
+                                                              "group": "", "as": "items"}]
+
+
+@pytest.fixture
+def calls(deck, monkeypatch):
+    """What each model call asked for: its thinking level and its output limit."""
+    from captain_claw.flight_deck import basna_routes
+    from captain_claw.llm import reasoning
+    seen: list[tuple[str, str | None, int]] = []
+    inner = basna_routes._provider_call(None)[0]
+
+    class Spy:
+        async def complete(self, messages, **kw):
+            seen.append((messages[0].content[:24], reasoning.requested_effort(), kw.get("max_tokens")))
+            return await inner.complete(messages, **kw)
+
+    monkeypatch.setattr(basna_routes, "_provider_call", lambda *_a, **_k: (Spy(), 32768))
+    return seen
+
+
+async def test_the_funnels_calls_dont_think(deck, calls):
+    run, folder = await _run(deck["store"], PEOPLE, rid="bat_funnel0030")
+    (folder / "extra" / "contacts.csv").write_text("Name,Email,Team\nAna,ana@a.example,a\nBo,bo@b.example,b\n")
+    deck["recipe"] = {"item": "person", "sources": [{"kind": "file", "path": "extra/contacts.csv"}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "drop", "reason": "no"} for i, _ in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    setup, decide = calls
+    assert setup[1] == "off" and setup[2] == funnel.OUT_TOKENS["setup"]
+    assert decide[1] == "off" and decide[2] == funnel.OUT_TOKENS["decide"] + funnel.DECIDE_PER_ITEM
+    # a run that turns thinking on: its judging calls think, with room for it
+    run2, folder2 = await _run(deck["store"], PEOPLE, cfg={"funnel_thinking": "on"}, rid="bat_think0031")
+    (folder2 / "extra" / "contacts.csv").write_text("Name,Email,Team\nCy,cy@c.example,a\n")
+    calls.clear()
+    await _go(deck["store"], run2, (await funnel.plan(run2))[:1])
+    assert calls[0][1] == "off" and calls[1][1] is None and calls[1][2] == funnel.THINKING_TOKENS
+
+
+async def test_setup_falls_back_to_web_searches(deck):
+    run, folder = await _run(deck["store"], LEADS, rid="bat_funnel0032")
+    run = {**run, "task": CHARTER}
+    (folder / "extra" / "links-1.md").write_text("# Links\n\n1. [Web](https://captain.example)\n")
+    deck["recipe"] = {"kind": "search", "query": "\"{Firm}\" site:linkedin.com/company"}  # a fragment, no sources
+    steps = await funnel.plan(run)
+    assert [s["title"] for s in steps][:2] == ["Find and check 10 consultancies", "Find and check 10 research shops"]
+    notes = [e["message"] for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note"]
+    assert any("set up from web searches built from its checks" in n for n in notes)
+    assert deck["asked"] == ["setup", "setup"]  # asked twice, then the fallback

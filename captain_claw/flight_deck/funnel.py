@@ -42,6 +42,7 @@ from urllib.parse import quote, urljoin, urlsplit
 import structlog
 
 from captain_claw.flight_deck import funnel_extract as fx
+from captain_claw.llm import reasoning
 
 log = structlog.get_logger(__name__)
 
@@ -67,6 +68,14 @@ ITEMS_MAX = 5000     # items looked at per step (config funnel_items_max)
 READ_CHARS = 12_000  # what one item's judging call reads of its pages, in all
 MORE_PAGES = 10      # list pages found in search results, followed per step
 DECIDE_TOKENS = 8192
+# What each funnel call may write. Its calls run with thinking off (a JSON answer and
+# nothing more): with it on, Qwen thought 160k characters on the setup call, looped,
+# and never answered, twice. A small limit also keeps a loop from running for minutes
+# on the tier's whole output.
+OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500}
+DECIDE_PER_ITEM = 600       # more room for a judging call with several short rows
+THINKING_TOKENS = 16_000    # a judging call's room when the run turns thinking on
+LINKS_AS_ITEMS = 5          # a links file with fewer links is reference, not a list to go through
 NOTE_EVERY = 10
 FINISH_MAX = 30          # nearly-there items one finishing step is given
 AGENT_CONTEXT = 64_000   # a funnel run's agent steps work in this much context (config funnel_agent_context)
@@ -390,9 +399,20 @@ def _folder_listing(folder: Path) -> str:
     return "\n".join(lines) or "(no files)"
 
 
+def _links_count(p: Path) -> int:
+    """How many links a links file the owner added holds (0 when it isn't one)."""
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")[:200_000]
+    except OSError:
+        return 0
+    found = fx.read_links(text)
+    return len(found) if found and (text.lstrip().startswith("# Links") or len(found) * 120 > len(text) * 0.3) else 0
+
+
 def default_recipe(folder: Path, base: dict[str, Any]) -> dict[str, Any] | None:
-    """A recipe without a model: the folder's own tables, documents and links as
-    sources. None when there's nothing to read."""
+    """A recipe without a model: the folder's own tables and documents as sources, and
+    a links file as a list to go through only when it holds a list (a few links are
+    reference: the product's site, say). None when there's nothing to read."""
     sources = []
     for place in (folder / "extra", folder):
         if not place.is_dir():
@@ -404,13 +424,87 @@ def default_recipe(folder: Path, base: dict[str, Any]) -> dict[str, Any] | None:
             if rel == base.get("output"):
                 continue
             ext = p.suffix.lower()
-            if ext in fx.TABLE_EXTS:
+            links = _links_count(p) if ext in (".md", ".markdown", ".txt") else 0
+            if links:
+                if links >= LINKS_AS_ITEMS:
+                    sources.append({"kind": "links", "path": rel, "as": "items"})
+            elif ext in fx.TABLE_EXTS:
                 sources.append({"kind": "file", "path": rel})
             elif ext in fx.DOC_EXTS:
                 sources.append({"kind": "document", "path": rel})
     if not sources:
         return None
     return normalize_recipe({"sources": sources}, base)
+
+
+_NOUNS = re.compile(r"\b(firms?|compan(?:y|ies)|agenc(?:y|ies)|startups?|businesses|people|persons?|products?|"
+                    r"schools?|clinics?|vendors?|suppliers?|shops?|stores?|restaurants?|investors?|funds?)\b", re.I)
+_SIZE = re.compile(r"(\d{1,4})\s*(?:-|–|—|to)\s*(\d{1,6})\s+(?:employees|people|staff)", re.I)
+_MONTHS = re.compile(r"(?:last|within|past)\s+(\d{1,3})\s+months", re.I)
+
+
+def _singular(word: str) -> str:
+    w = word.lower()
+    for plural, one in (("ies", "y"), ("people", "person"), ("businesses", "business")):
+        if w.endswith(plural):
+            return w[: -len(plural)] + one if plural == "ies" else one
+    return w[:-1] if w.endswith("s") and not w.endswith("ss") else w
+
+
+def web_recipe(base: dict[str, Any], task: str) -> dict[str, Any] | None:
+    """A recipe without a model for a list found on the web, from the run's checks and
+    charter: searches for each group (directories, lists, member lists, company pages
+    with a size band), the size band first when the charter names one, then the item's
+    own pages; emails checked against the page they're cited from. None without the
+    list's columns."""
+    cols = base["columns"]
+    if not cols:
+        return None
+    text = " ".join(str(task or "").split())
+    noun = _NOUNS.search(text)
+    item = _singular(noun.group(1)) if noun else "item"
+    country = "US" if re.search(r"\b(US|USA|U\.S\.|United States)\b", text) else \
+        "GB" if re.search(r"\b(UK|United Kingdom|Britain)\b", text) else ""
+    place = {"US": "United States", "GB": "UK"}.get(country, "")
+    size = _SIZE.search(text)
+    groups = list(base["groups"]) or [""]
+    sources = []
+    for g in groups:
+        what = g or f"{item}s"
+        qs = [f"{what} directory {place}", f"list of {what} {place}", f"top {what} {place}",
+              f"{what} association member directory {place}", f"small {what} {place}"]
+        if size:
+            qs.append(f'site:linkedin.com/company {what} {place} "{size.group(1)}-{size.group(2)} employees"')
+        sources.append({"kind": "search", "group": g, "country": country, "count": 20,
+                        "queries": [" ".join(q.split()) for q in qs], "about": f"{what} {place}".strip()})
+    site = next((c for c in cols if re.search(r"website|domain|homepage|site\b|url", c, re.I)
+                 and not re.search(r"source", c, re.I)), "")
+    name = next((c for c in cols if c != site and not re.search(r"mail|url|source|date|segment|state", c, re.I)), "")
+    gather: list[dict[str, Any]] = []
+    filters: list[dict[str, Any]] = []
+    if size and name:
+        gather.append({"kind": "search", "query": f'"{{{name}}}" site:linkedin.com/company', "count": 5})
+        filters.append({"column": "size_band", "op": "size_max", "value": int(size.group(2))})
+    if site:
+        gather.append({"kind": "fetch", "url": f"{{{site}}}", "paths": ["", "about", "team", "contact", "news"]})
+    checks: list[dict[str, Any]] = []
+    for c in cols:
+        src = next((x for x in cols if x.lower().replace(" ", "") in (f"{c}sourceurl".lower(), f"{c}source".lower())), "")
+        if src and re.search(r"mail", c, re.I):
+            checks.append({"column": c, "op": "in_evidence", "source_column": src})
+    months = _MONTHS.search(text)
+    date_col = next((c for c in cols if re.search(r"date", c, re.I)), "")
+    if months and date_col:
+        checks.append({"column": date_col, "op": "within_months", "value": int(months.group(1))})
+    extract = ["emails", "dates", "size_band"] + (["us_state"] if country == "US" else [])
+    return normalize_recipe({"item": item, "site_column": site, "sources": sources, "gather": gather,
+                             "filters": filters, "extract": extract, "checks": checks, "decide": text[:3000]}, base)
+
+
+def fallback_recipe(folder: Path, base: dict[str, Any], task: str) -> dict[str, Any] | None:
+    """When no model's recipe can be had: the folder's own lists and documents, else
+    web searches built from the run's checks and charter."""
+    return default_recipe(folder, base) or web_recipe(base, task)
 
 
 async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
@@ -444,11 +538,12 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
             try:
                 async with bat_routes._metered(run["id"], "funnel-setup"):
                     prov, mt = bat_routes.think_call(creds, temperature=0.2)
-                    resp = await prov.complete(messages=[
-                        Message(role="system", content=SETUP_SYSTEM
-                                + ("\nKeep your thinking short; the answer is JSON only." if attempt else "")),
-                        Message(role="user", content=prompt),
-                    ], temperature=0.2, max_tokens=mt)
+                    with reasoning.call_effort("off"):  # a JSON answer: no thinking to loop in
+                        resp = await prov.complete(messages=[
+                            Message(role="system", content=SETUP_SYSTEM
+                                    + ("\nThe answer is JSON only, nothing before or after it." if attempt else "")),
+                            Message(role="user", content=prompt),
+                        ], temperature=0.2, max_tokens=min(mt, OUT_TOKENS["setup"]))
                 raw = fx.parse_json(resp.content or "")
                 if isinstance(raw, dict):
                     recipe = normalize_recipe(raw, base)
@@ -462,9 +557,11 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
                 log.warning("funnel setup call failed", run_id=run.get("id"), error=str(e))
             recipe = None
     if recipe is None:
-        recipe = await asyncio.to_thread(default_recipe, folder, base)
+        recipe = await asyncio.to_thread(fallback_recipe, folder, base, str(run.get("task", "")))
         if recipe is not None:
-            why = f"set up from the folder's own files ({why})" if why else ""
+            how = "web searches built from its checks" if all(
+                s["kind"] == "search" for s in recipe["sources"]) else "the folder's own files"
+            why = f"set up from {how} ({why})" if why else ""
     if recipe is None or not recipe["columns"] or not recipe["sources"]:
         return None, why or ("no columns for the list" if recipe is not None else "nothing to build a list from")
     (folder / STATE).mkdir(parents=True, exist_ok=True)
@@ -681,6 +778,7 @@ class Work:
         self.cfg = run.get("config") or {}
         self.budget = _int(self.cfg.get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
         self.items_max = _int(self.cfg.get("funnel_items_max"), 1, 1_000_000, ITEMS_MAX)
+        self.thinking = str(self.cfg.get("funnel_thinking") or "off").lower() == "on"
         self.more_pages: list[str] = []
         self.tools: Tools | None = None
         self.creds: dict | None = None
@@ -750,15 +848,21 @@ class Work:
                 raise RuntimeError("no model is set up to judge items with")
         return self.creds
 
-    async def _ask(self, label: str, system: str, user: str) -> Any:
+    async def _ask(self, label: str, system: str, user: str, items: int = 1) -> Any:
+        """One of the funnel's short calls: thinking off and a small limit, except a
+        judging call in a run that turns thinking on (``config.funnel_thinking``)."""
         from captain_claw.flight_deck import bat_routes
         from captain_claw.llm import Message
         creds = await self._creds()
+        think = label == "decide" and self.thinking
+        limit = THINKING_TOKENS if think else OUT_TOKENS.get(label, 4000) + (
+            DECIDE_PER_ITEM * max(0, items - 1) if label == "decide" else 0)
         async with bat_routes._metered(self.run["id"], f"funnel-{label}"):
             prov, mt = bat_routes.think_call(creds, temperature=0.0, default_max=DECIDE_TOKENS)
-            resp = await prov.complete(messages=[Message(role="system", content=system),
-                                                 Message(role="user", content=user)],
-                                       temperature=0.0, max_tokens=mt)
+            with reasoning.call_effort(None if think else "off"):
+                resp = await prov.complete(messages=[Message(role="system", content=system),
+                                                     Message(role="user", content=user)],
+                                           temperature=0.0, max_tokens=min(mt, limit))
         return fx.parse_json(resp.content or "")
 
     # ── the run ──
@@ -1054,7 +1158,7 @@ class Work:
         try:
             got = await self._ask("decide", DECIDE_SYSTEM,
                                   f"# Rules\n{self.recipe['decide'] or '(take every item that fits the list)'}\n\n"
-                                  f"# Columns\n{cols}{groups}\n\n# Items\n" + "\n\n".join(lines))
+                                  f"# Columns\n{cols}{groups}\n\n# Items\n" + "\n\n".join(lines), items=len(batch))
         except Exception as e:  # noqa: BLE001 — these go back for the next call
             log.warning("funnel decide call failed", run_id=self.run["id"], error=str(e))
             got = None

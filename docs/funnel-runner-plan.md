@@ -294,6 +294,24 @@ Each phase ends merged, with tests, and a live check on a test deck (isolated
    one run each. Compare rows kept per group, tokens, time, searches, the code's
    provenance checks, the reviewers' verdict. Decide what each is for.
 
+## 8b. After the first live run (2026-11-19)
+
+The first funnel run on the Pi's Qwen never got a recipe: the setup call thought
+162k characters with thinking on, looped (decode speed climbing mid-thought is the
+tell), hit the 32k output cap, and answered nothing, twice. The fallback then took the
+owner's two Captain links as the only "document" to find firms in. Fixed:
+
+- every funnel call runs with thinking off (`reasoning.call_effort("off")`, which
+  sends `chat_template_kwargs.enable_thinking: false` to Qwen on a LAN server) and a
+  small output limit per kind (setup and extraction 6k, new searches 2k, judging 2.5k
+  plus 600 per extra row); `config.funnel_thinking = "on"` gives judging calls their
+  thinking back, with 16k of room;
+- without a model's recipe, a web list gets one built from its checks and charter
+  (`web_recipe`): searches per group (directories, lists, member lists, LinkedIn
+  pages with the size band), the size band first, the item's own pages, emails
+  checked against their cited page, the date window; a links file with fewer than 5
+  links is reference, never a source of items.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
