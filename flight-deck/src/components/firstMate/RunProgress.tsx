@@ -8,6 +8,7 @@ import { TimingChips } from './FactoryResults'
 import { RunDataList } from './FactoryData'
 import { useRunData } from './useRunData'
 import { NoteText } from './RunResult'
+import { FunnelStrip } from './FunnelStrip'
 import { Pill, errText, type PillTone } from './ui'
 
 // What a run is doing, inside its row on the Runs tab: how far it got (a bar with one
@@ -238,6 +239,7 @@ export function RunProgress({ runId, going, stopped }: { runId: string; going: b
             ))}
           </div>
         )}
+        {p.funnel && <FunnelStrip counts={p.funnel} />}
       </div>
 
       <div role="tablist" aria-label="This run" className="flex flex-wrap gap-1 border-y border-[var(--fd-line)] bg-[var(--fd-surface-raised)] px-3 py-2">

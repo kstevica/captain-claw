@@ -54,7 +54,11 @@ from typing import Any
 
 # ── Vocabulary ─────────────────────────────────────────────────────────
 
-RUNNERS = ("bat", "vatra", "basna", "code", "crew", "flow", "plan")
+RUNNERS = ("bat", "funnel", "vatra", "basna", "code", "crew", "flow", "plan")
+# Runners whose runs are Bat runs (the list funnel is a Bat engine): their results,
+# timing, caps and progress are read from Bat.
+BAT_RUNNERS = ("bat", "funnel")
+FUNNEL_LEFTOVERS = ("agent", "none")
 STATES = ("draft", "awaiting_charter", "running", "paused", "paused_budget", "stopped", "retired")
 # What set_state() may do. A factory leaves draft / awaiting_charter only by
 # submit(), approve() or decline(), or by being retired.
@@ -297,6 +301,18 @@ def check_runner_config(runner: str, value: Any) -> dict[str, Any]:
         if mode not in ("plain", "archetype"):
             raise FirstMateError("worker_mode must be plain or archetype")
         cfg = {"worker_mode": mode, "steps": _str_list("steps", cfg.get("steps"))}
+    elif runner == "funnel":
+        _known("runner settings", cfg, ("leftovers", "search_budget", "agent_context"))
+        out: dict[str, Any] = {"leftovers": str(cfg.get("leftovers") or "agent")}
+        if out["leftovers"] not in FUNNEL_LEFTOVERS:
+            raise FirstMateError("leftovers must be agent or none")
+        for key, lo, hi in (("search_budget", 0, 100_000), ("agent_context", 16_000, 1_000_000)):
+            if cfg.get(key) not in (None, ""):
+                v = cfg[key]
+                if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+                    raise FirstMateError(f"{key} must be a whole number from {lo:,} to {hi:,}")
+                out[key] = v
+        cfg = out
     elif runner == "flow":
         _known("runner settings", cfg, ("flow_id",))
         cfg = {"flow_id": _text("flow_id", cfg.get("flow_id"), 80, required=True)}

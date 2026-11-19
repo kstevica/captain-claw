@@ -13,7 +13,7 @@ import type { ProgressEvent } from '../stores/basnaStore'
 export type FactoryState = 'draft' | 'awaiting_charter' | 'running' | 'paused' | 'paused_budget' | 'stopped' | 'retired'
 export type VersionStatus = 'draft' | 'awaiting' | 'live' | 'replaced' | 'declined'
 export type Trust = 'propose' | 'commit' | 'direct'
-export type Runner = 'bat' | 'vatra' | 'basna' | 'code' | 'crew' | 'flow' | 'plan'
+export type Runner = 'bat' | 'funnel' | 'vatra' | 'basna' | 'code' | 'crew' | 'flow' | 'plan'
 export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 export type OwnerState = 'running' | 'paused' | 'stopped' | 'retired'
 
@@ -33,7 +33,7 @@ export const TRUST_HINTS: Record<Trust, string> = {
 }
 
 export const RUNNER_LABELS: Record<Runner, string> = {
-  bat: 'Bat', vatra: 'Vatra', basna: 'Basna', code: 'Code', crew: 'Crew', flow: 'Flow', plan: 'Plan',
+  bat: 'Bat', funnel: 'List funnel', vatra: 'Vatra', basna: 'Basna', code: 'Code', crew: 'Crew', flow: 'Flow', plan: 'Plan',
 }
 
 export const RUN_LABELS: Record<RunStatus, string> = {
@@ -424,6 +424,8 @@ export interface Template {
 /** What the owner edits in a draft. */
 export interface DraftFields {
   charter?: string
+  runner?: Runner
+  runner_config?: Record<string, unknown>
   triggers?: Trigger[]
   checks?: { contract: string[]; off?: string[]; satisfaction_target?: number }
   budget?: { run_tokens: number | null }
@@ -507,6 +509,14 @@ export function factoryDataUrl(id: string, itemId: string, download = false): st
   const qs = q.toString()
   return `${f(id)}/data/${encodeURIComponent(itemId)}/file${qs ? `?${qs}` : ''}`
 }
+/** What a factory's runs already checked: later runs skip those items. */
+export interface CheckedRecord { items: number; kept: number; dropped: number; maybe: number; runs: number; last: string }
+export const getChecked = (id: string) => call<CheckedRecord>(`${f(id)}/checked`)
+export const forgetChecked = (id: string) => call<CheckedRecord>(`${f(id)}/checked`, { method: 'DELETE' })
+export function checkedFileUrl(id: string): string {
+  const { token, authEnabled } = useAuthStore.getState()
+  return `${f(id)}/checked/file${authEnabled && token ? `?fd_token=${encodeURIComponent(token)}` : ''}`
+}
 export const getFactoryResults = (id: string) => call<{ runs: RunResults[] }>(`${f(id)}/results`).then((r) => r.runs)
 
 /** "23 h 4 min", "12 min", "45 s". */
@@ -561,7 +571,27 @@ export interface RunProgress {
   files: string
   /** How long it has taken so far (kept once it ended). */
   timing?: RunTiming | null
+  /** A list funnel run's counts: per group, where its items went. */
+  funnel?: FunnelCounts | null
 }
+
+/** Where a group's items went in the list funnel (docs/funnel-runner-plan.md). */
+export interface FunnelGroup {
+  looked: number
+  filter: number
+  read: number
+  judge: number
+  check: number
+  full: number
+  duplicate: number
+  kept: number
+  maybe: number
+  agent: number
+  'agent-check': number
+  quota: number
+  on_list: number
+}
+export interface FunnelCounts { groups: Record<string, FunnelGroup>; target: number; searches: number; updated: string }
 export const getRunProgress = (runId: string, since = 0) =>
   call<RunProgress>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/progress?since=${since}`)
 /** A factory's improvement run: Captain Swarm trying better charters on its cases. */

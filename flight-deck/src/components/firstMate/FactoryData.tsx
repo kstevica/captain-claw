@@ -1,11 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import {
-  Bot, ClipboardPaste, Database, Download, Eye, Folder, Link2, Loader2, MessagesSquare, Plus, Trash2, UploadCloud,
+  Bot, ClipboardPaste, Database, Download, Eye, Folder, History, Link2, Loader2, MessagesSquare, Plus, Trash2, UploadCloud,
   type LucideIcon,
 } from 'lucide-react'
 import {
-  addFactoryData, addRunData, dropFactoryData, dropRunData, factoryDataUrl,
-  type FactoryDataItem,
+  addFactoryData, addRunData, checkedFileUrl, dropFactoryData, dropRunData, factoryDataUrl, forgetChecked, getChecked,
+  type CheckedRecord, type FactoryDataItem,
 } from '../../services/firstMate'
 import { vfsApi } from '../../services/vfsApi'
 import { getFileTypeGroup, isViewable, type AgentFile } from '../../services/fileTransfer'
@@ -87,6 +87,73 @@ function useViewer() {
   return { open, canOpen, node }
 }
 
+/** What the factory's runs already checked: later runs skip those items (first_mate_ledger). */
+function CheckedCard({ factoryId, onNotice, onChanged }: { factoryId: string; onNotice: (text: string) => void; onChanged: () => void }) {
+  const [rec, setRec] = useState<CheckedRecord | null>(null)
+  const [asking, setAsking] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let stop = false
+    getChecked(factoryId).then((r) => { if (!stop) setRec(r) }).catch((e) => { if (!stop) setError(errText(e)) })
+    return () => { stop = true }
+  }, [factoryId])
+  const forget = async () => {
+    setBusy(true); setError('')
+    try {
+      setRec(await forgetChecked(factoryId))
+      setAsking(false)
+      onNotice('Forgotten: the next run looks at every item again')
+      onChanged()  // its history says so
+    } catch (e) {
+      setError(errText(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  if (!rec) return error ? <p role="alert" className="text-xs text-red-700 dark:text-red-300">{error}</p> : null
+  return (
+    <section className="rounded-2xl border border-[var(--fd-line)] bg-[var(--fd-surface-raised)] p-4">
+      <div className="flex flex-wrap items-start gap-3">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[var(--fd-accent-soft)] text-[var(--fd-accent-text)]">
+          <History className="h-4 w-4" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h3 className="text-sm font-semibold text-zinc-100">Already checked</h3>
+          {rec.items ? (
+            <p className="mt-0.5 text-xs text-zinc-500">
+              <span className="font-medium text-zinc-300">{rec.items} item{rec.items === 1 ? '' : 's'}</span> from {rec.runs} run{rec.runs === 1 ? '' : 's'}:
+              {' '}{rec.kept} kept, {rec.dropped} dropped, {rec.maybe} came close. Later runs skip what was kept, and what was dropped while
+              the charter asks for the same work; the ones that came close are checked again.
+            </p>
+          ) : (
+            <p className="mt-0.5 text-xs text-zinc-500">Nothing yet. When a run ends, what it checked is kept here, so later runs don’t check it again.</p>
+          )}
+        </div>
+        {rec.items > 0 && (
+          <div className="flex shrink-0 items-center gap-1.5">
+            <a href={checkedFileUrl(factoryId)} className="fd-btn-quiet inline-flex h-8 items-center gap-1.5 px-3 text-xs">
+              <Download className="h-3.5 w-3.5" />Download
+            </a>
+            {asking ? (
+              <>
+                <button onClick={() => void forget()} disabled={busy}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-full bg-red-600 px-3 text-xs font-semibold text-white hover:bg-red-500 disabled:opacity-60">
+                  {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}Forget {rec.items}?
+                </button>
+                <button onClick={() => setAsking(false)} disabled={busy} className="fd-btn-quiet h-8 px-3 text-xs">Keep</button>
+              </>
+            ) : (
+              <button onClick={() => setAsking(true)} className="fd-btn-quiet h-8 px-3 text-xs">Forget</button>
+            )}
+          </div>
+        )}
+      </div>
+      {error && <p role="alert" className="mt-2 text-xs text-red-700 dark:text-red-300">{error}</p>}
+    </section>
+  )
+}
+
 /** The factory's Data tab. `items` come with the factory; a change reloads it. */
 export function FactoryData({ factoryId, title, items, onChanged, onNotice }: {
   factoryId: string
@@ -151,6 +218,8 @@ export function FactoryData({ factoryId, title, items, onChanged, onNotice }: {
       </section>
 
       {error && <p role="alert" className="text-xs text-red-700 dark:text-red-300">{error}</p>}
+
+      <CheckedCard factoryId={factoryId} onNotice={onNotice} onChanged={onChanged} />
 
       {items.length > 0 && (
         <>

@@ -476,6 +476,39 @@ async def drop_factory_data(factory_id: str, item_id: str, user: dict = Depends(
     return {"items": fm_data.items(factory_id)}
 
 
+# ── what its runs already checked (first_mate_ledger) ──────────────────
+
+@router.get("/fd/first-mate/factories/{factory_id}/checked")
+async def factory_checked(factory_id: str, user: dict = Depends(allowed_user)):
+    """How much the factory's record of checked items holds."""
+    from captain_claw.flight_deck import first_mate_ledger
+    _mine(factory_id, user)
+    return first_mate_ledger.counts(factory_id)
+
+
+@router.get("/fd/first-mate/factories/{factory_id}/checked/file")
+async def factory_checked_file(factory_id: str, user: dict = Depends(allowed_user)):
+    from captain_claw.flight_deck import first_mate_ledger
+    _mine(factory_id, user)
+    path = first_mate_ledger.path(factory_id)
+    if not path.is_file():
+        raise HTTPException(404, "nothing checked yet")
+    return FileResponse(path, media_type="text/csv", filename="already-checked.csv",
+                        content_disposition_type="attachment", headers={"X-Content-Type-Options": "nosniff"})
+
+
+@router.delete("/fd/first-mate/factories/{factory_id}/checked")
+async def forget_factory_checked(factory_id: str, user: dict = Depends(allowed_user)):
+    """Forget what its runs checked: the next run looks at every item again."""
+    from captain_claw.flight_deck import first_mate_ledger
+    _mine(factory_id, user)
+    had = first_mate_ledger.counts(factory_id)["items"]
+    first_mate_ledger.forget(factory_id)
+    if had:
+        fms.get_store().note_event(factory_id, "owner", "checked_forgotten", {"items": had})
+    return first_mate_ledger.counts(factory_id)
+
+
 def _own_run(run_id: str, user: dict) -> dict[str, Any]:
     run = fms.get_store().get_run(run_id)
     if run is None or run["owner_id"] != _uid(user):
