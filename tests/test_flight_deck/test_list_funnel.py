@@ -609,7 +609,7 @@ LEADS = [{"id": "fm1", "text": "leads.csv: 15 columns; 10 per Segment", "check":
 
 def test_a_web_list_without_a_models_recipe():
     r = funnel.web_recipe(funnel.from_contract(LEADS), CHARTER)
-    assert r["item"] == "firm" and r["site_column"] == "Website" and r["key"] == "Website"
+    assert r["item"] == "knowledge firm" and r["site_column"] == "Website" and r["key"] == "Website"  # from its ask
     assert [s["group"] for s in r["sources"]] == ["consultancies", "research shops"]
     q = r["sources"][0]["queries"]
     assert r["sources"][0]["country"] == "US" and "consultancies directory United States" in q
@@ -709,7 +709,7 @@ def test_code_tidies_a_models_recipe(tmp_path):
     t = funnel.tidy_recipe(r, charter, tmp_path)
     assert [s["kind"] for s in t["sources"]] == ["search", "search"] and t["reference"] == ["extra/Captain.md"]
     assert t["sources"][0]["queries"] == [f"{q} United States" for q in copied]  # names its group: kept, with the place
-    assert t["sources"][1]["queries"][0] == "research shops directory United States"  # copied: written for it
+    assert t["sources"][1]["queries"][0] == "list of research shops United States"  # copied: written for it
     assert {"column": "Signal", "op": "in", "value": ["A", "B"]} not in t["checks"]
     (tmp_path / "extra").mkdir()
     (tmp_path / "extra" / "Captain.md").write_text("# Captain\n\nFeatures: Onboarding, Flows.")
@@ -740,11 +740,11 @@ async def test_a_firm_found_on_linkedin_gets_its_own_site_read(deck):
         pages={"https://delta.example/": "Delta Advisors.", "https://delta.example/contact": "hi@delta.example",
                "https://eps.example/": "Eps.", "https://eps.example/contact": "team@eps.example"},
         results={"x firms list": "list results",
-                 '"Delta" United States official website': (
+                 '"Delta" firm United States': (
                      "[QUERY: q]\n\n1. Delta | LinkedIn\n   URL: https://www.linkedin.com/company/delta\n   Snippet: -\n\n"
                      "2. Unrelated\n   URL: https://other.example\n   Snippet: -\n\n"
                      "3. Delta Advisors | Home\n   URL: https://delta.example/\n   Snippet: Delta Advisors\n"),
-                 '"Eps" United States official website': _result("Eps", "https://eps.example/", "Eps home")})
+                 '"Eps" firm United States': _result("Eps", "https://eps.example/", "Eps home")})
 
     def decide(items):
         out = []
@@ -812,7 +812,7 @@ async def test_a_listing_from_elsewhere_isnt_read(deck):
     fetched = [u for k, u in deck["tools"].calls if k == "fetch"]
     assert not any("maple" in u for u in fetched) and any("alpha" in u for u in fetched)
     why = {r["key"]: (r["stage"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
-    assert why["maple.example"] == ("filter", "outside the US (its listing says Toronto)")
+    assert why["maple.example"] == ("filter", "not in the United States (its listing says Ontario)")
 
 
 async def test_a_recipe_written_before_gets_the_charters_file(deck):
@@ -830,3 +830,71 @@ async def test_a_recipe_written_before_gets_the_charters_file(deck):
     await bat_routes._bat_attempt(fresh, steps[0])
     await bat_routes._bat_attempt(fresh, steps[-1])
     assert funnel.load_recipe(folder)["output"] == "contacts-out.csv" and (folder / "contacts-out.csv").is_file()
+
+
+# ── any place, any kind of item ────────────────────────────────────────
+
+def test_which_country_a_charter_means():
+    assert fx.target_places("Find small US knowledge firms") == ["US"]
+    assert fx.target_places("small Croatian law firms") == ["HR"]
+    assert fx.target_places("vegan restaurants in Zagreb") == ["HR"]
+    assert fx.target_places("clinics in the UK and Ireland") == ["GB", "IE"]
+    assert fx.target_places("German machine makers") == ["DE"]
+    assert fx.target_places("Spanish restaurants in London") == []  # a place it doesn't know: no guess
+    assert fx.target_places("recipes with lentils") == []
+    assert fx.foreign_place("Belgrade, Serbia", ["HR"]) == "Belgrade"
+    assert fx.foreign_place("Zagreb, Croatia", ["HR"]) == ""
+    assert fx.foreign_place("Toronto, Ontario", ["US", "CA"]) == ""  # either is the list's
+    assert fx.place_phrase("US") == "the United States" and fx.place_phrase("HR") == "Croatia"
+
+
+def test_a_list_of_anything_without_a_models_recipe():
+    base = funnel.from_contract([{"id": "fm1", "text": "places.csv", "check": {
+        "type": "table", "path": "places.csv", "columns": ["Name", "Website", "Address", "Cuisine", "MenuURL"],
+        "min_rows": 20}}])
+    r = funnel.web_recipe(base, "Find 20 vegan restaurants in Zagreb that put their menu online, and list them in places.csv.")
+    assert r["item"] == "vegan restaurant" and r["output"] == "places.csv"
+    q = r["sources"][0]["queries"]
+    assert "list of vegan restaurants Croatia" in q and not any("linkedin" in x or "employees" in x for x in q)
+    assert r["sources"][0]["country"] == ""  # the search engine takes no Croatia: the words name it
+    assert r["filters"] == [] and "size_band" not in r["extract"] and "us_state" not in r["extract"]
+    assert funnel.item_from("Collect at least 50 open datasets on air quality, with a link") == "open dataset"
+
+
+def test_a_croatian_list_keeps_to_croatia(tmp_path):
+    r = funnel.normalize_recipe({"columns": ["Name", "Website"], "sources": [
+        {"kind": "search", "queries": ["law firms list", "odvjetnička društva Zagreb"]}]})
+    t = funnel.tidy_recipe(r, "Find small Croatian law firms with a website.", tmp_path)
+    assert t["places"] == ["HR"] and t["sources"][0]["country"] == ""
+    assert t["sources"][0]["queries"] == ["law firms list Croatia", "odvjetnička društva Zagreb"]
+
+
+async def test_a_listing_from_another_country_isnt_read(deck):
+    contract = [{"id": "fm1", "text": "firms.csv", "check": {
+        "type": "table", "path": "firms.csv", "columns": ["Name", "Website"], "min_rows": 2}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_croat0001")
+    run = {**run, "task": "Find small Croatian law firms with a website."}
+    deck["recipe"] = {"item": "law firm", "site_column": "Website",
+                      "sources": [{"kind": "search", "queries": ["law firms list"]}],
+                      "gather": [{"kind": "fetch", "url": "{Website}", "paths": [""]}]}
+    deck["extract"] = lambda user: {"items": [
+        {"name": "Odvjetnik A", "url": "https://a.example", "fields": {"Name": "Odvjetnik A", "Website": "https://a.example"}},
+        {"name": "Advokat B", "url": "https://b.example", "fields": {"Name": "Advokat B", "Website": "https://b.example"}}]}
+    deck["tools"] = _Tools(pages={"https://a.example/": "Odvjetnik A, Zagreb"}, results={"law firms list Croatia": (
+        "[QUERY: q]\n\n1. Odvjetnik A\n   URL: https://a.example\n   Snippet: Zagreb\n\n"
+        "2. Advokat B\n   URL: https://b.example\n   Snippet: Advokat B · Belgrade, Serbia\n")})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"], "Website": f["Website"]}}
+                                    for i, f in items]
+    steps = await funnel.plan(run)
+    await bat_routes._bat_attempt({**(await deck["store"].get_run(run["id"])), "task": run["task"]}, steps[0])
+    assert not any("b.example" in u for k, u in deck["tools"].calls if k == "fetch")
+    why = {r["name"]: r["reason"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert why["Advokat B"] == "not in Croatia (its listing says Belgrade)"
+
+
+def test_a_list_of_linkedin_profiles_keeps_linkedin():
+    people = funnel.normalize_recipe({"columns": ["Name", "LinkedIn URL"], "site_column": "LinkedIn URL",
+                                      "sources": [{"kind": "search", "queries": ["x"]}]})
+    assert "linkedin.com" not in funnel.skip_sites(people)
+    firms = funnel.normalize_recipe({"columns": ["Firm", "Website"], "sources": [{"kind": "search", "queries": ["x"]}]})
+    assert "linkedin.com" in funnel.skip_sites(firms) and "x.com" in funnel.skip_sites(firms)

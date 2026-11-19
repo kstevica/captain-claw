@@ -337,38 +337,162 @@ def us_state(text: str) -> str:
     return ""
 
 
-# Places outside the US a listing may name (countries, provinces, big cities), never
-# a name a US place shares on its own (London, Paris, Athens, Georgia, Victoria).
-_FOREIGN = (
-    "Canada", "Ontario", "Quebec", "British Columbia", "Alberta", "Manitoba", "Nova Scotia", "Toronto",
-    "Vancouver", "Montreal", "Calgary", "Ottawa", "United Kingdom", "UK", "England", "Scotland", "Wales",
-    "Ireland", "Dublin", "Australia", "Sydney", "Melbourne", "Brisbane", "New Zealand", "Auckland", "India",
-    "Mumbai", "Bengaluru", "Bangalore", "New Delhi", "Hyderabad", "Pune", "Chennai", "Pakistan", "Karachi",
-    "Lahore", "Bangladesh", "Dhaka", "United Arab Emirates", "UAE", "Dubai", "Abu Dhabi", "Saudi Arabia",
-    "Riyadh", "Qatar", "Doha", "Morocco", "Casablanca", "Egypt", "Cairo", "Nigeria", "Lagos", "Kenya",
-    "Nairobi", "South Africa", "Johannesburg", "Cape Town", "Germany", "Berlin", "Munich", "France", "Spain",
-    "Madrid", "Barcelona", "Italy", "Milan", "Netherlands", "Amsterdam", "Belgium", "Brussels",
-    "Switzerland", "Zurich", "Geneva", "Austria", "Vienna", "Sweden", "Stockholm", "Norway", "Oslo",
-    "Denmark", "Copenhagen", "Finland", "Helsinki", "Poland", "Warsaw", "Portugal", "Lisbon", "Turkey",
-    "Istanbul", "Israel", "Tel Aviv", "Singapore", "Hong Kong", "China", "Shanghai", "Beijing", "Japan",
-    "Tokyo", "South Korea", "Seoul", "Philippines", "Manila", "Indonesia", "Jakarta", "Malaysia",
-    "Kuala Lumpur", "Thailand", "Bangkok", "Vietnam", "Brazil", "São Paulo", "Sao Paulo", "Mexico",
-    "Argentina", "Buenos Aires", "Colombia", "Chile", "Peru",
-)
-_FOREIGN_RE = re.compile(r"(?<![\w-])(" + "|".join(re.escape(p) for p in sorted(_FOREIGN, key=len, reverse=True))
-                         + r")(?![\w-])")
-_US_MARK = re.compile(r"(?<![\w-])(United States|USA|U\.S\.A?\.?|US-based)(?![\w-])")
+# ── places ─────────────────────────────────────────────────────────────
+# Countries by code: their name as searches write it, the names and big cities a
+# text may give for them, and their demonyms (only to tell which country a charter
+# means, "small Croatian law firms", never to place an item). A name a US place
+# shares on its own (London, Paris, Athens, Georgia, Victoria…) isn't listed, so a
+# listing in "Athens, GA" stays American; US states count as the US.
+PLACES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
+    "US": ("United States", ("United States", "USA", "U.S.", "U.S.A.", "US", "America", "US-based"), ("American",)),
+    "CA": ("Canada", ("Canada", "Ontario", "Quebec", "British Columbia", "Alberta", "Manitoba", "Nova Scotia",
+                      "Montreal", "Calgary", "Ottawa", "Edmonton", "Winnipeg"), ("Canadian",)),
+    "GB": ("United Kingdom", ("United Kingdom", "UK", "U.K.", "Great Britain", "Britain", "England", "Scotland",
+                              "Wales", "Northern Ireland", "Edinburgh", "Glasgow", "Leeds", "Bristol"), ("British",)),
+    "IE": ("Ireland", ("Ireland", "Republic of Ireland", "Cork", "Galway", "Limerick"), ("Irish",)),
+    "AU": ("Australia", ("Australia", "New South Wales", "Queensland", "Brisbane", "Adelaide", "Canberra"),
+           ("Australian",)),
+    "NZ": ("New Zealand", ("New Zealand", "Auckland", "Christchurch"), ()),
+    "IN": ("India", ("India", "Mumbai", "Bengaluru", "Bangalore", "New Delhi", "Hyderabad", "Pune", "Chennai",
+                     "Kolkata", "Ahmedabad", "Gurgaon", "Gurugram", "Noida"), ()),
+    "PK": ("Pakistan", ("Pakistan", "Karachi", "Lahore", "Islamabad"), ("Pakistani",)),
+    "BD": ("Bangladesh", ("Bangladesh", "Dhaka"), ("Bangladeshi",)),
+    "AE": ("United Arab Emirates", ("United Arab Emirates", "UAE", "Dubai", "Abu Dhabi", "Sharjah"), ("Emirati",)),
+    "SA": ("Saudi Arabia", ("Saudi Arabia", "Riyadh", "Jeddah"), ("Saudi",)),
+    "QA": ("Qatar", ("Qatar", "Doha"), ("Qatari",)),
+    "IL": ("Israel", ("Israel", "Tel Aviv", "Jerusalem", "Haifa"), ("Israeli",)),
+    "TR": ("Turkey", ("Turkey", "Türkiye", "Istanbul", "Ankara", "Izmir"), ("Turkish",)),
+    "EG": ("Egypt", ("Egypt", "Cairo", "Alexandria, Egypt"), ("Egyptian",)),
+    "MA": ("Morocco", ("Morocco", "Casablanca", "Rabat", "Marrakesh", "Marrakech"), ("Moroccan",)),
+    "NG": ("Nigeria", ("Nigeria", "Lagos", "Abuja"), ("Nigerian",)),
+    "KE": ("Kenya", ("Kenya", "Nairobi", "Mombasa"), ("Kenyan",)),
+    "ZA": ("South Africa", ("South Africa", "Johannesburg", "Cape Town", "Durban", "Pretoria"), ("South African",)),
+    "DE": ("Germany", ("Germany", "Deutschland", "Munich", "München", "Hamburg", "Frankfurt", "Cologne", "Köln",
+                       "Stuttgart", "Düsseldorf"), ("German",)),
+    "FR": ("France", ("France", "Lyon", "Marseille", "Toulouse", "Bordeaux", "Lille"), ("French",)),
+    "ES": ("Spain", ("Spain", "España", "Madrid", "Barcelona", "Valencia, Spain", "Seville", "Bilbao"), ("Spanish",)),
+    "PT": ("Portugal", ("Portugal", "Porto"), ("Portuguese",)),
+    "IT": ("Italy", ("Italy", "Italia", "Milano", "Roma", "Turin", "Torino", "Bologna"), ("Italian",)),
+    "NL": ("Netherlands", ("Netherlands", "Nederland", "Holland", "Amsterdam", "Rotterdam", "The Hague", "Utrecht",
+                           "Eindhoven"), ("Dutch",)),
+    "BE": ("Belgium", ("Belgium", "Brussels", "Antwerp", "Ghent"), ("Belgian",)),
+    "LU": ("Luxembourg", ("Luxembourg",), ()),
+    "CH": ("Switzerland", ("Switzerland", "Zurich", "Zürich", "Geneva", "Basel", "Lausanne"), ("Swiss",)),
+    "AT": ("Austria", ("Austria", "Österreich", "Vienna", "Wien", "Graz", "Salzburg", "Linz"), ("Austrian",)),
+    "DK": ("Denmark", ("Denmark", "Copenhagen", "Aarhus"), ("Danish",)),
+    "SE": ("Sweden", ("Sweden", "Stockholm", "Gothenburg", "Malmö"), ("Swedish",)),
+    "NO": ("Norway", ("Norway", "Oslo", "Bergen"), ("Norwegian",)),
+    "FI": ("Finland", ("Finland", "Helsinki", "Tampere", "Espoo"), ("Finnish",)),
+    "IS": ("Iceland", ("Iceland", "Reykjavik"), ("Icelandic",)),
+    "PL": ("Poland", ("Poland", "Polska", "Warsaw", "Kraków", "Krakow", "Wrocław", "Gdańsk", "Poznań"), ("Polish",)),
+    "CZ": ("Czech Republic", ("Czech Republic", "Czechia", "Prague", "Brno"), ("Czech",)),
+    "SK": ("Slovakia", ("Slovakia", "Bratislava", "Košice"), ("Slovak",)),
+    "HU": ("Hungary", ("Hungary", "Budapest", "Debrecen"), ("Hungarian",)),
+    "RO": ("Romania", ("Romania", "Bucharest", "Cluj-Napoca", "Timișoara", "Iași"), ("Romanian",)),
+    "BG": ("Bulgaria", ("Bulgaria", "Sofia", "Plovdiv", "Varna"), ("Bulgarian",)),
+    "GR": ("Greece", ("Greece", "Thessaloniki", "Αθήνα"), ("Greek",)),
+    "HR": ("Croatia", ("Croatia", "Hrvatska", "Zagreb", "Rijeka", "Osijek", "Zadar", "Dubrovnik"), ("Croatian",)),
+    "SI": ("Slovenia", ("Slovenia", "Slovenija", "Ljubljana", "Maribor"), ("Slovenian",)),
+    "RS": ("Serbia", ("Serbia", "Srbija", "Belgrade", "Beograd", "Novi Sad", "Niš"), ("Serbian",)),
+    "BA": ("Bosnia and Herzegovina", ("Bosnia and Herzegovina", "Bosnia", "Sarajevo", "Banja Luka", "Mostar"),
+           ("Bosnian",)),
+    "ME": ("Montenegro", ("Montenegro", "Podgorica"), ("Montenegrin",)),
+    "MK": ("North Macedonia", ("North Macedonia", "Skopje"), ("Macedonian",)),
+    "AL": ("Albania", ("Albania", "Tirana"), ("Albanian",)),
+    "UA": ("Ukraine", ("Ukraine", "Kyiv", "Kiev", "Kharkiv", "Lviv", "Odesa"), ("Ukrainian",)),
+    "RU": ("Russia", ("Russia", "Saint Petersburg", "Novosibirsk"), ("Russian",)),
+    "EE": ("Estonia", ("Estonia", "Tallinn", "Tartu"), ("Estonian",)),
+    "LV": ("Latvia", ("Latvia", "Riga"), ("Latvian",)),
+    "LT": ("Lithuania", ("Lithuania", "Vilnius", "Kaunas"), ("Lithuanian",)),
+    "CN": ("China", ("China", "Shanghai", "Beijing", "Shenzhen", "Guangzhou", "Hangzhou"), ("Chinese",)),
+    "HK": ("Hong Kong", ("Hong Kong",), ()),
+    "TW": ("Taiwan", ("Taiwan", "Taipei"), ("Taiwanese",)),
+    "JP": ("Japan", ("Japan", "Tokyo", "Osaka", "Kyoto", "Yokohama"), ("Japanese",)),
+    "KR": ("South Korea", ("South Korea", "Korea", "Seoul", "Busan"), ("Korean",)),
+    "SG": ("Singapore", ("Singapore",), ("Singaporean",)),
+    "MY": ("Malaysia", ("Malaysia", "Kuala Lumpur", "Penang"), ("Malaysian",)),
+    "ID": ("Indonesia", ("Indonesia", "Jakarta", "Bali", "Surabaya"), ("Indonesian",)),
+    "TH": ("Thailand", ("Thailand", "Bangkok", "Chiang Mai", "Phuket"), ("Thai",)),
+    "VN": ("Vietnam", ("Vietnam", "Viet Nam", "Hanoi", "Ho Chi Minh City", "Saigon"), ("Vietnamese",)),
+    "PH": ("Philippines", ("Philippines", "Manila", "Cebu", "Makati"), ("Filipino",)),
+    "BR": ("Brazil", ("Brazil", "Brasil", "São Paulo", "Sao Paulo", "Rio de Janeiro", "Belo Horizonte"),
+           ("Brazilian",)),
+    "MX": ("Mexico", ("Mexico City", "Guadalajara", "Monterrey", "Ciudad de México", "México"), ("Mexican",)),
+    "AR": ("Argentina", ("Argentina", "Buenos Aires", "Córdoba, Argentina"), ("Argentine", "Argentinian")),
+    "CL": ("Chile", ("Chile", "Santiago de Chile"), ("Chilean",)),
+    "CO": ("Colombia", ("Colombia", "Bogotá", "Bogota", "Medellín", "Medellin"), ("Colombian",)),
+    "PE": ("Peru", ("Peru", "Lima, Peru"), ("Peruvian",)),
+}
+_PLACE_NAMES = sorted(((n, code) for code, (_, names, _) in PLACES.items() for n in names), key=lambda x: -len(x[0]))
+_PLACE_RE = re.compile(r"(?<![\w-])(" + "|".join(re.escape(n) for n, _ in _PLACE_NAMES) + r")(?![\w-])")
+_PLACE_OF = {n: code for n, code in _PLACE_NAMES}
+_DEMONYM_RE = re.compile(r"(?<![\w-])(" + "|".join(
+    re.escape(d) for _, (_, _, ds) in PLACES.items() for d in ds) + r")(?![\w-])")
+_DEMONYM_OF = {d: code for code, (_, _, ds) in PLACES.items() for d in ds}
+_MEXICO = re.compile(r"(?<!New )(?<![\w-])Mexico(?![\w-])")
 
 
-def foreign_place(text: str) -> str:
-    """The place outside the US a text names, when it names nothing in the US (no
-    state, no "United States"); "" otherwise. For a firm's listing: one named in
-    Ontario or Dubai, and nowhere American, isn't a US firm."""
+def places_named(text: str) -> list[tuple[str, str]]:
+    """The countries a text names, in order, as ``(code, the words that named it)``: by a
+    country's name, its common short form, a big city or province, and for the US a
+    state."""
     t = text or ""
-    if _US_MARK.search(t) or us_state(t):
+    out: list[tuple[int, str, str]] = []
+    for m in _PLACE_RE.finditer(t):
+        out.append((m.start(), _PLACE_OF[m.group(1)], m.group(1)))
+    for m in _MEXICO.finditer(t):
+        out.append((m.start(), "MX", "Mexico"))
+    m = _STATE_ABBR.search(t)
+    if m:
+        out.append((m.start(), "US", m.group(1)))
+    m = _STATE_NAME.search(t)
+    if m:
+        out.append((m.start(), "US", m.group(1)))
+    seen, ordered = set(), []
+    for _, code, words in sorted(out):
+        if code not in seen:
+            seen.add(code)
+            ordered.append((code, words))
+    return ordered
+
+
+def target_places(text: str) -> list[str]:
+    """The countries a charter is about, in the order it names them: by name, short
+    form or city; by demonym ("small Croatian law firms") only when it names none."""
+    named = [code for code, _ in places_named(text)]
+    if named:
+        return named
+    if re.search(r"\b(?:in|from|around|near)\s+[A-Z][a-z]{2,}", text or ""):
+        return []  # a place it names that isn't in the table: no guessing from a demonym
+    seen: list[str] = []
+    for m in _DEMONYM_RE.finditer(text or ""):
+        code = _DEMONYM_OF[m.group(1)]
+        if code not in seen:
+            seen.append(code)
+    return seen
+
+
+def place_name(code: str) -> str:
+    return PLACES.get(code, ("",))[0]
+
+
+_THE = {"US", "GB", "NL", "PH", "AE", "CZ"}
+
+
+def place_phrase(code: str) -> str:
+    """A country as a sentence names it: "the United States", "Croatia"."""
+    name = place_name(code) or code
+    return f"the {name}" if code in _THE else name
+
+
+def foreign_place(text: str, targets: list[str] | tuple[str, ...] = ("US",)) -> str:
+    """The place outside ``targets`` a text names, when it names none of them; ""
+    otherwise. For an item's listing: one in Belgrade, and nowhere in Croatia, isn't on
+    a Croatian list; one in Ontario, and nowhere American, isn't on a US list."""
+    named = places_named(text)
+    if not named or any(code in targets for code, _ in named):
         return ""
-    m = _FOREIGN_RE.search(t)
-    return m.group(1) if m else ""
+    return named[0][1]
 
 
 _LINK = re.compile(r"https?://[^\s<>()\"'\]]+")
