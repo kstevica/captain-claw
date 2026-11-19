@@ -37,8 +37,18 @@ _DOCUMENT_EXTENSIONS: set[str] = {".pdf", ".docx", ".xlsx", ".pptx"}
 # Maximum file size to attempt reading (10 MB).
 _MAX_FILE_BYTES: int = 10_000_000
 
-# Conservative per-call input char limit (~100k tokens ≈ 400k chars).
+# Upper bound on one call's input in characters, whatever the window.
 _MAX_INPUT_CHARS: int = 400_000
+# One call's input may take this share of the model's window (in its tokens):
+# 400k chars of a Croatian gazette PDF came to ~159k tokens, the whole window
+# of a 160k model, and every such summary was cut at the output limit.
+_CHUNK_WINDOW_SHARE: float = 0.35
+_MIN_CHUNK_CHARS: int = 20_000
+# Output room per call; the final combine scales with the words asked for.
+_SUMMARY_MAX_TOKENS: int = 4096
+_COMBINE_MAX_TOKENS_CAP: int = 16_000
+# A summary that still hit the output limit says so, so the agent knows it is partial.
+_CUT_NOTE: str = "\n\n[… this summary was cut at the output limit — it is incomplete]"
 
 
 class SummarizeFilesTool(Tool):
@@ -193,7 +203,9 @@ class SummarizeFilesTool(Tool):
                 self._log(stream_cb, f"   ⚠️  Skip ({mat_error})")
                 errors.append(f"{file_path.name}: {mat_error}")
                 continue
-            content, read_error = self._read_file_content(read_path)
+            # Off the event loop: a few hundred pages of PDF parse for ~20 s,
+            # long enough for the chat link's keepalive to time out.
+            content, read_error = await asyncio.to_thread(self._read_file_content, read_path)
             if read_error:
                 self._log(stream_cb, f"   ⚠️  Skip ({read_error})")
                 errors.append(f"{file_path.name}: {read_error}")
@@ -201,10 +213,11 @@ class SummarizeFilesTool(Tool):
 
             content_len = len(content)
             total_chars_read += content_len
+            chunk_chars = self._chunk_chars(provider, content)
             self._log(
                 stream_cb,
                 f"   Read {content_len:,} chars"
-                + (f" (chunking required)" if content_len > _MAX_INPUT_CHARS else ""),
+                + (" (chunking required)" if content_len > chunk_chars else ""),
             )
 
             # Summarise via LLM
@@ -214,7 +227,7 @@ class SummarizeFilesTool(Tool):
                 summary, calls = await self._summarise_single_file(
                     provider, Message, file_path, content,
                     summary_style, instructions, personality_block,
-                    total_usage, session_id,
+                    total_usage, session_id, chunk_chars=chunk_chars,
                 )
                 llm_calls += calls
             except Exception as exc:
@@ -404,17 +417,20 @@ class SummarizeFilesTool(Tool):
         messages: list[Any],
         interaction_label: str,
         latency_ms: int,
-        max_tokens: int = 4096,
+        max_tokens: int = _SUMMARY_MAX_TOKENS,
+        error: BaseException | None = None,
     ) -> None:
-        """Persist a single LLM call's usage to the DB (fire-and-forget)."""
+        """Persist a single LLM call's usage to the DB (fire-and-forget).
+        A failed call (``error``) is kept too, with no tokens."""
         try:
             from captain_claw.session import get_session_manager
 
             mgr = get_session_manager()
             usage = getattr(response, "usage", {}) or {}
-            model_name = str(getattr(response, "model", "") or "")
+            model_name = str(getattr(response, "model", "") or getattr(provider, "model", "") or "")
             provider_name = str(getattr(provider, "provider", "") or "")
-            finish_reason = str(getattr(response, "finish_reason", "") or "")
+            finish_reason = (f"error:{type(error).__name__}" if error is not None
+                             else str(getattr(response, "finish_reason", "") or ""))
             content = str(getattr(response, "content", "") or "")
 
             input_bytes = 0
@@ -441,7 +457,7 @@ class SummarizeFilesTool(Tool):
                 tools_enabled=False,
                 max_tokens=max_tokens,
                 finish_reason=finish_reason,
-                error=False,
+                error=error is not None,
                 latency_ms=latency_ms,
                 task_name="summarize_files",
             ))
@@ -449,6 +465,27 @@ class SummarizeFilesTool(Tool):
             pass  # Never fail the main flow
 
     # ── helpers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _chunk_chars(provider: Any, content: str) -> int:
+        """Characters one summarising call may read: a share of the model's
+        window, converted with the text's own density (a sample counted by
+        the provider), never past ``_MAX_INPUT_CHARS``."""
+        try:
+            from captain_claw.config import get_config
+
+            window = int(get_config().context.max_tokens or 0)
+        except Exception:
+            window = 0
+        window = window or 128_000
+        budget_tokens = int(window * _CHUNK_WINDOW_SHARE)
+        sample = content[:20_000]
+        try:
+            sample_tokens = int(provider.count_tokens(sample)) if sample else 0
+        except Exception:
+            sample_tokens = 0
+        chars_per_token = (len(sample) / sample_tokens) if sample_tokens > 0 else 4.0
+        return max(_MIN_CHUNK_CHARS, min(_MAX_INPUT_CHARS, int(budget_tokens * chars_per_token)))
 
     @staticmethod
     def _resolve_folder(
@@ -646,6 +683,8 @@ class SummarizeFilesTool(Tool):
         personality_block: str,
         total_usage: dict[str, int],
         session_id: str = "default",
+        *,
+        chunk_chars: int = _MAX_INPUT_CHARS,
     ) -> tuple[str, int]:
         """Summarise a single file's content, chunking if necessary.
 
@@ -656,8 +695,9 @@ class SummarizeFilesTool(Tool):
         )
         fname = file_path.stem
         calls = 0
+        chunk_chars = max(1, int(chunk_chars or _MAX_INPUT_CHARS))
 
-        if len(content) <= _MAX_INPUT_CHARS:
+        if len(content) <= chunk_chars:
             # Single-pass summarisation
             user_prompt = f"FILE: {file_path.name}\n\nCONTENT:\n{content}"
             text, usage = await self._llm_complete(
@@ -669,7 +709,7 @@ class SummarizeFilesTool(Tool):
             return text, 1
 
         # Chunked map-reduce for large files
-        chunks = self._split_into_chunks(content, _MAX_INPUT_CHARS)
+        chunks = self._split_into_chunks(content, chunk_chars)
         chunk_summaries: list[str] = []
 
         for i, chunk in enumerate(chunks):
@@ -748,8 +788,12 @@ class SummarizeFilesTool(Tool):
         user_prompt = (
             f"Individual file summaries ({len(summaries)} files):\n\n{joined}"
         )
+        # ~3 tokens a word leaves room for a language that tokenizes densely
+        # (3000 words of Croatian didn't fit in 4096).
+        combine_max = min(_COMBINE_MAX_TOKENS_CAP,
+                          max(_SUMMARY_MAX_TOKENS, int(max(0, int(target_words or 0)) * 3)))
         text, usage = await self._llm_complete(
-            provider, MessageCls, system_prompt, user_prompt,
+            provider, MessageCls, system_prompt, user_prompt, combine_max,
             session_id=session_id,
             interaction_label=f"summarize_files: final-combine ({len(summaries)} files)",
         )
@@ -762,7 +806,7 @@ class SummarizeFilesTool(Tool):
         MessageCls: type,
         system_prompt: str,
         user_prompt: str,
-        max_tokens: int = 4096,
+        max_tokens: int = _SUMMARY_MAX_TOKENS,
         *,
         session_id: str = "default",
         interaction_label: str = "summarize_files",
@@ -770,27 +814,51 @@ class SummarizeFilesTool(Tool):
         """Make a single LLM call using the configured provider.
 
         Returns ``(content_text, usage_dict)``.
-        Each call is individually recorded in the LLM usage table.
+        Each call is individually recorded in the LLM usage table, a failed
+        one too.
         """
         import time as _time
+
+        from captain_claw.llm import reasoning
 
         _t0 = _time.monotonic()
         messages = [
             MessageCls(role="system", content=system_prompt),
             MessageCls(role="user", content=user_prompt),
         ]
-        response = await asyncio.wait_for(
-            provider.complete(
+        try:
+            # Thinking off where the model can switch it off: a thinking model
+            # counts its thinking against max_tokens, and 9 of 14 summaries
+            # of one run stopped at the limit.
+            with reasoning.quiet_call():
+                response = await asyncio.wait_for(
+                    provider.complete(
+                        messages=messages,
+                        tools=None,
+                        temperature=0.3,
+                        max_tokens=max_tokens,
+                    ),
+                    timeout=120.0,
+                )
+        except Exception as exc:
+            SummarizeFilesTool._record_single_usage(
+                session_id=session_id,
+                provider=provider,
+                response=None,
                 messages=messages,
-                tools=None,
-                temperature=0.3,
+                interaction_label=interaction_label,
+                latency_ms=int((_time.monotonic() - _t0) * 1000),
                 max_tokens=max_tokens,
-            ),
-            timeout=120.0,
-        )
+                error=exc,
+            )
+            raise
         _latency_ms = int((_time.monotonic() - _t0) * 1000)
         content = (getattr(response, "content", "") or "").strip()
         usage = getattr(response, "usage", {}) or {}
+        if str(getattr(response, "finish_reason", "") or "") == "length" and content:
+            log.warning("Summary cut at the output limit", label=interaction_label,
+                        max_tokens=max_tokens)
+            content += _CUT_NOTE
 
         # Record this individual call to the DB
         SummarizeFilesTool._record_single_usage(

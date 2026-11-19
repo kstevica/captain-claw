@@ -89,10 +89,13 @@ def _read_calls(path: Path, after: int) -> tuple[list[dict], int]:
         # An agent that last ran before own keys existed has no such column.
         columns = {row[1] for row in conn.execute("PRAGMA table_info(llm_usage)")}
         byok_column = "byok" if "byok" in columns else "0"
+        # A failed call is kept as a row with no tokens (error=1): not a call made.
+        count_expr = ("SUM(CASE WHEN COALESCE(error, 0) THEN 0 ELSE 1 END)"
+                      if "error" in columns else "COUNT(*)")
         calls = conn.execute(
             f"SELECT substr(created_at, 1, 10), provider, model, {byok_column}, SUM(prompt_tokens),"
             " SUM(completion_tokens), SUM(cache_creation_input_tokens),"
-            " SUM(cache_read_input_tokens), COUNT(*)"
+            f" SUM(cache_read_input_tokens), {count_expr}"
             " FROM llm_usage WHERE rowid > ? AND rowid <= ? GROUP BY 1, 2, 3, 4",
             (after, newest),
         ).fetchall()

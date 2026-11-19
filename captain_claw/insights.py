@@ -409,13 +409,15 @@ class InsightsManager:
             except Exception:
                 pass  # fall through to LIKE
 
-        # Fallback: LIKE substring search.
+        # Fallback: LIKE substring search. Aliased like the FTS query: the
+        # category filter is shared and names ``i.category`` (without the
+        # alias every category search that FTS missed failed outright).
         like_pat = f"%{query.strip()}%"
         sql_like = f"""
-            SELECT * FROM insights
-            WHERE (content LIKE ? OR tags LIKE ?)
+            SELECT i.* FROM insights i
+            WHERE (i.content LIKE ? OR i.tags LIKE ?)
             {cat_filter}
-            ORDER BY created_at DESC
+            ORDER BY i.created_at DESC
             LIMIT ?
         """
         params_like: list[Any] = [like_pat, like_pat, *cat_params, limit]
