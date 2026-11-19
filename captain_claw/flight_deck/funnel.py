@@ -211,6 +211,10 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
         if isinstance(f, dict) and f.get("op") in FILTER_OPS and str(f.get("column") or "").strip():
             if f["op"] == "not_regex" and not sane_exclude(str(f.get("value") or ""), keep):
                 continue  # it would rule out every item, or a group's own (an "agency" filter on a list of agencies)
+            if f["op"] in ("in", "not_in") and str(f["column"]).strip().lower() in {c.lower() for c in columns}:
+                # a list column's fixed values are the judging call's to set: what a listing says ("Boutique
+                # consulting firm") is free text, never one of them exactly. Its check holds them on the row.
+                continue
             recipe["filters"].append({"column": str(f["column"]).strip()[:80], "op": f["op"], "value": f.get("value")})
     if base["exclude"] and sane_exclude(base["exclude"], keep):
         recipe["filters"].append({"column": "*", "op": "not_regex", "value": base["exclude"]})
@@ -1241,6 +1245,24 @@ rule. drop: it breaks a rule. A column with a fixed set of values takes one of t
 or YYYY-MM when there's no day.
 Keep your thinking short."""
 
+# The same, when a group that runs short may take rows on a looser reading: a fact
+# that simply isn't shown is no reason for maybe, unless a rule that never loosens
+# needs it; a maybe names the rules whose facts weren't shown, so code can tell.
+DECIDE_LOOSE = DECIDE_SYSTEM.replace(
+    '''[{"id": <its id>, "verdict": "keep|maybe|drop", "reason": "<one short line>",
+  "row": {"<column>": "<value>"}}]
+keep: it meets every rule and the row is filled from the facts. maybe: it seems to fit but a fact the rules need
+wasn't in what was read; also when nothing read came from the item's own website, unless a fact shown breaks a
+rule. drop: it breaks a rule.''',
+    '''[{"id": <its id>, "verdict": "keep|loose|maybe|drop", "reason": "<one short line>",
+  "row": {"<column>": "<value>"}, "loosened": ["<rule>"], "missing": ["<rule>"]}]
+keep: it meets every rule as written and the row is filled from the facts. loose: it meets every rule that never
+loosens, and each other rule as written or by its looser reading (a fact that isn't shown, with nothing saying
+the item breaks the rule, is met by "not shown"); name those rules in "loosened" and fill the row. maybe: a fact a
+rule that never loosens needs wasn't in what was read, or nothing read came from the item's own website; name in
+"missing" every rule whose fact wasn't shown, and fill the row with what was. drop: what was read shows it breaks
+a rule.''')
+
 
 class Work:
     """One work step: items from its sources, until its group is full or the sources
@@ -1547,13 +1569,14 @@ class Work:
                     return f"{col} doesn't match"
                 if op == "not_regex" and re.search(str(val), text, re.I):
                     return f"{'it' if col == '*' else col} matches what's excluded"
-                if op == "in" and text and text.lower() not in {str(x).lower() for x in val or []}:
-                    return f"{col} is {text}"
+                if op == "in" and text and not any(_stems(text) & _stems(str(x)) or text.lower() == str(x).lower()
+                                                   for x in val or []):
+                    return f"{col} is {text}"  # it shares no word with any value it may take
                 if op == "not_in" and text.lower() in {str(x).lower() for x in val or []}:
                     return f"{col} is {text}"
                 if op in ("min", "max") and text:
-                    n = float(re.sub(r"[^\d.]", "", text) or "nan")
-                    if (op == "min" and n < float(val)) or (op == "max" and n > float(val)):
+                    span = number_span(text)
+                    if span and ((op == "min" and span[1] < float(val)) or (op == "max" and span[0] > float(val))):
                         return f"{col} is {text}"
             except (re.error, TypeError, ValueError):
                 continue
@@ -1739,7 +1762,7 @@ class Work:
         groups = (f"\n# {self.recipe['group_by']}\n" + ", ".join(self.recipe["groups"])
                   + (f"\nThis step looks for: {self.group}" if self.group else "")) if self.recipe["groups"] else ""
         try:
-            got = await self._ask("decide", DECIDE_SYSTEM,
+            got = await self._ask("decide", DECIDE_LOOSE if self.loosen else DECIDE_SYSTEM,
                                   f"# Rules\n{self.recipe['decide'] or '(take every item that fits the list)'}\n\n"
                                   + self._tiers_text()
                                   + (f"# The goal, in the owner's words (what each column takes)\n{self.charter}\n\n"
@@ -1760,7 +1783,10 @@ class Work:
             reason = " ".join(str(v.get("reason") or "").split())[:200]
             if verdict == "loose" and not self.loosen:
                 verdict = "maybe"  # no looser reading in this run: it's nearly there
-            loosened = self._loosened(v.get("loosened")) if verdict == "loose" else []
+            if verdict == "maybe" and self.loosen:
+                verdict, loosened = self._maybe_or_loose(v)
+            else:
+                loosened = self._loosened(v.get("loosened")) if verdict == "loose" else []
             if verdict == "loose" and not loosened:
                 verdict = "maybe"  # it named only rules that never loosen: what it lacks must still be found
             if verdict in ("keep", "loose"):
@@ -1824,6 +1850,28 @@ class Work:
                   'break a rule is still dropped. Name the rules met loosely in "loosened": ["<rule>", ...]; a column '
                   'the looser reading gives no value for stays empty. "keep" only when every rule is met as written.']
         return "\n".join(lines) + "\n\n"
+
+    def _named(self, named: Any) -> list[dict[str, Any]]:
+        said = [" ".join(str(x).split()).lower() for x in named or [] if str(x).strip()] \
+            if isinstance(named, list) else []
+        return [r for r in self.recipe.get("rules") or []
+                if any(x and (x in r["rule"].lower() or r["rule"].lower() in x) for x in said)]
+
+    def _maybe_or_loose(self, v: dict) -> tuple[str, list[dict[str, Any]]]:
+        """A maybe whose missing facts are all ones a looser reading lets go unshown is
+        loose: unshown is not broken. Code decides from the rules it names, so a judging
+        call that keeps to "maybe" for every gap still lets such an item through. It
+        stays maybe when it names a rule that never loosens, names none, or gave no row."""
+        missing = self._named(v.get("missing")) + self._named(v.get("loosened"))
+        soft = loosenable(self.recipe)
+        row = v.get("row") if isinstance(v.get("row"), dict) else {}
+        if missing and all(r in soft for r in missing) and any(str(x).strip() for x in row.values()):
+            once: list[dict[str, Any]] = []
+            for r in missing:
+                if r not in once:
+                    once.append(r)
+            return "loose", once
+        return "maybe", []
 
     def _loosened(self, named: Any) -> list[dict[str, Any]]:
         """The rules a loose verdict names that may be met loosely (the prefer rules
@@ -2006,13 +2054,29 @@ def check_row(recipe: dict[str, Any], row: dict[str, str], texts: dict[str, str]
             if ago > limit or ago < -1:
                 return f"{col} {v} is outside the last {int(limit)} months"
         if op in ("min", "max"):
+            span = number_span(v)
             try:
-                n, lim = float(re.sub(r"[^\d.-]", "", v)), float(c.get("value"))
+                lim = float(c.get("value"))
             except (TypeError, ValueError):
                 continue
-            if (op == "min" and n < lim) or (op == "max" and n > lim):
+            if span and ((op == "min" and span[1] < lim) or (op == "max" and span[0] > lim)):
                 return f"{col} {v} is {'under' if op == 'min' else 'over'} {c.get('value')}"
     return ""
+
+
+def number_span(text: str) -> tuple[float, float] | None:
+    """A number or a range in free text, as (low, high): "12" → (12, 12), "11-50" and
+    "11 to 50 employees" → (11, 50), "1,001+" → (1001, inf), "$2.5M" → (2.5, 2.5).
+    None when it has no number."""
+    t = str(text or "").replace(",", "")
+    nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", t)]
+    if not nums:
+        return None
+    if re.search(r"\d\s*\+", t) and len(nums) == 1:
+        return nums[0], float("inf")
+    if len(nums) >= 2 and re.search(r"\d\s*(?:-|–|to)\s*\d", t):
+        return min(nums[:2]), max(nums[:2])
+    return nums[0], nums[0]
 
 
 def kept_per_group(folder: Path) -> dict[str, int]:

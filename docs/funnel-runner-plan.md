@@ -434,6 +434,16 @@ must, and not finding it was read as breaking it. Now, for any list:
 - the judging call is told which rules never loosen, and that an item shown to break
   a rule is still dropped (a stated 120 people fails the size check as before).
 
+The run after that split the size rule as meant, then dropped 226 of 264 firms before
+reading them: the setup had added a filter "Segment is one of the four segments", and
+what a listing says ("Boutique consulting firm") never equals a fixed value exactly. A
+filter before reading never holds a list column to its fixed values now (the row's
+check does that after judging); an "in" filter on another field passes when the text
+shares a word with a value it may take; numbers in free text are read as ranges ("11-50"
+was read as 1150). And the judging call kept answering maybe for "meets every rule;
+employee count not shown": with looser readings on, a maybe names the rules whose facts
+weren't shown, and code makes it loose when each of them may go unshown.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
