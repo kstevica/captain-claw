@@ -5,21 +5,21 @@ owner's two daily jobs ran for sixteen days after their last sign-in, another's
 twice-a-day task reported "no change" thirty times into a Line nobody read.
 
 Once an hour, for every account on a deck with sign-in on: when the owner's last
-activity is ``FD_IDLE_PAUSE_DAYS`` (default 7) days old, their scheduled tasks
-are paused — Flight Deck's own (``fd_scheduler``) and the jobs their agents set
+activity is as many days old as the admin's setting (Settings → Agents, "Pause
+scheduled tasks for people who are away"; ``scheduled_idle_pause_days`` in the
+deck config, default 7), their scheduled tasks are paused — Flight Deck's own (``fd_scheduler``) and the jobs their agents set
 up for themselves (``agent_cron_routes``) — and one item on their Line says so.
 Nothing is deleted; they resume each one in Scheduled tasks.
 
 Activity is the later of: signing in or coming back to the deck on a saved
 session (``users.last_login_at``), and a message they sent their agents from any
 channel (``daily_usage``). A new account counts from when it was made.
-``FD_IDLE_PAUSE_DAYS=0`` turns it off.
+A setting of 0 turns it off.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -29,27 +29,35 @@ from captain_claw.logging import get_logger
 log = get_logger(__name__)
 
 DEFAULT_DAYS = 7
+MAX_DAYS = 365
+CONFIG_KEY = "scheduled_idle_pause_days"
 CHECK_EVERY_S = 3600.0
 FIRST_CHECK_S = 600.0
 _NAMES_SHOWN = 8
 
 
-def idle_days() -> int:
-    """Days without activity before tasks pause; 0 = never."""
-    raw = (os.environ.get("FD_IDLE_PAUSE_DAYS") or "").strip().lower()
-    if raw in ("off", "no", "false"):
-        return 0
+async def idle_days() -> int:
+    """The admin's setting: days without activity before tasks pause (0 =
+    never). Unreadable: 0, so nothing pauses on a guess."""
     try:
-        return max(0, int(raw)) if raw else DEFAULT_DAYS
-    except ValueError:
-        return DEFAULT_DAYS
+        from captain_claw.flight_deck.admin_routes import _load_system_config
+        from captain_claw.flight_deck.auth import get_db
+
+        cfg = _load_system_config(await get_db().get_system_setting("fd:system-config"))
+        days = int(cfg.get(CONFIG_KEY, DEFAULT_DAYS) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+    return min(MAX_DAYS, max(0, days))
 
 
-def active() -> bool:
-    """On for this deck: a day count, and accounts to be away from."""
+async def pause_days() -> int:
+    """Days before an away owner's tasks pause on this deck; 0 when it doesn't
+    (the setting is 0, or there are no accounts to be away from)."""
     from captain_claw.flight_deck.auth import _fd_auth_enabled
 
-    return idle_days() > 0 and _fd_auth_enabled()
+    if not _fd_auth_enabled():
+        return 0
+    return await idle_days()
 
 
 def _epoch(text: Any) -> float:
@@ -164,9 +172,9 @@ async def pause_idle_owner(user: dict[str, Any], days: int) -> int:
 
 async def sweep(db: Any, now: float | None = None) -> int:
     """One pass over every account; how many tasks were paused."""
-    if not active():
+    days = await pause_days()
+    if days <= 0:
         return 0
-    days = idle_days()
     cutoff = (now if now is not None else time.time()) - days * 86400.0
     typed = await db.message_day_bounds()
     paused = 0

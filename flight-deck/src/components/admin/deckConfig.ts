@@ -34,6 +34,9 @@ export interface SystemConfig {
   show_powered_by: boolean
   // A process agent idle this many minutes is put to sleep (0 = never).
   agent_idle_stop_minutes: number
+  // A person away this many days (no sign-in, no message to their agents) has
+  // their scheduled tasks paused (0 = never; decks with accounts).
+  scheduled_idle_pause_days: number
   // Custom tools (customTools.ts): on for this deck, and whether a tool shared
   // with everybody waits for an admin.
   external_tools_enabled: boolean
@@ -46,7 +49,7 @@ export const CONFIG_DEFAULTS: SystemConfig = {
   docker_spawn_enabled: true, kiosk_mode: 'off', kiosk_new_users: false,
   waitlist_enabled: true, waitlist_cohort: '',
   instance_name: 'Captain', instance_description: 'Agent Management Console',
-  show_powered_by: true, agent_idle_stop_minutes: 0,
+  show_powered_by: true, agent_idle_stop_minutes: 0, scheduled_idle_pause_days: 7,
   external_tools_enabled: false, external_tools_everybody_approval: true, external_tools_require_sandbox: false,
 }
 

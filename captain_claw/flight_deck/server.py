@@ -11492,7 +11492,7 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
 # Settings about other people: on a deck without sign-in (the desktop app's)
 # there is no one else, so these keep their defaults there.
 _PEOPLE_SETTINGS = ("kiosk_mode", "kiosk_mode_from_env", "kiosk_new_users",
-                    "waitlist_enabled", "waitlist_cohort")
+                    "waitlist_enabled", "waitlist_cohort", "scheduled_idle_pause_days")
 
 
 async def _get_system_config() -> dict:

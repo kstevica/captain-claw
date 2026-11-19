@@ -319,10 +319,13 @@ def test_delivery_options_say_when_tasks_pause_for_an_away_owner(api, monkeypatc
         return {"available": False, "provider": "", "from": "", "to": "", "reason": ""}
     monkeypatch.setattr(sched, "_email_route", _route)
     monkeypatch.setattr(sched, "_owner_telegram_chat", lambda owner: "")
-    monkeypatch.setenv("FD_IDLE_PAUSE_DAYS", "5")
-    monkeypatch.setattr(idle_pause, "active", lambda: True)
+    days = {"n": 5}
+
+    async def _pause_days():
+        return days["n"]
+    monkeypatch.setattr(idle_pause, "pause_days", _pause_days)
     assert api.get("/scheduler/delivery-options", headers=_bearer(ALICE)).json()["idle_pause_days"] == 5
-    monkeypatch.setattr(idle_pause, "active", lambda: False)
+    days["n"] = 0
     assert api.get("/scheduler/delivery-options", headers=_bearer(ALICE)).json()["idle_pause_days"] == 0
 
 

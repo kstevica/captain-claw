@@ -27,6 +27,16 @@ def _user(uid: str, *, login: float | None, created: float = 60) -> dict:
             "last_login_at": _iso(login) if login is not None else ""}
 
 
+class _Settings:
+    """Flight Deck's db as idle_pause reads the admin's setting from it."""
+
+    def __init__(self) -> None:
+        self.config: dict = {}
+
+    async def get_system_setting(self, key: str):
+        return json.dumps(self.config) if key == "fd:system-config" and self.config else None
+
+
 class _Db:
     def __init__(self, users: list[dict], typed: dict[str, str] | None = None) -> None:
         self.users = users
@@ -43,8 +53,9 @@ class _Db:
 def deck(tmp_path, monkeypatch):
     """Sign-in on, a scheduler store of its own, one agent per owner whose
     jobs live in a stand-in file, and a Line that records what it was told."""
-    monkeypatch.delenv("FD_IDLE_PAUSE_DAYS", raising=False)
     monkeypatch.setattr("captain_claw.flight_deck.auth._fd_auth_enabled", lambda: True)
+    settings = _Settings()
+    monkeypatch.setattr("captain_claw.flight_deck.auth.get_db", lambda: settings)
     store = fd_scheduler.SchedulerStore(tmp_path / "scheduler.db")
     monkeypatch.setattr(fd_scheduler, "get_store", lambda: store)
 
@@ -73,7 +84,7 @@ def deck(tmp_path, monkeypatch):
     from captain_claw.flight_deck import line
 
     monkeypatch.setattr(line, "post", post)
-    return {"store": store, "agent_rows": agent_rows, "told": told}
+    return {"store": store, "agent_rows": agent_rows, "told": told, "settings": settings}
 
 
 def _task(store, owner: str, name: str, enabled: bool = True) -> dict:
@@ -137,9 +148,9 @@ async def test_someone_active_keeps_their_tasks(deck, user, typed):
 async def test_it_can_be_turned_off_and_is_off_without_accounts(deck, monkeypatch):
     _task(deck["store"], "roko", "Tender watch")
     db = _Db([_user("roko", login=40)])
-    monkeypatch.setenv("FD_IDLE_PAUSE_DAYS", "0")
+    deck["settings"].config = {"scheduled_idle_pause_days": 0}     # the admin turned it off
     assert await idle_pause.sweep(db, now=NOW.timestamp()) == 0
-    monkeypatch.delenv("FD_IDLE_PAUSE_DAYS")
+    deck["settings"].config = {}
     monkeypatch.setattr("captain_claw.flight_deck.auth._fd_auth_enabled", lambda: False)
     assert await idle_pause.sweep(db, now=NOW.timestamp()) == 0
     assert deck["store"].list(owner_id="roko")[0]["enabled"]
@@ -148,8 +159,8 @@ async def test_it_can_be_turned_off_and_is_off_without_accounts(deck, monkeypatc
 async def test_the_day_count_comes_from_the_deck(deck, monkeypatch):
     _task(deck["store"], "vedran", "Weekly scan")
     db = _Db([_user("vedran", login=4)])
-    monkeypatch.setenv("FD_IDLE_PAUSE_DAYS", "3")
-    assert idle_pause.idle_days() == 3
+    deck["settings"].config = {"scheduled_idle_pause_days": 3}
+    assert await idle_pause.idle_days() == 3
     assert await idle_pause.sweep(db, now=NOW.timestamp()) == 1
     assert "3 days" in deck["told"][0][2]
 
@@ -186,9 +197,51 @@ async def test_one_owner_failing_doesnt_stop_the_others(deck, monkeypatch):
     assert [t[0] for t in deck["told"]] == ["b"]
 
 
-def test_on_by_default_with_accounts_and_off_by_setting(monkeypatch):
-    monkeypatch.delenv("FD_IDLE_PAUSE_DAYS", raising=False)
-    monkeypatch.setattr("captain_claw.flight_deck.auth._fd_auth_enabled", lambda: True)
-    assert idle_pause.active() and idle_pause.idle_days() == 7
-    monkeypatch.setenv("FD_IDLE_PAUSE_DAYS", "off")
-    assert not idle_pause.active()
+async def test_on_by_default_with_accounts_and_off_by_setting(deck, monkeypatch):
+    assert await idle_pause.pause_days() == 7                      # nothing stored: the default
+    deck["settings"].config = {"scheduled_idle_pause_days": 0}
+    assert await idle_pause.pause_days() == 0
+    deck["settings"].config = {"scheduled_idle_pause_days": 14}
+    assert await idle_pause.pause_days() == 14
+    monkeypatch.setattr("captain_claw.flight_deck.auth._fd_auth_enabled", lambda: False)
+    assert await idle_pause.pause_days() == 0                      # no accounts to be away from
+
+
+async def test_an_unreadable_setting_pauses_nothing(deck, monkeypatch):
+    class _Broken:
+        async def get_system_setting(self, key):
+            raise RuntimeError("database is locked")
+
+    monkeypatch.setattr("captain_claw.flight_deck.auth.get_db", lambda: _Broken())
+    _task(deck["store"], "roko", "Tender watch")
+    assert await idle_pause.sweep(_Db([_user("roko", login=40)]), now=NOW.timestamp()) == 0
+    assert deck["store"].list(owner_id="roko")[0]["enabled"]
+
+
+async def test_the_admin_setting_is_bounded_and_saved(monkeypatch):
+    from fastapi import HTTPException
+
+    from captain_claw.flight_deck import admin_routes
+
+    assert admin_routes.SYSTEM_CONFIG_DEFAULTS["scheduled_idle_pause_days"] == 7
+
+    class _DB:
+        stored = None
+
+        async def get_system_setting(self, key):
+            return self.stored
+
+        async def set_system_setting(self, key, value):
+            self.stored = value
+
+    db = _DB()
+    monkeypatch.setattr(admin_routes, "get_db", lambda: db)
+    req = admin_routes.UpdateConfigRequest
+    for bad in (-1, idle_pause.MAX_DAYS + 1):
+        with pytest.raises(HTTPException):
+            await admin_routes.update_config(req(scheduled_idle_pause_days=bad), admin={})
+    out = await admin_routes.update_config(req(scheduled_idle_pause_days=14), admin={})
+    assert out["scheduled_idle_pause_days"] == 14
+    assert json.loads(db.stored) == {"scheduled_idle_pause_days": 14}
+    off = await admin_routes.update_config(req(scheduled_idle_pause_days=0), admin={})
+    assert off["scheduled_idle_pause_days"] == 0
