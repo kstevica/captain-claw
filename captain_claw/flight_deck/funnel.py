@@ -838,6 +838,30 @@ def skip_sites(recipe: dict[str, Any]) -> tuple[str, ...]:
     return tuple(s for s in _SKIP_SITES if not re.search(r"(?<![a-z])" + re.escape(s.split(".")[0]) + r"(?![a-z])", words))
 
 
+_NAME_STOP = frozenset({"the", "and", "inc", "llc", "ltd", "group", "partners", "company", "consulting", "co",
+                        "corp", "firm", "associates", "services"})
+
+
+def name_words(name: str) -> list[str]:
+    """The words that pick an item's name out on a page: its distinctive ones ("P&S
+    International Strategies" → international, strategies), else all of them ("U.S.
+    Consulting Services")."""
+    words = re.findall(r"[a-z0-9]+", str(name or "").lower())
+    strong = [w for w in words if len(w) >= 3 and w not in _NAME_STOP]
+    return list(dict.fromkeys(strong or [w for w in words if len(w) >= 2]))
+
+
+def names_item(words: list[str], url: str, title: str) -> bool:
+    """Whether a search result is about the item: its address and title carry the
+    item's name (every word of a one- or two-word name; at least half, and two, of a
+    longer one). A result about something else ("LinkedIn News") never is."""
+    if not words:
+        return False
+    where = f"{url} {title}".lower()
+    hits = sum(1 for w in words if w in where)
+    return hits >= (len(words) if len(words) <= 2 else max(2, (len(words) + 1) // 2))
+
+
 def _own_result(results: list[dict[str, str]], name: str, url: str) -> str:
     """An item's own search result (its title, link and snippet), so code reads what
     was said of it alone, not of the other results beside it."""
@@ -1324,8 +1348,13 @@ class Work:
                 self._save_queries()
                 await self._event("web_search", f"query={q}")
                 if ok:
+                    words, own_site = name_words(self._name_of(item)), fx.domain_of(self._site_of(item))
                     for r in fx.search_results(text):
-                        evidence.append({"source": r["url"], "text": r["text"]})
+                        # a result about something else ("LinkedIn News") is read, but
+                        # code takes no size from it
+                        own = names_item(words, r["url"], r["title"]) or bool(
+                            own_site and fx.same_site(fx.domain_of(r["url"]), own_site))
+                        evidence.append({"source": r["url"], "text": r["text"], "own": own})
             elif g["kind"] == "fetch":
                 base = render(g["url"], item["fields"], site)
                 if not base:
@@ -1334,7 +1363,16 @@ class Work:
                     base = "https://" + base.lstrip("/")
                 parts = urlsplit(base)
                 root = f"{parts.scheme}://{parts.netloc}/"
-                urls = list(dict.fromkeys(base if not p else urljoin(root, p.lstrip("/")) for p in g["paths"]))
+                if any(fx.same_site(fx.domain_of(base), s) for s in self.skip_sites):
+                    # the item's page on a directory or social site (its LinkedIn page, no
+                    # site of its own found): that page only. The site's own about, news
+                    # or contact pages aren't the item's (linkedin.com/news gave two firms
+                    # another company's size).
+                    urls = [base] if parts.path.strip("/") else []
+                else:
+                    urls = list(dict.fromkeys(base if not p else urljoin(root, p.lstrip("/")) for p in g["paths"]))
+                if not urls:
+                    continue
                 tools = await self._tools()
                 got = await asyncio.gather(*(tools.fetch(u) for u in urls))
                 for u, (ok, text) in zip(urls, got):
@@ -1353,17 +1391,19 @@ class Work:
                 return v
         return ""
 
+    def _name_of(self, item: dict) -> str:
+        f = item["fields"]
+        return str(f.get("name") or f.get(self.recipe["key"]) or next(iter(f.values()), "")).strip()
+
     async def find_site(self, item: dict, evidence: list[dict]) -> None:
         """An item found on a directory or a LinkedIn page has no site of its own to
         read: one search for its name, and the first result on a site of its own whose
         title or address carries the name's words."""
         f = item["fields"]
-        name = str(f.get("name") or f.get(self.recipe["key"]) or next(iter(f.values()), "")).strip()
+        name = self._name_of(item)
         if not name or self.queries["searches"] >= self.budget:
             return
-        words = [w for w in re.findall(r"[a-z0-9]+", name.lower())
-                 if len(w) >= 3 and w not in {"the", "and", "inc", "llc", "ltd", "group", "partners", "company",
-                                              "consulting", "co", "corp", "firm", "associates", "services"}]
+        words = name_words(name)
         place = fx.place_name(self.places[0]) if len(self.places) == 1 else ""
         kind = self.recipe["item"] if self.recipe["item"] != "item" else ""
         q = " ".join(f'"{name}" {kind} {place}'.split())
@@ -1395,6 +1435,8 @@ class Work:
         found: dict[str, list[tuple[str, str]]] = {}
         for e in evidence:
             for name in names:
+                if name == "size_band" and not e.get("own", True):
+                    continue  # another company's size, read off a page that isn't about this one
                 for v in fx.extract(name, e["text"], domain=domain if name == "emails" else ""):
                     found.setdefault(name, [])
                     if all(v != x for x, _ in found[name]):

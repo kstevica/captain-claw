@@ -330,6 +330,11 @@ def test_an_exclusion_that_matches_everything_is_no_exclusion(tmp_path):
     assert not code_contract.sane_exclude(r"^(?!([A-Z]{2})$).*$")
     assert not code_contract.sane_exclude(".*") and not code_contract.sane_exclude("[") and not code_contract.sane_exclude("")
     assert code_contract.sane_exclude(r"(?i)(university|government)") and code_contract.sane_exclude(r"\.edu\b")
+    # "everything except X" is a format rule, never an exclusion: this one dropped "P&S …",
+    # "U.S. …" and "C-Suite …" while passing most plain names
+    for rule in (r"^(?!([A-Z]{2}|\d{4}-\d{2}(-\d{2})?))", r"(?!.*\bLLC\b)", r"^(?:(?!agency).)*$"):
+        assert not code_contract.sane_exclude(rule), rule
+    assert code_contract.sane_exclude(r"(?i)\b(gov|edu)\b(?!-)")  # a lookahead later on is fine
     # nor one that rules out the list's own groups ("agency" on a list of agencies)
     assert not code_contract.sane_exclude(r"(?i)(university|agency)", ["marketing/content agencies"])
     shaped = code_contract.parse_contract(json.dumps({"constraints": [{"id": "a", "text": "x", "check": {
