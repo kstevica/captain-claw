@@ -146,3 +146,26 @@ async def test_planning_writes_dont_undo_each_other(bat, model):
     cfg = (await bat.get_run("bat_plan00001"))["config"]
     assert cfg["max_parallel"] == 1 and cfg["contract_shaped"] is True
     assert cfg["contract"][0]["check"]["type"] == "table"
+
+
+async def test_shaping_asks_for_no_thinking_and_a_short_answer(bat, monkeypatch):
+    """A local Qwen thought 137k characters on the shaping call, looped and answered nothing."""
+    from captain_claw.flight_deck import auth, basna_routes
+    from captain_claw.llm import reasoning
+    seen = {}
+
+    class Prov:
+        async def complete(self, messages, **kw):
+            seen.update(effort=reasoning.requested_effort(), max_tokens=kw.get("max_tokens"))
+            return _Reply(json.dumps({"constraints": [{"id": "fm1", "text": "x", "check": {"type": "table", "min_rows": 100}}]}))
+
+    async def tiers(_db, _owner):
+        return {"reason": {"provider": "x", "model": "m"}}, None
+
+    monkeypatch.setattr(auth, "get_db", lambda: None)
+    monkeypatch.setattr(basna_routes, "_load_owner_tiers", tiers)
+    monkeypatch.setattr(bat_routes, "think_call", lambda creds, **kw: (Prov(), 32768))
+    await _run(bat, factory_id="fac_1", contract=RULES)
+    await bat_routes._shape_contract(await bat.get_run("bat_plan00001"), {"provider": "x"}, False)
+    assert seen == {"effort": "off", "max_tokens": bat_routes.SHAPE_TOKENS}
+    assert (await bat.get_run("bat_plan00001"))["config"]["contract_shaped"] is True

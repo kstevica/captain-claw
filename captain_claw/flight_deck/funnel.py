@@ -319,6 +319,23 @@ def charter_checks(task: str, columns: list[str]) -> list[dict[str, Any]]:
     return out
 
 
+_US_QUERY = re.compile(r"(?<![\w-])(US|USA|U\.S\.|United States|America|American)(?![\w-])|"
+                       + "|".join(re.escape(n) for n in fx.US_STATES.values()))
+
+
+def fix_output(recipe: dict[str, Any], task: str) -> bool:
+    """The list's file as the charter names it ("list them in leads.csv"), when nothing
+    else named it (the checks weren't shaped, the setup left it out). True when it
+    changed."""
+    if recipe.get("output") not in ("", "results.csv"):
+        return False
+    m = re.search(r"(?<![\w/.-])([\w-]+\.csv)\b", str(task or ""))
+    if not m or m.group(1) == recipe.get("output"):
+        return False
+    recipe["output"] = m.group(1)
+    return True
+
+
 def _group_words(group: str) -> list[str]:
     return [w[:6] for w in re.findall(r"[a-z]+", group.lower()) if len(w) >= 4 and w not in _GROUP_STOP]
 
@@ -339,6 +356,7 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
     text = " ".join(str(task or "").split())
     place = "United States" if re.search(r"\b(US|USA|U\.S\.|United States)\b", text) else ""
     size = _SIZE.search(text)
+    fix_output(recipe, text)
     seen_lists: list[list[str]] = []
     for s in recipe["sources"]:
         if s["kind"] != "search" or not s.get("group"):
@@ -349,6 +367,11 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
             s["queries"] = _group_queries(s["group"], place, size)
             s["about"] = s["about"] or s["group"]
         seen_lists.append(s["queries"])
+    if place == "United States":  # a search that names no place finds firms anywhere
+        for s in recipe["sources"]:
+            if s["kind"] == "search":
+                s["queries"] = [q if _US_QUERY.search(q) else f"{q} United States" for q in s["queries"]]
+                s["country"] = s.get("country") or "US"
     refs = list(recipe.get("reference") or [])
     for s in list(recipe["sources"]):
         path = s.get("path") or ""
@@ -471,7 +494,8 @@ Rules:
 - An offline list (a file or documents only) has no searches and no gather unless the rules need the web.
 - A file the goal points to for information (what the owner's product is, house rules) is "reference", never a
   source: no items are taken from it, and every judging call reads it.
-- Each group's searches name that group; never copy one group's searches to another.
+- Each group's searches name that group; never copy one group's searches to another. When the list is about one
+  place, every search names it (the country, or a state or city in it).
 - Never invent a file or a link that isn't in what you're shown."""
 
 
@@ -767,6 +791,21 @@ def _append_csv(path: Path, cols: list[str], row: dict[str, Any]) -> None:
         w.writerow({c: ("" if row.get(c) is None else str(row.get(c))) for c in cols})
 
 
+def _own_result(results: list[dict[str, str]], name: str, url: str) -> str:
+    """An item's own search result (its title, link and snippet), so code reads what
+    was said of it alone, not of the other results beside it."""
+    d = fx.domain_of(url)
+    low = name.lower()
+    for r in results:
+        if url and (r["url"].rstrip("/") == url.rstrip("/") or (d and fx.domain_of(r["url"]) == d
+                                                                  and not any(fx.same_site(d, s) for s in _SKIP_SITES))):
+            return f"{r['text']}\n{r['url']}"
+    for r in results:
+        if low and low in r["title"].lower():
+            return f"{r['text']}\n{r['url']}"
+    return ""
+
+
 def known_keys(folder: Path) -> set[str]:
     """The items the factory's earlier runs checked, as the run was given them
     (``extra/already-checked.csv``): the funnel doesn't look at them again."""
@@ -896,6 +935,7 @@ class Work:
         self.items_max = _int(self.cfg.get("funnel_items_max"), 1, 1_000_000, ITEMS_MAX)
         self.thinking = str(self.cfg.get("funnel_thinking") or "off").lower() == "on"
         self.charter = " ".join(str(run.get("task") or "").split())[:CHARTER_CHARS]
+        self.us_only = any(s.get("country") == "US" for s in recipe["sources"])
         self.reference = reference_text(folder, recipe)
         self.more_pages: list[str] = []
         self.tools: Tools | None = None
@@ -1096,6 +1136,7 @@ class Work:
                 if url.startswith(("http://", "https://")) and url not in self.more_pages \
                         and len(self.more_pages) < MORE_PAGES:
                     self.more_pages.append(url)
+        results = fx.search_results(text) if origin.startswith("search: ") else []
         out = []
         for it in items or []:
             if not isinstance(it, dict) or not str(it.get("name") or "").strip():
@@ -1104,7 +1145,9 @@ class Work:
             fields.setdefault("name", str(it["name"]).strip())
             if it.get("url"):
                 fields.setdefault("url", str(it["url"]).strip())
-            out.append({"fields": fields, "origin": origin, "text": text if len(text) <= 3000 else ""})
+            own = _own_result(results, fields["name"], str(it.get("url") or ""))
+            out.append({"fields": fields, "origin": origin,
+                        "text": own or (text if len(text) <= 3000 else "")})
         return out
 
     def item_key(self, item: dict) -> str:
@@ -1124,8 +1167,14 @@ class Work:
 
     def passes(self, item: dict, found: dict[str, list[tuple[str, str]]] | None = None) -> str:
         """"" when an item passes the recipe's filters, else why not. Before gathering
-        only the item's fields are known; a size band is tested once it's found."""
+        only the item's fields and its listing are known: one that places it outside
+        the US (for a US list) goes before any page is read; a size band is tested once
+        it's found."""
         f = {k.lower(): v for k, v in item["fields"].items()}
+        if found is None and self.us_only:
+            where = fx.foreign_place(f"{item.get('text') or ''}\n" + " ".join(map(str, f.values())))
+            if where:
+                return f"outside the US (its listing says {where})"
         for flt in self.recipe["filters"]:
             col, op, val = flt["column"], flt["op"], flt.get("value")
             if op in ("size_max", "size_min"):
@@ -1877,6 +1926,8 @@ async def attempt(run: dict, step: dict) -> dict:
     recipe = load_recipe(folder)
     if recipe is None:
         return {"ok": False, "error": f"the list funnel's recipe ({RECIPE}) is missing", "usd": 0.0, "tokens": 0}
+    if fix_output(recipe, str(run.get("task", ""))):  # a recipe written before the charter's name was read
+        (folder / RECIPE).write_text(json.dumps(recipe, indent=1, ensure_ascii=False), encoding="utf-8")
     if kind.get("kind") == "merge":
         return await merge(run, step, folder, recipe)
     work = Work(run, step, recipe, folder, kind.get("group", ""))

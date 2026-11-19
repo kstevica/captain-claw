@@ -1147,6 +1147,7 @@ async def merge_config(run_id: str, changes: dict) -> dict:
 
 
 SHAPE_TRIES = 3
+SHAPE_TOKENS = 8000  # what the shaping call may write: checks as JSON
 
 
 async def _shape_contract(run: dict, creds: dict | None, has_shell: bool) -> None:
@@ -1169,12 +1170,16 @@ async def _shape_contract(run: dict, creds: dict | None, has_shell: bool) -> Non
     shaped: list[dict] = []
     why = ""
     try:
+        from captain_claw.llm import reasoning
         prov, mt = think_call(creds, temperature=0.0)
         listing = "\n".join(f'- id "{r["id"]}": {r["text"]}' for r in rules)
-        resp = await prov.complete(messages=[
-            Message(role="system", content=_SHAPE_SYSTEM.replace("COMMAND_SHAPE", _COMMAND_SHAPE if has_shell else "")),
-            Message(role="user", content=f"# The job\n{str(run.get('task', ''))[:6000]}\n\n# Its rules\n{listing}"),
-        ], temperature=0.0, max_tokens=mt)
+        # A JSON answer, nothing to reason out: with thinking on, a local Qwen thought
+        # 137k characters here, looped and answered nothing, so no rule got a check.
+        with reasoning.call_effort("off"):
+            resp = await prov.complete(messages=[
+                Message(role="system", content=_SHAPE_SYSTEM.replace("COMMAND_SHAPE", _COMMAND_SHAPE if has_shell else "")),
+                Message(role="user", content=f"# The job\n{str(run.get('task', ''))[:6000]}\n\n# Its rules\n{listing}"),
+            ], temperature=0.0, max_tokens=min(mt, SHAPE_TOKENS))
         content = resp.content or ""
         shaped = _read_rules(content)
         if not shaped:

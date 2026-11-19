@@ -708,7 +708,7 @@ def test_code_tidies_a_models_recipe(tmp_path):
     charter = CHARTER + " What Captain is and does is in extra/Captain.md. CaptainFeature is exactly one of: A, B."
     t = funnel.tidy_recipe(r, charter, tmp_path)
     assert [s["kind"] for s in t["sources"]] == ["search", "search"] and t["reference"] == ["extra/Captain.md"]
-    assert t["sources"][0]["queries"] == copied  # names its group: kept
+    assert t["sources"][0]["queries"] == [f"{q} United States" for q in copied]  # names its group: kept, with the place
     assert t["sources"][1]["queries"][0] == "research shops directory United States"  # copied: written for it
     assert {"column": "Signal", "op": "in", "value": ["A", "B"]} not in t["checks"]
     (tmp_path / "extra").mkdir()
@@ -771,3 +771,62 @@ async def test_a_firm_found_on_linkedin_gets_its_own_site_read(deck):
     prompt = deck["decide_prompts"][0]
     assert "# The goal, in the owner's words" in prompt and "CaptainFeature is exactly one of: Onboarding, Flows" in prompt
     assert "# Reference\n[extra/Captain.md] # Captain Onboarding teaches agents your documents." in prompt
+
+
+# ── the list's file, the place, and listings from elsewhere ────────────
+
+def test_a_listing_from_elsewhere():
+    assert fx.foreign_place("Boutique Growth | Oakville, Ontario | 12 followers") == "Ontario"
+    assert fx.foreign_place("NAOS Consulting · Casablanca, Morocco") == "Casablanca"
+    for us in ("Acme · Austin, TX 78701", "a firm in New Mexico", "offices in New York and London",
+               "Ontario, California office", "based in the UK and United States", "a clothing store"):
+        assert fx.foreign_place(us) == "", us
+
+
+def test_the_lists_file_and_the_place_come_from_the_charter(tmp_path):
+    r = funnel.normalize_recipe({"columns": ["Firm", "Website"], "sources": [
+        {"kind": "search", "queries": ["boutique consulting firm site:linkedin.com/company", "consultancies in Texas",
+                                       "US consulting firms list"]}]})
+    assert r["output"] == "results.csv"
+    t = funnel.tidy_recipe(r, "Find small US firms and list them in leads.csv. Also write summary.md.", tmp_path)
+    assert t["output"] == "leads.csv"
+    assert t["sources"][0]["queries"] == ["boutique consulting firm site:linkedin.com/company United States",
+                                          "consultancies in Texas", "US consulting firms list"]
+    assert t["sources"][0]["country"] == "US"
+    named = {**r, "output": "firms.csv"}
+    assert funnel.fix_output(named, "list them in leads.csv") is False and named["output"] == "firms.csv"
+
+
+async def test_a_listing_from_elsewhere_isnt_read(deck):
+    run, folder = await _run(deck["store"], CONTRACT, rid="bat_place0001")
+    recent = _months_back(3)
+    _web_deck(deck, recent)
+    deck["extract"] = lambda user: {"items": [
+        {"name": "Alpha", "url": "https://alpha.example", "fields": {"Firm": "Alpha", "Website": "https://alpha.example"}},
+        {"name": "Maple", "url": "https://maple.example", "fields": {"Firm": "Maple", "Website": "https://maple.example"}}]}
+    deck["tools"].results["x firms list"] = (
+        "[QUERY: q]\n\n1. Alpha | Consulting\n   URL: https://alpha.example\n   Snippet: Alpha, Austin, TX\n\n"
+        "2. Maple Advisory\n   URL: https://maple.example\n   Snippet: Maple Advisory · Toronto, Ontario · 11-50 employees\n")
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    fetched = [u for k, u in deck["tools"].calls if k == "fetch"]
+    assert not any("maple" in u for u in fetched) and any("alpha" in u for u in fetched)
+    why = {r["key"]: (r["stage"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert why["maple.example"] == ("filter", "outside the US (its listing says Toronto)")
+
+
+async def test_a_recipe_written_before_gets_the_charters_file(deck):
+    run, folder = await _run(deck["store"], PEOPLE, rid="bat_named0001")
+    run = {**run, "task": "Find people and list them in contacts-out.csv."}
+    (folder / "extra" / "contacts.csv").write_text("Name,Email,Team\nAna,ana@a.example,a\n")
+    deck["recipe"] = {"item": "person", "sources": [{"kind": "file", "path": "extra/contacts.csv"}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"], "Email": f["Email"],
+                                                                         "Team": f["Team"]}} for i, f in items]
+    steps = await funnel.plan(run)
+    recipe = funnel.load_recipe(folder)
+    recipe["output"] = "results.csv"  # as an earlier version wrote it
+    (folder / funnel.RECIPE).write_text(json.dumps(recipe))
+    fresh = {**(await deck["store"].get_run(run["id"])), "task": run["task"]}
+    await bat_routes._bat_attempt(fresh, steps[0])
+    await bat_routes._bat_attempt(fresh, steps[-1])
+    assert funnel.load_recipe(folder)["output"] == "contacts-out.csv" and (folder / "contacts-out.csv").is_file()
