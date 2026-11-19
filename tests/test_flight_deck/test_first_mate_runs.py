@@ -189,7 +189,7 @@ async def test_start_refusals(store, bat, monkeypatch):
     with pytest.raises(FirstMateError, match="approved"):
         await runs.start(draft["id"], BOB, watch=False)
     g = _live(store, runner="vatra")
-    with pytest.raises(FirstMateError, match="only Bat is wired"):
+    with pytest.raises(FirstMateError, match="only Bat and the list funnel are wired"):
         await runs.start(g["id"], BOB, watch=False)
     monkeypatch.setattr(bat_loop, "_STORE", None)
     with pytest.raises(FirstMateError, match="Bat isn't running"):

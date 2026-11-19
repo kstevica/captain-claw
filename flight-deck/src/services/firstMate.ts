@@ -13,7 +13,7 @@ import type { ProgressEvent } from '../stores/basnaStore'
 export type FactoryState = 'draft' | 'awaiting_charter' | 'running' | 'paused' | 'paused_budget' | 'stopped' | 'retired'
 export type VersionStatus = 'draft' | 'awaiting' | 'live' | 'replaced' | 'declined'
 export type Trust = 'propose' | 'commit' | 'direct'
-export type Runner = 'bat' | 'vatra' | 'basna' | 'code' | 'crew' | 'flow' | 'plan'
+export type Runner = 'bat' | 'funnel' | 'vatra' | 'basna' | 'code' | 'crew' | 'flow' | 'plan'
 export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'
 export type OwnerState = 'running' | 'paused' | 'stopped' | 'retired'
 
@@ -33,7 +33,7 @@ export const TRUST_HINTS: Record<Trust, string> = {
 }
 
 export const RUNNER_LABELS: Record<Runner, string> = {
-  bat: 'Bat', vatra: 'Vatra', basna: 'Basna', code: 'Code', crew: 'Crew', flow: 'Flow', plan: 'Plan',
+  bat: 'Bat', funnel: 'List funnel', vatra: 'Vatra', basna: 'Basna', code: 'Code', crew: 'Crew', flow: 'Flow', plan: 'Plan',
 }
 
 export const RUN_LABELS: Record<RunStatus, string> = {
@@ -424,6 +424,8 @@ export interface Template {
 /** What the owner edits in a draft. */
 export interface DraftFields {
   charter?: string
+  runner?: Runner
+  runner_config?: Record<string, unknown>
   triggers?: Trigger[]
   checks?: { contract: string[]; off?: string[]; satisfaction_target?: number }
   budget?: { run_tokens: number | null }
@@ -561,7 +563,27 @@ export interface RunProgress {
   files: string
   /** How long it has taken so far (kept once it ended). */
   timing?: RunTiming | null
+  /** A list funnel run's counts: per group, where its items went. */
+  funnel?: FunnelCounts | null
 }
+
+/** Where a group's items went in the list funnel (docs/funnel-runner-plan.md). */
+export interface FunnelGroup {
+  looked: number
+  filter: number
+  read: number
+  judge: number
+  check: number
+  full: number
+  duplicate: number
+  kept: number
+  maybe: number
+  agent: number
+  'agent-check': number
+  quota: number
+  on_list: number
+}
+export interface FunnelCounts { groups: Record<string, FunnelGroup>; target: number; searches: number; updated: string }
 export const getRunProgress = (runId: string, since = 0) =>
   call<RunProgress>(`/fd/first-mate/runs/${encodeURIComponent(runId)}/progress?since=${since}`)
 /** A factory's improvement run: Captain Swarm trying better charters on its cases. */

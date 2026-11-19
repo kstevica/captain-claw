@@ -1,6 +1,6 @@
 # List funnel: a cheaper way to build a list
 
-Status: phases 1 and 2 built (branch `feat/list-funnel`, PR #668, not merged). Bat stays the
+Status: phases 1–3 built (branch `feat/list-funnel`, PR #668, not merged). Bat stays the
 default; the funnel is a second way to run a factory whose result is a list, so
 the same charter can run both ways and be compared.
 
@@ -253,7 +253,24 @@ Each phase ends merged, with tests, and a live check on a test deck (isolated
    context, the merge (leads.csv, exclusions.md, summary.md, funnel.json), the
    judge seeing the code's checks. Tests: a short group gets one agent step with
    its maybe list; the merge; judge input.
-3. **First Mate and UI.** `funnel` runner in the store and `RUNNERS`, settings
+3. **First Mate and UI. BUILT** (4 more tests, `test_first_mate_funnel.py`). `funnel`
+   is a runner (`first_mate_store.RUNNERS`, `BAT_RUNNERS`), its settings checked
+   (`leftovers` agent|none, `search_budget`, `agent_context`, nothing else);
+   `FunnelRunner` is `BatRunner` that starts the Bat run with `engine: "funnel"` and
+   the settings, and adds the funnel's counts to a run's progress (`live_counts`);
+   results, timing and cap-following treat it as a Bat run. The draft charter has
+   "How it runs" (Agents / List funnel, and for the funnel "Finish what's short with an
+   agent"); the runner chip reads "List funnel"; a run's panel shows the funnel strip
+   (per group: a bar of where its items went, on the list against what it needs, how
+   many looked at; a legend with totals). Live-checked on a test deck: the choice saved
+   and read back (`funnel`, `leftovers: none`), approval, a real run (its Bat run in the
+   funnel's engine; with no model key the funnel noted why and the run went to Bat's
+   plan, as designed; its workers removed when it was stopped), the strip from the
+   progress endpoint in dark and light, the recipe and state files on the Notes tab,
+   and the funnel's search-and-fetch path against a live agent (`web_fetch` through
+   `/api/tool?token=` returned the page; `web_search` reported the missing search key;
+   a wrong token got 401). A model-driven run waits for a deck with keys (phase 5).
+   Planned as: `funnel` runner in the store and `RUNNERS`, settings
    validation, "How it runs" in the charter editor (lists only), runner chip,
    the funnel strip in RunProgress, Notes shows the recipe. Live check on a test
    deck.

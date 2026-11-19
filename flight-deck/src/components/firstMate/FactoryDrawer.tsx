@@ -47,8 +47,8 @@ import { CapPicker } from './CapPicker'
 import { FactoryData } from './FactoryData'
 import { FactoryResults, TimingChips } from './FactoryResults'
 import { AddDataPanel } from '../context/AddData'
-import { CharterText, GoalChecklist, GoalList, SchedulePicker } from './CharterEditor'
-import { checksOf, goalsOf, type Goal } from '../../utils/charterGoals'
+import { CharterText, GoalChecklist, GoalList, RunnerPicker, SchedulePicker } from './CharterEditor'
+import { checksOf, goalKind, goalsOf, type Goal } from '../../utils/charterGoals'
 
 // One factory, in a drawer over the page: its charter (the live version, and
 // the draft being written), its runs, and its history. Approving a draft is
@@ -91,7 +91,7 @@ function eventText(e: FactoryEvent): string {
 }
 
 /** The editable part of a draft, as the form holds it: its goals each on or off. */
-interface Form { charter: string; goals: Goal[]; schedule: string }
+interface Form { charter: string; goals: Goal[]; schedule: string; runner: Version['runner']; leftovers: boolean }
 
 function formOf(v: Version): Form {
   const sched = v.triggers.find((t): t is Extract<Trigger, { kind: 'schedule' }> => t.kind === 'schedule')
@@ -99,7 +99,15 @@ function formOf(v: Version): Form {
     charter: v.charter,
     goals: goalsOf(v.checks),
     schedule: sched?.schedule ?? '',
+    runner: v.runner,
+    leftovers: (v.runner_config?.leftovers ?? 'agent') !== 'none',
   }
+}
+
+/** The runner settings a form asks for: the version's own while its runner stays. */
+function runnerConfigOf(form: Form, v: Version): Record<string, unknown> {
+  if (form.runner === 'funnel') return { ...(v.runner === 'funnel' ? v.runner_config : {}), leftovers: form.leftovers ? 'agent' : 'none' }
+  return form.runner === v.runner ? v.runner_config : {}
 }
 
 function fieldsOf(form: Form, v: Version): DraftFields {
@@ -109,10 +117,13 @@ function fieldsOf(form: Form, v: Version): DraftFields {
     charter: form.charter,
     checks: { ...v.checks, ...checksOf(form.goals) },
     triggers: [...(schedule ? [{ kind: 'schedule' as const, schedule, tz: '' }] : []), ...others],
+    runner: form.runner,
+    runner_config: runnerConfigOf(form, v),
   }
 }
 
 const same = (a: Form, b: Form) => a.charter === b.charter && a.schedule.trim() === b.schedule.trim()
+  && a.runner === b.runner && (a.runner !== 'funnel' || a.leftovers === b.leftovers)
   && JSON.stringify(checksOf(a.goals)) === JSON.stringify(checksOf(b.goals))
 
 export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onChanged, onNotice }: {
@@ -323,6 +334,11 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                       <div className="space-y-6">
                         <GoalList goals={form.goals} onChange={(goals) => setForm({ ...form, goals })} />
                         <SchedulePicker value={form.schedule} onChange={(schedule) => setForm({ ...form, schedule })} />
+                        {(form.runner === 'bat' || form.runner === 'funnel') && (
+                          <RunnerPicker value={form.runner} leftovers={form.leftovers}
+                            listy={form.goals.some((g) => g.on && goalKind(g.text) === 'countable')}
+                            onChange={(runner, leftovers) => setForm({ ...form, runner, leftovers })} />
+                        )}
                       </div>
                     </div>
                   {gate && (
@@ -745,7 +761,7 @@ function RunItem({ run: r, busy, deciding, onStop, onContinue, continuing, onApp
   const going = r.status === 'queued' || r.status === 'running'
   const waiting = (r.intents ?? []).filter((i) => i.status === 'open')
   // Its steps, agents and activity: open while it's going, a click away after.
-  const traceable = r.runner === 'bat' && !!r.child_id
+  const traceable = (r.runner === 'bat' || r.runner === 'funnel') && !!r.child_id
   const [open, setOpen] = useState(going)
   useEffect(() => { if (going) setOpen(true) }, [going])  // a run that goes on opens again
   const [unticked, setUnticked] = useState<Set<number>>(new Set())

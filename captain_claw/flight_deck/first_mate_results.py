@@ -88,7 +88,7 @@ async def run_results(run: dict[str, Any], *, profile_now: bool = False) -> dict
     from captain_claw.flight_deck import bat_loop
     from captain_claw.flight_deck.bat_routes import _project_of, _run_files, _run_folder
     child = str(run.get("child_id") or "")
-    if run.get("runner") != "bat" or not child:
+    if run.get("runner") not in fms.BAT_RUNNERS or not child:
         return None
     project = _project_of({"id": child})
     found = await asyncio.to_thread(_run_files, _run_folder({"id": child, "owner_id": run["owner_id"]}), limit=MAX_FILES)
@@ -236,7 +236,7 @@ async def run_timing(run: dict[str, Any]) -> dict[str, Any] | None:
     from captain_claw.flight_deck import bat_loop
     child = str(run.get("child_id") or "")
     store = bat_loop.get_store()
-    if run.get("runner") != "bat" or not child or store is None:
+    if run.get("runner") not in fms.BAT_RUNNERS or not child or store is None:
         return None
     events = await store.list_events(child, limit=50_000)
     started = datetime.fromisoformat(run["created_at"]).timestamp()

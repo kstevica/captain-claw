@@ -229,7 +229,7 @@ async def sync_caps(owner_id: str, factory_id: str | None = None) -> int:
         if f is None or f["owner_id"] != fms.norm_user(owner_id):
             continue
         for run in store.list_runs(f["id"], limit=5):
-            if run["status"] in fms.ACTIVE_RUN and run["runner"] == "bat" and run.get("child_id"):
+            if run["status"] in fms.ACTIVE_RUN and run["runner"] in fms.BAT_RUNNERS and run.get("child_id"):
                 b = await bstore.get_run(run["child_id"])
                 if b is not None and await sync_cap(b):
                     moved += 1
@@ -478,13 +478,52 @@ async def made_before_stop(bat_run: dict[str, Any]) -> str:
     return ("**What it made before it stopped** (Captain counted it):\n" + "\n".join(f"- {ln}" for ln in lines)
             + "\n\nIts files are in the run's folder.\n\n---\n\n")
 
-RUNNERS: dict[str, Runner] = {"bat": BatRunner()}
+class FunnelRunner(BatRunner):
+    """Factory runs that build a list with the list funnel (docs/funnel-runner-plan.md):
+    a Bat run with ``config.engine = "funnel"`` and its settings, so everything else
+    (progress, caps, Continue, results, timing) is Bat's. Its progress carries the
+    funnel's counts, per group and stage."""
+
+    kind = "funnel"
+
+    async def start(self, factory: dict[str, Any], version: dict[str, Any], run: dict[str, Any],
+                    brief: str, *, token_cap: int, extra: dict[str, Any] | None = None,
+                    files: list[tuple[str, Any, str]] | None = None) -> str:
+        return await super().start(factory, version, run, brief, token_cap=token_cap,
+                                   extra={**funnel_config(version), **(extra or {})}, files=files)
+
+    async def progress(self, child_id: str, since: int = 0) -> dict[str, Any] | None:
+        got = await super().progress(child_id, since)
+        if got is None:
+            return None
+        from captain_claw.flight_deck import bat_routes, funnel
+        b = await self._store().get_run(child_id)
+        try:
+            got["funnel"] = await asyncio.to_thread(funnel.live_counts, bat_routes._run_folder(b)) if b else None
+        except Exception:  # noqa: BLE001 — the rest of the progress shows without it
+            log.debug("first mate: couldn't read a funnel's counts", exc_info=True)
+            got["funnel"] = None
+        return got
+
+
+def funnel_config(version: dict[str, Any]) -> dict[str, Any]:
+    """A funnel version's settings as its Bat run's config."""
+    rc = version.get("runner_config") or {}
+    cfg: dict[str, Any] = {"engine": "funnel", "funnel_leftovers": rc.get("leftovers") or "agent"}
+    if rc.get("search_budget") is not None:
+        cfg["funnel_search_budget"] = int(rc["search_budget"])
+    if rc.get("agent_context") is not None:
+        cfg["funnel_agent_context"] = int(rc["agent_context"])
+    return cfg
+
+
+RUNNERS: dict[str, Runner] = {"bat": BatRunner(), "funnel": FunnelRunner()}
 
 
 def runner_for(kind: str) -> Runner:
     runner = RUNNERS.get(kind)
     if runner is None:
-        raise FirstMateError(f"First Mate can't start {kind} runs yet; so far only Bat is wired")
+        raise FirstMateError(f"First Mate can't start {kind} runs yet; so far only Bat and the list funnel are wired")
     return runner
 
 

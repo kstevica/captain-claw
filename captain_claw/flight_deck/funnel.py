@@ -1281,6 +1281,19 @@ def counts(folder: Path, recipe: dict[str, Any]) -> dict[str, Any]:
             "updated": time.strftime("%Y-%m-%d %H:%M")}
 
 
+def live_counts(folder: Path) -> dict[str, Any] | None:
+    """A going run's counts for its panel: as its last progress note left them, or
+    worked out now; None before it has a recipe."""
+    try:
+        got = json.loads((folder / COUNTS).read_text(encoding="utf-8"))
+        if isinstance(got, dict) and got.get("groups") is not None:
+            return got
+    except (OSError, ValueError):
+        pass
+    recipe = load_recipe(folder)
+    return counts(folder, recipe) if recipe else None
+
+
 def write_counts(folder: Path, recipe: dict[str, Any]) -> dict[str, Any]:
     got = counts(folder, recipe)
     (folder / COUNTS).parent.mkdir(parents=True, exist_ok=True)

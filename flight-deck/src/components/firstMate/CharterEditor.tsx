@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
-import { Calculator, Check, CircleCheck, CircleDashed, Gavel, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { Bot, Calculator, Check, CircleCheck, CircleDashed, Filter, Gavel, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { scheduleText } from '../../services/firstMate'
 import { goalKind, newGoal, type Goal } from '../../utils/charterGoals'
 
@@ -212,6 +212,61 @@ export function SchedulePicker({ value, onChange }: { value: string; onChange: (
           )}
         </div>
       </div>
+    </Field>
+  )
+}
+
+
+export type HowItRuns = 'bat' | 'funnel'
+
+const HOW: { value: HowItRuns; label: string; icon: typeof Bot; hint: string }[] = [
+  { value: 'bat', label: 'Agents', icon: Bot,
+    hint: 'Workers search and reason in long turns. For research, documents, anything that isn\u2019t a list.' },
+  { value: 'funnel', label: 'List funnel', icon: Filter,
+    hint: 'Code searches, reads and checks; a model judges each item once. Far fewer tokens for lists, files you give it included.' },
+]
+
+/** How a factory's runs do the work: Bat's agents, or the list funnel (with or without
+ *  an agent to finish what's short). */
+export function RunnerPicker({ value, leftovers, onChange, listy }: {
+  value: HowItRuns
+  leftovers: boolean
+  onChange: (value: HowItRuns, leftovers: boolean) => void
+  /** Its goals ask for an amount: it reads as a list. */
+  listy: boolean
+}) {
+  return (
+    <Field label="How it runs"
+      hint={value === 'funnel' && !listy
+        ? 'Works when the result is a list; a run that isn\u2019t one goes to agents anyway.'
+        : 'Agents for open work; the list funnel when the result is a list of rows.'}>
+      <div role="radiogroup" aria-label="How it runs" className="grid gap-2 @2xl:grid-cols-2">
+        {HOW.map((h) => {
+          const on = value === h.value
+          const Icon = h.icon
+          return (
+            <button key={h.value} type="button" role="radio" aria-checked={on} onClick={() => onChange(h.value, leftovers)}
+              className={`flex items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors ${on
+                ? 'border-violet-500/50 bg-violet-500/10' : 'border-[var(--fd-line)] hover:bg-[var(--fd-hover)]'}`}>
+              <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${on
+                ? 'bg-violet-500 text-white' : 'bg-[var(--fd-accent-soft)] text-[var(--fd-accent-text)]'}`}>
+                <Icon className="h-3.5 w-3.5" />
+              </span>
+              <span className="min-w-0">
+                <span className={`block text-xs font-semibold ${on ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-200'}`}>{h.label}</span>
+                <span className="mt-0.5 block text-[11px] leading-snug text-zinc-500">{h.hint}</span>
+              </span>
+            </button>
+          )
+        })}
+      </div>
+      {value === 'funnel' && (
+        <label className="mt-2 flex cursor-pointer items-start gap-2 text-[11px] text-zinc-400">
+          <input type="checkbox" checked={leftovers} onChange={(e) => onChange(value, e.target.checked)}
+            className="mt-0.5 h-3.5 w-3.5 accent-violet-600" />
+          <span>Finish what\u2019s short with an agent: it checks only the items that came close, in a small context.</span>
+        </label>
+      )}
     </Field>
   )
 }
