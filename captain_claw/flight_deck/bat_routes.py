@@ -1652,6 +1652,15 @@ async def _bat_planner(run: dict) -> list[dict]:
             log.warning("bat contract step failed", run_id=run.get("id"), error=str(e))
         store = bat_loop.get_store()
         fresh = await store.get_run(run["id"]) if store is not None else None
+        if ((fresh or run).get("config") or {}).get("engine") == "funnel":
+            from captain_claw.flight_deck import funnel
+            try:
+                steps = await funnel.plan(fresh or run)
+            except Exception as e:  # noqa: BLE001 — planned as any Bat run instead
+                log.warning("bat funnel planning failed", run_id=run.get("id"), error=str(e))
+                steps = None
+            if steps:
+                return steps
         return await _plan_steps(fresh or run)
 
 
@@ -1789,10 +1798,12 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
         _RUN_USAGE, _dispatch_one, _finalize_usage, _load_owner_tiers, _run_sid,
     )
     from captain_claw.flight_deck.auth import get_db
-    from captain_claw.flight_deck import pricing
+    from captain_claw.flight_deck import funnel, pricing
 
     if _factory_run(run):  # between steps, a factory's run takes its factory's cap as it is now
         await _cap_refresh(run)
+    if funnel.step_kind(run, step):  # the list funnel's own step: code and short calls, no worker turn
+        return await funnel.attempt(run, step)
     sid = run["id"]
     owner = run["owner_id"]
     key = step["step_key"]
@@ -2499,7 +2510,9 @@ bat_loop.set_cap_refresh(_cap_refresh)
 
 
 async def _course_check(run: dict, step: dict, started_at: float, last_try: bool) -> dict | None:
-    from captain_claw.flight_deck import bat_course
+    from captain_claw.flight_deck import bat_course, funnel
+    if funnel.step_kind(run, step):
+        return None  # its checks are part of its work: every row is checked as it's kept
     return await bat_course.check_step(run, step, started_at, last_try)
 
 
