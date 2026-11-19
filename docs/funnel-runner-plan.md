@@ -419,6 +419,21 @@ another's), a slashed group is searched by each of its parts ("research/analysis
 ("research firms"). A model's own searches count as naming a group when they use a
 common word for it ("law" for "legal", "CPA" for "accounting").
 
+Unshown is not broken. Two runs dropped most firms for "no employee count shown":
+the charter asked for a size "shown on LinkedIn or its team page", the setup kept it a
+must, and not finding it was read as breaking it. Now, for any list:
+
+- the setup splits a rule that asks for a fact and the page it must be shown on into
+  the exclusion (a must: "not shown to have more than 50 people") and the shown proof
+  (a prefer, looser "stated on any page, or not shown");
+- in code, a must about something measured (a count, an amount, a date, a rating) may
+  be met by "not shown" on a looser reading even when the setup kept it a must; a
+  must about what the item is, where it is (a place) or how to reach it (an email, a
+  phone), or about the key, group or site column, never is. A judging call that names
+  only such rules for a loose row makes it maybe;
+- the judging call is told which rules never loosen, and that an item shown to break
+  a rule is still dropped (a stated 120 people fails the size check as before).
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

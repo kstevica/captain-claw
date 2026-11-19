@@ -987,7 +987,7 @@ async def test_a_retried_setup_leaves_no_stale_note(deck, monkeypatch):
 PAPERS = [{"id": "fm1", "text": "papers.csv: Title, Year, Code, Cites; at least 3", "check": {
     "type": "table", "path": "papers.csv", "columns": ["Title", "Year", "Code", "Cites"], "min_rows": 3,
     "unique": ["Title"]}}]
-PAPER_RULES = [{"rule": "about graph search, from 2022 on", "kind": "must"},
+PAPER_RULES = [{"rule": "about graph search", "kind": "must"},
                {"rule": "links its code", "kind": "prefer", "looser": "no code link; Code left empty",
                 "columns": ["Code", "Title"]},  # the key never loosens
                {"rule": "cited 10 times or more", "kind": "prefer", "looser": "any citation count, or none found",
@@ -998,11 +998,11 @@ PAPER_RULES = [{"rule": "about graph search, from 2022 on", "kind": "must"},
 def test_rules_are_sorted_into_musts_and_soft_ones():
     r = funnel.normalize_recipe({"rules": PAPER_RULES + [{"rule": ""}, "x"]}, funnel.from_contract(PAPERS))
     assert [(x["rule"], x["kind"]) for x in r["rules"]] == [
-        ("about graph search, from 2022 on", "must"), ("links its code", "prefer"),
+        ("about graph search", "must"), ("links its code", "prefer"),
         ("cited 10 times or more", "prefer"), ("peer reviewed", "must")]
     assert r["rules"][1]["columns"] == ["Code"] and r["rules"][2]["looser"].startswith("any citation")
     note = funnel.rules_note(r, {"config": {}})
-    assert note.startswith("Rules: must — about graph search, from 2022 on; peer reviewed.")
+    assert note.startswith("Rules: must — about graph search; peer reviewed.")
     assert "Loosened only when a group runs short — links its code (looser: no code link; Code left empty)" in note
     assert "never loosens" in funnel.rules_note(r, {"config": {"funnel_loosen": "never"}})
     assert funnel.normalize_recipe({}, funnel.from_contract(PAPERS))["rules"] == [] and funnel.rules_note(
@@ -1062,7 +1062,7 @@ async def test_a_short_list_takes_rows_on_a_looser_reading_after_every_strict_on
     statuses = {r["name"]: (r["status"], r["stage"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
     assert statuses["Eps"] == statuses["Gamma"] == ("kept", "loose")
     note = funnel.judge_note(await deck["store"].get_run(run["id"]))
-    assert "2 rows meet a soft rule only by its looser reading" in note and "Those rows: Gamma, Eps." in note
+    assert "2 rows meet some rules only by their looser reading" in note and "Those rows: Gamma, Eps." in note
     from captain_claw.flight_deck import first_mate_ledger as ledger
     assert {r["name"]: r["outcome"] for r in ledger.rows_from_funnel(folder)}["Gamma"] == "kept"
 
@@ -1205,3 +1205,78 @@ def test_a_slashed_group_is_searched_by_each_part():
     funnel.tidy_recipe(r, "Find firms.")
     assert r["sources"][0]["queries"] == ["boutique law firm directory", "CPA firms list"]
     assert r["sources"][1]["queries"][:2] == ["list of research shops", "list of analysis shops"]  # item: "item"
+
+
+# ── unshown is not broken ──────────────────────────────────────────────
+
+FIRM_LEADS = [{"id": "fm1", "text": "leads.csv; at least 3", "check": {
+    "type": "table", "path": "leads.csv", "min_rows": 3, "unique": ["Firm"],
+    "columns": ["Firm", "Website", "State", "Employees", "EmployeesSourceURL", "Email", "EmailSourceURL",
+                "SignalDate", "Signal"]}}]
+LEAD_RULES = [  # as a setup model sorted a real charter: the shown size kept as a must
+    {"rule": "US knowledge firm headquartered in the US", "kind": "must"},
+    {"rule": "2-50 employees shown by its LinkedIn company page size band or its own team page", "kind": "must"},
+    {"rule": "not a university or government body", "kind": "must"},
+    {"rule": "own website prints a founder's or partner's email or a shared inbox like info@", "kind": "must"},
+    {"rule": "something dated in the last 24 months showing interest in AI", "kind": "prefer",
+     "looser": "any mention of AI, undated", "columns": ["SignalDate", "Signal"]}]
+
+
+def test_only_a_must_about_something_measured_may_go_unshown():
+    """A run dropped 45 of 87 firms for "no employee count shown": not found was read as
+    broken. Any list: a count, an amount, a date or a rating many items never publish
+    may go unshown on a looser reading; what an item is, where, and how to reach it may not."""
+    r = funnel.normalize_recipe({"rules": LEAD_RULES}, funnel.from_contract(FIRM_LEADS))
+    loosen = {x["rule"][:24] for x in funnel.loosenable(r)}
+    assert loosen == {"2-50 employees shown by ", "something dated in the l"}
+    size = r["rules"][1]
+    assert size["columns"] == ["Employees", "EmployeesSourceURL"] and not size["protected"]  # inferred from its words
+    assert funnel.looser_of(size).startswith("not shown in what was read")
+    assert "2-50 employees shown by its LinkedIn" in funnel.rules_note(r, {"config": {}}).split("Loosened")[1]
+    for rule, protected in (("rated 4.5 stars or more", False), ("over 1,000 members", False),
+                            ("founded before 2015", False), ("revenue under $10M per its filings", False),
+                            ("located in Zagreb", True), ("serves vegan food", True), ("peer reviewed", True),
+                            ("lists a phone number", True), ("has at least 2 office addresses", True)):
+        got = funnel.normalize_recipe({"rules": [{"rule": rule, "kind": "must"}]},
+                                      funnel.from_contract(FIRM_LEADS))["rules"][0]["protected"]
+        assert got is protected, rule
+
+
+async def test_a_fact_a_firm_doesnt_publish_is_no_reason_to_drop_it(deck):
+    run, folder = await _run(deck["store"], FIRM_LEADS, rid="bat_unshown01")
+    (folder / "extra" / "firms.csv").write_text(
+        "Firm,Website,State,Employees,Email,Signal\nA,https://a.example,TX,12,info@a.example,AI pilot\n"
+        "B,https://b.example,NY,,info@b.example,AI pilot\nC,https://c.example,CA,9,,AI pilot\n"
+        "D,https://d.example,WA,,info@d.example,\nE,https://e.example,OR,120,info@e.example,AI pilot\n")
+    deck["recipe"] = {"item": "firm", "key": "Firm", "sources": [{"kind": "file", "path": "extra/firms.csv"}],
+                      "decide": "US firms, 2-50 people shown, an email on the site, interest in AI.", "rules": LEAD_RULES,
+                      "checks": [{"column": "Employees", "op": "min", "value": 2},
+                                 {"column": "Employees", "op": "max", "value": 50},
+                                 {"column": "EmployeesSourceURL", "op": "required"}, {"column": "Email", "op": "required"}]}
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            row = {**f, "EmployeesSourceURL": "https://a.example/team" if f["Firm"] == "A" else ""}
+            size = "2-50 employees shown by its LinkedIn company page size band or its own team page"
+            if f["Firm"] == "A":
+                out.append({"id": i, "verdict": "keep", "row": row})
+            elif f["Firm"] == "C":  # no email: a way to reach it never loosens
+                out.append({"id": i, "verdict": "loose", "row": row, "loosened": ["own website prints a founder's"]})
+            elif f["Firm"] == "D":  # size and AI both unshown
+                out.append({"id": i, "verdict": "loose", "row": row, "loosened": [size, "something dated"]})
+            else:  # B: size unshown; E: says 120, so it's shown to break the rule
+                out.append({"id": i, "verdict": "loose", "row": row, "loosened": [size]})
+        return out
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    prompt = deck["decide_prompts"][0]
+    assert "Never loosened" in prompt and "own website prints a founder's" in prompt.split("Never loosened")[1].split(
+        "May be met")[0]
+    assert "Unshown is not broken" in prompt and "— looser: not shown in what was read" in prompt
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["A"][0] == "kept" and got["B"][0] == got["D"][0] == "loose"
+    assert got["C"][0] == "maybe"  # it named only a rule that never loosens
+    assert got["E"][0] == "dropped" and "Employees 120 is over 50" in got["E"][1]
