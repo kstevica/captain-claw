@@ -45,6 +45,13 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 
+def _headless() -> tuple[bool, str]:
+    """Whether there is no desktop to listen on: (headless, why)."""
+    if sys.platform == "linux" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return True, "no display"
+    return False, ""
+
+
 def _check_platform_support() -> tuple[bool, str]:
     """Return (supported, reason) for the current platform."""
     if sys.platform == "linux":
@@ -289,6 +296,14 @@ async def start_hotkey_daemon(server: WebServer) -> None:
     screen_cfg = cfg.tools.screen_capture
 
     if not screen_cfg.hotkey_enabled:
+        return
+
+    # No screen to listen on: a Linux server without a display (a deck's
+    # agents). Every such start used to warn about pynput (174 times in a
+    # week on one deck).
+    headless, why = _headless()
+    if headless:
+        log.debug("Hotkey listener skipped", reason=why)
         return
 
     if not _HAS_PYNPUT:

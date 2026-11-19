@@ -1162,6 +1162,60 @@ _REFRESH_FAILED = (
 )
 
 
+# A refresh token Google refused for good (invalid_grant: revoked, expired, the
+# password changed): keyed by user, with a fingerprint of that token. Every
+# caller (agent mail, auto-reply, the passive inbox, event sources) used to try
+# it again on every pass — one deck refreshed a token dead for a month every
+# minute. Reconnecting stores a new refresh token, which is tried again.
+_DEAD_REFRESH: dict[str, str] = {}
+# Any other refresh failure (Google down, a network blip): not again for a while.
+_REFRESH_RETRY_S = 300.0
+_REFRESH_PAUSED: dict[str, float] = {}
+RECONNECT_REF = "google_reconnect"
+
+
+def _token_mark(refresh_token: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()[:12]
+
+
+def _refresh_error(exc: Exception) -> tuple[int, str]:
+    """(HTTP status, Google's error code) of a failed refresh; (0, "") when
+    there was no answer."""
+    resp = getattr(exc, "response", None)
+    status = int(getattr(resp, "status_code", 0) or 0)
+    code = ""
+    try:
+        body = resp.json() if resp is not None else {}
+        code = str(body.get("error") or "") if isinstance(body, dict) else ""
+    except Exception:  # noqa: BLE001 — not JSON
+        code = ""
+    return status, code
+
+
+async def _tell_reconnect(user_id: str, mark: str) -> None:
+    """One Line item: Google needs reconnecting (once per dead token)."""
+    try:
+        from captain_claw.flight_deck import line
+
+        await line.post_once(
+            user_id, "deck", "Reconnect Google",
+            "Google stopped accepting this deck's access to your account (the sign-in was "
+            "revoked or has expired). Mail, Drive and Calendar for your agents are paused "
+            "until you reconnect it in Connections → Google.",
+            bell_type="info", needs_you=True, source="Flight Deck", trust="deck",
+            ref_type=RECONNECT_REF, ref_id=mark,
+        )
+    except Exception as exc:  # noqa: BLE001 — a notice, never a failed call
+        log.debug("Google reconnect notice not posted", error=str(exc))
+
+
+def google_needs_reconnect(user_id: str) -> bool:
+    """Whether *user_id*'s stored Google sign-in was refused for good."""
+    return _tenant(user_id) in _DEAD_REFRESH if user_id else False
+
+
 async def _refresh_if_needed(
     db: FlightDeckDB,
     user_id: str,
@@ -1171,11 +1225,19 @@ async def _refresh_if_needed(
     """Refresh *tokens* when near expiry; persist the new pair for *user_id*.
 
     *client* must be the OAuth client that originally minted the
-    refresh token (use :func:`_token_client`).
+    refresh token (use :func:`_token_client`). A refresh token Google refused
+    for good isn't tried again (the user is told once); any other failure
+    waits ``_REFRESH_RETRY_S`` before the next try.
     """
     if not tokens.is_expired():
         return tokens
     if not tokens.refresh_token:
+        return None
+    mark = _token_mark(tokens.refresh_token)
+    if _DEAD_REFRESH.get(user_id) == mark:
+        return None
+    _DEAD_REFRESH.pop(user_id, None)   # a new refresh token: reconnected
+    if time.time() < _REFRESH_PAUSED.get(user_id, 0.0):
         return None
     try:
         fresh = await refresh_access_token(
@@ -1184,10 +1246,32 @@ async def _refresh_if_needed(
             client_secret=client["client_secret"],
         )
     except Exception as exc:
-        log.warning("Google token refresh failed: %s", exc)
+        status, code = _refresh_error(exc)
+        if status == 400 and code == "invalid_grant":
+            _DEAD_REFRESH[user_id] = mark
+            log.warning("Google sign-in refused for good; not refreshing until reconnected",
+                        owner=user_id, error=code)
+            await _tell_reconnect(user_id, mark)
+        else:
+            _REFRESH_PAUSED[user_id] = time.time() + _REFRESH_RETRY_S
+            log.warning("Google token refresh failed", owner=user_id, status=status,
+                        error=code or type(exc).__name__, retry_in_s=int(_REFRESH_RETRY_S))
         return None
+    _REFRESH_PAUSED.pop(user_id, None)
     await _store_tokens(db, user_id, fresh)
     return fresh
+
+
+async def granted_google_scopes(user_id: str) -> set[str]:
+    """FD-side, no network: the scopes *user_id*'s stored Google sign-in
+    granted (empty when not connected)."""
+    if not user_id or not _connections_available():
+        return set()
+    try:
+        tokens = await _load_tokens(get_db(), _tenant(user_id))
+    except Exception:  # noqa: BLE001
+        return set()
+    return set(str(getattr(tokens, "scope", "") or "").split()) if tokens else set()
 
 
 @router.get("/access_token")

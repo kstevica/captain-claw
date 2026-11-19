@@ -1186,6 +1186,22 @@ _STALL_MAIL_NEUTRAL_INSTRUCTION = (
 class AgentOrchestrationMixin:
     """Core request orchestration: complete() and stream()."""
 
+    # How often a long turn re-asks Flight Deck which of the owner's
+    # connections are there (Google, Microsoft, IMAP, Jev, crew …).
+    _CONNECTION_FLAGS_REFRESH_S = 30.0
+
+    def _connection_flags_due(self, iteration: int) -> bool:
+        """Whether this step refreshes the connection flags: a turn's first
+        step always, later steps once the last refresh is old enough."""
+        import time as _time
+
+        now = _time.monotonic()
+        last = float(getattr(self, "_connection_flags_at", 0.0) or 0.0)
+        if iteration == 0 or now - last >= self._CONNECTION_FLAGS_REFRESH_S:
+            self._connection_flags_at = now
+            return True
+        return False
+
     def _eco_kept_tools(self, wanted: set[str] | frozenset[str]) -> set[str]:
         """Eco mode's full-definition set for this call: the session's kept set
         plus *wanted*, kept in the session's metadata. It only grows, so the
@@ -2702,7 +2718,11 @@ class AgentOrchestrationMixin:
                         await GoogleOAuthManager(self.session_manager).speaker_status()
                 except Exception:
                     pass
-            else:
+            elif self._connection_flags_due(iteration):
+                # The owner's connections: at a turn's start, then at most
+                # every _CONNECTION_FLAGS_REFRESH_S. Asked on every step, they
+                # were ~10 requests to Flight Deck per step — a not-connected
+                # Microsoft answered 404 every two seconds of a browsing run.
                 try:
                     from captain_claw.google_oauth_manager import GoogleOAuthManager
                     await GoogleOAuthManager(self.session_manager).is_connected()

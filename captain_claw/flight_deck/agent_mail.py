@@ -55,6 +55,17 @@ _CHANNEL = {"gmail": "gmail", "outlook": "outlook", "imap": "email"}
 _WHERE = {"gmail": "your owner's Gmail", "outlook": "your owner's Outlook", "imap": "your owner's inbox"}
 _GRAPH = "https://graph.microsoft.com/v1.0"
 
+# Gmail scopes that can list the inbox; a sign-in with Drive only gets 403.
+_GMAIL_READ_SCOPES = frozenset({
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://mail.google.com/",
+})
+# A source that keeps failing waits longer each time (one pass, two, four …,
+# up to this), instead of failing — and logging — on every pass.
+_BACKOFF_MAX_S = 6 * 3600.0
+_FAILS: dict[tuple[str, str], tuple[int, float]] = {}
+
 _TASK: asyncio.Task | None = None
 _STOP: asyncio.Event | None = None
 _PASS_LOCK: asyncio.Lock | None = None  # made on the loop that first runs a pass
@@ -237,6 +248,11 @@ async def _gmail_read(owner: str, cursor: dict) -> tuple[list[Email], dict] | No
     from captain_claw.flight_deck import gmail_autoreply as ar
     from captain_claw.flight_deck.google_oauth_routes import get_valid_google_access_token
 
+    from captain_claw.flight_deck.google_oauth_routes import granted_google_scopes
+
+    scopes = await granted_google_scopes(owner)
+    if scopes and not scopes & _GMAIL_READ_SCOPES:
+        return None   # connected for Drive / Calendar only: there is no inbox to read
     token = await get_valid_google_access_token(owner)
     if not token:
         return None
@@ -382,11 +398,14 @@ async def owner_pass(owner: str) -> int:
                          own_email=str(rec.get("email") or ""), send_ok=_can_send(rec))
         store.save_cursor(owner, key, cur)
     for source, reader in (("gmail", _gmail_read), ("outlook", _outlook_read)):
+        if _backing_off(owner, source):
+            continue
         try:
             res = await reader(owner, store.cursor(owner, source))
         except Exception as exc:  # noqa: BLE001
-            log.info("Agent mail: source not read", owner=owner, source=source, error=str(exc)[:160])
+            _failed(owner, source, str(exc))
             continue
+        _FAILS.pop((owner, source), None)
         if res is None:
             store.drop_cursor(owner, source)  # connected again later: a fresh baseline
             continue
@@ -395,6 +414,21 @@ async def owner_pass(owner: str) -> int:
                          mine=mine | {str(a).lower() for a in cur.get("own") or []})
         store.save_cursor(owner, source, cur)
     return n
+
+
+def _backing_off(owner: str, source: str) -> bool:
+    """Whether a source that failed lately waits out this pass."""
+    _count, until = _FAILS.get((owner, source), (0, 0.0))
+    return time.time() < until
+
+
+def _failed(owner: str, source: str, error: str) -> None:
+    """Count a failed read; the source waits twice as long each time."""
+    count = _FAILS.get((owner, source), (0, 0.0))[0] + 1
+    wait = min(_BACKOFF_MAX_S, POLL_S * (2 ** (count - 1)))
+    _FAILS[(owner, source)] = (count, time.time() + wait)
+    log.info("Agent mail: source not read", owner=owner, source=source, error=error[:160],
+             failures=count, next_try_in_s=int(wait))
 
 
 async def _account_addresses(owner: str) -> set[str]:

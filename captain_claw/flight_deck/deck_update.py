@@ -578,8 +578,10 @@ async def start(*, by: str, target: str, wait: bool = False, user_id: str = "", 
     # A fresh record: the last update's verdict goes with it, not what the switch has to remember.
     refused = read_state().get("refused")
     _state_path().unlink(missing_ok=True)
+    # Starting it is as good as being told about it (see should_tell).
     _write_state(phase="rehearsing", to=full, **{"from": head}, by=by, user_id=user_id, agent=agent or {},
-                 started_at=time.time(), steps=[], reported=False, refused=refused, told=full, countdown_s=countdown)
+                 started_at=time.time(), steps=[], reported=False, refused=refused, told=full,
+                 told_for=head, told_at=time.time(), countdown_s=countdown)
     _task = asyncio.create_task(_run(repo, editable, head, full, wait, countdown))
     return _view(read_state())
 
@@ -964,11 +966,24 @@ async def tick(db: Any) -> None:
         # A turn can start during the countdown, and nobody chose to cut it short.
         await start(by="this deck, by itself", target=target, wait=True)
         return
-    if state.get("told") != target:
-        _write_state(told=target)
+    if should_tell(state, seen.get("head") or "", time.time()):
+        _write_state(told=target, told_for=seen.get("head") or "", told_at=time.time())
         n = seen["behind"]
         await _bell(await _admins(), "New version for this deck",
                     f"{n} new commit{'s' if n != 1 else ''} on {seen['upstream']}. Console → Updates installs it.")
+
+
+# While the deck stays behind, the admins are reminded at most this often.
+_TELL_AGAIN_S = 7 * 86400.0
+
+
+def should_tell(state: dict[str, Any], head: str, now: float) -> bool:
+    """Whether to tell the admins about a newer version: once for the version
+    the deck runs (``head``), then a reminder a week on. It used to tell them
+    again for every new commit upstream — 214 notices in a week on one deck."""
+    if state.get("told_for") != head:
+        return True
+    return now - float(state.get("told_at") or 0.0) >= _TELL_AGAIN_S
 
 
 async def loop(db: Any, stop: asyncio.Event) -> None:
