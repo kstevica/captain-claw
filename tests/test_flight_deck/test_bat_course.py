@@ -112,6 +112,45 @@ def test_rules_for_a_part():
     assert "min_per" not in per[0]["check"] and per[0]["check"]["allowed"] == {"Segment": ["a", "b"]}
 
 
+def test_the_amount_a_step_asks_for():
+    """A night's run: "add 8 … 2-50 employees" read as 50, and steps that had all
+    they were asked for went round again as short."""
+    asked = bat_course._asked
+    assert asked("Find, check, and add 8 qualifying boutique consultancies headquartered in the Northeast; "
+                 "require US HQ, 2-50 employees with source, dated signal within 24 months") == 8
+    assert asked("Find, vet, and record up to 25 boutique consultancies: check shared/seen.csv") == 25
+    assert asked("Boutique consultancies batch 1 (0→20): append 20 new qualifying rows") == 20
+    assert asked("Boutique finish (boutique 20→25, research 12→25)") == 5
+    assert asked("Find 50 leads, segment 1") == 50
+    assert asked("Write shared/conventions.md defining the 16 leads.csv columns, the feature list, "
+                 "24-month signal window") == 0
+    assert asked("Merge segment CSVs into leads.csv with exactly 16 columns, 60 unique rows") == 0
+    assert asked("Write a 1,500-word report") == 0
+
+
+async def test_a_step_that_got_its_amount_isnt_short(bat, model):
+    run = await _run(bat, steps=5)
+    f = _folder(run)
+    started = time.time()
+    title = "Find, check, and add 8 qualifying firms; require 2-50 employees and a signal within 24 months"
+    (f / "batch_02.csv").write_text("Name,Email,Source\n" + "".join(
+        f"P{i},p{i}@org{i}.example,https://org{i}.example/team\n" for i in range(8)))
+    model["answer"] = {"state": "on_course", "why": "fine", "correction": "", "stopped_early": True}
+    got = await bat_course.check_step(run, {"step_key": "step-2", "title": title, "seq": 1, "attempt": 1,
+                                            "output": "8 firms"}, started, last_try=False)
+    assert got["redo"] is False
+    (f / "batch_03.csv").write_text("Name,Email,Source\nA,a@a.example,https://a.example\n")
+    got = await bat_course.check_step(run, {"step_key": "step-3", "title": title, "seq": 2, "attempt": 1,
+                                            "output": "1 firm"}, time.time() - 1, last_try=False)
+    assert got["redo"] is True and "1 of the 8 its step asked for" in got["why"]
+    # the conventions step is never short: it lays out the work
+    conv = {"step_key": "step-1", "title": "Write shared/conventions.md: collect 60 rows, 15 per segment",
+            "seq": 0, "round": 0, "attempt": 1, "output": ""}
+    (f / "seen.csv").write_text("Name,Email,Source\n")
+    hard, soft, _ = bat_course.script_findings(run, conv, f, bat_course.changed_since(f, time.time() - 5), False)
+    assert not any(bat_course.SHORT_MARK in s for s in soft)
+
+
 def test_shaping_and_drafting_keep_amounts_and_prefer_counted_checks():
     """A run's checks came back as long Python scripts, "at least 60" read "60"."""
     from captain_claw.flight_deck import first_mate_drafting

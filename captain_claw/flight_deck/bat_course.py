@@ -129,13 +129,34 @@ def _key_values(path: Path) -> set[str]:
     return set()
 
 
+# The amount a step collects: a number after what it does ("add 8 qualifying firms",
+# "Find, vet, and record 25 …"), never one that is a range or has a unit ("2-50
+# employees", "24 months"). The first number between 10 and 5000 anywhere used to
+# count, so "add 8 firms … 2-50 employees" read as 50, and three steps that had
+# found all they were asked for went round again as short.
+_COLLECT = r"(?:add|find|collect|gather|record|get|list|research|identify|source|append|vet|check)"
+_NOT_AN_AMOUNT = (r"(?![\d.,]|\s*[-–/]\s*\d|-|\s*(?:%|percent|employees?|people|staff|persons?|months?|years?|"
+                  r"days?|weeks?|hours?|minutes?|words?|characters?|pages?|columns?|sections?|steps?|tiers?|"
+                  r"states?|segments?|groups?)\b)")
+_AMOUNT = re.compile(r"\b" + _COLLECT + r"\b[^.;:\n]{0,50}?(?<![\d.,/-])\b(\d{1,5})\b" + _NOT_AN_AMOUNT, re.I)
+_FROM_TO = re.compile(r"\b(\d{1,5})\s*(?:→|->)\s*(\d{1,5})\b")
+
+
 def _asked(title: str) -> int:
-    """How many items a step's title asks for ("Find 50 leads in …"), or 0."""
-    for m in re.finditer(r"\b(\d{1,5})\b", title or ""):
-        n = int(m.group(1))
-        if 10 <= n <= 5000:
-            return n
-    return 0
+    """How many items a step's title asks it to add ("add 8 qualifying firms",
+    "batch 1 (0→20)"), or 0 when it names no amount of its own."""
+    t = title or ""
+    m = _FROM_TO.search(t)
+    if m and int(m.group(2)) > int(m.group(1)):
+        return int(m.group(2)) - int(m.group(1))
+    m = _AMOUNT.search(t)
+    n = int(m.group(1)) if m else 0
+    return n if 1 <= n <= 5000 else 0
+
+
+def _conventions_step(step: dict) -> bool:
+    from captain_claw.flight_deck.bat_routes import is_conventions_step
+    return is_conventions_step(step)
 
 
 def script_findings(run: dict, step: dict, folder: Path, changed: list[tuple[float, str, Path, int]],
@@ -165,7 +186,7 @@ def script_findings(run: dict, step: dict, folder: Path, changed: list[tuple[flo
             verified.append(dp.render({"main": [{"path": rel, "size": path.stat().st_size, "profile": prof,
                                                  "flags": dp.flags(prof)}]}))
             soft += [f"{rel}: {f}" for f in dp.flags(prof)]
-            asked = _asked(step.get("title") or "")
+            asked = 0 if _conventions_step(step) else _asked(step.get("title") or "")
             if asked and not last_step and prof.get("rows", 0) < asked * SHORT_SHARE:
                 soft.append(f"{rel} {SHORT_MARK}: {prof.get('rows', 0)} of the {asked} its step asked for")
             if last_step or "/" in rel:
