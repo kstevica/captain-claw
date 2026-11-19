@@ -24,6 +24,57 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
+# Path-based and URL-based tools: their duplicate signature is the target, not
+# the full arguments (see ``duplicate_signature``).
+PATH_TOOLS = frozenset({"read", "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract"})
+URL_TOOLS = frozenset({"web_fetch", "web_get"})
+
+
+def duplicate_signature(tool_name: str, arguments: Any, registry: Any = None) -> str:
+    """The per-turn duplicate guard's key for one call.
+
+    Path tools key on the absolute path plus the section asked for (a read's
+    offset/limit — only ranges the tool declares), URL tools on the URL, glob
+    on its pattern, everything else on its whole sorted arguments.
+    """
+    name = str(tool_name or "")
+    lower = name.strip().lower()
+    if lower in PATH_TOOLS and isinstance(arguments, dict):
+        key = str(arguments.get("path", "")).strip()
+        # Relative and absolute references to one file share a counter.
+        if key:
+            key = os.path.abspath(key)
+        return f"{name}|path={key}" + loop_guards.range_signature(
+            arguments, loop_guards.declared_params(registry, name))
+    if lower in URL_TOOLS and isinstance(arguments, dict):
+        return f"{name}|url={str(arguments.get('url', '')).strip()}"
+    if lower == "glob" and isinstance(arguments, dict):
+        return f"{name}|pattern={str(arguments.get('pattern', '')).strip()}"
+    try:
+        sig_args = (json.dumps(arguments, sort_keys=True, ensure_ascii=True)
+                    if isinstance(arguments, dict) else str(arguments))
+    except Exception:
+        sig_args = str(arguments)
+    return f"{name}|{sig_args}"
+
+
+def _call_name_and_args(call: Any) -> tuple[str, Any]:
+    """(name, arguments) of a tool call in any of its shapes: a ToolCall, an
+    OpenAI wire dict ({"function": {"name", "arguments": "<json>"}}), or a
+    flat dict."""
+    if isinstance(call, dict):
+        fn = call.get("function") if isinstance(call.get("function"), dict) else call
+        name = str(fn.get("name", "") or "")
+        args = fn.get("arguments", {})
+    else:
+        name = str(getattr(call, "name", "") or "")
+        args = getattr(call, "arguments", {})
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return name, args
 
 
 class AgentToolLoopMixin:
@@ -1001,6 +1052,41 @@ class AgentToolLoopMixin:
         )
         return result
 
+    def _forget_dropped_call_guards(self, messages: list[dict[str, Any]]) -> list[str]:
+        """Calls whose results the packer just left out of the request are new again.
+
+        The duplicate guard refused a re-fetch as "the content has not
+        changed" while the first result had been dropped unseen — the model
+        then reported work it never read. Forgets the guard's count (and file
+        state) for every call in *messages*: an assistant step's ``tool_calls``
+        and any tool result that names its call. Returns the forgotten keys.
+        """
+        counts = getattr(self, "_turn_tool_call_counts", None)
+        if not isinstance(counts, dict) or not counts:
+            return []
+        fps = getattr(self, "_turn_tool_call_fps", None)
+        registry = getattr(self, "tools", None)
+        calls: list[tuple[str, Any]] = []
+        for msg in messages or []:
+            if not isinstance(msg, dict):
+                continue
+            for call in msg.get("tool_calls") or []:
+                calls.append(_call_name_and_args(call))
+            if msg.get("role") == "tool" and msg.get("tool_name"):
+                calls.append((str(msg["tool_name"]), msg.get("tool_arguments") or {}))
+        forgotten: list[str] = []
+        for name, args in calls:
+            if not name:
+                continue
+            sig = duplicate_signature(name, args, registry)
+            if counts.pop(sig, None) is not None:
+                forgotten.append(sig)
+            if isinstance(fps, dict):
+                fps.pop(sig, None)
+        if forgotten:
+            log.info("Dropped results: their calls may run again", calls=len(forgotten))
+        return forgotten
+
     async def _handle_tool_calls(
         self,
         tool_calls: list[ToolCall],
@@ -1024,8 +1110,8 @@ class AgentToolLoopMixin:
         if sp is not None:
             sp["_batch_extractions"] = 0
 
-        _PATH_TOOLS = {"read", "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract"}
-        _URL_TOOLS = {"web_fetch", "web_get"}
+        _PATH_TOOLS = set(PATH_TOOLS)
+        _URL_TOOLS = set(URL_TOOLS)
 
         for tc in tool_calls:
             # Status reflects the phase START — the UI's "Using X..." must
@@ -1208,31 +1294,11 @@ class AgentToolLoopMixin:
             _sp = getattr(self, "_scale_progress", None)
             if _sp is not None and _tool_lower in (_PATH_TOOLS | _URL_TOOLS | {"glob"}):
                 _dup_max = max(_dup_max, 2)
-            if _tool_lower in _PATH_TOOLS and isinstance(arguments, dict):
-                _sig_key = str(arguments.get("path", "")).strip()
-                # Normalize to absolute path so relative and absolute
-                # references to the same file share one dup-counter.
-                if _sig_key:
-                    _sig_key = os.path.abspath(_sig_key)
-                # A different section of the file is a different call: the
-                # next lines of a script, the next part of a long report,
-                # the read tool's own "continue with offset=" hint. Only the
-                # range arguments the tool declares count, so one it ignores
-                # (pdf_extract has no page range) can't dodge the guard.
-                _dup_sig = f"{tc.name}|path={_sig_key}" + loop_guards.range_signature(
-                    arguments, loop_guards.declared_params(getattr(self, "tools", None), tc.name))
-            elif _tool_lower in _URL_TOOLS and isinstance(arguments, dict):
-                _sig_key = str(arguments.get("url", "")).strip()
-                _dup_sig = f"{tc.name}|url={_sig_key}"
-            elif _tool_lower == "glob" and isinstance(arguments, dict):
-                _sig_key = str(arguments.get("pattern", "")).strip()
-                _dup_sig = f"{tc.name}|pattern={_sig_key}"
-            else:
-                try:
-                    _sig_args = json.dumps(arguments, sort_keys=True, ensure_ascii=True) if isinstance(arguments, dict) else str(arguments)
-                except Exception:
-                    _sig_args = str(arguments)
-                _dup_sig = f"{tc.name}|{_sig_args}"
+            # A different section of a file is a different call (the next
+            # lines of a script, the next part of a long report, the read
+            # tool's own "continue with offset=" hint); only range arguments
+            # the tool declares count, so one it ignores can't dodge the guard.
+            _dup_sig = duplicate_signature(tc.name, arguments, getattr(self, "tools", None))
             _dup_counts: dict[str, int] = getattr(self, "_turn_tool_call_counts", {})
             _dup_count = _dup_counts.get(_dup_sig, 0)
             # The files the call reads or runs: a file changed since the last
@@ -1324,11 +1390,17 @@ class AgentToolLoopMixin:
                         "same rows."
                     )
                 else:
+                    # Say only what's known: a file-backed call's file is
+                    # unchanged (its state is checked above); any other call's
+                    # answer is still in this request (a dropped one is
+                    # forgotten by the packer, so it never reaches here).
+                    _same = ("The file has not changed since" if _dup_files
+                             else "Its result is still above in this conversation")
                     dup_msg = (
                         f"DUPLICATE CALL BLOCKED: You have already called `{tc.name}` on "
-                        f"this target {_dup_count} times this turn. The content has not "
-                        "changed. Use the data you already have and move on to the next "
-                        "item. Do NOT re-read, re-extract, or re-glob the same target."
+                        f"this target {_dup_count} times this turn. {_same}. Use the data "
+                        "you already have and move on to the next item. Do NOT re-read, "
+                        "re-extract, or re-glob the same target."
                     )
                 # Jev picks what follows; a scale item and a send/create/
                 # mailbox change keep their own specific message.
@@ -1569,6 +1641,19 @@ class AgentToolLoopMixin:
                     _result_content = spill_tool_result(
                         self, _tool_lower, arguments if isinstance(arguments, dict) else None,
                         _result_content,
+                    )
+
+                # Not governed: one result never outgrows its share of the
+                # window. A bigger one used to go in whole, and the packer then
+                # dropped it (with the rest of the turn) before the model saw it.
+                if not _governor_enabled():
+                    from captain_claw import context_spill
+
+                    _result_content = context_spill.cap_tool_result(
+                        self, _tool_lower, arguments if isinstance(arguments, dict) else None,
+                        _result_content,
+                        cap_tokens=context_spill.plain_cap_tokens(self, len(tool_calls)),
+                        count_tokens=self._count_tokens,
                     )
 
                 # Optional per-agent cap on one tool result (off by default),

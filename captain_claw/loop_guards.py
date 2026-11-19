@@ -155,8 +155,9 @@ def _resolve(raw: str, base: Path | None) -> Path | None:
         return None
     try:
         p = Path(raw).expanduser()
+        # The office tools take a path under saved/ without the prefix too.
         candidates = [p] if p.is_absolute() else [
-            *([base / p] if base is not None else []), Path.cwd() / p,
+            *([base / p, base / "saved" / p] if base is not None else []), Path.cwd() / p,
         ]
         for cand in candidates:
             if cand.is_file():
@@ -184,7 +185,10 @@ def touched_files(tool_lower: str, arguments: Any, base: Path | None, *, path_to
     """The existing files whose content decides a call's answer.
 
     A path tool: the file it reads. A shell command: the files it names
-    (``python build_pdf.py``). Anything else: none.
+    (``python build_pdf.py``). Any other call but a write or an edit naming an
+    existing file in ``path`` / ``file_path`` (``xlsx check``, ``pptx check``):
+    that file — so a check after the file was edited is a new call, not "the
+    content has not changed". Anything else: none.
     """
     args = _args_dict(arguments)
     if tool_lower in set(path_tools):
@@ -198,6 +202,12 @@ def touched_files(tool_lower: str, arguments: Any, base: Path | None, *, path_to
             if found is not None and found not in files:
                 files.append(found)
         return files
+    raw = args.get("path") or args.get("file_path")
+    # Not the write/edit tools: the same edit twice stays a repeat even when
+    # the file was reverted behind its back (forget_repeats_after_change).
+    if tool_lower not in FILE_CHANGE_TOOLS and isinstance(raw, str) and raw.strip():
+        found = _resolve(raw, base)
+        return [found] if found is not None else []
     return []
 
 
