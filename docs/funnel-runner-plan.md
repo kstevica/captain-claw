@@ -413,6 +413,12 @@ initials), accents aside and either spelling ("Đurđević" → durdevic or djur
 leaves out a long item phrase ("US knowledge firm lead"), and more contact-list and
 marketplace sites are never an item's own.
 
+When code writes a group's searches (the model's never named the group, or copied
+another's), a slashed group is searched by each of its parts ("research/analysis shops"
+→ "research shops", "analysis shops"), and a vague group noun also by the run's item
+("research firms"). A model's own searches count as naming a group when they use a
+common word for it ("law" for "legal", "CPA" for "accounting").
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

@@ -392,19 +392,63 @@ def fix_output(recipe: dict[str, Any], task: str) -> bool:
     return True
 
 
+# Words a search may use for a group's word instead (by stem): "law firm" names a
+# "legal boutiques" group, "CPA" an "accounting" one.
+_GROUP_SYNONYMS = {"legal": ("law", "lawyer", "attorn", "counsel"), "accoun": ("cpa", "bookke", "audit", "tax"),
+                   "market": ("advert", "brand", "growth"), "consul": ("advis", "strateg"),
+                   "resear": ("insigh", "survey", "analyt"), "analys": ("analyt", "insigh", "resear"),
+                   "conten": ("copywr", "editor", "writin"), "restau": ("dining", "eatery", "bistro", "cafe"),
+                   "dental": ("dentis",), "medica": ("clinic", "health", "doctor"),
+                   "softwa": ("saas", "app", "tech"), "design": ("creati", "studio")}
+# Group nouns too vague to search by alone: "research shops" is also looked for as
+# "research firms" when the run's item is a firm.
+_VAGUE_NOUNS = {"shops", "shop", "boutiques", "boutique", "outfits", "outfit", "houses", "players", "providers"}
+
+
 def _group_words(group: str) -> list[str]:
-    return [w[:6] for w in re.findall(r"[a-z]+", group.lower()) if len(w) >= 4 and w not in _GROUP_STOP]
+    """The stems a search for a group should carry, any one of them: the group's own
+    words (shops, firms and such aside) and the words searches use for them."""
+    stems = [w[:6] for w in re.findall(r"[a-z]+", group.lower()) if len(w) >= 4 and w not in _GROUP_STOP]
+    return list(dict.fromkeys(stems + [x for st in stems for x in _GROUP_SYNONYMS.get(st, ())]))
 
 
-def _group_queries(group: str, place: str, size: re.Match | None) -> list[str]:
+def _plural(noun: str) -> str:
+    n = noun.strip()
+    if not n or n.endswith("s"):
+        return n
+    return n[:-1] + "ies" if n.endswith("y") and n[-2:-1] not in "aeiou" else n + "s"
+
+
+def _group_phrases(group: str, item: str = "") -> list[str]:
+    """How to say a group in a search: a slashed word as each of its parts ("research/
+    analysis shops" → "research shops", "analysis shops"), and a vague group noun also
+    as the run's item ("research firms")."""
+    group = " ".join(str(group or "").split())
+    m = re.search(r"\S+/\S+", group)
+    phrases = [group.replace(m.group(0), part) for part in m.group(0).split("/") if part] if m else [group]
+    item_words = str(item or "").split()
+    noun = _plural(item_words[-1].lower()) if 0 < len(item_words) <= 2 else ""  # not "US knowledge firm lead"
+    if noun in ("items", "rows", "entries", "leads", "results"):
+        noun = ""  # no noun of its own to search by
+    out: list[str] = []
+    for ph in phrases:
+        out.append(ph)
+        words = ph.split()
+        if noun and len(words) > 1 and words[-1].lower() in _VAGUE_NOUNS and noun not in ph.lower():
+            out.append(" ".join(words[:-1] + [noun]))
+    return list(dict.fromkeys(out))
+
+
+def _group_queries(group: str, place: str, size: re.Match | None, item: str = "") -> list[str]:
     """Searches for pages that list many of a group's items, any kind of item: lists,
-    directories, databases, rankings. A company-size band adds a search for company
-    pages with that band."""
-    qs = [f"list of {group} {place}", f"{group} {place}", f"best {group} {place}", f"{group} directory {place}",
-          f"{group} database {place}", f"top {group} {place}"]
+    directories, databases, rankings, for each way to say the group. A company-size
+    band adds a search for company pages with that band."""
+    phrases = _group_phrases(group, item) or [group]
+    qs = [q for t in ("list of {} {}", "best {} {}", "{} directory {}", "{} {}", "top {} {}", "{} database {}")
+          for q in (t.format(ph, place) for ph in phrases)]
     if size:
-        qs.append(f'site:linkedin.com/company {group} {place} "{size.group(1)}-{size.group(2)} employees"')
-    return [" ".join(q.split()) for q in qs]
+        qs += [f'site:linkedin.com/company {ph} {place} "{size.group(1)}-{size.group(2)} employees"' for ph in phrases]
+    return list(dict.fromkeys(" ".join(q.split()) for q in qs))[:24]
 
 
 def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -> dict[str, Any]:
@@ -425,7 +469,7 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
         words = _group_words(s["group"])
         joined = " ".join(s["queries"]).lower()
         if (words and not any(w in joined for w in words)) or s["queries"] in seen_lists:
-            s["queries"] = _group_queries(s["group"], place, size)
+            s["queries"] = _group_queries(s["group"], place, size, recipe.get("item", ""))
             s["about"] = s["about"] or s["group"]
         seen_lists.append(s["queries"])
     if place:  # one place: a search that names none finds items anywhere
@@ -705,7 +749,8 @@ def web_recipe(base: dict[str, Any], task: str) -> dict[str, Any] | None:
     for g in groups:
         what = g or f"{item}s"
         sources.append({"kind": "search", "group": g, "country": country, "count": 20,
-                        "queries": _group_queries(what, place, size), "about": f"{what} {place}".strip()})
+                        "queries": _group_queries(what, place, size, item if g else ""),
+                        "about": f"{what} {place}".strip()})
     site = next((c for c in cols if re.search(r"website|domain|homepage|site\b|url", c, re.I)
                  and not re.search(r"source", c, re.I)), "")
     name = next((c for c in cols if c != site and not re.search(r"mail|url|source|date|segment|state", c, re.I)), "")
