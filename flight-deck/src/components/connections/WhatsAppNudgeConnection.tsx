@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { isAppShell } from '../../services/desktopShell'
+import { isKioskOnly } from '../../services/desktopShell'
 import { MessageCircle, Loader2, Check, AlertCircle, ChevronDown, Send } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 import { useUIStore } from '../../stores/uiStore'
@@ -229,8 +229,8 @@ export default function WhatsAppNudgeConnection({ kiosk = false }: { kiosk?: boo
           {state.bridge_configured && !state.autonomy_active && (
             <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
               Autonomous Work isn't running for you, so no nudges are sent yet.
-              {/* The desktop app and the kiosk have no Autonomous Work page to send you to. */}
-              {!kiosk && !isAppShell() && (
+              {/* The apps, the kiosk and the Admin console have no Autonomous Work page to send you to. */}
+              {!kiosk && !isKioskOnly() && (
                 <>
                   {' '}
                   <button

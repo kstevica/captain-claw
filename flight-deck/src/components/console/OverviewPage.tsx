@@ -9,7 +9,7 @@ import { hasTierSets, tierSetKeyCount, TIER_SETS_EVENT } from '../../services/ti
 import { fetchSharedTierSets } from '../../services/sharedTierSets'
 import { getOAuthClientConfig, getAdminTelegram } from '../../services/sharedIntegrations'
 import { getSystemProcesses, type SystemProcessResponse } from '../../services/system'
-import { isAppShell } from '../../services/desktopShell'
+import { isKioskOnly } from '../../services/desktopShell'
 import {
   fetchAllUsers, fetchWaitlistPending, fetchOpenInvites, fetchUsageToday, fetchCosts, fetchProviderKeys,
 } from './consoleApi'
@@ -176,7 +176,7 @@ export function OverviewPage() {
           <h1 className="mt-1 text-3xl font-bold tracking-tight text-zinc-100 wide:text-4xl">{headline}</h1>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-2">
-          {isAppShell()
+          {isKioskOnly()
             ? <Button icon={MessagesSquare} onClick={enterKioskView}>Switch to user view</Button>
             : <Button icon={LayoutDashboard} onClick={() => leaveConsole('desktop')}>Open Flight Deck</Button>}
         </div>

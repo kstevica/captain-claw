@@ -66,7 +66,7 @@ import { PublicBeingPage } from './pages/PublicBeingPage'
 import { AgentStorePanel } from './components/store/AgentStorePanel'
 import { useUIStore, startInConsoleUnlessChosen, beginLayoutHydrate } from './stores/uiStore'
 import { useConsoleStore, syncConsoleFromUrl, dropConsoleRequest, selectConsoleAdmin, openConsole, startDesktop, consoleHome, pageFromPath } from './stores/consoleStore'
-import { isAppShell, reportAndroidSession, reportAndroidSignedOut } from './services/desktopShell'
+import { isAppShell, isKioskOnly, reportAndroidSession, reportAndroidSignedOut } from './services/desktopShell'
 import { useAgentStore } from './stores/agentStore'
 import { useAuthStore, selectKioskLocked, awaitAuthStatus, refreshAccessToken, reloadAfterSessionEnd, DEFAULT_INSTANCE_NAME, DEFAULT_LOGO } from './stores/authStore'
 import { useChatStore } from './stores/chatStore'
@@ -185,22 +185,31 @@ function AppContent() {
   const kioskLocked = useAuthStore(selectKioskLocked)
   // The Admin console: an admin (the user of a deck without sign-in included)
   // who just signed in, has it as their layout — the default until they pick
-  // another — or followed a <deck>/console address. In the desktop app an
-  // admin is always in the console or, by its Admin | User switch, the users'
-  // kiosk (kioskView — part of kioskLocked). Anyone else gets the usual layout.
+  // another — or followed a <deck>/console address. In the apps, and in a
+  // browser tab without ?app=classic (isKioskOnly), an admin is always in the
+  // console or, by its Admin | User switch, the users' kiosk (kioskView — part
+  // of kioskLocked); anyone else gets the kiosk. In a ?app=classic tab anyone
+  // else gets the usual layout.
   const consoleAdmin = useAuthStore(selectConsoleAdmin)
   const kioskView = useAuthStore((s) => s.kioskView)
   const consoleRequested = useConsoleStore((s) => s.requested)
   const adminSignedIn = useAuthStore((s) => s.adminStartPending)
   // A followed Taskboard link (see below) wins over an admin's default console.
-  const [boardVisit] = useState(() => !isAppShell() && hasTaskboardLink())
-  const inConsole = consoleAdmin && (isAppShell() || consoleRequested
+  const [boardVisit] = useState(() => !isKioskOnly() && hasTaskboardLink())
+  const inConsole = consoleAdmin && (isKioskOnly() || consoleRequested
     || ((layoutMode === 'console' || adminSignedIn) && !PAYMENTS_LINK && !boardVisit))
   useEffect(() => {
     window.addEventListener('popstate', syncConsoleFromUrl)
     return () => window.removeEventListener('popstate', syncConsoleFromUrl)
   }, [])
   useEffect(() => { if (!consoleAdmin) dropConsoleRequest() }, [consoleAdmin])
+  // The kiosk has no address of its own: a console page's (a link took an
+  // admin from the console to the kiosk for a visit) would bring the console
+  // back on a reload.
+  useEffect(() => {
+    if (!kioskLocked || isAppShell() || !pageFromPath(window.location.pathname)) return
+    window.history.replaceState(null, '', '/' + window.location.search + window.location.hash)
+  }, [kioskLocked])
   const chatOpen = useChatStore((s) => s.chatOpen)
   const chatFullscreen = useChatStore((s) => s.chatFullscreen)
   const { fetchInstances, fetchStats, fetchConcerns, setWsConnected, upsertInstance, removeInstance, updateInstanceActivity } = useAgentStore()
@@ -482,8 +491,9 @@ function AppContent() {
   // MCP connections, edit their profile, or sign out — nothing else is
   // reachable. Placed before the mobile/tablet/full branches so it always wins.
   // Admins are exempt (selectKioskLocked) — they keep full access even here —
-  // except the desktop app's admin who switched to it: the switch
-  // (`adminSwitch`) is their one way back to the Admin console.
+  // except an admin who switched to it (the apps, or a browser tab without
+  // ?app=classic): the switch (`adminSwitch`) is their one way back to the
+  // Admin console.
   if (kioskLocked) {
     return (
       <>
@@ -503,6 +513,10 @@ function AppContent() {
 
   // ── Admin console ── (every form factor; admins are never kiosk-locked)
   if (inConsole) return <ConsoleLayout />
+
+  // Everything below is the classic Flight Deck: only a browser tab that asked
+  // for it (?app=classic) gets here — anywhere else everyone is in the kiosk
+  // or the console above (isKioskOnly).
 
   // A followed Taskboard link, on a phone or a tablet too (see boardVisit).
   if (boardVisit && layoutMode === 'simple') {
