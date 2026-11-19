@@ -22,6 +22,7 @@ import { SharedCredentialsAdmin } from '../components/admin/SharedCredentialsAdm
 import { BrandingAdmin } from '../components/admin/BrandingAdmin'
 import { Switch } from '../components/admin/Switch'
 import { IdleAgentsSetting, IDLE_AGENTS_HINT, IDLE_AGENTS_TITLE } from '../components/admin/IdleAgentsSetting'
+import { IdlePauseSetting, IDLE_PAUSE_HINT, IDLE_PAUSE_TITLE } from '../components/admin/IdlePauseSetting'
 import { ByokSetting } from '../components/admin/ByokSetting'
 import { activityText } from '../components/console/activityText'
 import { fetchAllUsers } from '../components/console/consoleApi'
@@ -226,6 +227,7 @@ export function AdminPage() {
   const [plans, setPlans] = useState<Record<string, PlanLimits>>({})
   const [config, setConfig] = useState<SystemConfig>({ ...CONFIG_DEFAULTS })
   const [idleSaving, setIdleSaving] = useState(false)
+  const [idlePauseSaving, setIdlePauseSaving] = useState(false)
   const [providerKeys, setProviderKeys] = useState<Record<string, string>>({})
   const [providerKeysDraft, setProviderKeysDraft] = useState<Record<string, string>>({})
   const [keySaveFlash, setKeySaveFlash] = useState<string | null>(null)
@@ -522,6 +524,26 @@ export function AdminPage() {
                       setError(e instanceof Error ? e.message : 'Failed to save config')
                     } finally {
                       setIdleSaving(false)
+                    }
+                  }}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <div className="text-sm text-zinc-300">{IDLE_PAUSE_TITLE}</div>
+                  <div className="text-xs text-zinc-500 mt-0.5">{IDLE_PAUSE_HINT}</div>
+                </div>
+                <IdlePauseSetting
+                  days={config.scheduled_idle_pause_days}
+                  busy={idlePauseSaving}
+                  onSave={async (d) => {
+                    setIdlePauseSaving(true)
+                    try {
+                      setConfig(await saveConfig({ scheduled_idle_pause_days: d }))
+                    } catch (e) {
+                      setError(e instanceof Error ? e.message : 'Failed to save config')
+                    } finally {
+                      setIdlePauseSaving(false)
                     }
                   }}
                 />

@@ -219,9 +219,19 @@ export function ScheduledTasks({
     </div>
   )
 
+  const idleDays = options?.idle_pause_days ?? 0
   const list = (
     <div className="flex min-h-0 flex-col">
       <div className="px-3 pt-3">{searchBox}</div>
+      {idleDays > 0 && (
+        <p className="mx-3 mt-2 flex items-start gap-1.5 rounded-lg bg-zinc-800/60 px-2.5 py-2 text-[11px] leading-snug text-zinc-400">
+          <Pause className="mt-px h-3 w-3 shrink-0" />
+          <span>
+            Tasks pause if there's no activity from you for {idleDays} days (signing in, or a message
+            to your agents). Your Line will say so, and you can resume them here.
+          </span>
+        </p>
+      )}
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
         <button
           onClick={() => go({ kind: 'all' })}

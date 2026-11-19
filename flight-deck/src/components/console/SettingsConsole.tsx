@@ -6,6 +6,7 @@ import { useConsoleStore } from '../../stores/consoleStore'
 import { BrandingAdmin } from '../admin/BrandingAdmin'
 import { Switch } from '../admin/Switch'
 import { IdleAgentsSetting, IDLE_AGENTS_HINT, IDLE_AGENTS_TITLE } from '../admin/IdleAgentsSetting'
+import { IdlePauseSetting, IDLE_PAUSE_HINT, IDLE_PAUSE_TITLE } from '../admin/IdlePauseSetting'
 import { DeckProfileDefaults } from '../profile/DeckProfileDefaults'
 import { DeckCourseSettings } from '../course/DeckCourseSettings'
 import { TrustedModelCard } from '../anonymize/TrustedModelCard'
@@ -199,6 +200,13 @@ export function SettingsConsole() {
             onSave={(m) => save('idle', { agent_idle_stop_minutes: m })}
           />
         </SettingRow>
+        {accounts && <SettingRow title={IDLE_PAUSE_TITLE} hint={IDLE_PAUSE_HINT}>
+          <IdlePauseSetting
+            days={config.scheduled_idle_pause_days}
+            busy={busy === 'idle-pause'}
+            onSave={(d) => save('idle-pause', { scheduled_idle_pause_days: d })}
+          />
+        </SettingRow>}
       </Card>
 
       <ApprovalsPolicyCard />

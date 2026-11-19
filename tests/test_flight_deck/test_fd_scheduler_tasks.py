@@ -312,6 +312,23 @@ def test_delivery_options(api, monkeypatch):
     assert not r["email"]["available"] and not r["telegram"]["available"] and r["telegram"]["reason"]
 
 
+def test_delivery_options_say_when_tasks_pause_for_an_away_owner(api, monkeypatch):
+    from captain_claw.flight_deck import idle_pause
+
+    async def _route(owner):
+        return {"available": False, "provider": "", "from": "", "to": "", "reason": ""}
+    monkeypatch.setattr(sched, "_email_route", _route)
+    monkeypatch.setattr(sched, "_owner_telegram_chat", lambda owner: "")
+    days = {"n": 5}
+
+    async def _pause_days():
+        return days["n"]
+    monkeypatch.setattr(idle_pause, "pause_days", _pause_days)
+    assert api.get("/scheduler/delivery-options", headers=_bearer(ALICE)).json()["idle_pause_days"] == 5
+    days["n"] = 0
+    assert api.get("/scheduler/delivery-options", headers=_bearer(ALICE)).json()["idle_pause_days"] == 0
+
+
 def test_run_now_in_the_background_answers_at_once(api, store, monkeypatch):
     async def _fake(job, *, force=False):
         return ("ok", "done")

@@ -1273,6 +1273,12 @@ async def lifespan(app: FastAPI):
     _spend_stop = asyncio.Event()
     app.state.usage_spend_stop = _spend_stop
     app.state.usage_spend_task = asyncio.create_task(usage_spend.sync_loop(_spend_stop))
+    # ── Idle pause: a week without its owner, scheduled work pauses (idle_pause). ──
+    from captain_claw.flight_deck import idle_pause as _idle_pause
+
+    _idle_pause_stop = asyncio.Event()
+    app.state.idle_pause_stop = _idle_pause_stop
+    app.state.idle_pause_task = asyncio.create_task(_idle_pause.loop(_fd_db, _idle_pause_stop))
     # ── Browser: can Chromium start on this host? Admins told once if not. ──
     from captain_claw.flight_deck import browser_health
 
@@ -1651,6 +1657,8 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(app.state.usage_spend_task, timeout=5.0)
         except Exception:
             pass
+    if hasattr(app.state, "idle_pause_stop"):
+        app.state.idle_pause_stop.set()
     if hasattr(app.state, "external_memory_stop"):
         app.state.external_memory_stop.set()
         try:
@@ -11508,7 +11516,7 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
 # Settings about other people: on a deck without sign-in (the desktop app's)
 # there is no one else, so these keep their defaults there.
 _PEOPLE_SETTINGS = ("kiosk_mode", "kiosk_mode_from_env", "kiosk_new_users",
-                    "waitlist_enabled", "waitlist_cohort")
+                    "waitlist_enabled", "waitlist_cohort", "scheduled_idle_pause_days")
 
 
 async def _get_system_config() -> dict:

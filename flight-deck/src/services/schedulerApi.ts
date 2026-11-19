@@ -65,6 +65,9 @@ export interface DeliveryOptions {
   chat: { available: boolean }
   email: { available: boolean; provider: string; from: string; to: string; reason: string }
   telegram: { available: boolean; reason: string }
+  /** Days without the owner (no sign-in, no message to their agents) before
+   *  their tasks pause by themselves; 0 when the deck doesn't pause them. */
+  idle_pause_days?: number
 }
 
 export interface SchedulePreview {
