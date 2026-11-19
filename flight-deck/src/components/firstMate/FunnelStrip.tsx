@@ -3,12 +3,13 @@ import type { FunnelCounts, FunnelGroup } from '../../services/firstMate'
 
 // A list funnel run's strip in its panel: per group, how many items it looked at and
 // where each went (ruled out by code, after reading, by the judging call, by a check;
-// maybe; kept; added by the finishing step), and how many the group has against what
+// maybe; on a looser reading of the soft rules; kept; added by the finishing step), and how many the group has against what
 // it needs.
 
 const PARTS: { key: keyof FunnelGroup; label: string; cls: string }[] = [
   { key: 'kept', label: 'kept', cls: 'bg-emerald-500' },
   { key: 'agent', label: 'added by the finishing step', cls: 'bg-teal-400' },
+  { key: 'loose', label: 'on a looser reading', cls: 'bg-lime-400' },
   { key: 'maybe', label: 'came close', cls: 'bg-amber-400' },
   { key: 'check', label: 'failed a check', cls: 'bg-rose-400' },
   { key: 'agent-check', label: 'finishing step’s, failed a check', cls: 'bg-rose-300' },

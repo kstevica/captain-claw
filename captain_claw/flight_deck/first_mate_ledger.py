@@ -149,7 +149,8 @@ def rows_from_funnel(folder: Path) -> list[dict[str, str]]:
     out = []
     for r in funnel._read_csv(folder / funnel.ITEMS):
         status = r.get("status", "")
-        outcome = status if status in OUTCOMES else ""
+        # one on a looser reading that wasn't needed is checked again next run
+        outcome = "maybe" if status == "loose" else status if status in OUTCOMES else ""
         if outcome:
             out.append({"key": r.get("key", ""), "name": r.get("name", ""), "group": r.get("group", ""),
                         "outcome": outcome, "reason": r.get("reason", "")})

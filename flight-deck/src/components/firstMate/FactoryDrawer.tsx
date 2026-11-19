@@ -92,7 +92,7 @@ function eventText(e: FactoryEvent): string {
 }
 
 /** The editable part of a draft, as the form holds it: its goals each on or off. */
-interface Form { charter: string; goals: Goal[]; schedule: string; runner: Version['runner']; leftovers: boolean }
+interface Form { charter: string; goals: Goal[]; schedule: string; runner: Version['runner']; leftovers: boolean; loosen: boolean }
 
 function formOf(v: Version): Form {
   const sched = v.triggers.find((t): t is Extract<Trigger, { kind: 'schedule' }> => t.kind === 'schedule')
@@ -102,12 +102,16 @@ function formOf(v: Version): Form {
     schedule: sched?.schedule ?? '',
     runner: v.runner,
     leftovers: (v.runner_config?.leftovers ?? 'agent') !== 'none',
+    loosen: (v.runner_config?.loosen ?? 'short') !== 'never',
   }
 }
 
 /** The runner settings a form asks for: the version's own while its runner stays. */
 function runnerConfigOf(form: Form, v: Version): Record<string, unknown> {
-  if (form.runner === 'funnel') return { ...(v.runner === 'funnel' ? v.runner_config : {}), leftovers: form.leftovers ? 'agent' : 'none' }
+  if (form.runner === 'funnel') {
+    return { ...(v.runner === 'funnel' ? v.runner_config : {}), leftovers: form.leftovers ? 'agent' : 'none',
+      loosen: form.loosen ? 'short' : 'never' }
+  }
   return form.runner === v.runner ? v.runner_config : {}
 }
 
@@ -124,7 +128,7 @@ function fieldsOf(form: Form, v: Version): DraftFields {
 }
 
 const same = (a: Form, b: Form) => a.charter === b.charter && a.schedule.trim() === b.schedule.trim()
-  && a.runner === b.runner && (a.runner !== 'funnel' || a.leftovers === b.leftovers)
+  && a.runner === b.runner && (a.runner !== 'funnel' || (a.leftovers === b.leftovers && a.loosen === b.loosen))
   && JSON.stringify(checksOf(a.goals)) === JSON.stringify(checksOf(b.goals))
 
 export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onChanged, onNotice }: {
@@ -336,9 +340,9 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                         <GoalList goals={form.goals} onChange={(goals) => setForm({ ...form, goals })} />
                         <SchedulePicker value={form.schedule} onChange={(schedule) => setForm({ ...form, schedule })} />
                         {(form.runner === 'bat' || form.runner === 'funnel') && (
-                          <RunnerPicker value={form.runner} leftovers={form.leftovers}
+                          <RunnerPicker value={form.runner} leftovers={form.leftovers} loosen={form.loosen}
                             listy={form.goals.some((g) => g.on && goalKind(g.text) === 'countable')}
-                            onChange={(runner, leftovers) => setForm({ ...form, runner, leftovers })} />
+                            onChange={(runner, leftovers, loosen) => setForm({ ...form, runner, leftovers, loosen })} />
                         )}
                       </div>
                     </div>

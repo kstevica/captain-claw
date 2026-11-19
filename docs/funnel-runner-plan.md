@@ -370,6 +370,40 @@ their own found, their LinkedIn page stayed their site, and the recipe's pages (
 item's own page is read now. And a size counts only from the item's own listing, its own
 pages, or a search result whose address and title carry its name.
 
+## 8c. Rule tiers: rows on a looser reading when a group runs short
+
+The run after those fixes read 67 firms and kept none: almost half failed one rule,
+"published something dated about AI in the last 24 months", which most small firms
+never put on their own site. Rather than an owner hand-writing a looser rule, the setup
+model sorts the owner's rules for each task (recipe `rules`):
+
+- **must**: what makes an item the right kind of thing (type, place, size range, the
+  owner's exclusions) and what the list is useless without (a way to reach it on a
+  contact list, the price on a price list);
+- **prefer**: evidence many good items never publish (recent activity, dated news, a
+  signal, a rating, a certification), each with a **looser** reading (a wider window,
+  any mention undated, another kind of page, the column left empty) and the columns
+  it fills. Never anything the owner wrote as "only", "never", "exactly" or an
+  exclusion, nor a safety rule.
+
+A judging call may then answer **loose**: every must met, and each soft rule it misses
+met by its looser reading. Code checks still run, except "required" and date windows
+on the loosened rules' columns; a value given there must still be on its page. Loose
+rows wait in `shared/funnel/loose.csv`. A group counts them once it has looked at 3
+items per row wanted (at least 30), so a strict row still has its chance. At the merge,
+strict rows (the funnel's and the finishing step's) go first; loose rows fill only what
+is still short, those with fewest rules loosened first. `summary.md` lists them, the
+judge's note says they aren't faults, and the finishing agent isn't started when loose
+rows already fill what's short. A factory setting (runner config `loosen`: `short`,
+the default, or `never`) turns it off; the run's first notes name the tiers it read.
+
+The same run also showed that one slow call (a model or a tool call that got no answer
+in time) ended the whole step, and Bat took the error for "too big for one turn" and
+split the step into agent steps (the fix round burned 235k tokens in two minutes). A
+slow or broken call now skips what it was for (those results, that item) and the step
+goes on; a step that still stops says so in words Bat doesn't read as a size failure,
+and picks up where it left off on its next try.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

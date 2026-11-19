@@ -980,3 +980,149 @@ async def test_a_retried_setup_leaves_no_stale_note(deck, monkeypatch):
     await funnel.plan(run)
     notes = [e["message"] for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note"]
     assert any(n.startswith("List funnel:") and n.endswith("The recipe is in shared/recipe.json.") for n in notes)
+
+
+# ── rule tiers: rows on a looser reading when a group runs short ───────
+
+PAPERS = [{"id": "fm1", "text": "papers.csv: Title, Year, Code, Cites; at least 3", "check": {
+    "type": "table", "path": "papers.csv", "columns": ["Title", "Year", "Code", "Cites"], "min_rows": 3,
+    "unique": ["Title"]}}]
+PAPER_RULES = [{"rule": "about graph search, from 2022 on", "kind": "must"},
+               {"rule": "links its code", "kind": "prefer", "looser": "no code link; Code left empty",
+                "columns": ["Code", "Title"]},  # the key never loosens
+               {"rule": "cited 10 times or more", "kind": "prefer", "looser": "any citation count, or none found",
+                "columns": ["Cites"]},
+               {"rule": "peer reviewed", "kind": "prefer"}]  # no looser reading: a must
+
+
+def test_rules_are_sorted_into_musts_and_soft_ones():
+    r = funnel.normalize_recipe({"rules": PAPER_RULES + [{"rule": ""}, "x"]}, funnel.from_contract(PAPERS))
+    assert [(x["rule"], x["kind"]) for x in r["rules"]] == [
+        ("about graph search, from 2022 on", "must"), ("links its code", "prefer"),
+        ("cited 10 times or more", "prefer"), ("peer reviewed", "must")]
+    assert r["rules"][1]["columns"] == ["Code"] and r["rules"][2]["looser"].startswith("any citation")
+    note = funnel.rules_note(r, {"config": {}})
+    assert note.startswith("Rules: must — about graph search, from 2022 on; peer reviewed.")
+    assert "Loosened only when a group runs short — links its code (looser: no code link; Code left empty)" in note
+    assert "never loosens" in funnel.rules_note(r, {"config": {"funnel_loosen": "never"}})
+    assert funnel.normalize_recipe({}, funnel.from_contract(PAPERS))["rules"] == [] and funnel.rules_note(
+        {"rules": []}, {}) == ""
+
+
+def _papers(deck, folder):
+    (folder / "extra" / "papers.csv").write_text(
+        "Title,Year,Code,Cites\nAlpha,2023,https://code.example/alpha,40\nBeta,2023,,3\nGamma,2024,,\n"
+        "Delta,2023,,2\nEps,2022,,15\n")
+    deck["recipe"] = {"item": "paper", "key": "Title", "sources": [{"kind": "file", "path": "extra/papers.csv"}],
+                      "decide": "Graph search papers from 2022 on that link their code and are cited 10+ times.",
+                      "rules": PAPER_RULES,
+                      "checks": [{"column": "Code", "op": "required"}, {"column": "Code", "op": "in_evidence"},
+                                 {"column": "Cites", "op": "min", "value": 10}, {"column": "Cites", "op": "required"}]}
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            row = {"Title": f["Title"], "Year": f["Year"], "Code": f.get("Code", ""), "Cites": f.get("Cites", "")}
+            if f["Title"] == "Alpha":
+                out.append({"id": i, "verdict": "keep", "row": row})
+            elif f["Title"] == "Gamma":  # misses both soft rules
+                out.append({"id": i, "verdict": "loose", "row": row, "loosened": ["links its code", "cited 10 times"]})
+            elif f["Title"] == "Delta":  # a code link it made up: still checked
+                out.append({"id": i, "verdict": "loose", "row": {**row, "Code": "https://code.example/made-up"},
+                            "loosened": ["cited 10 times or more"]})
+            else:  # Beta (code and cites missing, says only the code rule), Eps (no code)
+                out.append({"id": i, "verdict": "loose", "row": row, "loosened": ["links its code"]})
+        return out
+
+    deck["decide"] = decide
+
+
+async def test_a_short_list_takes_rows_on_a_looser_reading_after_every_strict_one(deck):
+    run, folder = await _run(deck["store"], PAPERS, rid="bat_loose0001")
+    _papers(deck, folder)
+    steps = await funnel.plan(run)
+    notes = [e["message"] for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note"]
+    assert any(n.startswith("Rules: must — about graph search") for n in notes)
+    work = (await _go(deck["store"], run, steps[:1]))[0]
+    assert "# Rule tiers" in deck["decide_prompts"][0] and "looser: no code link" in deck["decide_prompts"][0]
+    assert work["output"].startswith("1 kept of 3, 2 more on a looser reading. Looked at 5 items")
+    why = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert why["Delta"][0] == "dropped" and "made-up" in why["Delta"][1]  # a value given must still be in its source
+    assert why["Beta"][0] == "dropped" and "Cites 3 is under 10" in why["Beta"][1]  # loosened only the code rule
+    assert why["Gamma"][0] == why["Eps"][0] == "loose"
+    # nothing for the finishing agent: the loose rows fill what's short
+    fresh = await deck["store"].get_run(run["id"])
+    assert funnel.prepare_finish(fresh, steps[1])["result"]["output"].startswith("Nothing to finish: rows on a looser")
+    merged = (await _go(deck["store"], run, steps[2:]))[0]
+    rows = (folder / "papers.csv").read_text().splitlines()
+    assert rows == ["Title,Year,Code,Cites", "Alpha,2023,https://code.example/alpha,40", "Eps,2022,,15", "Gamma,2024,,"]
+    assert "2 meet the soft rules only by their looser reading" in merged["output"]  # Eps first: one rule loosened
+    summary = (folder / funnel.SUMMARY).read_text()
+    assert "## On a looser reading" in summary and "| Eps |" in summary and "links its code — looser:" in summary
+    statuses = {r["name"]: (r["status"], r["stage"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert statuses["Eps"] == statuses["Gamma"] == ("kept", "loose")
+    note = funnel.judge_note(await deck["store"].get_run(run["id"]))
+    assert "2 rows meet a soft rule only by its looser reading" in note and "Those rows: Gamma, Eps." in note
+    from captain_claw.flight_deck import first_mate_ledger as ledger
+    assert {r["name"]: r["outcome"] for r in ledger.rows_from_funnel(folder)}["Gamma"] == "kept"
+
+
+async def test_a_factory_that_never_loosens_keeps_every_rule(deck):
+    run, folder = await _run(deck["store"], PAPERS, {"funnel_loosen": "never"}, rid="bat_loose0002")
+    _papers(deck, folder)
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    assert "# Rule tiers" not in deck["decide_prompts"][0]
+    assert (folder / "papers.csv").read_text().splitlines() == ["Title,Year,Code,Cites",
+                                                                "Alpha,2023,https://code.example/alpha,40"]
+    assert {r["status"] for r in funnel._read_csv(folder / funnel.ITEMS) if r["name"] in ("Gamma", "Eps")} == {"maybe"}
+
+
+def test_loose_rows_count_only_once_enough_items_were_looked_at(tmp_path):
+    recipe = funnel.normalize_recipe({"rules": PAPER_RULES}, funnel.from_contract(CONTRACT))
+    w = funnel.Work({"id": "r", "config": {}}, {"step_key": "step-1"}, recipe, tmp_path, group="x")
+    w.kept, w.loose, w.looked_in = {"x": 1}, {"x": 1}, {"x": 29}
+    assert not w.full()  # a strict row may still turn up
+    w.looked_in["x"] = 30
+    assert w.full()
+    w.loosen = False
+    assert not w.full()
+
+
+async def test_a_slow_call_skips_what_it_was_for_and_the_step_goes_on(deck):
+    import httpx
+
+    from captain_claw.flight_deck import bat_loop
+    run, folder = await _run(deck["store"], CONTRACT, rid="bat_slowcal01")
+    recent = _months_back(3)
+    _web_deck(deck, recent)
+    calls = []
+
+    def extract(user):
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("slow")  # the first list of results: skipped
+        return {"items": [{"name": "Alpha", "url": "https://alpha.example",
+                           "fields": {"Firm": "Alpha", "Website": "https://alpha.example"}}]}
+
+    deck["extract"] = extract
+    deck["queries"] = ["more x firms"]
+    deck["tools"].results["more x firms"] = "more results"
+    real_fetch = deck["tools"].fetch
+
+    async def fetch(url):
+        if "contact" in url and "gamma" in url:
+            raise RuntimeError("boom")
+        return await real_fetch(url)
+
+    deck["tools"].fetch = fetch
+    steps = await funnel.plan(run)
+    work = (await _go(deck["store"], run, steps[:1]))[0]
+    assert work["ok"] and [r["Firm"] for r in funnel._read_csv(folder / funnel.ROWS)] == ["Alpha"]
+    events = [e for e in await deck["store"].list_events(run["id"]) if e["stage"] == "action"]
+    assert any("couldn't pull items out of" in (e.get("data") or {}).get("detail", "")
+               or "couldn't pull items out of" in str(e) for e in events)
+    # a step that still breaks says so in words Bat doesn't take for "too big for one turn"
+    assert funnel._plain_error(httpx.ReadTimeout("x")) == "a call got no answer in time"
+    assert not bat_loop.size_failure(funnel._plain_error(httpx.ReadTimeout("x")))
+    assert not bat_loop.size_failure(funnel._plain_error(RuntimeError("request timed out")))
