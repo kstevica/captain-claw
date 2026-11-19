@@ -806,6 +806,16 @@ class FirstMateStore:
         except FirstMateError:
             return dict(DEFAULT_PREFS)
 
+    def last_cap(self, user_id: str) -> int:
+        """The cap per run the owner last picked for a factory (0: their default,
+        UNLIMITED: no cap): a new factory starts with it."""
+        got = self._setting(f"last_cap:{norm_user(user_id)}")
+        if isinstance(got, bool) or not isinstance(got, int):
+            return 0
+        if got in (0, UNLIMITED) or 100_000 <= got <= 50_000_000:
+            return got
+        return 0
+
     def set_prefs(self, user_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         merged = check_prefs({**self.prefs(user_id), **_dict("preferences", changes)})
         self._put_setting(f"prefs:{norm_user(user_id)}", merged)
@@ -904,6 +914,7 @@ class FirstMateStore:
         note = _text("note", note, NOTE_MAX)
         created_by = _text("created_by", created_by, 40) or "owner"
         cap = self.settings()["max_factories"]
+        start_cap = self.last_cap(owner)
         now = _iso(_utcnow())
         fid = "fac_" + secrets.token_hex(8)
         with self._tx() as conn:
@@ -914,8 +925,9 @@ class FirstMateStore:
                                      f"archive one first")
             conn.execute(
                 "INSERT INTO fm_factories (id, owner_id, title, state, draft_version, share, priority,"
-                " goal_id, template, created_at, updated_at) VALUES (?, ?, ?, 'draft', 1, ?, ?, ?, ?, ?, ?)",
-                (fid, owner, title, share, priority, goal_id, template, now, now))
+                " goal_id, template, run_tokens, created_at, updated_at)"
+                " VALUES (?, ?, ?, 'draft', 1, ?, ?, ?, ?, ?, ?, ?)",
+                (fid, owner, title, share, priority, goal_id, template, start_cap, now, now))
             self._insert_version(conn, fid, 1, content, note=note, created_by=created_by, now=now)
             self._event(conn, fid, created_by, "created", {"title": title, "template": template})
         return self.view(fid)
@@ -958,7 +970,9 @@ class FirstMateStore:
                              (*updates.values(), factory_id))
                 self._event(conn, factory_id, actor, "updated",
                             {k: v for k, v in updates.items() if k != "updated_at"})
-            return self.view(factory_id)
+        if "run_tokens" in updates and actor == "owner":  # the next factory starts with it
+            self._put_setting(f"last_cap:{f['owner_id']}", updates["run_tokens"])
+        return self.view(factory_id)
 
     def note_event(self, factory_id: str, actor: str, event: str, detail: dict[str, Any] | None = None) -> None:
         """An event in the factory's history that changes nothing in the store (its

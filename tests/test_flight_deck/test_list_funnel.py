@@ -898,3 +898,33 @@ def test_a_list_of_linkedin_profiles_keeps_linkedin():
     assert "linkedin.com" not in funnel.skip_sites(people)
     firms = funnel.normalize_recipe({"columns": ["Firm", "Website"], "sources": [{"kind": "search", "queries": ["x"]}]})
     assert "linkedin.com" in funnel.skip_sites(firms) and "x.com" in funnel.skip_sites(firms)
+
+
+# ── filters that would rule out everything ─────────────────────────────
+
+def test_a_filter_that_rules_out_everything_is_dropped():
+    base = funnel.from_contract([{"id": "fm6", "text": "x", "check": {
+        "type": "table", "path": "leads.csv", "columns": ["Firm", "Segment"], "exclude_pattern": r"^(?!([A-Z]{2})$).*$",
+        "min_per": {"Segment": 10}, "allowed": {"Segment": ["marketing/content agencies", "legal/accounting boutiques"]}}}])
+    r = funnel.normalize_recipe({"filters": [
+        {"column": "Firm", "op": "not_regex", "value": "(?i)(university|government|agency)"},  # agencies are a group
+        {"column": "Firm", "op": "not_regex", "value": "(?i)(university|college)"},
+        {"column": "size_band", "op": "size_max", "value": 50}]}, base)
+    assert r["filters"] == [{"column": "Firm", "op": "not_regex", "value": "(?i)(university|college)"},
+                            {"column": "size_band", "op": "size_max", "value": 50}]
+
+
+async def test_a_retried_setup_leaves_no_stale_note(deck, monkeypatch):
+    run, folder = await _run(deck["store"], PEOPLE, rid="bat_retry0001")
+    (folder / "extra" / "contacts.csv").write_text("Name,Email,Team\nAna,ana@a.example,a\n")
+    deck["recipe"] = {"item": "person", "sources": [{"kind": "file", "path": "extra/contacts.csv"}]}
+    real, calls = fx.parse_json, []
+
+    def flaky(text):
+        calls.append(1)
+        return None if len(calls) == 1 else real(text)  # the first answer isn't JSON
+
+    monkeypatch.setattr(fx, "parse_json", flaky)
+    await funnel.plan(run)
+    notes = [e["message"] for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note"]
+    assert any(n.startswith("List funnel:") and n.endswith("The recipe is in shared/recipe.json.") for n in notes)
