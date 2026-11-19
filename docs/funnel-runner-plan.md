@@ -1,6 +1,6 @@
 # List funnel: a cheaper way to build a list
 
-Status: phases 1–3 built (branch `feat/list-funnel`, PR #668, not merged). Bat stays the
+Status: phases 1–4 built (branch `feat/list-funnel`, PR #668, not merged). Phase 5 (side by side on the Pi) is left. Bat stays the
 default; the funnel is a second way to run a factory whose result is a list, so
 the same charter can run both ways and be compared.
 
@@ -274,7 +274,21 @@ Each phase ends merged, with tests, and a live check on a test deck (isolated
    validation, "How it runs" in the charter editor (lists only), runner chip,
    the funnel strip in RunProgress, Notes shows the recipe. Live check on a test
    deck.
-4. **Ledger.** Factory ledger read and written by the funnel, seeded into Bat
+4. **Ledger. BUILT** (`first_mate_ledger.py`; 5 tests in `test_first_mate_ledger.py`,
+   1 more in `test_list_funnel.py`). Each factory keeps `_checked.csv` in its data
+   folder (it goes with the factory): key (a site by its domain), name, group,
+   outcome, reason, the charter's work hash, run, when. A firmer outcome replaces a
+   softer one (close → dropped → kept). A run or rehearsal of a funnel or Bat factory
+   starts with `extra/already-checked.csv`: kept items always, dropped ones while the
+   charter asks for the same work (a changed charter, checks or settings lets them be
+   tried again), never ones that only came close; its brief says how many and not to
+   check them again. The funnel skips them (counted in its note, result and summary)
+   and never takes the file as a source. When a run ends, First Mate adds what it
+   checked: a funnel run every item, a Bat run its final list (its site column first,
+   as the funnel names items). Test cases and carry-outs neither read nor add. The
+   Data tab shows an "Already checked" card (how many, from how many runs, kept /
+   dropped / close), with Download and a two-step Forget (in the history too).
+   Live-checked on the test deck: the card, the download, Forget. Planned as: Factory ledger read and written by the funnel, seeded into Bat
    runs as `shared/seen.csv`, recheck window. Tests.
 5. **Side by side on the Pi.** The same charter as two versions (Bat, funnel),
    one run each. Compare rows kept per group, tokens, time, searches, the code's

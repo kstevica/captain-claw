@@ -509,6 +509,14 @@ export function factoryDataUrl(id: string, itemId: string, download = false): st
   const qs = q.toString()
   return `${f(id)}/data/${encodeURIComponent(itemId)}/file${qs ? `?${qs}` : ''}`
 }
+/** What a factory's runs already checked: later runs skip those items. */
+export interface CheckedRecord { items: number; kept: number; dropped: number; maybe: number; runs: number; last: string }
+export const getChecked = (id: string) => call<CheckedRecord>(`${f(id)}/checked`)
+export const forgetChecked = (id: string) => call<CheckedRecord>(`${f(id)}/checked`, { method: 'DELETE' })
+export function checkedFileUrl(id: string): string {
+  const { token, authEnabled } = useAuthStore.getState()
+  return `${f(id)}/checked/file${authEnabled && token ? `?fd_token=${encodeURIComponent(token)}` : ''}`
+}
 export const getFactoryResults = (id: string) => call<{ runs: RunResults[] }>(`${f(id)}/results`).then((r) => r.runs)
 
 /** "23 h 4 min", "12 min", "45 s". */

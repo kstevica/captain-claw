@@ -569,3 +569,22 @@ async def test_the_judge_hears_what_code_checked(deck):
     assert note.startswith("## The list funnel's own checks") and "SignalDate is a date" in note
     assert "It looked at 3 items and kept 1" in note
     assert funnel.judge_note({"config": {}}) == ""
+
+
+# ── phase 4: what earlier runs checked ─────────────────────────────────
+
+async def test_items_earlier_runs_checked_arent_looked_at_again(deck):
+    run, folder = await _run(deck["store"], PEOPLE, rid="bat_funnel0020")
+    (folder / "extra" / "contacts.csv").write_text("Name,Email,Team\nAna,ana@acme.example,a\nBo,bo@beta.example,b\n")
+    (folder / "extra" / funnel.LEDGER_FILE).write_text("key,name,group,outcome,reason\nANA@acme.example,Ana,,kept,on a list\n")
+    deck["recipe"] = {"item": "person", "sources": [{"kind": "file", "path": "extra/contacts.csv"},
+                                                     {"kind": "file", "path": f"extra/{funnel.LEDGER_FILE}"}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"], "Email": f["Email"],
+                                                                         "Team": f["Team"]}} for i, f in items]
+    steps = await funnel.plan(run)
+    assert [s["path"] for s in funnel.load_recipe(folder)["sources"]] == ["extra/contacts.csv"]  # the record isn't one
+    work, = await _go(deck["store"], run, steps[:1])
+    assert deck["asked"] == ["setup", "decide:1"]
+    assert "Skipped 1 that earlier runs already checked." in work["output"]
+    assert [r["Name"] for r in funnel._read_csv(folder / funnel.ROWS)] == ["Bo"]
+    assert "Skipped 1 that earlier runs already checked." in (folder / "progress" / "step-1.md").read_text()

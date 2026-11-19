@@ -80,6 +80,7 @@ function eventText(e: FactoryEvent): string {
     case 'archived': return d.paused ? 'Archived, and paused' : 'Archived'
     case 'restored': return 'Restored to the list'
     case 'run_finished': return `Run ${RUN_LABELS[d.status as Run['status']]?.toLowerCase() ?? String(d.status ?? '')}`
+    case 'checked_forgotten': return `Forgot the ${String(d.items ?? '')} items its runs had checked`
     case 'case_added': return 'Test case added'
     case 'case_deleted': return 'Test case deleted'
     case 'check_started': return `Check of v${String(d.version ?? '')} started (${String(d.cases ?? '')} cases)`

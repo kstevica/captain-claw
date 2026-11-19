@@ -57,6 +57,7 @@ FINISH_ITEMS = f"{STATE}/finish-items.csv"  # the nearly-there items it's given
 COUNTS = f"{STATE}/counts.json"    # per group: how items went, stage by stage (for the run panel)
 SUMMARY = "summary.md"
 EXCLUSIONS = "exclusions.md"
+LEDGER_FILE = "already-checked.csv"  # in extra/: what the factory's earlier runs checked (first_mate_ledger)
 
 SEARCH_BUDGET = 1000
 FETCH_CHARS = 6000
@@ -214,6 +215,8 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
 def _source(s: Any, groups: dict[str, int]) -> dict[str, Any] | None:
     if not isinstance(s, dict) or s.get("kind") not in SOURCE_KINDS:
         return None
+    if str(s.get("path") or "").endswith(LEDGER_FILE):
+        return None  # what earlier runs checked: items to skip, not to take
     group = str(s.get("group") or "").strip()
     group = group if group in groups else ""
     kind = s["kind"]
@@ -363,7 +366,7 @@ def _folder_listing(folder: Path) -> str:
         if not place.is_dir():
             continue
         for p in sorted(place.iterdir()):
-            if not p.is_file() or p.name.startswith(".") or p in seen or len(lines) > 60:
+            if not p.is_file() or p.name.startswith(".") or p in seen or len(lines) > 60 or p.name == LEDGER_FILE:
                 continue
             seen.add(p)
             rel = p.relative_to(folder).as_posix()
@@ -395,7 +398,7 @@ def default_recipe(folder: Path, base: dict[str, Any]) -> dict[str, Any] | None:
         if not place.is_dir():
             continue
         for p in sorted(place.iterdir()):
-            if not p.is_file() or p.name.startswith("."):
+            if not p.is_file() or p.name.startswith(".") or p.name == LEDGER_FILE:
                 continue
             rel = p.relative_to(folder).as_posix()
             if rel == base.get("output"):
@@ -553,6 +556,12 @@ def _append_csv(path: Path, cols: list[str], row: dict[str, Any]) -> None:
         w.writerow({c: ("" if row.get(c) is None else str(row.get(c))) for c in cols})
 
 
+def known_keys(folder: Path) -> set[str]:
+    """The items the factory's earlier runs checked, as the run was given them
+    (``extra/already-checked.csv``): the funnel doesn't look at them again."""
+    return {norm_key(r.get("key", "")) for r in _read_csv(folder / "extra" / LEDGER_FILE) if r.get("key")}
+
+
 def norm_key(v: str) -> str:
     """An item's key as compared: a link or a site by its domain, the rest by its
     lowercased words."""
@@ -677,7 +686,8 @@ class Work:
         self.creds: dict | None = None
         self.seen: set[str] = set()
         self.kept: dict[str, int] = {}
-        self.counts = {"looked": 0, "kept": 0, "maybe": 0, "dropped": 0}
+        self.counts = {"looked": 0, "kept": 0, "maybe": 0, "dropped": 0, "known": 0}
+        self.known = known_keys(folder)
         self.reasons: dict[str, int] = {}
         self.pending: list[dict] = []
         self.recent: list[str] = []
@@ -935,6 +945,10 @@ class Work:
             key = self.item_key(item)
             if not key or key in self.seen:
                 continue
+            if key in self.known:  # checked in one of the factory's earlier runs
+                self.seen.add(key)
+                self.counts["known"] += 1
+                continue
             if self.recipe.get("site_column") and any(fx.same_site(key, s) for s in _SKIP_SITES):
                 continue  # items with sites of their own: a directory or a social page isn't one
             item["key"] = key
@@ -1065,8 +1079,9 @@ class Work:
                     await self.record(it, "dropped", f"{group} is already full", group=group, stage="full")
                     continue
                 key = norm_key(row.get(self.recipe["key"], "")) if self.recipe["key"] in row else it["key"]
-                if key and key != it["key"] and key in self.seen:
-                    await self.record(it, "dropped", "already looked at under another name", stage="duplicate")
+                if key and key != it["key"] and (key in self.seen or key in self.known):
+                    await self.record(it, "dropped", "already looked at under another name"
+                                      + (" in an earlier run" if key in self.known else ""), stage="duplicate")
                     continue
                 self.seen.add(key)
                 self.kept[group] = self.kept.get(group, 0) + 1
@@ -1145,7 +1160,8 @@ class Work:
             lines += ["", f"Kept so far: {total}" + (f" of {target}" if target else "")]
         c = self.counts
         lines += ["", f"This step looked at {c['looked']} items: {c['kept']} kept, {c['maybe']} maybe, "
-                      f"{c['dropped']} dropped. Searches used in the run: {self.queries['searches']} of {self.budget}."]
+                      f"{c['dropped']} dropped. Searches used in the run: {self.queries['searches']} of {self.budget}."
+                  + (f" Skipped {c['known']} that earlier runs already checked." if c["known"] else "")]
         if self.reasons:
             top = sorted(self.reasons.items(), key=lambda x: -x[1])[:6]
             lines += ["", "Dropped most often for:"] + [f"- {r or 'other'} ({n})" for r, n in top]
@@ -1178,7 +1194,8 @@ class Work:
         top = ", ".join(f"{r or 'other'} ({n})" for r, n in sorted(self.reasons.items(), key=lambda x: -x[1])[:4])
         out = (f"{head}{why_short} Looked at {c['looked']} items: {c['kept']} kept, {c['maybe']} maybe "
                f"(in {MAYBE}), {c['dropped']} dropped" + (f", most often for: {top}" if top else "") + ". "
-               f"Searches used in the run: {self.queries['searches']} of {self.budget}.")
+               + (f"Skipped {c['known']} that earlier runs already checked. " if c["known"] else "")
+               + f"Searches used in the run: {self.queries['searches']} of {self.budget}.")
         return {"ok": True, "output": out, "usd": 0.0, "tokens": 0, "error": ""}
 
 
@@ -1518,6 +1535,10 @@ def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
         lines += ["", f"The finishing step added {added} row{'' if added == 1 else 's'} that passed the same checks, "
                   "their cited pages read again" + (f" ({unsourced} with no page to cite)" if unsourced else "")
                   + f"; {refused} it added didn't pass and were dropped."]
+    known = len(known_keys(folder))
+    if known:
+        lines += ["", f"{known} items the factory's earlier runs already checked weren't looked at again "
+                  f"(`extra/{LEDGER_FILE}`)."]
     src = [f"`{s['path']}`" if s.get("path") else s.get("url") or f"{len(s.get('queries') or [])} planned searches"
            for s in recipe["sources"]]
     lines += ["", "## Sources", "", ", ".join(src) + f". Searches made: {got['searches']} of {budget}.", "",

@@ -85,7 +85,7 @@ EXAMPLE_INPUT_MAX = 1500
 
 def compose_brief(factory: dict[str, Any], version: dict[str, Any], *, note: str = "",
                   context: list[dict[str, Any]] | None = None, rehearsal: bool = False,
-                  examples: list[dict[str, Any]] | None = None) -> str:
+                  examples: list[dict[str, Any]] | None = None, checked: int = 0) -> str:
     """What one run is asked to do.
 
     * The charter, quoted as the owner wrote it.
@@ -95,6 +95,8 @@ def compose_brief(factory: dict[str, Any], version: dict[str, Any], *, note: str
       ones who give orders.
     * The factory's open cases as examples (``first_mate_cases``); sealed
       ones never come here.
+    * How many items earlier runs already checked (``first_mate_ledger``), in a
+      file in its folder, not to be checked again.
     """
     parts = [
         f'This is one run of "{factory["title"]}", a standing job its owner set up '
@@ -129,6 +131,10 @@ def compose_brief(factory: dict[str, Any], version: dict[str, Any], *, note: str
             parts += ["", f"Example: {str(ex.get('title') or '')[:120]}",
                       _fence(str(ex.get("input") or "")[:EXAMPLE_INPUT_MAX]), "A good result:"]
             parts += [f"- {line}" for line in ex.get("expect") or []]
+    if checked:
+        parts += ["", f"This factory's earlier runs already checked {checked} items: they are in "
+                      "extra/already-checked.csv (each with what became of it). Don't check or add any of "
+                      "them again; look for new ones."]
     if rehearsal:
         parts += ["", REHEARSAL_NOTE]
     brief = "\n".join(parts)
@@ -580,11 +586,22 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
     if refs is None:
         refs = [str(c.get("id")) for c in (context or []) if c.get("id")]
     kind = kind or kind_for(factory)
+    checked = 0
+    if kind in LEDGER_KINDS and version["runner"] in fms.BAT_RUNNERS:  # what earlier runs already checked
+        from captain_claw.flight_deck import first_mate_ledger
+        try:
+            snap = await asyncio.to_thread(first_mate_ledger.snapshot, factory_id, version)
+        except OSError:
+            log.warning("first mate: couldn't read what earlier runs checked", exc_info=True)
+            snap = None
+        if snap:
+            files = [(first_mate_ledger.RUN_FILE, snap[0], "Captain · what this factory's earlier runs checked")] + files
+            checked = snap[1]
     if brief is None:
         from captain_claw.flight_deck import first_mate_cases
         examples = [c for c in first_mate_cases.cases(store, factory_id) if not c["sealed"] and c["id"] not in refs]
         brief = compose_brief(factory, version, note=note, context=context, rehearsal=kind in ("rehearsal", "check"),
-                              examples=examples)
+                              examples=examples, checked=checked)
     token_cap = setting = token_cap_for(store, factory, version)
     if max_tokens is not None and not fms.unlimited(max_tokens):
         token_cap = int(max_tokens) if fms.unlimited(token_cap) else max(1, min(token_cap, int(max_tokens)))
@@ -615,6 +632,9 @@ async def start(factory_id: str, owner_id: str, *, trigger: str = "manual", kind
 # A carry-out never goes on (it could do what it already did, again); a check
 # is measured from its own start.
 CONTINUE_KINDS = ("run", "rehearsal")
+# The runs that read and add to the record of what a factory already checked
+# (first_mate_ledger): not a test case, not a carry-out.
+LEDGER_KINDS = ("run", "rehearsal")
 
 
 def _same_work(a: dict[str, Any], b: dict[str, Any]) -> bool:
@@ -733,6 +753,12 @@ async def refresh(run_id: str, *, now: datetime | None = None) -> dict[str, Any]
     finished = await _keep_timing(store, store.finish_run(
         run_id, state["status"], verdict=state.get("verdict", ""), result=state.get("result", ""),
         error=state.get("note", ""), tokens=state["tokens"], usd=state["usd"]))
+    if finished["kind"] in LEDGER_KINDS:
+        try:
+            from captain_claw.flight_deck import first_mate_ledger
+            await first_mate_ledger.record_run(finished)
+        except Exception:  # noqa: BLE001 — the run is finished either way
+            log.warning("first mate: couldn't add a run's items to its factory's record", exc_info=True)
     if finished["kind"] == "run" and finished["status"] == "done":
         from captain_claw.flight_deck import first_mate_drafts
         await first_mate_drafts.capture(store, finished)  # a direct run's drafts are watched too
