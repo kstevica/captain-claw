@@ -332,6 +332,9 @@ def _web_deck(deck, recent):
     def decide(items):
         out = []
         for i, f in items:
+            if f.get("Firm") not in ("Alpha", "Gamma"):  # a listing with no site of its own
+                out.append({"id": i, "verdict": "drop", "reason": "a directory, not a firm"})
+                continue
             if f["Firm"] == "Alpha":
                 row = {"Firm": "Alpha", "Website": "https://alpha.example", "Segment": "x", "Email": "hello@alpha.example",
                        "EmailSourceURL": "https://alpha.example/contact", "SignalDate": recent}
@@ -357,7 +360,7 @@ async def test_a_web_list_checks_size_first_and_proves_its_sources(deck):
     assert not any("beta" in u for u in fetched)  # 51-200 on LinkedIn: no page of it read
     assert not any("clutch" in u for k, u in tools.calls)  # a directory isn't an item
     assert tools.closed
-    assert deck["asked"].count("decide:1") == 2 and "queries" in deck["asked"]  # still short: asked for more
+    assert deck["asked"].count("decide:1") == 3 and "queries" in deck["asked"]  # still short: asked for more
     rows = funnel._read_csv(folder / "firms.csv")
     assert [r["Firm"] for r in rows] == ["Alpha"] and rows[0]["Email"] == "hello@alpha.example"
     why = {r["key"]: r["reason"] for r in funnel._read_csv(folder / funnel.ITEMS) if r["status"] == "dropped"}
@@ -365,7 +368,7 @@ async def test_a_web_list_checks_size_first_and_proves_its_sources(deck):
     assert "boss@gamma.example" in why["gamma.example"] and "isn't in https://gamma.example/contact" in why["gamma.example"]
     assert work["output"].startswith("x: 1 of 2 kept. Short: its sources ran out.")
     queries = json.loads((folder / funnel.QUERIES).read_text())
-    assert queries["searches"] == 4 and queries["used"] == ["x firms list"]
+    assert queries["searches"] == 5 and queries["used"] == ["x firms list"]  # 1 list, 3 size bands, 1 site lookup
     events = [e for e in await deck["store"].list_events(run["id"]) if e["stage"] == "action"]
     kinds = {e["message"] for e in events}
     assert {"web_search", "web_fetch", "decide"} <= kinds
@@ -567,7 +570,7 @@ async def test_the_judge_hears_what_code_checked(deck):
     await _go(deck["store"], run, steps)
     note = funnel.judge_note(await deck["store"].get_run(run["id"]))
     assert note.startswith("## The list funnel's own checks") and "SignalDate is a date" in note
-    assert "It looked at 3 items and kept 1" in note
+    assert "It looked at 4 items and kept 1" in note
     assert funnel.judge_note({"config": {}}) == ""
 
 
@@ -680,3 +683,91 @@ async def test_setup_falls_back_to_web_searches(deck):
     notes = [e["message"] for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note"]
     assert any("set up from web searches built from its checks" in n for n in notes)
     assert deck["asked"] == ["setup", "setup"]  # asked twice, then the fallback
+
+
+# ── a firm's own site, the charter's rules, and what code tidies ───────
+
+def test_the_charters_value_lists_become_checks():
+    charter = ("leads.csv has these columns.\n- Segment is exactly one of the four segment names above.\n"
+               "- CaptainFeature is exactly one of: Onboarding, Memory & files, Flows. Pick the one that fits.\n"
+               "- Tier is one of gold or silver\n- Nope is one of: a, b")
+    got = funnel.charter_checks(charter, ["Segment", "CaptainFeature", "Tier"])
+    assert got == [{"column": "CaptainFeature", "op": "in", "value": ["Onboarding", "Memory & files", "Flows"]},
+                   {"column": "Tier", "op": "in", "value": ["gold", "silver"]}]
+
+
+def test_code_tidies_a_models_recipe(tmp_path):
+    base = funnel.from_contract(LEADS)
+    copied = ["boutique consulting firm directory", "boutique consulting firm site:linkedin.com/company"]
+    r = funnel.normalize_recipe({
+        "item": "small US knowledge firm (boutique consultancy, research/analysis shop, marketing agency)",
+        "sources": [{"kind": "document", "path": "extra/Captain.md"},
+                    {"kind": "search", "group": "consultancies", "queries": copied},
+                    {"kind": "search", "group": "research shops", "queries": copied}]}, base)
+    assert r["item"] == "small US knowledge firm"
+    charter = CHARTER + " What Captain is and does is in extra/Captain.md. CaptainFeature is exactly one of: A, B."
+    t = funnel.tidy_recipe(r, charter, tmp_path)
+    assert [s["kind"] for s in t["sources"]] == ["search", "search"] and t["reference"] == ["extra/Captain.md"]
+    assert t["sources"][0]["queries"] == copied  # names its group: kept
+    assert t["sources"][1]["queries"][0] == "research shops directory United States"  # copied: written for it
+    assert {"column": "Signal", "op": "in", "value": ["A", "B"]} not in t["checks"]
+    (tmp_path / "extra").mkdir()
+    (tmp_path / "extra" / "Captain.md").write_text("# Captain\n\nFeatures: Onboarding, Flows.")
+    (tmp_path / "extra" / "links-1.md").write_text("# Links\n\n1. [Web](https://captain.example)\n")
+    (tmp_path / "extra" / funnel.LEDGER_FILE).write_text("key\nx.example\n")
+    ref = funnel.reference_text(tmp_path, t)
+    assert ref.startswith("[extra/Captain.md] # Captain Features: Onboarding, Flows.") and "links-1" not in ref
+
+
+async def test_a_firm_found_on_linkedin_gets_its_own_site_read(deck):
+    contract = [{"id": "fm1", "text": "firms.csv", "check": {
+        "type": "table", "path": "firms.csv", "columns": ["Firm", "Website", "Segment", "Email", "EmailSourceURL",
+                                                           "CaptainFeature"],
+        "min_rows": 2, "min_per": {"Segment": 1}, "allowed": {"Segment": ["x", "y"]}, "unique": ["Website"]}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_site00001")
+    run = {**run, "task": "Find US firms. CaptainFeature is exactly one of: Onboarding, Flows. Captain is described in extra/Captain.md."}
+    (folder / "extra" / "Captain.md").write_text("# Captain\n\nOnboarding teaches agents your documents.")
+    deck["recipe"] = {"item": "firm", "site_column": "Website",
+                      "sources": [{"kind": "document", "path": "extra/Captain.md"},
+                                  {"kind": "search", "group": "x", "country": "US", "queries": ["x firms list"]}],
+                      "gather": [{"kind": "fetch", "url": "{Website}", "paths": ["", "contact"]}],
+                      "extract": ["emails"],
+                      "checks": [{"column": "Email", "op": "in_evidence", "source_column": "EmailSourceURL"}]}
+    deck["extract"] = lambda user: {"items": [{"name": "Delta", "url": "https://www.linkedin.com/company/delta",
+                                               "fields": {"Firm": "Delta"}},
+                                              {"name": "Eps", "fields": {"Firm": "Eps"}}]}
+    deck["tools"] = _Tools(
+        pages={"https://delta.example/": "Delta Advisors.", "https://delta.example/contact": "hi@delta.example",
+               "https://eps.example/": "Eps.", "https://eps.example/contact": "team@eps.example"},
+        results={"x firms list": "list results",
+                 '"Delta" United States official website': (
+                     "[QUERY: q]\n\n1. Delta | LinkedIn\n   URL: https://www.linkedin.com/company/delta\n   Snippet: -\n\n"
+                     "2. Unrelated\n   URL: https://other.example\n   Snippet: -\n\n"
+                     "3. Delta Advisors | Home\n   URL: https://delta.example/\n   Snippet: Delta Advisors\n"),
+                 '"Eps" United States official website': _result("Eps", "https://eps.example/", "Eps home")})
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            firm = f["Firm"]
+            feature = "Onboarding" if firm == "Delta" else "AI Readiness Assessment"  # Eps: not a Captain feature
+            out.append({"id": i, "verdict": "keep", "row": {
+                "Firm": firm, "Website": f.get("Website", ""), "Segment": "x", "Email": "hi@delta.example" if firm == "Delta"
+                else "team@eps.example", "EmailSourceURL": f"{f.get('Website', '')}/contact", "CaptainFeature": feature}})
+        return out
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    recipe = funnel.load_recipe(folder)
+    assert [s["kind"] for s in recipe["sources"]] == ["search"] and recipe["reference"] == ["extra/Captain.md"]
+    assert {"column": "CaptainFeature", "op": "in", "value": ["Onboarding", "Flows"]} in recipe["checks"]
+    await bat_routes._bat_attempt({**(await deck["store"].get_run(run["id"])), "task": run["task"]}, steps[0])
+    fetched = [u for k, u in deck["tools"].calls if k == "fetch"]
+    assert "https://delta.example/contact" in fetched and not any("other.example" in u for u in fetched)
+    rows = funnel._read_csv(folder / funnel.ROWS)
+    assert [(r["Firm"], r["Website"]) for r in rows] == [("Delta", "https://delta.example")]
+    why = {r["name"]: r["reason"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert "CaptainFeature 'AI Readiness Assessment' isn't one of the allowed values" in why["Eps"]
+    prompt = deck["decide_prompts"][0]
+    assert "# The goal, in the owner's words" in prompt and "CaptainFeature is exactly one of: Onboarding, Flows" in prompt
+    assert "# Reference\n[extra/Captain.md] # Captain Onboarding teaches agents your documents." in prompt

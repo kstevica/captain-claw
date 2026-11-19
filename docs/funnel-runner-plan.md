@@ -312,6 +312,24 @@ owner's two Captain links as the only "document" to find firms in. Fixed:
   checked against their cited page, the date window; a links file with fewer than 5
   links is reference, never a source of items.
 
+The second live run (same evening) set up in a minute and kept its first firm with
+the email proven on its page, but kept 1 of 66 in ten minutes: its searches were all
+LinkedIn company searches, whose results give a firm's name and no site, so the funnel
+had nothing of the firm's own to read and the judging call dropped it. Also: all four
+groups got the first group's searches, the product file was taken as a list of firms,
+and CaptainFeature got invented values. Fixed:
+
+- an item without a site of its own gets one: one search for its name, the first
+  result off directory and social sites whose title or address carries the name; a
+  link on such a site never names an item (it falls back to its name);
+- a judging call reads the charter (what each column takes) and the run's reference
+  files (`Captain.md`), and answers maybe, not drop, when nothing it read came from
+  the item's own site;
+- "X is exactly one of: a, b, c" anywhere in the charter becomes a check on X;
+- code tidies a model's recipe (`tidy_recipe`): a group's searches that never name it
+  (or copy another's) are written for it; a file the charter points to for
+  information is reference, never a source; the item is a noun, not a list.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
