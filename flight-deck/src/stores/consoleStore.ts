@@ -4,7 +4,7 @@ import { useAuthStore } from './authStore'
 import type { ViewMode } from '../types'
 import { USERS_TAB_KEY, type UsersTab } from '../components/admin/deckConfig'
 import { ADMIN_TAB_KEY } from '../services/sharedIntegrations'
-import { isAppShell } from '../services/desktopShell'
+import { isAppShell, isKioskOnly } from '../services/desktopShell'
 import { hasTierSets } from '../services/tierConfig'
 import { listProcesses, listContainers } from '../services/docker'
 import { isManagedProcess } from '../utils/managedAgents'
@@ -160,6 +160,9 @@ export async function startDesktop({ signedIn = false }: { signedIn?: boolean } 
 export function enterKioskView() {
   useConsoleStore.setState({ requested: false })
   if (pageFromPath(window.location.pathname)) window.history.pushState(null, '', '/')
+  // A browser tab: the saved layout is what keeps them here (syncBrowserKioskView).
+  const ui = useUIStore.getState()
+  if (!isAppShell() && ui.layoutMode === 'console') ui.setLayoutMode('full')
   useAuthStore.getState().setKioskView(true)
 }
 
@@ -181,6 +184,8 @@ export function syncConsoleFromUrl() {
   if (isAppShell()) return   // only the console or the users' kiosk: Back never means 'full'
   if (!useConsoleStore.getState().requested && ui.layoutMode !== 'console') return
   useConsoleStore.setState({ requested: false })
+  // Out of the console: the full layout, or in a tab without ?app=classic the
+  // users' kiosk (syncBrowserKioskView).
   ui.setLayoutMode('full')
 }
 
@@ -211,11 +216,11 @@ useUIStore.subscribe((s, prev) => {
     go('connections', tab ? { connection: tab } : {})
   } else if (s.view === 'library') {
     go('models')
-  } else if (!isAppShell()) {
+  } else if (!isKioskOnly()) {
     leaveConsole(s.view)
     return
   }
-  // (The desktop app has no full layout to leave for: it stays here.)
+  // (The apps, and a tab without ?app=classic, have no full layout to leave for: it stays here.)
   // Put the view back, so the same link works again next time.
   restoringView = true
   useUIStore.setState({ view: prev.view })
@@ -228,3 +233,27 @@ export function dropConsoleRequest() {
   useConsoleStore.setState({ requested: false })
   if (pageFromPath(window.location.pathname)) window.history.replaceState(null, '', '/')
 }
+
+// ── A browser tab without ?app=classic: the console or the users' kiosk too ──
+
+// Like the apps, an admin there has the Admin console and the users' kiosk
+// (kioskView), nothing else. Which one shows follows the saved layout — the
+// console, or any other for the kiosk — so a switch is remembered like any
+// layout choice, on every device; a console address, and a sign-in until it
+// lands, are the console. (The apps decide on launch instead: startDesktop.)
+function syncBrowserKioskView() {
+  if (isAppShell() || !isKioskOnly()) return
+  const auth = useAuthStore.getState()
+  const kiosk = selectConsoleAdmin(auth)
+    // A deck without sign-in kept to the kiosk (--simple-chat) holds everyone
+    // there, with no way to the console.
+    && !(auth.authEnabled === false && auth.simpleChatOnly)
+    && !auth.adminStartPending
+    && useUIStore.getState().layoutMode !== 'console'
+    && !useConsoleStore.getState().requested
+  if (auth.kioskView !== kiosk) useAuthStore.setState({ kioskView: kiosk })
+}
+useUIStore.subscribe(syncBrowserKioskView)
+useConsoleStore.subscribe(syncBrowserKioskView)
+useAuthStore.subscribe(syncBrowserKioskView)
+syncBrowserKioskView()

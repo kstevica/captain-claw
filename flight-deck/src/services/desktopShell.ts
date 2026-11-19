@@ -5,6 +5,11 @@
 // open any deck address with `?app=desktop` — the tab then acts as the desktop
 // app until it closes (`?app=web` turns it back off). Only the layout follows
 // it: sign-in popups still go by the real shell.
+//
+// A browser tab works like the apps too — the Admin console or the users'
+// kiosk, nothing else (isKioskOnly) — unless it asks for the classic Flight
+// Deck with `?app=classic`: the sidebar, top bar and pages, as before. That
+// lasts until the tab closes, or another `?app=` (web, desktop) turns it off.
 
 interface DesktopBridge {
   isDesktop?: boolean
@@ -25,13 +30,28 @@ function simulated(): boolean {
   try {
     const ask = new URLSearchParams(window.location.search).get('app')
     if (ask === 'desktop') sessionStorage.setItem(SIMULATE_KEY, '1')
-    else if (ask === 'web') sessionStorage.removeItem(SIMULATE_KEY)
+    else if (ask === 'web' || ask === 'classic') sessionStorage.removeItem(SIMULATE_KEY)
     return sessionStorage.getItem(SIMULATE_KEY) === '1'
   } catch { return false }
 }
 
+const CLASSIC_KEY = 'fd:classic-layout'
+
+function classicAsked(): boolean {
+  try {
+    const ask = new URLSearchParams(window.location.search).get('app')
+    if (ask === 'classic') sessionStorage.setItem(CLASSIC_KEY, '1')
+    else if (ask) sessionStorage.removeItem(CLASSIC_KEY)
+    return sessionStorage.getItem(CLASSIC_KEY) === '1'
+  } catch {
+    // Storage blocked: this page load only.
+    try { return new URLSearchParams(window.location.search).get('app') === 'classic' } catch { return false }
+  }
+}
+
 // Read once, at load: the app rewrites the address (e.g. to /console/…) later.
 const SIMULATED = simulated()
+const CLASSIC = classicAsked()
 
 /** Running inside the desktop app (or a tab simulating it) rather than a browser tab. */
 export function isDesktopApp(): boolean {
@@ -55,6 +75,13 @@ export function isAndroidApp(): boolean {
  * gets the kiosk, and an admin starts in it when they have agents. */
 export function isAppShell(): boolean {
   return isDesktopApp() || ANDROID_APP
+}
+
+/** The Admin console or the users' kiosk, nothing else: the apps, and every
+ * browser tab that didn't ask for the classic Flight Deck (`?app=classic`).
+ * Anyone but an admin gets the kiosk; an admin switches between the two. */
+export function isKioskOnly(): boolean {
+  return isAppShell() || !CLASSIC
 }
 
 // The Android app's native side (MainActivity), injected for the deck's origin

@@ -10,7 +10,7 @@ import {
   useConsoleStore, leaveConsole, enterKioskView, pageFromPath, CONSOLE_PATH, type ConsolePage,
 } from '../../stores/consoleStore'
 import { APP_VERSION } from '../../version'
-import { isAppShell } from '../../services/desktopShell'
+import { isAppShell, isKioskOnly } from '../../services/desktopShell'
 import { hasTierSets, TIER_SETS_EVENT } from '../../services/tierConfig'
 import { fetchWaitlistPending } from './consoleApi'
 import { OverviewPage } from './OverviewPage'
@@ -178,8 +178,8 @@ function Brand() {
       <img src={logo || DEFAULT_LOGO} alt="" className="h-9 w-9 shrink-0 rounded-xl object-contain" />
       <div className="min-w-0">
         <div className="truncate text-[15px] font-bold tracking-tight text-zinc-100" title={name}>{name}</div>
-        {/* The desktop app has two views of the deck: say which one this is. */}
-        {isAppShell()
+        {/* The apps (and a browser tab without ?app=classic) have two views of the deck: say which one this is. */}
+        {isKioskOnly()
           ? <div className="text-[11px] font-medium text-violet-600 dark:text-violet-400">Admin view</div>
           : <div className="text-[11px] text-zinc-500">Admin console</div>}
       </div>
@@ -244,8 +244,8 @@ function Footer() {
   const row = 'flex w-full items-center gap-3 rounded-2xl px-3 py-2 text-sm text-zinc-400 transition-colors hover:bg-zinc-800/40 hover:text-zinc-200'
   return (
     <div className="space-y-0.5 border-t border-zinc-800/60 p-3">
-      {/* The desktop app has no full Flight Deck: its other side is the users' kiosk. */}
-      {isAppShell() ? (
+      {/* No full Flight Deck (the apps, a browser tab without ?app=classic): the other side is the users' kiosk. */}
+      {isKioskOnly() ? (
         <button onClick={enterKioskView} className={row} title="The kiosk your users get: their agents and chats">
           <MessagesSquare className="h-[18px] w-[18px] text-zinc-500" /> Switch to user view
         </button>

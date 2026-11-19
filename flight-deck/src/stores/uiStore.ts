@@ -15,6 +15,11 @@ type MobilePanel = 'none' | 'director' | 'chat' | 'tool'
  *  - `console` — the Admin console: the deck's admin work (models,
  *               archetypes, connections, users, usage, settings) and
  *               nothing else. Admins only; anyone else gets `full`.
+ *
+ * `full` and `simple` show only in a browser tab that asked for the classic
+ * Flight Deck (`?app=classic`). Anywhere else (isKioskOnly) there is the
+ * console or the users' kiosk: for an admin, `console` is the console and
+ * anything else the kiosk (consoleStore: syncBrowserKioskView).
  */
 export type LayoutMode = 'full' | 'simple' | 'console'
 

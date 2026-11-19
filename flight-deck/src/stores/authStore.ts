@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { useNotificationStore } from './notificationStore'
-import { isAppShell } from '../services/desktopShell'
+import { isAppShell, isKioskOnly } from '../services/desktopShell'
 
 export interface User {
   id: string
@@ -155,8 +155,9 @@ export const selectKioskLocked = (s: AuthStore): boolean =>
   || (s.authEnabled === false
     // The apps (desktop, Android) keep their admin's way to the console (their kiosk is kioskView).
     ? s.simpleChatOnly && !isAppShell()
-    // The apps have no full Flight Deck: anyone but an admin gets the kiosk.
-    : s.user?.role !== 'admin' && (s.user?.kiosk === true || isAppShell()))
+    // The apps, and a browser tab without ?app=classic, have no full Flight
+    // Deck: anyone but an admin gets the kiosk.
+    : s.user?.role !== 'admin' && (s.user?.kiosk === true || isKioskOnly()))
 
 // ── Auth API calls ──
 
