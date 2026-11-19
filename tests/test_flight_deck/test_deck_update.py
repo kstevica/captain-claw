@@ -823,7 +823,12 @@ async def test_tell_me_tells_once_per_version(world, steps):
     await deck_update.tick(db)
     await deck_update.tick(db)
     assert steps == ["bell New version for this deck"]
+    # Another commit upstream while the deck is still behind: no second notice
+    # (one deck got 214 in a week) — a reminder comes a week on.
     push(world, "another.txt")
+    await deck_update.tick(db)
+    assert steps == ["bell New version for this deck"]
+    deck_update._write_state(told_at=time.time() - 8 * 86400)
     await deck_update.tick(db)
     assert steps == ["bell New version for this deck"] * 2
     assert git(world.deck, "rev-parse", "HEAD") != git(world.dev, "rev-parse", "HEAD")

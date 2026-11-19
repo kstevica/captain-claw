@@ -31,9 +31,10 @@ JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1LW1lbWJlciJ9.c2lnbmF0dXJl"
     ("uvicorn.access", ACCESS_LINE,
      (CLIENT, "GET", "/fd/files/download?path=a%26b.txt&t=dl-secret&at=keep", "1.1", 200),
      f'{CLIENT} - "GET /fd/files/download?path=a%26b.txt&t=…&at=keep HTTP/1.1" 200'),
+    # (Not a polled route: a successful poll isn't logged at all — fd_logfile.)
     ("uvicorn.access", ACCESS_LINE,
-     (CLIENT, "GET", "/fd/processes?mytoken=keep&token_type=keep", "1.1", 200),
-     f'{CLIENT} - "GET /fd/processes?mytoken=keep&token_type=keep HTTP/1.1" 200'),
+     (CLIENT, "GET", "/fd/agents/sokol?mytoken=keep&token_type=keep", "1.1", 200),
+     f'{CLIENT} - "GET /fd/agents/sokol?mytoken=keep&token_type=keep HTTP/1.1" 200'),
 ])
 def test_uvicorn_lines_carry_no_token(caplog, logger_name, fmt, args, logged):
     with caplog.at_level(logging.INFO, logger=logger_name):

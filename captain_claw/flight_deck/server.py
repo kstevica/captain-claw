@@ -169,6 +169,23 @@ class _RedactQueryTokenFilter(logging.Filter):
         return True
 
 
+# An agent's process.log is appended to on every start and never trimmed (one
+# deck: 52 MB for one agent). Past this size it moves to process.log.1 when the
+# agent next starts (the one before that is dropped).
+_PROCESS_LOG_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _rotated_process_log(agent_dir: Path) -> Path:
+    """The agent's process.log, moved aside first when it has grown too big."""
+    log_file = agent_dir / "process.log"
+    try:
+        if log_file.stat().st_size > _PROCESS_LOG_MAX_BYTES:
+            os.replace(log_file, agent_dir / "process.log.1")
+    except OSError:
+        pass   # none yet, or it couldn't move: append as before
+    return log_file
+
+
 def _configure_fd_logging() -> None:
     """Install our colored handler on the root logger and silence dupes."""
     use_color = sys.stderr.isatty() and os.environ.get("NO_COLOR", "") == ""
@@ -200,6 +217,13 @@ def _configure_fd_logging() -> None:
     _uv_err = logging.getLogger("uvicorn.error")
     if not any(isinstance(f, agent_ws_quiet.AgentWsLogFilter) for f in _uv_err.filters):
         _uv_err.addFilter(agent_ws_quiet.AgentWsLogFilter())
+    # A successful poll (an open tab asks every few seconds) isn't an access
+    # line: they filled the scrollback in minutes (FD_ACCESS_LOG=all keeps them).
+    from captain_claw.flight_deck.fd_logfile import QuietPollingFilter
+
+    _uv_acc = logging.getLogger("uvicorn.access")
+    if not any(type(f).__name__ == "QuietPollingFilter" for f in _uv_acc.filters):
+        _uv_acc.addFilter(QuietPollingFilter())
 
 
 _configure_fd_logging()
@@ -799,7 +823,7 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
                      workspace=str(entry.get("workspace") or ""))
     _withhold_deck_keys(environment, base_env, agent_dir=agent_dir, owner_id=_owner)
 
-    log_file = agent_dir / "process.log"
+    log_file = _rotated_process_log(agent_dir)
     try:
         log_fh = open(log_file, "a", encoding="utf-8")
         proc = subprocess.Popen(
@@ -10777,7 +10801,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         await bundle_restore.unpack_on_spawn(config._bundle, slug, agent_dir, owner_id or "")
 
     # Open log file
-    log_file = agent_dir / "process.log"
+    log_file = _rotated_process_log(agent_dir)
     log_fh = open(log_file, "a", encoding="utf-8")
 
     # Resolve captain-claw-web binary: bundled (PyInstaller) or PATH
@@ -12186,6 +12210,11 @@ def main():
         print("Run 'cd flight-deck && npm run build' to build the frontend first.")
         print("Starting API-only mode (use --dev with Vite dev server).\n")
 
+    from captain_claw.flight_deck import fd_logfile
+
+    _log_file = fd_logfile.install(DATA_DIR)
+    if _log_file is not None:
+        log.info("Flight Deck log file: %s", _log_file)
     log.info("Flight Deck starting on http://%s:%s", args.host, args.port)
     # log_config=None: keep our colored formatter from _configure_fd_logging()
     # instead of letting uvicorn slap its default handlers back on.
