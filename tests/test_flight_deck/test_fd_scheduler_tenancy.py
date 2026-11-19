@@ -181,22 +181,27 @@ def test_owner_manages_own_job(store, fired):
     assert store.get(jid) is None
 
 
-def test_admin_sees_and_manages_every_job_including_legacy(store, fired):
+def test_admin_sees_their_own_and_system_jobs_never_another_persons(store, fired):
+    """Other people's scheduled tasks are theirs alone — an admin's list showed
+    every user's tasks and their results (cohort deck, 2026-11-19)."""
     c = _client()
     a = _create(c, _bearer(ALICE))
     b = _create(c, _bearer(BOB))
     legacy = store.create(schedule="every 1h", prompt="legacy", delivery_kind="channel",
                           delivery_target="c")  # pre-owner row: owner ""
     admin = _bearer(ADMIN, role="admin")
+    own = _create(c, admin)
 
     ids = {j["id"] for j in c.get("/scheduler/jobs", headers=admin).json()}
-    assert ids == {a["id"], b["id"], legacy["id"]}
-    assert c.get(f"/scheduler/jobs/{a['id']}", headers=admin).status_code == 200
-    r = c.patch(f"/scheduler/jobs/{b['id']}", json={"name": "renamed"}, headers=admin)
-    assert r.status_code == 200 and r.json()["name"] == "renamed"
-    assert store.get(b["id"])["owner_id"] == BOB  # an admin edit keeps the owner
+    assert ids == {own["id"], legacy["id"]}
+    for other in (a, b):
+        assert c.get(f"/scheduler/jobs/{other['id']}", headers=admin).status_code == 404
+        assert c.patch(f"/scheduler/jobs/{other['id']}", json={"name": "x"}, headers=admin).status_code == 404
+        assert c.post(f"/scheduler/jobs/{other['id']}/run", headers=admin).status_code == 404
+        assert c.delete(f"/scheduler/jobs/{other['id']}", headers=admin).status_code == 404
+    assert store.get(b["id"])["name"] == b["name"]
     assert c.post(f"/scheduler/jobs/{legacy['id']}/run", headers=admin).status_code == 200
-    assert c.delete(f"/scheduler/jobs/{a['id']}", headers=admin).status_code == 200
+    assert c.delete(f"/scheduler/jobs/{own['id']}", headers=admin).status_code == 200
 
 
 def test_legacy_ownerless_job_is_admin_only(store):

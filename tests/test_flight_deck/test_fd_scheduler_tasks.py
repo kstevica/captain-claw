@@ -260,9 +260,9 @@ def test_create_returns_the_delivery_and_refuses_another_users_agent(api):
     assert r.status_code == 403
     r = api.patch(f"/scheduler/jobs/{job['id']}", json={"agent_slug": "bob-agent"}, headers=_bearer(ALICE))
     assert r.status_code == 403
-    # an admin may
+    # nor may an admin: Bob's agent is Bob's to schedule
     assert api.post("/scheduler/jobs", json={**_BODY, "agent_slug": "bob-agent"},
-                    headers=_bearer("adm", role="admin")).status_code == 200
+                    headers=_bearer("adm", role="admin")).status_code == 403
 
 
 def test_an_agent_cannot_choose_who_a_task_emails(api, store, monkeypatch):
@@ -285,7 +285,12 @@ def test_runs_are_owner_scoped_and_searchable(api, store):
     rows = api.get("/scheduler/runs?q=sunny", headers=_bearer(ALICE)).json()
     assert [r["job_id"] for r in rows] == [mine["id"]]
     assert api.get(f"/scheduler/runs?job_id={theirs['id']}", headers=_bearer(ALICE)).status_code == 404
-    assert len(api.get("/scheduler/runs?q=sunny", headers=_bearer("adm", role="admin")).json()) == 2
+    # An admin sees neither person's runs — only the deck's ownerless (system) ones.
+    assert api.get("/scheduler/runs?q=sunny", headers=_bearer("adm", role="admin")).json() == []
+    system = store.create(schedule="daily 09:00", prompt="p", delivery_kind="channel", delivery_target="c")
+    store.finish_run(store.start_run(system, "scheduled"), status="ok", result="sunny system")
+    rows = api.get("/scheduler/runs?q=sunny", headers=_bearer("adm", role="admin")).json()
+    assert [r["job_id"] for r in rows] == [system["id"]]
 
 
 def test_preview_lists_the_next_runs(api):
