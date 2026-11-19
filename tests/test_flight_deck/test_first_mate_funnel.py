@@ -78,9 +78,11 @@ def _live(store, **kw):
 def test_a_version_may_run_on_the_funnel(store):
     f = _live(store, runner="funnel", runner_config={"leftovers": "none", "search_budget": 400})
     assert f["live"]["runner"] == "funnel"
-    assert f["live"]["runner_config"] == {"leftovers": "none", "search_budget": 400}
-    assert fm.check_runner_config("funnel", {}) == {"leftovers": "agent"}
-    for bad, why in (({"leftovers": "maybe"}, "leftovers"), ({"search_budget": -1}, "search_budget"),
+    assert f["live"]["runner_config"] == {"leftovers": "none", "loosen": "short", "search_budget": 400}
+    assert fm.check_runner_config("funnel", {}) == {"leftovers": "agent", "loosen": "short"}
+    assert fm.check_runner_config("funnel", {"loosen": "never"})["loosen"] == "never"
+    for bad, why in (({"leftovers": "maybe"}, "leftovers"), ({"loosen": "always"}, "loosen"),
+                     ({"search_budget": -1}, "search_budget"),
                      ({"search_budget": True}, "search_budget"), ({"agent_context": 1000}, "agent_context"),
                      ({"steps": ["x"]}, "steps")):
         with pytest.raises(FirstMateError, match=why):
@@ -96,7 +98,10 @@ async def test_a_funnel_factory_runs_as_a_bat_run_in_the_funnels_engine(store, b
     assert cfg["engine"] == "funnel" and cfg["funnel_leftovers"] == "none"
     assert cfg["funnel_search_budget"] == 400 and cfg["funnel_agent_context"] == 48000
     assert cfg["source"] == "first_mate" and cfg["factory_id"] == f["id"]  # a factory run as any other
-    assert runs.funnel_config({"runner_config": {}}) == {"engine": "funnel", "funnel_leftovers": "agent"}
+    assert cfg["funnel_loosen"] == "short"  # rows on a looser reading when a group runs short, unless set to never
+    assert runs.funnel_config({"runner_config": {}}) == {"engine": "funnel", "funnel_leftovers": "agent",
+                                                         "funnel_loosen": "short"}
+    assert runs.funnel_config({"runner_config": {"loosen": "never"}})["funnel_loosen"] == "never"
 
 
 async def test_its_progress_carries_the_funnels_counts(store, bat):

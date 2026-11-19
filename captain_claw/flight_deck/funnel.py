@@ -52,6 +52,7 @@ STATE = "shared/funnel"
 ITEMS = f"{STATE}/items.csv"      # every item looked at: what became of it, and why
 ROWS = f"{STATE}/rows.csv"        # the kept rows, the merge's input
 MAYBE = f"{STATE}/maybe.csv"      # nearly there: what the finishing step works on
+LOOSE = f"{STATE}/loose.csv"      # rows that meet the soft rules only by their looser reading
 QUERIES = f"{STATE}/queries.json"  # searches made, queries used, new-query rounds
 FINISH = f"{STATE}/finish.csv"            # rows the finishing agent adds, checked at the merge
 FINISH_ITEMS = f"{STATE}/finish-items.csv"  # the nearly-there items it's given
@@ -85,10 +86,16 @@ FILTER_OPS = ("regex", "not_regex", "in", "not_in", "min", "max", "size_max", "s
 CHECK_OPS = ("required", "in", "regex", "in_evidence", "within_months", "min", "max")
 _ITEM_COLS = ["key", "name", "group", "status", "stage", "reason", "source", "step", "at"]
 _MAYBE_COLS = ["key", "name", "group", "fields", "why", "sources"]
+_LOOSE_COL = "_loosened"
+RULES_MAX = 12
+# A group counts its loose rows only once it has looked at this many items (3 per row
+# wanted, at least 30): before that a strict row is still likely to turn up.
+LOOSE_AFTER_PER, LOOSE_AFTER_MIN = 3, 30
 # Where an item left the funnel: code's filters, after reading, the judging call, a
-# code check, its group already full, a duplicate; or kept, maybe, or the finishing
-# agent's (kept, or refused when its cited page didn't bear it out).
-STAGES = ("filter", "read", "judge", "check", "full", "duplicate", "kept", "maybe", "agent", "agent-check")
+# code check, its group already full, a duplicate; or kept, maybe, loose (it meets the
+# soft rules only by their looser reading), or the finishing agent's (kept, or refused
+# when its cited page didn't bear it out).
+STAGES = ("filter", "read", "judge", "check", "full", "duplicate", "kept", "maybe", "loose", "agent", "agent-check")
 _GROUP_COL = "_group"
 _SKIP_SITES = ("linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com",
                "wikipedia.org", "crunchbase.com", "zoominfo.com", "rocketreach.co", "bbb.org", "yelp.com",
@@ -233,7 +240,42 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
             recipe["checks"].append({"column": col, "op": "required"})
     recipe["decide_batch"] = _int(raw.get("decide_batch"), 1, 25, 1 if recipe["gather"] else 10)
     recipe["reference"] = [r for r in (_rel(x) for x in raw.get("reference") or []) if r][:6]
+    recipe["rules"] = _rules(raw.get("rules"), recipe)
     return recipe
+
+
+def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
+    """The owner's rules for an item, as the setup model sorted them: a must (an item
+    that breaks it is dropped) or a prefer rule with a looser reading (used only when
+    rows run short). A prefer rule without a looser reading is a must; the columns a
+    prefer rule fills never include the key or the group (they stay required)."""
+    out: list[dict[str, Any]] = []
+    fixed = {recipe["key"], recipe["group_by"]}
+    for r in raw if isinstance(raw, list) else []:
+        if not isinstance(r, dict) or not str(r.get("rule") or "").strip():
+            continue
+        looser = " ".join(str(r.get("looser") or "").split())[:300]
+        kind = "prefer" if str(r.get("kind") or "").lower() == "prefer" and looser else "must"
+        rule: dict[str, Any] = {"rule": " ".join(str(r["rule"]).split())[:300], "kind": kind}
+        if kind == "prefer":
+            rule["looser"] = looser
+            rule["columns"] = [c for c in _names(r.get("columns")) if c in recipe["columns"] and c not in fixed]
+        out.append(rule)
+        if len(out) >= RULES_MAX:
+            break
+    return out
+
+
+def soft_rules(recipe: dict[str, Any]) -> list[dict[str, Any]]:
+    return [r for r in recipe.get("rules") or [] if r.get("kind") == "prefer"]
+
+
+def loosen_on(run: dict, recipe: dict[str, Any] | None = None) -> bool:
+    """Whether rows on a looser reading may fill a group that runs short
+    (``config.funnel_loosen``: ``short``, the default, or ``never``), and the recipe
+    has a soft rule to loosen."""
+    on = str((run.get("config") or {}).get("funnel_loosen") or "short").lower() != "never"
+    return on and (recipe is None or bool(soft_rules(recipe)))
 
 
 def _short_item(v: Any) -> str:
@@ -495,6 +537,9 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
             {"kind": "fetch", "url": "{Website}", "paths": ["", "about", "team", "contact", "news"]}],
  "extract": ["emails", "phones", "dates", "size_band", "us_state", "links"],
  "decide": "<the owner's rules for an item, short, in their words>",
+ "rules": [{"rule": "<one of the owner's rules for an item>", "kind": "must|prefer",
+            "looser": "<prefer only: the loosest reading that still serves the goal>",
+            "columns": ["<prefer only: the columns this rule fills>"]}],
  "checks": [{"column": "<column>", "op": "required|in|regex|in_evidence|within_months|min|max",
              "value": ..., "source_column": "<column with the link it came from>"}],
  "decide_batch": <items per judging call: 1 when each item has pages to read, up to 20 for short rows>,
@@ -514,7 +559,21 @@ Rules:
   source: no items are taken from it, and every judging call reads it.
 - Each group's searches name that group; never copy one group's searches to another. When the list is about one
   place, every search names it (the country, or a state or city in it).
-- Never invent a file or a link that isn't in what you're shown."""
+- Never invent a file or a link that isn't in what you're shown.
+- rules: split the owner's rules for an item, one per line, into two kinds. "must" is what makes an item the
+  right kind of thing at all: its type or category, its place, its size range, the owner's explicit exclusions,
+  and what the list is useless without (a way to reach it on a contact list, the price on a price list).
+  "prefer" is evidence many good items never publish or a few pages rarely show: recent activity, dated news or
+  posts, a signal of interest, a rating, a certification, an exact count. Give each prefer rule its looser
+  reading: a wider time window, any mention undated, another kind of page (the item's social or directory
+  profile), or the column left empty. Rows on a looser reading are used only when a group runs short, after
+  every strict row. Never make a prefer rule of anything the owner wrote as "only", "never", "exactly" or an
+  exclusion, and never loosen a safety rule (don't guess an email, don't fill in forms). Examples:
+  "a dated AI or efficiency signal in the last 24 months" → prefer, looser "any mention of AI or automation on its
+  site or its social page, dated or not; the date column left empty when undated"; "2-50 employees" → must;
+  "a founder's or a shared email on its own site" on a contact list → must; "vegan restaurants in Zagreb rated
+  4.5 or more" → vegan and Zagreb must, the rating prefer, looser "rated 4.0 or more, or no rating found";
+  "papers on X since 2022 with code" → topic and year must, code prefer, looser "no code link, column empty"."""
 
 
 def _folder_listing(folder: Path) -> str:
@@ -792,7 +851,27 @@ async def plan(run: dict) -> list[dict] | None:
             + (f" ({searches} searches planned)" if searches else "")
             + f", {checks} check{'' if checks == 1 else 's'} by code, each {item} judged in one short call. "
             "The recipe is in shared/recipe.json." + (f" {why}" if why else "")))
+        tiers = rules_note(recipe, run)
+        if tiers:
+            await store.append_event(run["id"], "note", tiers)
     return steps
+
+
+def rules_note(recipe: dict[str, Any], run: dict) -> str:
+    """The owner's rules as the run reads them: which an item must meet, and which may
+    be met by a looser reading when a group runs short. "" when it sorted none."""
+    rules = recipe.get("rules") or []
+    if not rules:
+        return ""
+    must = [r["rule"] for r in rules if r["kind"] == "must"]
+    soft = soft_rules(recipe)
+    text = "Rules: must — " + ("; ".join(must) if must else "(none)") + "."
+    if soft and loosen_on(run, recipe):
+        text += " Loosened only when a group runs short — " + "; ".join(
+            f"{r['rule']} (looser: {r['looser']})" for r in soft) + "."
+    elif soft:
+        text += " Also kept strictly (the factory never loosens) — " + "; ".join(r["rule"] for r in soft) + "."
+    return text[:1500]
 
 
 def _source_words(s: dict) -> str:
@@ -950,6 +1029,10 @@ class Tools:
                 if time.monotonic() > deadline:  # the agent is still starting: wait for it a while
                     return False, "the run's search and fetch agent didn't answer"
                 await asyncio.sleep(2)
+            except httpx.TimeoutException:  # a slow page or search: this call fails, the step goes on
+                return False, f"{tool} got no answer in time"
+            except httpx.HTTPError as e:
+                return False, f"{tool} failed: {type(e).__name__}"
 
     async def search(self, query: str, count: int, country: str = "") -> tuple[bool, str]:
         args: dict[str, Any] = {"query": query, "count": count}
@@ -1014,7 +1097,10 @@ class Work:
         self.creds: dict | None = None
         self.seen: set[str] = set()
         self.kept: dict[str, int] = {}
-        self.counts = {"looked": 0, "kept": 0, "maybe": 0, "dropped": 0, "known": 0}
+        self.loose: dict[str, int] = {}       # rows on a looser reading, per group
+        self.looked_in: dict[str, int] = {}   # items judged or ruled out, per group
+        self.loosen = loosen_on(run, recipe)
+        self.counts = {"looked": 0, "kept": 0, "maybe": 0, "loose": 0, "dropped": 0, "known": 0}
         self.known = known_keys(folder)
         self.reasons: dict[str, int] = {}
         self.pending: list[dict] = []
@@ -1023,8 +1109,12 @@ class Work:
         self.stopped = ""
         for r in _read_csv(folder / ITEMS):
             self.seen.add(r.get("key", ""))
+            g = r.get("group", "")
+            self.looked_in[g] = self.looked_in.get(g, 0) + 1
             if r.get("status") == "kept":
-                self.kept[r.get("group", "")] = self.kept.get(r.get("group", ""), 0) + 1
+                self.kept[g] = self.kept.get(g, 0) + 1
+            elif r.get("status") == "loose":
+                self.loose[g] = self.loose.get(g, 0) + 1
 
     # ── state ──
     def _load_queries(self) -> dict:
@@ -1044,11 +1134,24 @@ class Work:
         groups = self.recipe["groups"]
         if self.group:
             q = self.quota(self.group)
-            return bool(q) and self.kept.get(self.group, 0) >= q
+            return bool(q) and self._enough([self.group], q)
         if groups and all(groups.values()):
-            return all(self.kept.get(g, 0) >= n for g, n in groups.items())
+            return all(self._enough([g], n) for g, n in groups.items())
         target = int(self.recipe.get("target") or 0)
-        return bool(target) and sum(self.kept.values()) >= target
+        return bool(target) and self._enough(list(set(self.kept) | set(self.loose)), target)
+
+    def _enough(self, groups: list[str], wanted: int) -> bool:
+        """Enough rows: strict ones, or, once the step has looked at enough items that
+        more strict ones are unlikely (3 per row wanted, at least 30), strict and loose
+        together. Strict rows still go first on the list."""
+        strict = sum(self.kept.get(g, 0) for g in groups)
+        if strict >= wanted:
+            return True
+        if not self.loosen:
+            return False
+        looked = self.looked_in.get(self.group, 0) if self.group else sum(self.looked_in.values())
+        return looked >= max(LOOSE_AFTER_MIN, LOOSE_AFTER_PER * wanted) \
+            and strict + sum(self.loose.get(g, 0) for g in groups) >= wanted
 
     async def _event(self, kind: str, detail: str) -> None:
         from captain_claw.flight_deck import bat_loop
@@ -1197,10 +1300,17 @@ class Work:
         """The items in a text (a search's results, a page, a part of a document), by a
         short model call. Links to more list pages are kept for later."""
         cols = ", ".join(self.recipe["columns"])
-        got = await self._ask("extract", EXTRACT_SYSTEM.format(item=self.recipe["item"]),
-                              f"# Looking for\n{self.recipe['item']}s"
-                              + (f" ({self.group})" if self.group else "") + (f": {about}" if about else "")
-                              + f"\n\n# Columns of the list\n{cols}\n\n# Text ({origin})\n{text[:12000]}")
+        try:
+            got = await self._ask("extract", EXTRACT_SYSTEM.format(item=self.recipe["item"]),
+                                  f"# Looking for\n{self.recipe['item']}s"
+                                  + (f" ({self.group})" if self.group else "") + (f": {about}" if about else "")
+                                  + f"\n\n# Columns of the list\n{cols}\n\n# Text ({origin})\n{text[:12000]}")
+        except RuntimeError:
+            raise  # no model to call at all
+        except Exception as e:  # noqa: BLE001 — a slow or broken call: these items are skipped, the step goes on
+            log.warning("funnel extract call failed", run_id=self.run["id"], error=str(e))
+            await self._event("funnel", f"couldn't pull items out of {origin[:120]} ({_plain_error(e)})")
+            return []
         items = got.get("items") if isinstance(got, dict) else got if isinstance(got, list) else []
         if isinstance(got, dict):
             for url in got.get("pages") or []:
@@ -1316,8 +1426,12 @@ class Work:
             await self._gather_wave(wave)
 
     async def _gather_wave(self, wave: list[dict]) -> None:
-        await asyncio.gather(*(self.gather(it) for it in wave))
-        for it in wave:
+        got = await asyncio.gather(*(self.gather(it) for it in wave), return_exceptions=True)
+        for it, err in zip(wave, got):
+            if isinstance(err, Exception):
+                log.warning("funnel: reading an item failed", run_id=self.run["id"], error=str(err))
+                await self.record(it, "dropped", f"couldn't be read ({_plain_error(err)})", stage="read")
+                continue
             why = self.passes(it, it.get("found") or {})
             if why:
                 await self.record(it, "dropped", why, stage="read")
@@ -1465,6 +1579,7 @@ class Work:
         try:
             got = await self._ask("decide", DECIDE_SYSTEM,
                                   f"# Rules\n{self.recipe['decide'] or '(take every item that fits the list)'}\n\n"
+                                  + self._tiers_text()
                                   + (f"# The goal, in the owner's words (what each column takes)\n{self.charter}\n\n"
                                      if self.charter else "")
                                   + (f"# Reference\n{self.reference}\n\n" if self.reference else "")
@@ -1481,9 +1596,14 @@ class Work:
                 continue
             verdict = str(v.get("verdict") or "").lower()
             reason = " ".join(str(v.get("reason") or "").split())[:200]
-            if verdict == "keep":
+            if verdict == "loose" and not self.loosen:
+                verdict = "maybe"  # no looser reading in this run: it's nearly there
+            if verdict in ("keep", "loose"):
                 row = {c: " ".join(str((v.get("row") or {}).get(c) or "").split()) for c in self.recipe["columns"]}
-                problem = self.check(row, it)
+                loosened = self._loosened(v.get("loosened")) if verdict == "loose" else []
+                relax = {c for r in loosened for c in r.get("columns") or []}
+                problem = check_row(self.recipe, row, {e["source"]: e["text"] for e in it.get("evidence") or []},
+                                    relax=relax)
                 if problem:
                     await self.record(it, "dropped", f"check: {problem}", stage="check")
                     continue
@@ -1498,6 +1618,14 @@ class Work:
                                       + (" in an earlier run" if key in self.known else ""), stage="duplicate")
                     continue
                 self.seen.add(key)
+                if verdict == "loose":
+                    names = "; ".join(r["rule"] for r in loosened)
+                    self.loose[group] = self.loose.get(group, 0) + 1
+                    _append_csv(self.folder / LOOSE, self.recipe["columns"] + [_GROUP_COL, _LOOSE_COL],
+                                {**row, _GROUP_COL: group, _LOOSE_COL: names})
+                    await self.record(it, "loose", f"meets only the looser reading of: {names}"
+                                      + (f" ({reason})" if reason else ""), group=group, stage="loose")
+                    continue
                 self.kept[group] = self.kept.get(group, 0) + 1
                 _append_csv(self.folder / ROWS, self.recipe["columns"] + [_GROUP_COL], {**row, _GROUP_COL: group})
                 await self.record(it, "kept", reason or "meets the rules", group=group)
@@ -1513,12 +1641,33 @@ class Work:
             else:
                 await self.record(it, "dropped", reason or "breaks a rule")
 
-    def check(self, row: dict[str, str], item: dict) -> str:
-        """Why a row the model kept fails the recipe's checks by code, or ""."""
-        return check_row(self.recipe, row, {e["source"]: e["text"] for e in item.get("evidence") or []})
+    def _tiers_text(self) -> str:
+        """The rule tiers for a judging call, when rows may be on a looser reading."""
+        if not self.loosen:
+            return ""
+        must = [r["rule"] for r in self.recipe.get("rules") or [] if r["kind"] == "must"]
+        lines = ["# Rule tiers"]
+        if must:
+            lines += ["Must (an item that breaks one is dropped):"] + [f"- {r}" for r in must]
+        lines += ["Prefer, each with a looser reading:"]
+        lines += [f"- {r['rule']} — looser: {r['looser']}" for r in soft_rules(self.recipe)]
+        lines += ['Verdict "loose": the item meets every must rule, and each prefer rule it doesn\'t meet as written '
+                  'it meets by its looser reading. Name those rules in "loosened": ["<rule>", ...]; a column the '
+                  'looser reading gives no value for stays empty. "keep" only when every rule is met as written.']
+        return "\n".join(lines) + "\n\n"
+
+    def _loosened(self, named: Any) -> list[dict[str, Any]]:
+        """The soft rules a loose verdict names (all of them when it names none it has)."""
+        soft = soft_rules(self.recipe)
+        said = [" ".join(str(x).split()).lower() for x in named or [] if str(x).strip()] \
+            if isinstance(named, list) else []
+        got = [r for r in soft if any(x and (x in r["rule"].lower() or r["rule"].lower() in x) for x in said)]
+        return got or soft
 
     async def record(self, item: dict, status: str, reason: str, group: str = "", stage: str = "") -> None:
-        self.counts["kept" if status == "kept" else status if status == "maybe" else "dropped"] += 1
+        self.counts[status if status in ("kept", "maybe", "loose") else "dropped"] += 1
+        g = group or self.group
+        self.looked_in[g] = self.looked_in.get(g, 0) + 1
         if status == "dropped":
             short = re.sub(r"\(.*?\)|'[^']*'|\d[\d,.-]*", "", reason).strip()[:60]
             self.reasons[short] = self.reasons.get(short, 0) + 1
@@ -1531,7 +1680,7 @@ class Work:
         line = f"{status} {str(name)[:60]}" + (f" ({group})" if group and not self.group else "") + f": {reason}"
         self.recent = (self.recent + [line])[-8:]
         await self._event("decide", line)
-        if (self.counts["kept"] + self.counts["maybe"] + self.counts["dropped"]) % NOTE_EVERY == 0:
+        if (self.counts["kept"] + self.counts["maybe"] + self.counts["loose"] + self.counts["dropped"]) % NOTE_EVERY == 0:
             await asyncio.to_thread(self.note)
 
     async def new_queries(self, src: dict) -> list[str]:
@@ -1545,7 +1694,19 @@ class Work:
                 q = r["source"][8:]
                 worked[q] = worked.get(q, 0) + 1
         used = [q for q in self.queries["used"] if q in src.get("queries", []) or q in worked]
-        got = await self._ask("queries", "Write new web searches for a list that is still short. Reply ONLY with "
+        try:
+            got = await self._new_queries_call(src, worked, used)
+        except Exception as e:  # noqa: BLE001 — no new searches this round
+            log.warning("funnel queries call failed", run_id=self.run["id"], error=str(e))
+            return []
+        fresh = got.get("queries") if isinstance(got, dict) else got if isinstance(got, list) else []
+        out = [str(q).strip()[:300] for q in fresh or [] if str(q).strip() and str(q).strip() not in self.queries["used"]]
+        if out:
+            await self._event("funnel", f"{len(out)} new searches for {self.group or 'the list'}")
+        return out[:15]
+
+    async def _new_queries_call(self, src: dict, worked: dict[str, int], used: list[str]) -> Any:
+        return await self._ask("queries", "Write new web searches for a list that is still short. Reply ONLY with "
                                          'JSON: {"queries": ["...", ...]} (10-15 new ones, none already used). '
                                          "Keep your thinking short.",
                               f"# Looking for\n{self.recipe['item']}s" + (f" ({self.group})" if self.group else "")
@@ -1554,11 +1715,6 @@ class Work:
                               + ("\n".join(f"- {q} ({n})" for q, n in sorted(worked.items(), key=lambda x: -x[1])[:15])
                                  or "(none yet)")
                               + "\n\n# Already used\n" + "\n".join(f"- {q}" for q in used[-40:]))
-        fresh = got.get("queries") if isinstance(got, dict) else got if isinstance(got, list) else []
-        out = [str(q).strip()[:300] for q in fresh or [] if str(q).strip() and str(q).strip() not in self.queries["used"]]
-        if out:
-            await self._event("funnel", f"{len(out)} new searches for {self.group or 'the list'}")
-        return out[:15]
 
     def note(self, final: bool = False) -> None:
         """The step's progress note, as Bat's workers keep one."""
@@ -1567,13 +1723,17 @@ class Work:
                  f"Status: {'finished' if final else 'working'}" + (f" (stopped: {self.stopped})" if self.stopped else "")]
         if self.recipe["groups"]:
             lines += ["", "Kept so far:"] + [f"- {g}: {self.kept.get(g, 0)}" + (f" of {n}" if n else "")
+                                             + (f" (and {self.loose[g]} on a looser reading)" if self.loose.get(g) else "")
                                              for g, n in self.recipe["groups"].items()]
         else:
             total = sum(self.kept.values())
             target = int(self.recipe.get("target") or 0)
-            lines += ["", f"Kept so far: {total}" + (f" of {target}" if target else "")]
+            loose = sum(self.loose.values())
+            lines += ["", f"Kept so far: {total}" + (f" of {target}" if target else "")
+                      + (f" (and {loose} on a looser reading)" if loose else "")]
         c = self.counts
-        lines += ["", f"This step looked at {c['looked']} items: {c['kept']} kept, {c['maybe']} maybe, "
+        lines += ["", f"This step looked at {c['looked']} items: {c['kept']} kept, "
+                      + (f"{c['loose']} on a looser reading, " if c["loose"] else "") + f"{c['maybe']} maybe, "
                       f"{c['dropped']} dropped. Searches used in the run: {self.queries['searches']} of {self.budget}."
                   + (f" Skipped {c['known']} that earlier runs already checked." if c["known"] else "")]
         if self.reasons:
@@ -1594,13 +1754,20 @@ class Work:
         if self.group:
             q = self.quota(self.group)
             have = self.kept.get(self.group, 0)
-            head = f"{self.group}: {have}" + (f" of {q}" if q else "") + " kept."
-            short = bool(q) and have < q
+            loose = self.loose.get(self.group, 0)
+            head = f"{self.group}: {have}" + (f" of {q}" if q else "") + " kept" \
+                + (f", {loose} more on a looser reading." if loose else ".")
+            short = bool(q) and have + loose < q
         else:
             have = sum(self.kept.values())
+            loose = sum(self.loose.values())
             target = int(self.recipe.get("target") or 0)
-            head = f"{have} kept" + (f" of {target}" if target else "") + "."
-            short = not self.full() and bool(self.recipe["groups"] or target)
+            head = f"{have} kept" + (f" of {target}" if target else "") \
+                + (f", {loose} more on a looser reading." if loose else ".")
+            if self.recipe["groups"]:
+                short = any(self.kept.get(g, 0) + self.loose.get(g, 0) < n for g, n in self.recipe["groups"].items() if n)
+            else:
+                short = bool(target) and have + loose < target
         why_short = ""
         if short:
             why_short = (f" Short: {self.stopped}." if self.stopped
@@ -1616,15 +1783,19 @@ class Work:
 # ── checks ─────────────────────────────────────────────────────────────
 
 def check_row(recipe: dict[str, Any], row: dict[str, str], texts: dict[str, str], *,
-              unsourced_ok: bool = False) -> str:
+              unsourced_ok: bool = False, relax: set[str] | frozenset[str] = frozenset()) -> str:
     """Why a row fails the recipe's checks by code, or "". ``texts`` is what was read,
     by link. A value that must be in its source is looked for on the page its source
     column names (any page read, when the check names no source column; skipped then
-    with ``unsourced_ok``, for rows whose pages Captain didn't read itself)."""
+    with ``unsourced_ok``, for rows whose pages Captain didn't read itself). ``relax``:
+    columns of rules met only by their looser reading, which may stay empty and keep
+    no date window; a value given there must still be in its source."""
     every = "\n".join(texts.values())
     for c in recipe["checks"]:
         col, op = c["column"], c["op"]
         v = row.get(col, "")
+        if col in relax and op in ("required", "within_months"):
+            continue
         if op == "required":
             if not v:
                 return f"{col} is empty"
@@ -1676,6 +1847,64 @@ def kept_per_group(folder: Path) -> dict[str, int]:
         g = r.get(_GROUP_COL, "")
         out[g] = out.get(g, 0) + 1
     return out
+
+
+def loose_per_group(folder: Path) -> dict[str, int]:
+    """Rows on a looser reading not yet on the list, per group."""
+    on_list = {r.get("key", "") for r in _read_csv(folder / ITEMS) if r.get("status") == "kept"}
+    out: dict[str, int] = {}
+    for r in _read_csv(folder / ITEMS):
+        if r.get("status") == "loose" and r.get("key") not in on_list:
+            out[r.get("group", "")] = out.get(r.get("group", ""), 0) + 1
+    return out
+
+
+def fill_from_loose(folder: Path, recipe: dict[str, Any]) -> list[dict[str, str]]:
+    """Rows on a looser reading where a group is still short after every strict row
+    (the funnel's and the finishing step's): fewest rules loosened first, then in the
+    order found. They join the list's rows, and their items count as kept. Returns
+    what was added: name, group and the rules loosened."""
+    short = shortfall(folder, recipe)
+    loose = _read_csv(folder / LOOSE)
+    if not short or not loose:
+        return []
+    key = recipe["key"]
+    on_list = {norm_key(r.get(key, "")) for r in _read_csv(folder / ROWS)} if key else set()
+    ranked = sorted(enumerate(loose), key=lambda x: (len([n for n in x[1].get(_LOOSE_COL, "").split(";") if n.strip()]),
+                                                     x[0]))
+    added: list[dict[str, str]] = []
+    for _i, r in ranked:
+        group = r.get(_GROUP_COL, "")
+        slot = group if recipe["groups"] else ""
+        if short.get(slot, 0) <= 0:
+            continue
+        k = norm_key(r.get(key, "")) if key else ""
+        if k and k in on_list:
+            continue
+        on_list.add(k)
+        short[slot] -= 1
+        _append_csv(folder / ROWS, recipe["columns"] + [_GROUP_COL], {**r, _GROUP_COL: group})
+        name = next((r.get(c, "") for c in recipe["columns"] if r.get(c)), k)
+        added.append({"key": k, "name": name, "group": group, "loosened": r.get(_LOOSE_COL, "")})
+    if added:
+        used = {a["key"] for a in added if a["key"]}
+        names = {a["name"].lower() for a in added}
+        items = _read_csv(folder / ITEMS)
+        for it in items:
+            if it.get("status") == "loose" and (norm_key(it.get("key", "")) in used or it.get("name", "").lower() in names):
+                it["status"] = "kept"
+                it["reason"] = "on the list on a looser reading: " + it.get("reason", "").removeprefix(
+                    "meets only the looser reading of: ")
+        with (folder / ITEMS).open("w", encoding="utf-8", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=_ITEM_COLS, extrasaction="ignore")
+            w.writeheader()
+            w.writerows(items)
+    return added
+
+
+def loose_on_list(folder: Path) -> list[dict[str, str]]:
+    """The list's rows that meet the soft rules only by their looser reading."""
+    return [r for r in _read_csv(folder / ITEMS) if r.get("status") == "kept" and r.get("stage") == "loose"]
 
 
 def shortfall(folder: Path, recipe: dict[str, Any]) -> dict[str, int]:
@@ -1767,6 +1996,12 @@ def prepare_finish(run: dict, step: dict) -> dict:
     short = shortfall(folder, recipe)
     if not short:
         return done("Nothing to finish: no group is short.")
+    if loosen_on(run, recipe):
+        loose = loose_per_group(folder)
+        short = {g: n - loose.get(g, 0) if g else n - sum(loose.values()) for g, n in short.items()}
+        short = {g: n for g, n in short.items() if n > 0}
+        if not short:
+            return done("Nothing to finish: rows on a looser reading of the soft rules fill what's short.")
     on_list = {norm_key(r.get(recipe["key"], "")) for r in _read_csv(folder / ROWS)} if recipe["key"] else set()
     items = [m for m in _read_csv(folder / MAYBE)
              if (m.get("group", "") in short or not m.get("group") or "" in short) and m.get("key") not in on_list]
@@ -1936,11 +2171,21 @@ def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
                else "the sources ran out of items that pass")
         lines += ["## Short", "", "; ".join(f"{g or 'the list'}: {n} more" for g, n in short.items())
                   + f". Why: {why}." + (f" {maybe} came close (`{MAYBE}`)." if maybe else ""), ""]
+    loose = loose_on_list(folder)
+    if loose:
+        soft = soft_rules(recipe)
+        lines += ["## On a looser reading", "",
+                  f"{len(loose)} row{'' if len(loose) == 1 else 's'} meet every must rule but a soft rule only by its "
+                  "looser reading, used because a group ran short of rows that meet every rule as written:", ""]
+        lines += [f"- {r['rule']} — looser: {r['looser']}" for r in soft] + ["", "| Item | Group | Why |", "|---|---|---|"]
+        lines += [f"| {_md(r.get('name') or r.get('key'))} | {_md(r.get('group'))} | {_md(r.get('reason'))} |"
+                  for r in loose]
+        lines.append("")
     lines += ["## How items went", "", "| Group | Looked at | " + " | ".join(_STAGE_WORDS.values())
-              + " | Maybe | Kept | Added by the finishing step |", "|---" * (len(_STAGE_WORDS) + 5) + "|"]
+              + " | Maybe | Looser reading | Kept | Added by the finishing step |", "|---" * (len(_STAGE_WORDS) + 6) + "|"]
     for g, c in groups.items():
         lines.append(f"| {_md(g) or '-'} | {c['looked']} | " + " | ".join(str(c.get(st, 0)) for st in _STAGE_WORDS)
-                     + f" | {c.get('maybe', 0)} | {c.get('kept', 0)} | {c.get('agent', 0)} |")
+                     + f" | {c.get('maybe', 0)} | {c.get('loose', 0)} | {c.get('kept', 0)} | {c.get('agent', 0)} |")
     checks = [c for c in recipe["checks"] if c["op"] != "required"]
     lines += ["", "## Checked in every row, by code", ""]
     lines += [f"- {c['column']} {_check_words(c)}" for c in checks] or ["- (no checks beyond the required columns)"]
@@ -1969,6 +2214,7 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
     """The list, from the funnel's rows and the finishing step's that pass its checks;
     ``exclusions.md``; ``summary.md``."""
     finished = await check_finish(run, step, folder, recipe)
+    loosened = await asyncio.to_thread(fill_from_loose, folder, recipe) if loosen_on(run, recipe) else []
     out = await asyncio.to_thread(write_list, folder, recipe)
     dropped = await asyncio.to_thread(write_exclusions, folder, recipe)
     budget = _int((run.get("config") or {}).get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
@@ -1980,6 +2226,8 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
     added, refused, _ = finished
     text = (f"`{recipe['output']}`: {len(out)} rows" + (f" of {recipe['target']}" if recipe.get("target") else "")
             + f".{per}" + (f" The finishing step added {added} (and {refused} that failed a check)." if added or refused else "")
+            + (f" {len(loosened)} meet the soft rules only by their looser reading (listed in `{SUMMARY}`)."
+               if loosened else "")
             + f" `{EXCLUSIONS}`: {dropped} dropped, with why. `{SUMMARY}`: how it went.")
     return {"ok": True, "output": text, "usd": 0.0, "tokens": 0, "error": ""}
 
@@ -2003,8 +2251,16 @@ def judge_note(run: dict) -> str:
              + (" (rows the finishing step added had their cited pages read again):" if any(
                  g.get("agent", 0) for g in got["groups"].values()) else ":")]
     lines += [f"- {c['column']} {_check_words(c)}" for c in checks] or ["- the required columns are filled"]
+    loose = loose_on_list(folder)
+    kept += len(loose)
     lines.append(f"It looked at {looked} items and kept {kept}; `{EXCLUSIONS}` says why each other one went. "
                  "Rules these checks don't cover are yours to judge.")
+    if loose:
+        lines += ["", f"{len(loose)} rows meet a soft rule only by its looser reading. The factory lets the run use "
+                      "them when a group runs short of rows that meet every rule as written, so they aren't faults "
+                      "to fix; their empty columns are the ones those rules fill:"]
+        lines += [f"- {r['rule']} — looser: {r['looser']}" for r in soft_rules(recipe)]
+        lines.append("Those rows: " + ", ".join(r.get("name") or r.get("key", "") for r in loose[:40]) + ".")
     return "\n".join(lines)
 
 
@@ -2025,5 +2281,21 @@ async def attempt(run: dict, step: dict) -> dict:
         return await work.run_step()
     except RuntimeError as e:
         return {"ok": False, "error": str(e), "usd": 0.0, "tokens": 0}
+    except Exception as e:  # noqa: BLE001 — what it did is kept: the next try picks up from there
+        log.warning("funnel step stopped", run_id=run.get("id"), step=step.get("step_key"), error=str(e))
+        return {"ok": False, "usd": 0.0, "tokens": 0,
+                "error": f"the list funnel stopped on a call that broke ({_plain_error(e)}); its items so far "
+                         "are kept and the next try picks up where it left off"}
     finally:
         await work.close()
+
+
+def _plain_error(e: BaseException) -> str:
+    """An error in a few words. A slow call reads as "no answer in time", never as
+    "timed out": Bat takes that for a step too big for one turn and splits it into
+    agent steps, which a funnel step isn't."""
+    import httpx
+    if isinstance(e, (httpx.TimeoutException, asyncio.TimeoutError)) or "timeout" in type(e).__name__.lower():
+        return "a call got no answer in time"
+    text = f"{type(e).__name__}: {e}"[:160]
+    return re.sub(r"(?i)timed? ?out", "no answer in time", text)

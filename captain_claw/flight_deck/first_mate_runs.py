@@ -515,7 +515,8 @@ class FunnelRunner(BatRunner):
 def funnel_config(version: dict[str, Any]) -> dict[str, Any]:
     """A funnel version's settings as its Bat run's config."""
     rc = version.get("runner_config") or {}
-    cfg: dict[str, Any] = {"engine": "funnel", "funnel_leftovers": rc.get("leftovers") or "agent"}
+    cfg: dict[str, Any] = {"engine": "funnel", "funnel_leftovers": rc.get("leftovers") or "agent",
+                           "funnel_loosen": rc.get("loosen") or "short"}
     if rc.get("search_budget") is not None:
         cfg["funnel_search_budget"] = int(rc["search_budget"])
     if rc.get("agent_context") is not None:

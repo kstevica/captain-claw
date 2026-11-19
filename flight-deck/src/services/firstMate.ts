@@ -586,6 +586,8 @@ export interface FunnelGroup {
   duplicate: number
   kept: number
   maybe: number
+  /** Meets the soft rules only by their looser reading (used when a group runs short). */
+  loose?: number
   agent: number
   'agent-check': number
   quota: number

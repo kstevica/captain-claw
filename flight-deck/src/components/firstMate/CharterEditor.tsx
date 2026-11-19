@@ -227,11 +227,13 @@ const HOW: { value: HowItRuns; label: string; icon: typeof Bot; hint: string }[]
 ]
 
 /** How a factory's runs do the work: Bat's agents, or the list funnel (with or without
- *  an agent to finish what's short). */
-export function RunnerPicker({ value, leftovers, onChange, listy }: {
+ *  an agent to finish what's short, and with or without rows on a looser reading of
+ *  the soft rules when a group runs short). */
+export function RunnerPicker({ value, leftovers, loosen, onChange, listy }: {
   value: HowItRuns
   leftovers: boolean
-  onChange: (value: HowItRuns, leftovers: boolean) => void
+  loosen: boolean
+  onChange: (value: HowItRuns, leftovers: boolean, loosen: boolean) => void
   /** Its goals ask for an amount: it reads as a list. */
   listy: boolean
 }) {
@@ -245,7 +247,7 @@ export function RunnerPicker({ value, leftovers, onChange, listy }: {
           const on = value === h.value
           const Icon = h.icon
           return (
-            <button key={h.value} type="button" role="radio" aria-checked={on} onClick={() => onChange(h.value, leftovers)}
+            <button key={h.value} type="button" role="radio" aria-checked={on} onClick={() => onChange(h.value, leftovers, loosen)}
               className={`flex items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors ${on
                 ? 'border-violet-500/50 bg-violet-500/10' : 'border-[var(--fd-line)] hover:bg-[var(--fd-hover)]'}`}>
               <span className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${on
@@ -261,11 +263,18 @@ export function RunnerPicker({ value, leftovers, onChange, listy }: {
         })}
       </div>
       {value === 'funnel' && (
-        <label className="mt-2 flex cursor-pointer items-start gap-2 text-[11px] text-zinc-400">
-          <input type="checkbox" checked={leftovers} onChange={(e) => onChange(value, e.target.checked)}
-            className="mt-0.5 h-3.5 w-3.5 accent-violet-600" />
-          <span>Finish what’s short with an agent: it checks only the items that came close, in a small context.</span>
-        </label>
+        <>
+          <label className="mt-2 flex cursor-pointer items-start gap-2 text-[11px] text-zinc-400">
+            <input type="checkbox" checked={leftovers} onChange={(e) => onChange(value, e.target.checked, loosen)}
+              className="mt-0.5 h-3.5 w-3.5 accent-violet-600" />
+            <span>Finish what’s short with an agent: it checks only the items that came close, in a small context.</span>
+          </label>
+          <label className="mt-1.5 flex cursor-pointer items-start gap-2 text-[11px] text-zinc-400">
+            <input type="checkbox" checked={loosen} onChange={(e) => onChange(value, leftovers, e.target.checked)}
+              className="mt-0.5 h-3.5 w-3.5 accent-violet-600" />
+            <span>When a group runs short, loosen the soft rules: rows that miss only evidence many never publish (recent news, a signal, a rating) fill it after every strict row. The run says which rules it reads as soft.</span>
+          </label>
+        </>
       )}
     </Field>
   )
