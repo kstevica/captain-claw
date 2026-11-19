@@ -409,7 +409,7 @@ soft), but 7 of its first 16 drops were firms whose site lookup took someone els
 page for theirs: a Forbes article, a marketplace, a contact-list site, a directory,
 each a result whose title named the firm. A result is now an item's own site only when
 its address names the item (a distinctive word of the name in the domain, or its
-initials); with none found it has no site, and its judging call says so. The lookup
+initials), accents aside and either spelling ("Đurđević" → durdevic or djurdjevic, "Müller" → muller or mueller); a name with no Latin letters is matched by the result's title instead. With none found it has no site, and its judging call says so. The lookup
 leaves out a long item phrase ("US knowledge firm lead"), and more contact-list and
 marketplace sites are never an item's own.
 

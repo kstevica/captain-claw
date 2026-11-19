@@ -1140,6 +1140,13 @@ def test_a_site_is_an_items_own_only_when_its_address_names_it():
     for article in ("forbes.com", "advisorindex.com", "syncgtm.com", "example.com"):
         assert not own("Darby Consulting", article), article
     assert not own("Darby Consulting", "") and not own("", "darby.com")
+    # any language: accents aside, and a name with no Latin letters by the result's title
+    assert own("Bistro Čarobnjak", "carobnjak.hr") and own("Kuća Đurđević", "djurdjevic.hr")
+    assert own("Kuća Đurđević", "kucadurdevic.hr") and own("Müller", "mueller.de") and own("Müller", "muller.de")
+    assert own("Ristorante Nonna Lucía", "nonnalucia.it") and not own("Müller", "schmidt.de")
+    assert own("Ресторан Дубрава", "dubrava.rs", "Ресторан Дубрава — почетна")
+    assert not own("Ресторан Дубрава", "news.example", "Најбољи ресторани у граду")
+    assert funnel.name_words("Bistro Čarobnjak") == ["bistro", "carobnjak"]
 
 
 async def test_a_page_about_an_item_is_never_taken_for_its_site(deck):

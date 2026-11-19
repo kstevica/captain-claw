@@ -35,6 +35,7 @@ import json
 import re
 import time
 import types
+import unicodedata
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urljoin, urlsplit
@@ -923,11 +924,33 @@ _NAME_STOP = frozenset({"the", "and", "inc", "llc", "ltd", "group", "partners", 
                         "corp", "firm", "associates", "services"})
 
 
+_FOLD = str.maketrans({"đ": "d", "Đ": "d", "ß": "ss", "ø": "o", "Ø": "o", "æ": "ae", "Æ": "ae", "ł": "l",
+                       "Ł": "l", "ı": "i", "œ": "oe", "þ": "th", "ð": "d"})
+
+
+# How else addresses spell some letters: Đurđević → djurdjevic, Müller → mueller.
+_FOLD_ALT = str.maketrans({"đ": "dj", "Đ": "dj", "ü": "ue", "Ü": "ue", "ö": "oe", "Ö": "oe", "ä": "ae", "Ä": "ae",
+                           "å": "aa", "Å": "aa", "ø": "oe", "Ø": "oe"})
+
+
+def _fold(text: str, alt: bool = False) -> str:
+    """Lower case without accents ("Čarobnjak Đuro" → "carobnjak duro"), as addresses
+    are written; ``alt`` spells some letters the other way addresses do ("djuro").
+    Letters of other scripts are kept as they are."""
+    t = str(text or "")
+    t = unicodedata.normalize("NFKD", (t.translate(_FOLD_ALT) if alt else t).translate(_FOLD))
+    return "".join(c for c in t if not unicodedata.combining(c)).lower()
+
+
+def _words(text: str, alt: bool = False) -> list[str]:
+    return re.findall(r"[a-z0-9]+", _fold(text, alt))
+
+
 def name_words(name: str) -> list[str]:
     """The words that pick an item's name out on a page: its distinctive ones ("P&S
     International Strategies" → international, strategies), else all of them ("U.S.
     Consulting Services")."""
-    words = re.findall(r"[a-z0-9]+", str(name or "").lower())
+    words = _words(name)
     strong = [w for w in words if len(w) >= 3 and w not in _NAME_STOP]
     return list(dict.fromkeys(strong or [w for w in words if len(w) >= 2]))
 
@@ -936,19 +959,27 @@ _INITIALS_SKIP = frozenset({"the", "and", "of", "llc", "inc", "ltd", "co", "corp
 _SECOND_LEVEL = frozenset({"co", "com", "org", "net", "ac", "gov", "edu", "or", "ne"})
 
 
-def site_names_item(name: str, domain: str) -> bool:
+def site_names_item(name: str, domain: str, title: str = "") -> bool:
     """Whether a site's address is the item's own: a distinctive word of its name is in
-    the domain (darbyconsulting.com, nera.com, 2visions.com), or the domain is its
-    initials (bcg.com). A page that only mentions it (an article on forbes.com, a
-    listing on a directory) never is, whatever its title says."""
-    labels = [x for x in str(domain or "").lower().removeprefix("www.").split(".") if x]
+    the domain (darbyconsulting.com, nera.com, 2visions.com, accents aside:
+    "Čarobnjak" → carobnjak.hr), or the domain is its initials (bcg.com). A page that
+    only mentions it (an article on forbes.com, a listing on a directory) never is,
+    whatever its title says. A name with no Latin letters (Дубрава, 東京堂) can't be
+    read in an address: then the result's title must carry the name's words."""
+    labels = [x for x in _fold(domain).removeprefix("www.").split(".") if x]
     if len(labels) < 2:
         return False
     labels = labels[:-1]
     if len(labels) >= 2 and labels[-1] in _SECOND_LEVEL:
         labels = labels[:-1]  # example.co.uk
     core = "".join(labels).replace("-", "")
-    words = re.findall(r"[a-z0-9]+", str(name or "").lower())
+    if not _words(name):
+        own = [w for w in re.findall(r"\w+", str(name or "").lower()) if len(w) >= 2]
+        return bool(own) and all(w in str(title or "").lower() for w in own)
+    return any(_core_names(core, _words(name, alt)) for alt in (False, True))
+
+
+def _core_names(core: str, words: list[str]) -> bool:
     strong = [w for w in words if len(w) >= 3 and w not in _NAME_STOP]
     if strong:
         if any(w in core for w in strong):
@@ -1560,7 +1591,7 @@ class Work:
             return
         for r in fx.search_results(text):
             d = fx.domain_of(r["url"])
-            if not d or any(fx.same_site(d, s) for s in self.skip_sites) or not site_names_item(name, d):
+            if not d or any(fx.same_site(d, s) for s in self.skip_sites) or not site_names_item(name, d, r["title"]):
                 continue
             f[self.recipe["site_column"]] = f"https://{d}"
             evidence.append({"source": r["url"], "text": r["text"]})
