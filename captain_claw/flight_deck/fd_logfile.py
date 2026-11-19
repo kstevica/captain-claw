@@ -11,8 +11,10 @@ than that survived to look at.
   keeps them all.
 * :func:`install` adds a rotating file under ``<FD_DATA_DIR>/logs/``
   (``FD_LOG_FILE`` names another path; ``off`` turns it off). The deck's
-  structlog lines (agent mail, the spend ledger …), which go straight to
-  stderr, are copied into it too.
+  structlog lines (agent mail, the spend ledger, Google sign-ins …) are copied
+  into it too. Flight Deck never configures structlog, so those print to
+  stdout through structlog's default factory: the factory is pointed at a
+  stream that writes to stdout as before and copies each line to the file.
 """
 
 from __future__ import annotations
@@ -63,6 +65,33 @@ class QuietPollingFilter(logging.Filter):
         if (200 <= code < 300 or code == 304) and _is_poll(path):
             return False
         return True
+
+
+class _TeeStream:
+    """stdout as structlog printed to it, with each line also logged to the file."""
+
+    def __init__(self, stream: object, copy: logging.Logger) -> None:
+        self._stream = stream
+        self._copy = copy
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        n = self._stream.write(text)  # type: ignore[attr-defined]
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line.strip():
+                try:
+                    self._copy.info(line)
+                except Exception:  # noqa: BLE001 — the terminal still has it
+                    pass
+        return n if isinstance(n, int) else len(text)
+
+    def flush(self) -> None:
+        try:
+            self._stream.flush()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class _FileFormatter(logging.Formatter):
@@ -124,4 +153,14 @@ def install(data_dir: Path) -> Path | None:
             pass
 
     set_system_log_sink(_tee)
+    # structlog as Flight Deck runs it: never configured, so its default
+    # factory prints to stdout and the sink above is never asked. Point the
+    # factory at stdout-plus-the-file instead; processors stay as they are.
+    try:
+        import structlog
+
+        structlog.configure(logger_factory=structlog.PrintLoggerFactory(
+            file=_TeeStream(sys.stdout, copy)))
+    except Exception as exc:  # noqa: BLE001 — the file still has the stdlib lines
+        print(f"Flight Deck: structlog lines not copied to the log file ({exc})", file=sys.stderr)
     return path
