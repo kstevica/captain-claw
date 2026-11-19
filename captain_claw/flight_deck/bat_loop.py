@@ -138,6 +138,22 @@ def size_failure(error: str | None) -> bool:
     return bool(_SIZE_FAILURE_RE.search(error or ""))
 
 
+# A worker's chat manners around its report (agent_stuck's step-limit notice, the
+# rating hint). Nobody can "reply continue" to a Bat worker, and the fix round, which
+# reads the first few hundred characters of each report, often saw only the notice.
+_STEP_LIMIT_RE = re.compile(
+    r"(?:⏸️?\s*)?I reached this message's step limit[^\n]*?pick up where I left off\.?", re.I)
+_RATING_RE = re.compile(r"\n*(?:-{3,}\s*\n)?\U0001f4a1[^\n]*\brate (?:good|bad)\b[^\n]*", re.I)
+RAN_OUT = "(Its worker ran out of steps before it finished; this is where it got to.)"
+
+
+def step_report(text: str | None) -> str:
+    """A step's report as Bat keeps it: the step-limit notice said in Bat's words,
+    the rating hint dropped."""
+    out = _STEP_LIMIT_RE.sub(RAN_OUT, str(text or ""))
+    return _RATING_RE.sub("", out).strip()
+
+
 def rewire_failed(steps: list[dict], new_keys: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     """A fix round takes over from the steps that ran out of attempts. Returns those
     steps (to skip) and the new dependencies of every pending step that waited on

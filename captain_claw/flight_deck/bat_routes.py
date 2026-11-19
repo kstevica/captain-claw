@@ -1378,6 +1378,11 @@ def _bat_env(sid: str, step_key: str, owner: str) -> list[dict]:
         # failing when the context fills.
         {"key": "CLAW_FLOATING_BUDGET", "value": str(_step_ceiling())},
         {"key": "CLAW_CTX_GOVERNOR", "value": "1"},
+        # No list loop, as for Vatra's workers: Bat already sized the step. The
+        # loop read the owner's reference links and the run's own files as items
+        # to work through one model call each, and its "Processed 4/4" summary
+        # replaced the worker's report, which the fix round then planned from.
+        {"key": "CLAW_NO_SCALE", "value": "1"},
     ]
 
 
@@ -1893,7 +1898,7 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
         ok = bool(res.get("ok")) and not res.get("timed_out")
         return {
             "ok": ok,
-            "output": res.get("output", ""),
+            "output": bat_loop.step_report(res.get("output", "")),
             "usd": float(cost.get("usd") or 0.0),
             "tokens": tokens,
             "error": res.get("error", "") or ("timed out" if res.get("timed_out") else ""),
@@ -2089,7 +2094,10 @@ def _replan_system(limit: int) -> str:
         "the new step must take a different one. A step that ran out of room (time, context or steps) was "
         "too big for one worker: split what is left of it into smaller steps, one batch each, each starting "
         "where its progress note says it got to, and say in each step which part it does. A step that adds "
-        "items says how many it must add (\"add 20 boutique consultancies\"), never \"up to\". Each step goes to "
+        "items says how many it must add (\"add 20 boutique consultancies\"), never \"up to\". When Captain's counts "
+        "of the result are given, plan only for what they show short, by the amount short, and nothing for a "
+        "group that is full; a split the plan made up (by region, by batch) isn't the goal's, so a short group "
+        "may be filled from anywhere the goal allows. Each step goes to "
         "a fresh worker who can see the team's shared "
         f"folder and earlier results. Return ONLY a JSON array, at most {limit} items: "
         '{"step": "<what to do>", "after": [<1-based numbers of the new steps it must wait for>]}. Steps that '
@@ -2102,13 +2110,21 @@ _REPLAN_SYSTEM = _replan_system(_MAX_FIX_STEPS)
 _MAX_SPLIT_STEPS = 8
 
 
-def _replan_line(run: dict, s: dict) -> str:
-    """A step as the fix round's planner sees it: its state, what it said, and an
-    unfinished step's progress note (where to split what's left from)."""
+# How much of a step's report the fix round reads: the newest finished steps say most
+# (a merge step's counts table came after the first 300 characters).
+_REPLAN_SAID = 300
+_REPLAN_SAID_LATEST = 1200
+_REPLAN_LATEST = 2
+
+
+def _replan_line(run: dict, s: dict, latest: bool = False) -> str:
+    """A step as the fix round's planner sees it: its state, what it said, and the
+    progress note of an unfinished step (where to split what's left from) or of one
+    of the newest finished ones (where the work stands)."""
+    said = (s.get("error") or bat_loop.step_report(s.get("output"))).strip()
     line = (f"- [{s.get('status')}] {s.get('title') or s.get('step_key')}"
-            + (f": {(s.get('error') or s.get('output') or '').strip()[:300]}"
-               if (s.get("error") or s.get("output")) else ""))
-    if s.get("status") not in ("done", "skipped"):
+            + (f": {said[:_REPLAN_SAID_LATEST if latest else _REPLAN_SAID]}" if said else ""))
+    if latest or s.get("status") not in ("done", "skipped"):
         note = read_progress(run, s.get("step_key", ""), 600)
         if note:
             line += f"\n  its progress note ({progress_path(run, s.get('step_key', ''))}): " + " ".join(note.split())
@@ -2123,6 +2139,7 @@ async def _bat_replan(run: dict, steps: list[dict], verdict: dict, round_no: int
     from captain_claw.llm import Message
 
     findings = _findings(verdict)
+    stands = await _standing_block(run)
     split = any(s.get("status") == "failed" and bat_loop.size_failure(s.get("error")) for s in steps)
     limit = _MAX_SPLIT_STEPS if split else _MAX_FIX_STEPS
     plan: list[dict] = []
@@ -2130,13 +2147,16 @@ async def _bat_replan(run: dict, steps: list[dict], verdict: dict, round_no: int
         tiers, _ = await _load_owner_tiers(get_db(), run["owner_id"])
         creds = _creds_for(tiers)
         if creds:
-            so_far = "\n".join(_replan_line(run, s) for s in steps)
+            finished = sorted((s for s in steps if s.get("status") == "done"), key=lambda s: int(s.get("seq") or 0))
+            latest = {s.get("step_key") for s in finished[-_REPLAN_LATEST:]}
+            so_far = "\n".join(_replan_line(run, s, s.get("step_key") in latest) for s in steps)
             async with _metered(run["id"], f"replan-{round_no}"):
                 prov, mt = think_call(creds, temperature=0.2)
                 resp = await prov.complete(messages=[
                     Message(role="system", content=_replan_system(limit) + workers_note(tiers, run)),
                     Message(role="user", content=(f"# Goal\n{str(run.get('task', ''))[:4000]}\n\n"
-                                                  f"# The work so far\n{so_far[:8000]}\n\n"
+                                                  + (f"{stands}\n\n" if stands else "")
+                                                  + f"# The work so far\n{so_far[-10000:]}\n\n"
                                                   f"# What the check found\n{findings}")),
                 ], temperature=0.2, max_tokens=mt)
             plan = _parse_fix_plan(resp.content or "", limit)
@@ -2144,7 +2164,24 @@ async def _bat_replan(run: dict, steps: list[dict], verdict: dict, round_no: int
         log.warning("bat replan fell back to one fix step", run_id=run.get("id"), error=str(e))
     if not plan:
         plan = [{"title": "Fix what the check found", "after": []}]
-    return [{**p, "brief": findings[:4000]} for p in plan]
+    brief = f"{findings}\n\n{stands}" if stands else findings
+    return [{**p, "brief": brief[:4000]} for p in plan]
+
+
+async def _standing_block(run: dict) -> str:
+    """Captain's own counts of the result against the goal's amounts, for the fix
+    round and its workers ("" when no rule asks for an amount it can count)."""
+    from captain_claw.flight_deck import code_contract
+    try:
+        lines = await asyncio.to_thread(code_contract.standing, _run_folder(run),
+                                        list((run.get("config") or {}).get("contract") or []), WORK_DIRS)
+    except Exception as e:  # noqa: BLE001 — the round still plans from the check
+        log.warning("bat standing count failed", run_id=run.get("id"), error=str(e))
+        return ""
+    if not lines:
+        return ""
+    return ("# Where the result stands (Captain counted it just now)\n" + "\n".join(f"- {ln}" for ln in lines)
+            + "\nAdd only to what is short; a group marked full needs nothing more.")
 
 
 async def _log_own_cost(run: dict) -> None:
