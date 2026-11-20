@@ -74,6 +74,11 @@ def live_tokens(run_id: str) -> int:
     return sum(v for (rid, _), v in _LIVE_TOKENS.items() if rid == run_id)
 
 
+def step_live_tokens(run_id: str, step_key: str) -> int:
+    """What one step's running turn has used so far."""
+    return int(_LIVE_TOKENS.get((run_id, step_key)) or 0)
+
+
 def token_cap(run: dict) -> int:
     """A run's cap in tokens (``config.token_cap``; 0 = none), beside its dollar cap."""
     try:

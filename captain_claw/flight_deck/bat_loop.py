@@ -79,6 +79,71 @@ def _max_parallel() -> int:
     return _PARALLEL or env_max_parallel()
 
 
+# A run with no token cap still stops here (``CLAW_BAT_TOKEN_CEILING``; 0 = never):
+# a run whose owner set "no cap" once went to 54.7M tokens for 20 rows overnight.
+# It stops as a cap does, so its owner can Continue it.
+TOKEN_CEILING = 20_000_000
+# One agent step's share of a run (``config.step_token_limit``): a list funnel's agent
+# steps work in a small context and need far less than a Bat run's.
+FUNNEL_STEP_TOKENS = 1_500_000
+STEP_TOKENS_MIN = 1_000_000
+
+
+def token_ceiling() -> int:
+    try:
+        return max(0, int(os.environ.get("CLAW_BAT_TOKEN_CEILING", TOKEN_CEILING)))
+    except ValueError:
+        return TOKEN_CEILING
+
+
+def ceiling_for(run: dict) -> int:
+    """Where a run with no token cap stops: the ceiling, counted from where its count
+    last started (``config.cap_base``, set when it was continued). 0 when it has a
+    cap of its own, or the ceiling is off."""
+    from captain_claw.flight_deck import bat_nested
+    ceiling = token_ceiling()
+    if bat_nested.token_cap(run) or not ceiling:
+        return 0
+    try:
+        base = max(0, int((run.get("config") or {}).get("cap_base") or 0))
+    except (TypeError, ValueError):
+        base = 0
+    return base + ceiling
+
+
+def step_token_limit(run: dict) -> int:
+    """How many tokens one agent step may use before it's stopped, its work kept:
+    ``config.step_token_limit``; else 1.5M in a list funnel's run; else, in a run
+    with no cap, a third of the safety ceiling (at least 1M). 0 for a capped Bat run:
+    its own cap bounds its steps."""
+    from captain_claw.flight_deck import bat_nested
+    cfg = run.get("config") or {}
+    try:
+        own = int(cfg.get("step_token_limit") or 0)
+    except (TypeError, ValueError):
+        own = 0
+    if own > 0:
+        return own
+    if cfg.get("engine") == "funnel":
+        return FUNNEL_STEP_TOKENS
+    if bat_nested.token_cap(run) or not token_ceiling():
+        return 0
+    return max(STEP_TOKENS_MIN, token_ceiling() // 3)
+
+
+def keeps_what_it_made(run: dict, step: dict) -> bool:
+    """A list funnel's agent step (its finishing step, a fix round's): one that times
+    out, comes back short or reaches its share is done with what it made, never run
+    again. A retry starts its search over at the same cost (one such step was retried
+    three times, 3 to 16M tokens each)."""
+    cfg = run.get("config") or {}
+    if cfg.get("engine") != "funnel":
+        return False
+    key = str(step.get("step_key") or "")
+    kind = ((cfg.get("funnel_steps") or {}).get(key) or {}).get("kind")
+    return kind == "finish" or key.startswith("fix-")
+
+
 # ── the plan's shape (pure) ───────────────────────────────────────────
 
 def effective_deps(steps: list[dict]) -> dict[str, list[str]]:
@@ -379,6 +444,8 @@ async def reopen_run(store: BatStore, run_id: str, *, token_cap: int | None = No
     cfg = dict(run.get("config") or {})
     if token_cap is not None:
         cfg["token_cap"] = max(0, int(token_cap))
+    if not cfg.get("token_cap"):
+        cfg["cap_base"] = int(run.get("cumulative_tokens") or 0)  # the safety ceiling counts from here
     await store.set_config(run_id, cfg)
     demoted = await store.demote_running_steps(run_id)
     await store.set_status(run_id, "running", stopped_reason="")
@@ -524,6 +591,12 @@ class BatDriver:
                 tokens = bat_nested.token_cap(run)
             if tokens and int(run.get("cumulative_tokens") or 0) + bat_nested.live_tokens(run_id) >= tokens:
                 return True, "llm_token_cap_reached"
+        ceiling = ceiling_for(run)
+        if ceiling and int(run.get("cumulative_tokens") or 0) + bat_nested.live_tokens(run_id) >= ceiling:
+            await self.store.append_event(
+                run_id, "note", f"This run has no token cap, so it stopped at the deck's safety ceiling of "
+                                f"{token_ceiling():,} tokens. Continue it to go on, or give it a cap.")
+            return True, "llm_token_cap_reached"
         return False, ""
 
     async def watch_parked(self, run: dict) -> None:
@@ -728,6 +801,7 @@ class BatDriver:
                 if stop:
                     await self._cancel_running(run_id, running)
                     return "stop", reason
+                await self._stop_steps_past_share(run_id, running)
                 cur = await self.store.get_run(run_id)
                 parked = parked or bool(cur and cur["status"] in ("awaiting_human", "awaiting_plan"))
                 if not parked:
@@ -767,6 +841,28 @@ class BatDriver:
             # Going down (a restart, or a bug): no worker runs on with nobody watching.
             await self._cancel_running(run_id, running, demote=False)
             raise
+
+    async def _stop_steps_past_share(self, run_id: str, running: dict[asyncio.Task, str]) -> None:
+        """An agent step that has used its share of tokens (:func:`step_token_limit`)
+        is stopped; what it spent is counted, and the step is done with what it made,
+        so it isn't run again at the same cost. The run goes on to its next step."""
+        from captain_claw.flight_deck import bat_nested
+        run = await self.store.get_run(run_id)
+        limit = step_token_limit(run or {})
+        if not limit or not running:
+            return
+        for task, key in list(running.items()):
+            used = bat_nested.step_live_tokens(run_id, key)
+            if used < limit:
+                continue
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            running.pop(task, None)
+            text = (f"Stopped at its share of {limit:,} tokens (used {used:,}); what it made so far is kept "
+                    "and the run goes on.")
+            await self.store.upsert_step(run_id, key, status="done", output=text, error="")
+            await self.store.append_event(run_id, "note", f"{key}: {text}", agent=key)
+            await self.store.append_event(run_id, "step", key, agent=key, ok=True, usd=0.0)
 
     async def _cancel_running(self, run_id: str, running: dict[asyncio.Task, str],
                               *, demote: bool = True) -> None:
@@ -850,8 +946,14 @@ class BatDriver:
                 log.warning("bat step check failed", run_id=run_id, step=key, error=str(e))
                 check = None
             if check and check.get("redo"):
-                res = {"ok": False, "error": check.get("error")
-                       or f"Captain checked this step's work and it isn't on course: {check.get('why', '')}"}
+                if keeps_what_it_made(run, step):
+                    # not round again at the same cost: what it found is kept, with the finding
+                    await self.store.append_event(
+                        run_id, "note", f"{key} is kept as it is (a list funnel's agent step isn't run again): "
+                                        f"{str(check.get('error') or check.get('why') or '')[:300]}", agent=key)
+                else:
+                    res = {"ok": False, "error": check.get("error")
+                           or f"Captain checked this step's work and it isn't on course: {check.get('why', '')}"}
         if res.get("ok"):
             await self.store.upsert_step(
                 run_id, key, status="done",
@@ -860,6 +962,16 @@ class BatDriver:
             )
             await self.store.append_event(run_id, "step", step.get("title") or key,
                                           agent=key, ok=True, usd=usd)
+        elif keeps_what_it_made(run, step):
+            # A list funnel's agent step that timed out or failed: done with what it made.
+            error = str(res.get("error", "")) or "it stopped"
+            await self.store.upsert_step(
+                run_id, key, status="done", error="",
+                output=(f"Stopped ({error[:200]}); what it made so far is kept. "
+                        + str(res.get("output", ""))[:_OUTPUT_CAP - 300]))
+            await self.store.append_event(run_id, "note", f"{key} stopped ({error[:200]}); its work so far is kept "
+                                          "and it isn't run again", agent=key)
+            await self.store.append_event(run_id, "step", step.get("title") or key, agent=key, ok=True, usd=usd)
         else:
             error = str(res.get("error", ""))
             fields: dict[str, Any] = {"status": "failed", "error": error[:_OUTPUT_CAP]}
