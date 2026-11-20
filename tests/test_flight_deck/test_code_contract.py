@@ -345,3 +345,27 @@ def test_an_exclusion_that_matches_everything_is_no_exclusion(tmp_path):
     (tmp_path / "leads.csv").write_text("Firm,State\nAcme,TX\n")
     ok, note = code_contract._check_table(tmp_path, {"type": "table", "path": "leads.csv", "exclude_pattern": r"^(?!([A-Z]{2})$).*$"})
     assert ok, note
+
+
+async def test_an_exclusion_never_rules_out_what_another_check_allows(tmp_path):
+    """An "agency" in one check's exclusion ("no universities, government bodies...")
+    flagged "The Gorilla Agency" on a list of marketing agencies: the segment names
+    lived in another check on the same file."""
+    shaped = code_contract.parse_contract(json.dumps({"constraints": [
+        {"id": "seg", "text": "10 per segment", "check": {"type": "table", "path": "leads.csv",
+                                                          "allowed": {"Segment": ["marketing/content agencies", "x"]}}},
+        {"id": "ex", "text": "no universities or government bodies", "check": {
+            "type": "table", "path": "leads.csv", "exclude_pattern": r"(?i)(university|government|agency)"}},
+        {"id": "other", "text": "elsewhere", "check": {
+            "type": "table", "path": "other.csv", "exclude_pattern": r"(?i)(university|government|agency)"}}]}))
+    assert "exclude_pattern" not in shaped[1]["check"]
+    assert shaped[2]["check"]["exclude_pattern"]  # another file: its own checks only
+    assert code_contract.table_keep([c["check"] for c in shaped], "leads.csv") == ["marketing/content agencies", "x"]
+    # a pattern stored before this guard is passed over when the list is checked
+    (tmp_path / "leads.csv").write_text("Firm,Segment\nThe Gorilla Agency,marketing/content agencies\n")
+    stored = [{"id": "seg", "text": "s", "severity": "major", "check": {
+                   "type": "table", "path": "leads.csv", "allowed": {"Segment": ["marketing/content agencies"]}}},
+              {"id": "ex", "text": "e", "severity": "major", "check": {
+                   "type": "table", "path": "leads.csv", "exclude_pattern": r"(?i)(university|agency)"}}]
+    res = await code_contract.validate(tmp_path, stored)
+    assert {e["id"] for e in res["passed"]} == {"seg", "ex"}, res

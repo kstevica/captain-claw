@@ -102,7 +102,26 @@ def parse_contract(output: str) -> list[dict]:
         norm = _normalize(item, i)
         if norm:
             out.append(norm)
+    for c in out:  # an exclusion held against every check on its file, not its own only
+        check = c["check"]
+        if check.get("type") == "table" and check.get("exclude_pattern") \
+                and not sane_exclude(check["exclude_pattern"], table_keep([x["check"] for x in out], check.get("path", ""))):
+            check.pop("exclude_pattern", None)
     return out
+
+
+def table_keep(checks: list[dict], path: str) -> list[str]:
+    """The values a list on ``path`` may hold, across every check on it: an exclusion
+    in one check ("no ... government agency") must never rule out what another check
+    allows ("marketing/content agencies"). A check with no path is on the main list."""
+    out: list[str] = []
+    for check in checks or []:
+        if not isinstance(check, dict) or check.get("type") != "table":
+            continue
+        if (check.get("path") or "") and path and check.get("path") != path:
+            continue
+        out += [str(v) for vals in (check.get("allowed") or {}).values() if isinstance(vals, list) for v in vals]
+    return list(dict.fromkeys(out))
 
 
 # A check script or pattern is kept whole or not at all: cut, it's broken code (a
@@ -273,7 +292,7 @@ def _target(repo: Path, check: dict, exts: tuple[str, ...], skip: tuple[str, ...
     return p, (p.name if p else "")
 
 
-def _check_table(repo: Path, check: dict, skip: tuple[str, ...] = ()) -> tuple[bool, str]:
+def _check_table(repo: Path, check: dict, skip: tuple[str, ...] = (), keep: list[str] | tuple[str, ...] = ()) -> tuple[bool, str]:
     from captain_claw.flight_deck import deliverable_profile as dp
     path, rel = _target(repo, check, (".csv", ".tsv"), skip)
     if path is None:
@@ -327,7 +346,7 @@ def _check_table(repo: Path, check: dict, skip: tuple[str, ...] = ()) -> tuple[b
             top, k = (Counter(doms).most_common(1) or [("", 0)])[0]
             if k > max(1, len(emails) * check["max_domain_share"]):
                 bad.append(f"{k} emails on {top} alone (allowed {round(check['max_domain_share'] * 100)}%)")
-    keep = [v for vals in (check.get("allowed") or {}).values() for v in vals]
+    keep = [v for vals in (check.get("allowed") or {}).values() for v in vals] + list(keep)
     if check.get("exclude_pattern") and sane_exclude(check["exclude_pattern"], keep):
         rx = re.compile(check["exclude_pattern"], re.I)
         hit = [r for r in rows if any(rx.search(str(v or "")) for v in r.values())]
@@ -627,7 +646,8 @@ async def validate(repo: Path, constraints: list[dict], *,
             elif ctype == "no_pattern":
                 ok, note = _check_no_pattern(repo, check, skip)
             elif ctype == "table":
-                ok, note = _check_table(repo, check, skip)
+                ok, note = _check_table(repo, check, skip, table_keep(
+                    [x.get("check") or {} for x in constraints], check.get("path", "")))
             elif ctype == "document":
                 ok, note = _check_document(repo, check, skip)
             elif ctype == "python_syntax":
