@@ -128,8 +128,12 @@ button “Delete” — in the row “September 2026”"), not as coordinates.
   when to skip it, what to check ("only the oldest month").
 - **Stop and review**: name it, say what it's for, remove or reorder steps,
   **add a step in your own words** ("wait until it says Ready, then download
-  it"), and tick **Different each time — ask me** on a value you type (a
-  period, an invoice number): each run asks for it.
+  it"), and say where a value you typed or chose comes from on a run (**This
+  value**): *Always the same*; *Ask me before it starts* (a field on the Run
+  form); *Ask me when it gets there* (the agent stops at that step, a box
+  opens in the panel and in Flight Deck, and it waits — Cancel stops the run
+  there); or *The agent decides* (it picks what fits and tells you what it
+  used).
 - **Passwords and codes are never recorded** — the step says one was typed,
   and the agent asks you for it when it gets there.
 - **Recordings → Run** hands it to the agent you pick. It works through the

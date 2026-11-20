@@ -78,6 +78,7 @@ const S = {
   recs: null,          // the saved recordings (Flight Deck's list)
   recsError: '',
   recRun: null,        // a recording about to be run: {rec, note, inputs}
+  asks: [],            // agents' questions open right now (/fd/clip/asks)
 }
 
 // ── small helpers ──
@@ -1288,6 +1289,7 @@ async function send(asked) {
 
 function startRun(run) {
   S.run = { ...run, status: 'starting', events: [], next: 0, result: '', live: '', error: '', files: [], done: false, at: Date.now() }
+  watchAsks()
   S.followUp = ''
   S.follow = true
   S.view = 'run'
@@ -1515,14 +1517,30 @@ function stepText(s) {
     case 'open': return `Open ${s.url}${s.new_tab ? ' in a new tab' : ''}`
     case 'switch': return `Switch to the tab “${s.title || s.url}”`
     case 'click': return `${s.double ? 'Double-click' : 'Click'} ${what}`
-    case 'type': return s.secret ? `Type the secret value into ${what} (not recorded)` : s.value ? `Type “${s.value}” into ${what}` : `Clear ${what}`
-    case 'select': return `Choose “${s.value}” in ${what}`
+    case 'type':
+      if (s.secret) return `Type the secret value into ${what} (not recorded)`
+      if (askMode(s) === 'during') return `Type what you answer then into ${what}`
+      if (askMode(s) === 'agent') return `Type what the agent judges right into ${what}`
+      return s.value ? `Type “${s.value}” into ${what}` : `Clear ${what}`
+    case 'select':
+      if (askMode(s) === 'during') return `Choose what you answer then in ${what}`
+      if (askMode(s) === 'agent') return `Choose what the agent judges right in ${what}`
+      return `Choose “${s.value}” in ${what}`
     case 'check': return s.target?.role === 'radio' ? `Choose ${what}` : `${s.checked ? 'Tick' : 'Untick'} ${what}`
     case 'upload': return `Pick the file “${s.value}” for ${what}`
     case 'key': return `Press ${s.key}${s.target ? ` in ${what}` : ''}`
     default: return s.kind
   }
 }
+
+// Where a typed or chosen value comes from on a run.
+const ASK_MODES = [['', 'Always the same'], ['before', 'Ask me before it starts'], ['during', 'Ask me when it gets there'], ['agent', 'The agent decides']]
+const ASK_HINTS = {
+  before: 'You fill it in on the Run form.',
+  during: 'The agent stops at this step and asks you: a box opens here (and in Flight Deck) and it waits. Cancel stops the run there.',
+  agent: 'The agent picks what fits the run and tells you afterwards what it used.',
+}
+const askMode = (s) => (s.ask === true ? 'before' : ASK_MODES.some(([id]) => id && id === s.ask) ? s.ask : '')
 
 const shortUrl = (url) => { try { const u = new URL(url); return (u.host.replace(/^www\./, '') + (u.pathname === '/' ? '' : u.pathname)).slice(0, 60) } catch { return '' } }
 
@@ -1595,6 +1613,7 @@ function recStepRow(s, i, n, edit) {
   const where = [s.kind === 'open' || s.kind === 'switch' || s.kind === 'do' ? '' : shortUrl(s.url), s.target?.near || '',
     s.frame ? 'in a frame' : '', s.leads_to ? `→ ${shortUrl(s.leads_to)}${s.new_tab ? ' (new tab)' : ''}` : ''].filter(Boolean).join(' · ')
   const canAsk = edit && (s.kind === 'type' || s.kind === 'select') && !s.secret
+  const mode = askMode(s)
   const body = s.kind === 'do' && edit
     ? `<textarea id="do-${esc(s.id)}" data-step-do="${esc(s.id)}" rows="2" placeholder="What should happen here, in your own words…">${esc(s.text || '')}</textarea>`
     : `<div class="rstep-text">${esc(stepText(s))}</div>`
@@ -1604,8 +1623,10 @@ function recStepRow(s, i, n, edit) {
       <div class="grow">
         ${body}
         ${where ? `<div class="dim ellipsis" title="${esc(where)}">${esc(where)}</div>` : ''}
-        ${canAsk && s.kind === 'type' ? `<input type="text" id="val-${esc(s.id)}" data-step-val="${esc(s.id)}" value="${esc(s.value || '')}" placeholder="What to type" ${s.ask ? 'disabled' : ''} style="margin-top:4px">` : ''}
-        ${canAsk ? `<label class="rstep-ask"><input type="checkbox" data-step-ask="${esc(s.id)}" ${s.ask ? 'checked' : ''}> Different each time — ask me</label>` : ''}
+        ${canAsk && s.kind === 'type' && !mode ? `<input type="text" id="val-${esc(s.id)}" data-step-val="${esc(s.id)}" value="${esc(s.value || '')}" placeholder="What to type" style="margin-top:4px">` : ''}
+        ${canAsk ? `<label class="rstep-ask"><span>This value</span>
+          <select class="select" data-step-ask="${esc(s.id)}">${ASK_MODES.map(([id, label]) => `<option value="${id}" ${mode === id ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+          ${mode ? `<div class="dim">${esc(ASK_HINTS[mode])}</div>` : ''}` : ''}
         ${s.kind === 'do' ? '' : open
           ? `<textarea id="note-${esc(s.id)}" class="rstep-note" data-step-note="${esc(s.id)}" rows="2" placeholder="Your instruction for this step — what to pick, when to skip it, what to check…">${esc(note)}</textarea>`
           : `<button class="link-btn" data-step-open="${esc(s.id)}">${icon('pencil', 'sm')} Add an instruction</button>`}
@@ -1782,6 +1803,8 @@ function viewRecRun() {
     <div><label class="label" for="agent">Who does it</label><select class="select" id="agent">${agents}</select></div>
     ${asks}
     <div><textarea id="recRunNote" rows="2" placeholder="Anything different this time? (optional)">${esc(run.note)}</textarea></div>
+    ${rec.asks_during?.length ? `<div class="dim">${icon('ask', 'sm')} It will stop and ask you for ${esc(rec.asks_during.map((l) => `“${l}”`).join(', '))} when it gets there — keep this panel open.</div>` : ''}
+    ${rec.agent_decides?.length ? `<div class="dim">${icon('sparkles', 'sm')} It decides ${esc(rec.agent_decides.map((l) => `“${l}”`).join(', '))} itself.</div>` : ''}
     ${handsOk ? '' : `<div class="notice">${icon('globe')}<div class="grow">Your agents can't use this browser yet — without it the agent has only a browser of its own, where you aren't signed in.
       <div style="margin-top:6px"><button class="btn" data-act="rec-hands-on">Let agents use this browser</button></div></div></div>`}
     ${run.error ? `<div class="notice err">${esc(run.error)}</div>` : ''}
@@ -1884,7 +1907,12 @@ $view.addEventListener('change', (ev) => {
   const el = ev.target
   if (el.dataset.stepAsk) {
     const s = draftStep(el.dataset.stepAsk)
-    if (s) { s.ask = el.checked; setDraft(S.draft); render() }
+    if (s) {
+      if (el.value) s.ask = el.value
+      else delete s.ask
+      setDraft(S.draft)
+      render()
+    }
   } else if (el.dataset.stepVal) render()   // the sentence above it says the new words
 })
 
@@ -1893,6 +1921,122 @@ setInterval(() => {
   const el = document.getElementById('recElapsed')
   if (el) el.textContent = elapsed(S.rec.startedAt)
 }, 1000)
+
+// ── an agent's question, answered here ──
+//
+// While a run is followed the agent may ask (ask_user): a value a recording
+// leaves to the moment, a choice the page forces. Flight Deck holds the
+// question (/fd/clip/asks) and shows it in its own tabs too; here it opens as
+// a box over the panel and the agent waits. Cancel = "don't answer".
+
+const $askLayer = document.getElementById('askLayer')
+let asksWatching = false
+
+async function watchAsks() {
+  if (asksWatching) return
+  asksWatching = true
+  let misses = 0
+  while (S.conn && S.run && !S.run.done) {
+    try {
+      const known = (S.asks || []).map((a) => a.id).join(',')
+      const r = await api(S.conn, `/fd/clip/asks?wait=20&known=${encodeURIComponent(known)}`)
+      misses = 0
+      showAsks(r.asks || [])
+    } catch (e) {
+      if (e instanceof AuthError || /answered 404/.test(e.message) || ++misses > 5) break   // an older Flight Deck asks in its own tabs only
+      await sleep(3000)
+    }
+  }
+  asksWatching = false
+  showAsks([])
+}
+
+function askField(q) {
+  const id = `askq-${esc(q.id)}`
+  if (q.kind === 'choice') {
+    return q.choices.map((c, i) => `<label class="opt"><input type="radio" name="${id}" value="${esc(c)}" ${q.default === c || (!q.default && i === 0 && !q.optional) ? 'checked' : ''}><div>${esc(c)}</div></label>`).join('')
+  }
+  if (q.kind === 'multiple') {
+    return q.choices.map((c) => `<label class="opt"><input type="checkbox" name="${id}" value="${esc(c)}" ${(q.default || []).includes(c) ? 'checked' : ''}><div>${esc(c)}</div></label>`).join('')
+  }
+  if (q.kind === 'confirm') {
+    return `<label class="opt"><input type="radio" name="${id}" value="yes" ${q.default === true ? 'checked' : ''}><div>Yes</div></label>
+      <label class="opt"><input type="radio" name="${id}" value="no" ${q.default === false ? 'checked' : ''}><div>No</div></label>`
+  }
+  if (q.kind === 'secret') return `<input type="password" name="${id}" autocomplete="off">`
+  return q.lines > 1
+    ? `<textarea name="${id}" rows="${Math.min(q.lines, 8)}">${esc(q.default || '')}</textarea>`
+    : `<input type="text" name="${id}" value="${esc(q.default || '')}" autocomplete="off">`
+}
+
+// Drawn only when the questions change: a redraw would drop what's being typed.
+function showAsks(asks) {
+  const was = (S.asks || []).map((a) => a.id).join(',')
+  S.asks = asks
+  const a = asks[0]
+  if (!a) { $askLayer.hidden = true; $askLayer.innerHTML = ''; return }
+  if (was === asks.map((x) => x.id).join(',') && !$askLayer.hidden) return
+  $askLayer.hidden = false
+  $askLayer.innerHTML = `
+    <form class="ask-box card" data-ask="${esc(a.id)}" role="dialog" aria-modal="true" aria-label="${esc(a.title || 'Your agent')} asks">
+      <div class="label">${esc(a.agent_name || a.title || 'Your agent')} asks</div>
+      ${a.questions.map((q) => `
+        <div class="ask-q">
+          <div class="ask-text">${esc(q.question)}${q.optional ? ' <span class="dim">(optional)</span>' : ''}</div>
+          ${q.help ? `<div class="dim">${esc(q.help)}</div>` : ''}
+          ${askField(q)}
+        </div>`).join('')}
+      <div class="notice err" id="askError" hidden></div>
+      <div class="row">
+        <button type="submit" class="btn primary grow">${icon('check', 'sm')} Answer</button>
+        <button type="button" class="btn" data-ask-cancel>Cancel</button>
+      </div>
+      ${asks.length > 1 ? `<div class="dim">${plural(asks.length - 1, 'more question')} after this one</div>` : ''}
+    </form>`
+  $askLayer.querySelector('input:not([type=radio]):not([type=checkbox]), textarea, input')?.focus()
+}
+
+function askAnswers(form, a) {
+  const out = {}
+  for (const q of a.questions) {
+    const name = `askq-${q.id}`
+    if (q.kind === 'multiple') out[q.id] = [...form.querySelectorAll(`[name="${name}"]:checked`)].map((el) => el.value)
+    else if (q.kind === 'choice' || q.kind === 'confirm') {
+      const picked = form.querySelector(`[name="${name}"]:checked`)?.value
+      if (picked !== undefined) out[q.id] = q.kind === 'confirm' ? picked === 'yes' : picked
+    } else {
+      const value = form.querySelector(`[name="${name}"]`)?.value ?? ''
+      if (value !== '' || !q.optional) out[q.id] = value
+    }
+  }
+  return out
+}
+
+async function sendAnswer(form, declined) {
+  const a = (S.asks || []).find((x) => x.id === form.dataset.ask)
+  if (!a || form.dataset.busy) return
+  form.dataset.busy = '1'
+  try {
+    await api(S.conn, `/fd/clip/asks/${encodeURIComponent(a.id)}`, {
+      method: 'POST', body: JSON.stringify(declined ? { declined: true } : { answers: askAnswers(form, a) }) })
+    showAsks(S.asks.filter((x) => x.id !== a.id))
+  } catch (e) {
+    delete form.dataset.busy
+    if (e instanceof AuthError) return disconnected(e.message)
+    if (/isn't open any more/.test(e.message)) return showAsks(S.asks.filter((x) => x.id !== a.id))
+    const box = form.querySelector('#askError')
+    box.textContent = e.message
+    box.hidden = false
+  }
+}
+
+$askLayer.addEventListener('submit', (ev) => { ev.preventDefault(); sendAnswer(ev.target, false) })
+$askLayer.addEventListener('click', (ev) => {
+  if (ev.target.closest('[data-ask-cancel]')) sendAnswer(ev.target.closest('form'), true)
+})
+$askLayer.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); sendAnswer(ev.target.closest('form'), false) }
+})
 
 // ── history ──
 
@@ -1925,7 +2069,7 @@ function openHistory(i) {
   S.follow = true
   S.view = 'run'
   render()
-  if (!S.run.done) pollRun(S.run)
+  if (!S.run.done) { pollRun(S.run); watchAsks() }
 }
 
 // ── settings ──

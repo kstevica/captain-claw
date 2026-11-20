@@ -165,6 +165,25 @@ class _Shell(Tool):
         return ToolResult(success=True, content=f"exit 0 ({len(self.ran)})")
 
 
+class _Browser(Tool):
+    """A page that changes when it's acted on."""
+
+    name = "browser"
+    description = "browse"
+    parameters = {"type": "object", "properties": {"action": {"type": "string"}, "ref": {"type": "string"},
+                                                   "target": {"type": "string"}}}
+
+    def __init__(self) -> None:
+        self.page = 1
+
+    async def execute(self, action: str = "", ref: str = "", **kwargs) -> ToolResult:
+        if action == "click" and ref == "gone":
+            return ToolResult(success=False, error="ref isn't on the page any more")
+        if action not in lg.BROWSER_LOOK_ACTIONS:
+            self.page += 1
+        return ToolResult(success=True, content=f"page {self.page}")
+
+
 @pytest.fixture
 def agent(tmp_path, monkeypatch):
     """The shipped duplicate limit (1), governor off, Jev review off."""
@@ -192,6 +211,7 @@ def agent(tmp_path, monkeypatch):
         registry.register(tool)
     shell = _Shell(tmp_path)
     registry.register(shell)
+    registry.register(_Browser())
     a.tools = registry
     a._turn_tool_call_counts = {}
     a._turn_tool_call_fps = {}
@@ -329,3 +349,32 @@ async def test_the_same_edit_twice_is_still_a_repeat(agent, tmp_path):
     path.write_text("x = 1\n")  # reverted behind its back
     r = await _call(agent, "edit", **args)
     assert _blocked(r)
+
+
+
+# ── The browser: a page is live ───────────────────────────────────────
+
+
+async def test_reading_the_page_after_each_step_is_never_a_repeat(agent):
+    """A recorded process run on staging stopped at step 5 of 10: the fourth
+    read_page — after a click — was refused as a duplicate."""
+    look = {"action": "read_page", "target": "chrome"}
+    for step in ({"action": "navigate"}, {"action": "click", "ref": "ref_23"}, {"action": "type", "ref": "ref_52"},
+                 {"action": "click", "ref": "ref_209"}, {"action": "click", "ref": "ref_213"}, {"action": "wait"}):
+        await _call(agent, "browser", target="chrome", **step)
+        r = await _call(agent, "browser", **look)
+        assert not _blocked(r), step
+    assert r[0]["content"] == "page 7"
+
+
+async def test_looking_again_with_nothing_done_is_still_a_repeat(agent):
+    look = {"action": "read_page", "target": "chrome"}
+    results = [await _call(agent, "browser", **look) for _ in range(4)]
+    assert not _blocked(results[2]) and _blocked(results[3])    # browser's limit is 3
+    # A step that failed changed nothing, and another kind of look doesn't either.
+    await _call(agent, "browser", action="click", ref="gone", target="chrome")
+    await _call(agent, "browser", action="screenshot", target="chrome")
+    assert _blocked(await _call(agent, "browser", **look))
+    await _call(agent, "browser", action="click", ref="ref_1", target="chrome")
+    assert not _blocked(await _call(agent, "browser", **look))
+

@@ -68,8 +68,11 @@ def attended(origin: str) -> bool:
 
 
 def in_flight_deck(origin: str) -> bool:
-    """Does a dialog in Flight Deck reach the person a turn from *origin* is for?"""
-    return _source(origin) in IN_FLIGHT_DECK
+    """Does a dialog reach the person a turn from *origin* is for? In Flight
+    Deck — or in Captain for Chrome's panel, which shows an agent's questions
+    while it follows a page or a recording it sent ("browser"; not Captain
+    for Mac's "browser:mac", which has no dialog)."""
+    return _source(origin) in IN_FLIGHT_DECK or str(origin or "").strip().lower() == "browser"
 
 
 def _text(value: Any, limit: int, what: str, *, required: bool = True) -> str:

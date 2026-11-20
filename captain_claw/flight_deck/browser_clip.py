@@ -1784,6 +1784,46 @@ async def _run_clip(run: _ClipRun, turn: dict, host: str, port: int, auth: str,
         run.updated = time.monotonic()
 
 
+# ── An agent's questions, answered in the panel ──────────────────────
+#
+# While the panel follows a run the agent may ask (ask_user, request_secret):
+# a value a recording leaves to the moment, a choice the page forces. The
+# question is Flight Deck's own (person_asks) and opens in its tabs too;
+# answered in one place, it closes in the others. Approval cards stay in
+# Flight Deck: an extension's token doesn't approve.
+
+
+def _agent_asks(items: list[dict]) -> list[dict]:
+    return [a for a in items if a.get("source") == "agent"]
+
+
+@router.get("/asks")
+async def clip_asks(wait: float = 0, known: str = "", user: dict = Depends(get_clip_user)):
+    """The agents' questions waiting for this person, once they differ from
+    *known* (the ids the panel shows) or after *wait* seconds."""
+    from captain_claw.flight_deck import person_asks
+
+    seen = {k for k in str(known)[:2000].split(",") if k}
+    return {"asks": _agent_asks(await person_asks.wait_for_change(str(user["id"]), seen, max(0.0, min(float(wait or 0), 30.0))))}
+
+
+@router.post("/asks/{ask_id}")
+async def clip_answer(ask_id: str, body: dict[str, Any] = Body(default={}), user: dict = Depends(get_clip_user)):
+    """The person's answer from the panel — or ``declined`` for Cancel."""
+    from captain_claw.flight_deck import person_asks
+
+    user_id = str(user["id"])
+    if not any(a["id"] == ask_id for a in _agent_asks(person_asks.open_for(user_id))):
+        raise HTTPException(404, "That question isn't open any more.")
+    try:
+        person_asks.answer(ask_id, user_id, answers=body.get("answers"), declined=bool(body.get("declined")))
+    except KeyError:
+        raise HTTPException(404, "That question isn't open any more.") from None
+    except person_asks.AskError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return {"ok": True}
+
+
 def _owned_run(user: dict, clip_id: str) -> _ClipRun:
     run = _runs.get(str(clip_id or ""))
     if run is None or run.user_id != str(user["id"]):

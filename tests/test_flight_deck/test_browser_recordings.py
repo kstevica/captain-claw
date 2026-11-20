@@ -10,6 +10,9 @@ Pinned here:
   steps written out with their instructions, this run's values in place of
   the ones that differ each time, recording.md attached from a folder of its
   own in web-clips, page labels marked as never instructions;
+* a value that differs each time comes one of three ways: filled in before
+  the run, asked for when the agent gets to the step (ask_user: a dialog the
+  extension's panel shows and answers, or cancels), or the agent's own call;
 * the extension ships the recorder (its page script and worker module).
 """
 
@@ -76,7 +79,7 @@ def test_the_deck_keeps_known_steps_web_addresses_and_no_secret():
     by = {s["id"]: s for s in rec["steps"]}
     assert "tabId" not in by["s1"] and "at" not in by["s1"]
     assert by["s2"]["note"].startswith("Only when") and by["s2"]["leads_to"].endswith("/new")
-    assert by["s3"]["ask"] is True and by["s3"]["value"] == "2026-10"
+    assert by["s3"]["ask"] == "before" and by["s3"]["value"] == "2026-10"
     assert by["s4"] == {"id": "s4", "kind": "type", "target": {"role": "textbox", "name": "Password"}, "secret": True}
     assert "hunter2" not in json.dumps(rec)
     assert br.asks(rec) == [{"id": "s3", "label": "Period", "was": "2026-10", "kind": "type"}]
@@ -111,6 +114,28 @@ def test_the_turn_is_the_persons_own_words_with_the_steps_written_out():
     # The file has what the turn leaves out: the hints.
     md = br.recording_markdown(rec, {"s3": "2026-11"})
     assert md.startswith("# Monthly report\n") and "selector `#new`" in md and "on https://portal.example/reports" in md
+
+
+def test_a_value_is_given_before_asked_for_on_the_way_or_left_to_the_agent():
+    steps = [
+        {"id": "a", "kind": "type", "target": {"role": "textbox", "name": "Search"}, "value": "acme", "ask": "before"},
+        {"id": "b", "kind": "type", "target": {"role": "textbox", "name": "Note"}, "value": "A test", "ask": "during"},
+        {"id": "c", "kind": "select", "target": {"role": "combobox", "name": "Type"}, "value": "Update", "ask": "agent"},
+        {"id": "d", "kind": "type", "target": {"role": "textbox", "name": "Old"}, "value": "x", "ask": True},
+        {"id": "e", "kind": "type", "target": {"role": "textbox", "name": "Odd"}, "value": "x", "ask": "whenever"},
+    ]
+    rec = br.clean_recording({"name": "Add a note", "steps": steps})
+    assert [s.get("ask") for s in rec["steps"]] == ["before", "during", "agent", "before", None]
+    # Only "before" is asked on the Run form; the list says what else to expect.
+    assert [a["id"] for a in br.asks(rec)] == ["a", "d"]
+    assert [a["label"] for a in br.asks(rec, br.ASK_DURING)] == ["Note"]
+    text = br.compose_run_turn(rec, "f", inputs={"a": "globex", "d": "y"})["content"]
+    assert "1. Type “globex” into the field “Search”" in text
+    assert "2. Type what I answer when you ask me into the field “Note”\n   (Ask me for “Note” with ask_user when you " \
+           "get to this step — a dialog opens for me — and wait for my answer. If I cancel it, stop there. When I " \
+           "recorded it, it was “A test”.)" in text
+    assert "3. Choose what you judge right in the list “Type”\n   (You decide “Type” from what this run is for" in text
+    assert "“Update”" in text and "4. Type “y” into the field “Old”" in text
 
 
 def test_a_long_recording_points_at_its_file():
@@ -210,6 +235,40 @@ async def test_a_run_goes_to_the_agents_chat_and_is_followed_like_a_clip(rdeck):
     assert again["content"].startswith("▶️ About the recording you ran for me: “Monthly report”")
     assert "recording.md" in again["content"] and "page.md" not in again["content"]
     assert again["file_paths"] == [f"vfs:web-clips/{folder}/recording.md"]
+
+
+@pytest.mark.asyncio
+async def test_the_panel_shows_an_agents_question_and_answers_or_cancels_it(rdeck):
+    from captain_claw.flight_deck import person_asks as asks
+
+    asks.reset_for_tests()
+    # A turn sent from the extension can be asked in a dialog; one from Captain for Mac or Telegram can't.
+    assert asks.in_flight_deck("browser") and asks.in_flight_deck("web")
+    assert not asks.in_flight_deck("browser:mac") and not asks.in_flight_deck("telegram")
+    c = rdeck["client"]
+    pat = {"Authorization": f"Bearer {await _pair(c, rdeck['jwt'])}"}
+    assert (await c.get("/fd/clip/asks")).status_code == 401
+    assert (await c.get("/fd/clip/asks", headers=pat)).json() == {"asks": []}
+
+    q = asks.check_questions([{"question": "Note?", "lines": 3}])
+    a = await asks.open_ask("alice", source="agent", title="Scout", agent_name="Scout", questions=q, wait_s=60, asker="scout")
+    card = await asks.open_ask("alice", source="approval", title="Scout", questions=asks.check_questions(
+        [{"question": "Send it?", "confirm": True}]), wait_s=60)
+    other = await asks.open_ask("bob", source="agent", title="Other", questions=q, wait_s=60, asker="x")
+    shown = (await c.get("/fd/clip/asks?wait=5&known=", headers=pat)).json()["asks"]
+    assert [x["id"] for x in shown] == [a.id] and shown[0]["questions"][0]["kind"] == "text"
+    # An approval card and somebody else's question aren't the extension's to answer.
+    for ask_id in (card.id, other.id):
+        assert (await c.post(f"/fd/clip/asks/{ask_id}", headers=pat, json={"answers": {"answer": True}})).status_code == 404
+    assert (await c.post(f"/fd/clip/asks/{a.id}", headers=pat, json={"answers": {}})).status_code == 422
+    assert (await c.post(f"/fd/clip/asks/{a.id}", headers=pat, json={"answers": {"answer": "Met the founder"}})).json() == {"ok": True}
+    assert await asks.wait_answer(a, 1) == {"ok": True, "answers": {"answer": "Met the founder"}}
+    assert (await c.post(f"/fd/clip/asks/{a.id}", headers=pat, json={"declined": True})).status_code == 404
+
+    b = await asks.open_ask("alice", source="agent", title="Scout", questions=q, wait_s=60, asker="scout")
+    assert (await c.post(f"/fd/clip/asks/{b.id}", headers=pat, json={"declined": True})).json() == {"ok": True}
+    assert (await asks.wait_answer(b, 1))["declined"] is True
+    asks.reset_for_tests()
 
 
 @pytest.mark.asyncio

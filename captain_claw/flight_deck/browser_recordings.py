@@ -5,8 +5,10 @@ the site: the extension notes each step (a page opened, a click, text typed
 into a field, a choice, a tick, a file picked, Enter) with what it was done
 to — its role and name, what it sits in, a selector as a hint — and the person
 adds an instruction to any step ("pick last month", "skip this when the list
-is empty"), steps of their own in words, and marks values that differ each
-time ("ask me"). Passwords and other secret fields are noted, never kept.
+is empty"), steps of their own in words, and says where a value that differs
+each time comes from: asked before the run starts, asked when the agent gets
+to that step (a dialog, in the panel and in Flight Deck), or the agent's own
+call. Passwords and other secret fields are noted, never kept.
 
 Here: the recordings are kept per person
 (``<FD_DATA_DIR>/browser-recordings/<user>.json``) and **run** — a run is a
@@ -52,6 +54,11 @@ MAX_VALUE_CHARS = 2_000     # text typed into a field
 STEPS_IN_TURN = 120         # written out in the turn; the rest is in recording.md
 
 KINDS = ("open", "switch", "click", "type", "select", "check", "upload", "key", "do")
+# Where a typed or chosen value comes from when it isn't always the same.
+ASK_BEFORE = "before"    # the person fills it in before the run starts
+ASK_DURING = "during"    # the agent asks when it gets there: a dialog, and it waits
+ASK_AGENT = "agent"      # the agent decides
+ASK_MODES = (ASK_BEFORE, ASK_DURING, ASK_AGENT)
 _KEYS = {"Enter", "Escape", "Ctrl+Enter", "⌘+Enter"}
 _ID = re.compile(r"[^A-Za-z0-9_-]")
 
@@ -151,12 +158,22 @@ def clean_step(raw: Any, taken: set[str]) -> dict[str, Any] | None:
             step["secret"] = True      # the value never reaches the deck's files
         else:
             step["value"] = _text(raw.get("value"), MAX_VALUE_CHARS) if kind == "type" else one_line(raw.get("value"), 500)
-            if kind != "upload" and raw.get("ask"):
-                step["ask"] = True
+            mode = ask_mode(raw) if kind != "upload" else ""
+            if mode:
+                step["ask"] = mode
                 label = one_line(raw.get("ask_label"), 80)
                 if label:
                     step["ask_label"] = label
     return step
+
+
+def ask_mode(step: dict) -> str:
+    """"before", "during", "agent" — or "" for a value that is always the same.
+    (``True`` is how the first recordings said "before".)"""
+    mode = step.get("ask")
+    if mode is True:
+        return ASK_BEFORE
+    return mode if isinstance(mode, str) and mode in ASK_MODES else ""
 
 
 def clean_recording(raw: Any) -> dict[str, Any]:
@@ -210,12 +227,21 @@ def step_text(step: dict, given: str | None = None) -> str:
         return f"Switch to the tab “{step.get('title') or step.get('url')}”"
     if kind == "click":
         return f"{'Double-click' if step.get('double') else 'Click'} {what}"
+    mode = ask_mode(step) if given is None else ""
     if kind == "type":
         if step.get("secret"):
             return f"Type the secret value into {what} (it was not recorded)"
+        if mode == ASK_DURING:
+            return f"Type what I answer when you ask me into {what}"
+        if mode == ASK_AGENT:
+            return f"Type what you judge right into {what}"
         value = step.get("value") if given is None else given
         return f"Type “{value}” into {what}" if value else f"Clear {what}"
     if kind == "select":
+        if mode == ASK_DURING:
+            return f"Choose what I answer when you ask me in {what}"
+        if mode == ASK_AGENT:
+            return f"Choose what you judge right in {what}"
         return f"Choose “{step.get('value') if given is None else given}” in {what}"
     if kind == "check":
         if (step.get("target") or {}).get("role") == "radio":
@@ -240,7 +266,15 @@ def step_lines(step: dict, n: int, given: str | None = None, *, detail: bool = F
     if step.get("note"):
         lines += [f"{pad}My instruction: {ln}" if i == 0 else f"{pad}{ln}"
                   for i, ln in enumerate(str(step["note"]).split("\n")) if ln or i == 0]
-    if step.get("ask") and given is None:
+    mode = ask_mode(step) if given is None else ""
+    was = f" When I recorded it, it was “{one_line(step.get('value'), 200)}”." if step.get("value") else ""
+    if mode == ASK_DURING:
+        lines.append(f"{pad}(Ask me for “{ask_label(step)}” with ask_user when you get to this step — a dialog "
+                     f"opens for me — and wait for my answer. If I cancel it, stop there.{was})")
+    elif mode == ASK_AGENT:
+        lines.append(f"{pad}(You decide “{ask_label(step)}” from what this run is for and what the page shows; "
+                     f"tell me afterwards what you used.{was})")
+    elif mode == ASK_BEFORE:
         lines.append(f"{pad}(the value differs each time: “{ask_label(step)}”)")
     if step.get("leads_to"):
         lines.append(f"{pad}→ then the page is {step['leads_to']}" + (" (a new tab)" if step.get("new_tab") else ""))
@@ -256,10 +290,11 @@ def step_lines(step: dict, n: int, given: str | None = None, *, detail: bool = F
     return lines
 
 
-def asks(rec: dict) -> list[dict[str, str]]:
-    """What a run must be given: the steps whose value differs each time."""
+def asks(rec: dict, mode: str = ASK_BEFORE) -> list[dict[str, str]]:
+    """The steps whose value comes the *mode* way — by default what a run must
+    be given before it starts."""
     return [{"id": s["id"], "label": ask_label(s), "was": str(s.get("value") or ""), "kind": s["kind"]}
-            for s in rec.get("steps") or [] if s.get("ask")]
+            for s in rec.get("steps") or [] if ask_mode(s) == mode]
 
 
 def recording_markdown(rec: dict, inputs: dict[str, str] | None = None, note: str = "") -> str:
@@ -359,6 +394,8 @@ def save_all(user_id: str, items: list[dict]) -> None:
 def _summary(rec: dict) -> dict[str, Any]:
     return {"id": rec["id"], "name": rec["name"], "about": rec.get("about", ""), "site": rec.get("site", ""),
             "start_url": rec.get("start_url", ""), "steps": len(rec["steps"]), "asks": asks(rec),
+            "asks_during": [a["label"] for a in asks(rec, ASK_DURING)],
+            "agent_decides": [a["label"] for a in asks(rec, ASK_AGENT)],
             "created_at": rec.get("created_at", ""), "updated_at": rec.get("updated_at", ""),
             "runs": int(rec.get("runs") or 0), "last_run_at": rec.get("last_run_at", "")}
 

@@ -1883,6 +1883,16 @@ class AgentToolLoopMixin:
                     for _k in [k for k in _dc if k.startswith("datastore|")]:
                         _dc.pop(_k, None)
 
+                # ── Acting on a page makes the next look at it new ──
+                # read_page → click → read_page … is how a site is worked, and
+                # each read has the same arguments. Counted as repeats, the
+                # fourth was refused "with nothing written in between" and a
+                # recorded process stopped at its fifth step (staging,
+                # 2026-11-20). Looks with nothing done in between still count.
+                if _tool_lower == "browser" and result.success and isinstance(arguments, dict):
+                    loop_guards.forget_browser_looks_after_act(
+                        getattr(self, "_turn_tool_call_counts", {}), str(arguments.get("action", "")))
+
                 # ── A file change makes the re-run and the re-read new ──
                 # edit → run again is how a fix gets tested; blocking the
                 # run as "the content has not changed" made agents report
