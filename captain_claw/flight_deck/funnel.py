@@ -67,7 +67,9 @@ EXCLUSIONS = "exclusions.md"
 CLOSE_SUFFIX = "-came-close"  # <the list>-came-close.csv: the items that nearly made it, a result of its own
 LEDGER_FILE = "already-checked.csv"  # in extra/: what the factory's earlier runs checked (first_mate_ledger)
 
-SEARCH_BUDGET = 1000
+SEARCH_BUDGET = 1000        # a run's searches, at least (config funnel_search_budget sets it outright)
+SEARCHES_PER_ROW = 12       # and this many for each row the list asks for, when that is more
+LOOKS_PER_ROW = 2           # items looked into per step, for each row it wants, when more than LOOK_MAX
 FETCH_CHARS = 40_000  # what code keeps of one page: the whole of it, its footer (contact, hours) too
 CONCURRENCY = 4
 MAX_QUERY_ROUNDS = 2
@@ -716,6 +718,24 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
         n = int(window.group(1)) * (12 if window.group(2).lower().startswith("year") else 1)
         recipe["checks"].append({"column": dates[0], "op": "within_months", "value": n})
     return recipe
+
+
+def rows_wanted(recipe: dict[str, Any]) -> int:
+    """How many rows the list asks for: its groups' amounts, else its target; 0 when it
+    takes every item that passes."""
+    groups = recipe.get("groups") or {}
+    if groups and all(groups.values()):
+        return sum(int(n) for n in groups.values())
+    return int(recipe.get("target") or 0)
+
+
+def search_budget(run: dict, recipe: dict[str, Any]) -> int:
+    """The searches a run may make: what its owner set, else 1,000, or more for a long
+    list (a list of 500 can't be found in the searches a list of 40 needs)."""
+    said = (run.get("config") or {}).get("funnel_search_budget")
+    if said not in (None, ""):
+        return _int(said, 0, 100_000, SEARCH_BUDGET)
+    return min(100_000, max(SEARCH_BUDGET, SEARCHES_PER_ROW * rows_wanted(recipe)))
 
 
 def limit_rules(recipe: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1817,7 +1837,7 @@ class Work:
         self.run, self.step, self.recipe, self.folder, self.group = run, step, recipe, folder, group
         self.key = step["step_key"]
         self.cfg = run.get("config") or {}
-        self.budget = _int(self.cfg.get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
+        self.budget = search_budget(run, recipe)
         self.items_max = _int(self.cfg.get("funnel_items_max"), 1, 1_000_000, ITEMS_MAX)
         self.thinking = str(self.cfg.get("funnel_thinking") or "off").lower() == "on"
         self.charter = " ".join(str(run.get("task") or "").split())[:CHARTER_CHARS]
@@ -1834,7 +1854,8 @@ class Work:
         self.again: list[dict] = []  # items to judge once more: left unanswered, or just looked into
         self.look = look_on(run)
         self.look_steps = _int(self.cfg.get("funnel_look_steps"), 1, 12, LOOK_STEPS)
-        self.look_max = _int(self.cfg.get("funnel_look_max"), 0, 10_000, LOOK_MAX)
+        wanted = self.quota(group) if group else rows_wanted(recipe)  # this step's rows
+        self.look_max = _int(self.cfg.get("funnel_look_max"), 0, 100_000, max(LOOK_MAX, LOOKS_PER_ROW * wanted))
         self.looks = 0
         self.site_hosts: dict[str, set[str]] = {}  # host → the pages items' sites are on it (several: a directory)  # rows on the list or waiting, by their own site
         for r in _read_csv(folder / ROWS) + _read_csv(folder / LOOSE):
@@ -4220,7 +4241,7 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
     out = await asyncio.to_thread(write_list, folder, recipe)
     close = await asyncio.to_thread(write_came_close, folder, recipe)
     dropped = await asyncio.to_thread(write_exclusions, folder, recipe)
-    budget = _int((run.get("config") or {}).get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
+    budget = search_budget(run, recipe)
     await asyncio.to_thread(write_summary, folder, recipe, len(out), dropped, finished, budget)
     await asyncio.to_thread(_test_report, folder)
     per = ""
@@ -4284,7 +4305,7 @@ async def write_on_stop(run: dict, why: str) -> str:
     out = await asyncio.to_thread(write_list, folder, recipe)
     close = await asyncio.to_thread(write_came_close, folder, recipe)
     dropped = await asyncio.to_thread(write_exclusions, folder, recipe)
-    budget = _int((run.get("config") or {}).get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
+    budget = search_budget(run, recipe)
     await asyncio.to_thread(write_summary, folder, recipe, len(out), dropped, (0, 0, 0), budget, why)
     await asyncio.to_thread(_test_report, folder)
     return (f"Stopped ({why}): what it found so far is written: `{recipe['output']}` {len(out)} rows"

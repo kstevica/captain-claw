@@ -881,6 +881,12 @@ differed from the known answers, none of them a wrong row:
 The score counted three good items turned away from a full group as wrong. It now
 lists them apart, as not judged.
 
+A long list was held to what a short one needs: 1,000 searches a run and 60 looks a
+step, whatever the list asked for. Now a run may make 12 searches for each row the
+list wants when that is more than 1,000, and a step may look into 2 items for each row
+it wants when that is more than 60. The owner can set a run's searches in the
+factory's charter form ("Searches a run may make"); set, it is used as written.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

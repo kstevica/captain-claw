@@ -3013,3 +3013,20 @@ def test_the_score_leaves_out_items_turned_away_from_a_full_group(tmp_path):
     got = funnel_eval.score(tmp_path, tmp_path / "expected.csv")
     assert (got["judged"], got["verdicts_right"], got["missed_keeps"], got["turned_away"]) == (1, 1, [], ["B"])
     assert "Not judged, their group was full: 1 (B)" in funnel_eval.report(got)
+
+
+def test_a_long_list_gets_the_searches_and_looks_its_length_needs(tmp_path):
+    """A list of 500 was held to the 1,000 searches and 60 looks a list of 40 needs."""
+    short = {"groups": {}, "target": 40, "sources": [], "rules": [], "checks": [], "columns": ["Name"], "key": "Name"}
+    long = {**short, "target": 500}
+    grouped = {**short, "target": 0, "groups": {"a": 200, "b": 300}}
+    run = {"id": "bat_x", "config": {}}
+    assert funnel.search_budget(run, short) == 1000 and funnel.search_budget(run, long) == 6000
+    assert funnel.search_budget(run, grouped) == 6000
+    assert funnel.search_budget({"id": "bat_x", "config": {"funnel_search_budget": 250}}, long) == 250  # the owner's own
+    step = {"step_key": "step-1"}
+    assert funnel.Work(run, step, {**short, "target": 20}, tmp_path).look_max == 60  # never under the usual
+    assert funnel.Work(run, step, short, tmp_path).look_max == 80
+    assert funnel.Work(run, step, long, tmp_path).look_max == 1000
+    assert funnel.Work(run, step, grouped, tmp_path, "a").look_max == 400  # this step's group, not the whole list
+    assert funnel.Work({"id": "bat_x", "config": {"funnel_look_max": 5}}, step, long, tmp_path).look_max == 5
