@@ -1345,3 +1345,42 @@ async def test_a_maybe_that_lacks_only_unshown_facts_is_loose(deck):
     got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
     assert got == {"A": "loose", "B": "maybe", "C": "maybe", "D": "maybe"}
     assert "Employees" in funnel._read_csv(folder / funnel.LOOSE)[0] and funnel._read_csv(folder / funnel.LOOSE)[0]["Firm"] == "A"
+
+
+async def test_a_drop_must_show_the_fact(deck):
+    """A run dropped 32 firms for "no dated AI signal found": a soft rule, and not finding
+    a fact isn't breaking it. A drop now names the rule and quotes what was read that
+    breaks it; one that quotes nothing read, for rules that may go unshown, isn't a drop."""
+    assert '"broken"' in funnel.DECIDE_LOOSE and '"shown"' in funnel.DECIDE_LOOSE
+    run, folder = await _run(deck["store"], FIRM_LEADS, rid="bat_dropfact1")
+    (folder / "extra" / "firms.csv").write_text(
+        "Firm,Website,State,Email,Note\nA,https://a.example,TX,info@a.example,\n"
+        "B,https://b.example,NY,info@b.example,Team of 120 people\nC,https://c.example,CA,,\n"
+        "D,https://d.example,WA,info@d.example,\nE,https://e.example,OR,info@e.example,\n")
+    deck["recipe"] = {"item": "firm", "key": "Firm", "sources": [{"kind": "file", "path": "extra/firms.csv"}],
+                      "decide": "US firms, 2-50 people, an email on the site, interest in AI.", "rules": FIRM_LEADS_RULES,
+                      "checks": [{"column": "Email", "op": "required"}]}
+    size = "2-50 employees shown by its LinkedIn company page size band or its own team page"
+    ai = "something dated in the last 24 months showing interest in AI"
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            row = {k: f[k] for k in ("Firm", "Website", "State", "Email")}
+            if f["Firm"] == "A":  # "not found" quoted as if it were a fact
+                out.append({"id": i, "verdict": "drop", "row": row, "broken": [ai], "shown": "no AI signal found"})
+            elif f["Firm"] == "B":  # really shown to be too big
+                out.append({"id": i, "verdict": "drop", "row": row, "broken": [size], "shown": "Team of 120 people"})
+            elif f["Firm"] == "C":  # no email: a rule that never loosens
+                out.append({"id": i, "verdict": "drop", "row": row, "broken": ["own website prints a founder's"]})
+            elif f["Firm"] == "D":  # names no rule: can't tell
+                out.append({"id": i, "verdict": "drop", "row": row, "reason": "no"})
+            else:  # E: nothing quoted at all, and no row to put on the list
+                out.append({"id": i, "verdict": "drop", "broken": [ai]})
+        return out
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got == {"A": "loose", "B": "dropped", "C": "dropped", "D": "dropped", "E": "maybe"}
