@@ -2179,7 +2179,9 @@ class Work:
                   + (f"\nThis step looks for: {self.group}. An item that fits another of these groups instead is "
                      f"that group's find: keep it (or answer loose or maybe) with that group in "
                      f"{self.recipe['group_by']}, never drop it for not being {self.group}. Drop an item for its "
-                     "kind only when it fits none of them; one that fits several takes the closest."
+                     "kind only when it fits none of them; one that fits several takes the closest. A narrower or "
+                     "regional kind of a group is that group (a region's own style of a country's kind, a "
+                     "specialty within a field): it fits it."
                      if self.group else "")) if self.recipe["groups"] else ""
         try:
             got = await self._ask("decide", DECIDE_LOOSE if self.loosen else DECIDE_STRICT,
@@ -2342,8 +2344,14 @@ class Work:
                                    self._named(v.get("_lacked") or v.get("missing")))
             else:
                 other = await self._drop_goes_to(v, it, reason)
-                if other:  # "Japanese, not Croatian": the Asian step judges it
+                if other and other != self.group:  # "Japanese, not Croatian": the Asian step judges it
                     await self._hand_over(it, other, reason)
+                    continue
+                if other:  # dropped for its kind, yet its kind is this group's ("Dalmatian" is Croatian)
+                    got = v.get("row") if isinstance(v.get("row"), dict) else {}
+                    note = f"its kind is {other} after all, so not dropped for it"
+                    await self._nearly(it, got, other, f"{reason}; {note}" if reason else note,
+                                       self._named(v.get("missing")))
                     continue
                 await self.record(it, "dropped", reason or "breaks a rule")
         if again:  # judged again now, in a call of their own
@@ -2514,7 +2522,9 @@ class Work:
         return next((x for x in self.recipe["groups"] if x.lower() == g.lower()), "") or self._group_named(g)
 
     async def _drop_goes_to(self, v: dict, item: dict, reason: str) -> str:
-        """Another group of the list a dropped item is that group's find, or "". Only for
+        """The list's group a dropped item is, when it was dropped for its kind: another
+        group's (that group's find), or this step's own (a narrower kind it fits after
+        all: nearly there, not dropped); "" when it fits none or the drop stands. Only for
         a drop about its kind: one also shown to break another rule (a hotel's
         restaurant, a 4.3 rating read) fails there too, while a fact not found (no phone
         read) is no reason to keep it from the group it fits. Which group: Jev's choice
@@ -2535,7 +2545,7 @@ class Work:
             return ""  # nothing says it's about its kind
         picked = await self._jev_group(item)
         target = picked if picked is not None else (typed or by_words)
-        return target if target in self.recipe["groups"] and target != self.group else ""
+        return target if target in self.recipe["groups"] else ""
 
     async def _jev_group(self, item: dict) -> str | None:
         """Which of the list's groups an item is, by Jev (a typed choice, calibrated), when

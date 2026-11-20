@@ -2629,3 +2629,35 @@ async def test_an_items_pages_are_found_by_its_own_links_not_guessed(deck):
     assert "https://bistro-y.example/kontakt" in fetched  # a page with no links: the recipe's paths, as before
     phones = {r["Naziv"]: r["Telefon"] for r in funnel._read_csv(folder / funnel.ROWS)}
     assert fx.in_text(phones["Konoba X"], "01 555 0808")
+
+
+async def test_a_narrower_kind_of_a_group_is_that_group(deck, monkeypatch):
+    """A restaurant was dropped in the Croatian step as "Dalmatian, not one of the three
+    kitchens": a region's own style of a country's kind is that kind."""
+    from captain_claw.flight_deck import jev_routes
+    run, folder = await _run(deck["store"], CUISINES, {"funnel_loosen": "never"}, rid="bat_narrower1")
+    (folder / "extra" / "hr.csv").write_text("Naziv,Telefon\nKonoba D,01 555 0101\nKonoba E,01 555 0202\n"
+                                             "Tvornica F,01 555 0303\n")
+    kitchen = "Kuhinja je jedna od tri"
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "group_by": "Kuhinja", "decide": "Restorani.",
+                      "sources": [{"kind": "file", "path": "extra/hr.csv", "group": "hrvatska kuhinja"}],
+                      "rules": [{"rule": kitchen, "kind": "must", "fact": "identity", "columns": ["Kuhinja"]}]}
+    said = {"Konoba D": ("none", "Dalmatinska kuhinja, nije jedna od tri."),
+            "Konoba E": ("hrvatska kuhinja", "Kuhinja nije točno navedena."),
+            "Tvornica F": ("none", "Nije restoran.")}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "drop", "broken": [1], "shown": "", "group": said[f["Naziv"]][0],
+                                     "reason": said[f["Naziv"]][1], "row": {"Naziv": f["Naziv"]}} for i, f in items]
+
+    async def jev(owner, state, questions, model=None, *, source, agent=""):
+        pick = {"Konoba D": ("hrvatska kuhinja", 0.9), "Konoba E": ("hrvatska kuhinja", 0.4), "Tvornica F": ("none", 0.9)}
+        choice, conf = pick[state["item"]]
+        return {"answers": {"group": {"type": "choice", "choice": choice, "confidence": conf}}}
+
+    monkeypatch.setattr(jev_routes, "ask_for_owner", jev)
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert "A narrower or regional kind of a group is that group" in deck["decide_prompts"][0]
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["Konoba D"][0] == "maybe" and "its kind is hrvatska kuhinja after all" in got["Konoba D"][1]  # Jev
+    assert got["Konoba E"][0] == "maybe"  # Jev unsure: its own typed group says this group
+    assert got["Tvornica F"][0] == "dropped"  # fits none
