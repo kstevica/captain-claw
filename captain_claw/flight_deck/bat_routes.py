@@ -2099,6 +2099,17 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
         await store.set_status(sid, "awaiting_human")
         await store.append_event(sid, "awaiting_human", "the reviewers won't pass it: asking you to decide")
         return {**verdict.to_dict(), "done": False, "parked": True, "failing": []}
+    # A list funnel's list that is complete and passes every check by code is done:
+    # the reviewers' remaining points go into its summary, not into fix rounds that
+    # delete the rows its factory allowed (rows on a looser reading) and hunt for
+    # strict ones at millions of tokens a step.
+    if finished and not verdict.done and not verdict.det_criticals and cfg.get("engine") == "funnel":
+        from captain_claw.flight_deck import funnel
+        settled = await asyncio.to_thread(funnel.review_settled, run, _findings(verdict.to_dict()))
+        if settled:
+            if store is not None:
+                await store.append_event(sid, "note", settled)
+            return {**verdict.to_dict(), "done": True, "overridden": True, "failing": [], "reason": settled}
     # What "the same failure again" means: a step's error, since fix steps are new
     # steps with new names, and a check's name, since its details change every run.
     failing = sorted({f"step failed: {str(s.get('error') or '')[:80]}" for s in failed})

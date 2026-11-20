@@ -470,6 +470,19 @@ looser reading is a contact page or form on the item's own site, the address lef
 empty, never an address guessed or taken from a contact-list site; an address given
 must still be on the page it cites.
 
+The run after that built a complete list: 40 of 40 rows in 24 minutes for about 0.7M
+tokens, every row on a looser reading (12 with an email printed, the rest reached by
+their contact page). Then Bat's reviewers judged it against the charter as written,
+and fix rounds started deleting its rows to hunt strict ones (each stopped at its 1.5M
+share by the token guards). Now a funnel run whose list is complete and passes every
+check by code is done when the reviewers disagree; their points go into `summary.md`
+under "Open points from the review". A list still short goes on to fix rounds as
+before. The same run left CaptainFeature and CaptainReason empty in 33 of its 40 rows
+(a reason "tied to the firm's signal" was skipped when no signal was shown): columns
+about the owner's own offer (named after a reference file, or with fixed values that
+come from it) are always filled now; a row that leaves one empty is nearly there, not
+on the list, and the judging prompt says to tie it to what was read.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
