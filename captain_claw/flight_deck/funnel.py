@@ -59,6 +59,9 @@ QUERIES = f"{STATE}/queries.json"  # searches made, queries used, new-query roun
 FINISH = f"{STATE}/finish.csv"            # rows the finishing agent adds, checked at the merge
 FINISH_ITEMS = f"{STATE}/finish-items.csv"  # the nearly-there items it's given
 COUNTS = f"{STATE}/counts.json"    # per group: how items went, stage by stage (for the run panel)
+TAPE_IN = "extra/tape"             # a recording to replay instead of the web (and its recipe, its answers)
+TAPE_OUT = f"{STATE}/tape"         # what a recorded run searched and read
+TAPE_MISSES = f"{STATE}/tape-misses.json"
 SUMMARY = "summary.md"
 EXCLUSIONS = "exclusions.md"
 CLOSE_SUFFIX = "-came-close"  # <the list>-came-close.csv: the items that nearly made it, a result of its own
@@ -1094,6 +1097,17 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
     have = load_recipe(folder)
     if have and have.get("sources"):
         return have, ""  # planned before a restart: the same recipe
+    taped = folder / TAPE_IN / "recipe.json"
+    if taped.is_file():  # a replay: the recording's own recipe, so its searches are the ones on the tape
+        try:
+            recipe = json.loads(taped.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            recipe = None
+        if isinstance(recipe, dict) and recipe.get("sources") and recipe.get("columns"):
+            (folder / STATE).mkdir(parents=True, exist_ok=True)
+            (folder / RECIPE).write_text(json.dumps(recipe, indent=1, ensure_ascii=False), encoding="utf-8")
+            (folder / "shared" / "conventions.md").write_text(conventions(recipe), encoding="utf-8")
+            return recipe, f"replayed from a recording (`{TAPE_IN}`): its recipe, searches and pages, not the web"
     recipe: dict[str, Any] | None = None
     why = ""
     try:
@@ -1413,6 +1427,17 @@ class Tools:
     def __init__(self, run: dict, step: dict):
         self.run, self.step = run, step
         self.port, self.auth, self.slug = 0, "", ""
+        self.tape: Path | None = None  # where a recorded run keeps its searches and pages
+
+    def _record(self, name: str, row: dict) -> None:
+        if self.tape is None:
+            return
+        try:
+            self.tape.mkdir(parents=True, exist_ok=True)
+            with (self.tape / name).open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError:
+            log.debug("funnel: couldn't record to the tape", exc_info=True)
 
     async def _ensure(self) -> None:
         if self.port:
@@ -1470,10 +1495,14 @@ class Tools:
         args: dict[str, Any] = {"query": query, "count": count}
         if country:
             args["country"] = country
-        return await self.call("web_search", args)
+        ok, text = await self.call("web_search", args)
+        self._record("searches.jsonl", {"query": query, "count": count, "ok": ok, "text": text})
+        return ok, text
 
     async def fetch(self, url: str) -> tuple[bool, str]:
-        return await self.call("web_fetch", {"url": url, "deep_fetch": False})
+        ok, text = await self.call("web_fetch", {"url": url, "deep_fetch": False})
+        self._record("pages.jsonl", {"url": url, "ok": ok, "text": text[:FETCH_CHARS]})
+        return ok, text
 
     async def close(self) -> None:
         if self.slug:
@@ -1485,8 +1514,97 @@ class Tools:
             self.slug, self.port = "", 0
 
 
-def make_tools(run: dict, step: dict) -> Tools:
-    return Tools(run, step)
+def _tape_key(text: str) -> str:
+    return " ".join(str(text or "").split()).rstrip("/").lower()
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    out = []
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict):
+                    out.append(row)
+    except OSError:
+        pass
+    return out
+
+
+class TapeTools:
+    """Search and fetch answered from a recording (``extra/tape/``) instead of the web:
+    the same searches and pages every time, so a change to the funnel is measured on
+    what it does, not on what the web returned that day. A search or page that isn't
+    on the tape finds nothing, and is counted (``shared/funnel/tape-misses.json``)."""
+
+    def __init__(self, folder: Path):
+        self.folder = folder
+        self.searches = {_tape_key(r.get("query")): (bool(r.get("ok", True)), str(r.get("text") or ""))
+                         for r in _read_jsonl(folder / TAPE_IN / "searches.jsonl")}
+        self.pages = {_tape_key(r.get("url")): (bool(r.get("ok", True)), str(r.get("text") or ""))
+                      for r in _read_jsonl(folder / TAPE_IN / "pages.jsonl")}
+        self.asked = {"searches": 0, "pages": 0}
+        self.missed: dict[str, list[str]] = {"searches": [], "pages": []}
+
+    def _answer(self, kind: str, tape: dict, key: str, nothing: tuple[bool, str]) -> tuple[bool, str]:
+        self.asked[kind] += 1
+        got = tape.get(_tape_key(key))
+        if got is None:
+            if key not in self.missed[kind]:
+                self.missed[kind].append(key)
+            return nothing
+        return got
+
+    async def search(self, query: str, count: int, country: str = "") -> tuple[bool, str]:
+        return self._answer("searches", self.searches, query, (True, "[RESULTS: 0]\n\nNo results found."))
+
+    async def fetch(self, url: str) -> tuple[bool, str]:
+        return self._answer("pages", self.pages, url, (False, "not on the tape"))
+
+    async def close(self) -> None:
+        path = self.folder / TAPE_MISSES
+        try:
+            before = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except (OSError, ValueError):
+            before = {}
+        out = {"asked": {k: int((before.get("asked") or {}).get(k, 0)) + v for k, v in self.asked.items()},
+               "missed": {k: list(dict.fromkeys(list((before.get("missed") or {}).get(k, [])) + v))
+                          for k, v in self.missed.items()}}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(out, indent=1, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            log.debug("funnel: couldn't write the tape's misses", exc_info=True)
+        self.asked = {"searches": 0, "pages": 0}
+        self.missed = {"searches": [], "pages": []}
+
+
+def recording(run: dict) -> bool:
+    """Whether this run keeps what it searched and read (``shared/funnel/tape/``), to
+    replay later: ``config.funnel_record``, or CLAW_FUNNEL_RECORD on the deck."""
+    import os
+    return bool((run.get("config") or {}).get("funnel_record")) or \
+        str(os.environ.get("CLAW_FUNNEL_RECORD", "")).strip().lower() in ("1", "true", "yes")
+
+
+def make_tools(run: dict, step: dict) -> Tools | TapeTools:
+    return tools_for(run, step)
+
+
+def tools_for(run: dict, step: dict) -> Tools | TapeTools:
+    """A run's search and fetch: from its recording when it has one (``extra/tape/``),
+    else the web, kept on a tape of its own when the run records."""
+    from captain_claw.flight_deck import bat_routes
+    folder = bat_routes._run_folder(run)
+    if (folder / TAPE_IN).is_dir():
+        return TapeTools(folder)
+    tools = Tools(run, step)
+    if recording(run):
+        tools.tape = folder / TAPE_OUT
+    return tools
 
 
 # ── a step's work ──────────────────────────────────────────────────────
@@ -3667,6 +3785,7 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
     dropped = await asyncio.to_thread(write_exclusions, folder, recipe)
     budget = _int((run.get("config") or {}).get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
     await asyncio.to_thread(write_summary, folder, recipe, len(out), dropped, finished, budget)
+    await asyncio.to_thread(_test_report, folder)
     per = ""
     if recipe["groups"]:
         kept = kept_per_group(folder)
@@ -3702,6 +3821,15 @@ def contract_for_checks(run: dict, rules: list[dict]) -> list[dict]:
     return out
 
 
+def _test_report(folder: Path) -> None:
+    """A replayed run with expected answers scores itself (``test-report.md``)."""
+    try:
+        from captain_claw.flight_deck import funnel_eval
+        funnel_eval.write_report(folder)
+    except Exception:  # noqa: BLE001 — a report is extra, never the run's failure
+        log.debug("funnel: couldn't write the test report", exc_info=True)
+
+
 async def write_on_stop(run: dict, why: str) -> str:
     """A funnel run that ends before its merge (its owner stopped it, a cap ran out)
     still leaves its result: the list so far, what came close, the items dropped and
@@ -3721,6 +3849,7 @@ async def write_on_stop(run: dict, why: str) -> str:
     dropped = await asyncio.to_thread(write_exclusions, folder, recipe)
     budget = _int((run.get("config") or {}).get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
     await asyncio.to_thread(write_summary, folder, recipe, len(out), dropped, (0, 0, 0), budget, why)
+    await asyncio.to_thread(_test_report, folder)
     return (f"Stopped ({why}): what it found so far is written: `{recipe['output']}` {len(out)} rows"
             + (f", `{came_close_name(recipe)}` {len(close)}" if close else "")
             + f", `{exclusions_name(recipe)}` {dropped} dropped, `{summary_name(recipe)}`.")

@@ -2678,3 +2678,61 @@ async def test_a_value_that_follows_from_a_fact_may_be_filled_and_reasons_are_wh
     await _go(deck["store"], run, steps[:1])
     assert 200 < len(why) <= 400
     assert funnel._read_csv(folder / funnel.ITEMS)[0]["reason"].endswith("but the start date.")
+
+
+async def test_a_recorded_run_replays_as_a_test_set(deck, monkeypatch, tmp_path):
+    """A change was measured by a live run against the web, different each time: a run
+    can record what it searched and read, and another replays it and scores itself."""
+    from captain_claw.flight_deck import funnel_eval
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv", "columns": ["Name", "Web", "Phone"],
+                                                     "min_rows": 2}}]
+    web = {"web_search": {"things": "list results"},
+           "web_fetch": {"https://a.example": "A. Call 01 555 0101", "https://b.example": "B. No phone here."}}
+    calls = []
+
+    async def call(self, tool, args):
+        calls.append(tool)
+        key = args.get("query") or args.get("url")
+        got = web[tool].get(key)
+        return (True, got) if got is not None else (False, "404")
+
+    monkeypatch.setattr(funnel.Tools, "call", call)
+    monkeypatch.setattr(funnel, "make_tools", funnel.tools_for)
+    recipe = {"item": "thing", "key": "Name", "site_column": "Web", "decide": "Things with a phone.",
+              "sources": [{"kind": "search", "group": "", "queries": ["things"]}],
+              "gather": [{"kind": "fetch", "url": "{Web}", "paths": [""]}]}
+    deck["recipe"] = recipe
+    deck["extract"] = lambda user: {"items": [{"name": n, "url": f"https://{n.lower()}.example", "fields": {"Name": n}}
+                                              for n in ("A", "B")]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep" if "0101" in json.dumps(f) or f["Name"] == "A" else "maybe",
+                                     "row": {"Name": f["Name"]}} for i, f in items]
+    run, folder = await _run(deck["store"], contract, {"funnel_record": True}, rid="bat_record01")
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    assert (folder / funnel.TAPE_OUT / "pages.jsonl").is_file() and "web_fetch" in calls
+    made = funnel_eval.make_set(folder, tmp_path / "set")
+    assert made == {"recorded": 3, "items": 2}
+    expected = funnel._read_csv(tmp_path / "set" / "expected.csv")
+    assert [(r["name"], r["verdict"]) for r in expected] == [("A", "keep"), ("B", "close")]
+    assert fx.in_text(expected[0]["Phone"], "01 555 0101")
+
+    # replayed: no web, no setup call, the same result; and it scores itself
+    calls.clear()
+    deck["asked"].clear()
+    again, folder2 = await _run(deck["store"], contract, rid="bat_replay01")
+    import shutil
+    shutil.copytree(tmp_path / "set", folder2 / funnel.TAPE_IN)
+    steps = await funnel.plan(again)
+    notes = [e["message"] for e in await deck["store"].list_events(again["id"]) if e["stage"] == "note"]
+    assert any("replayed from a recording" in n for n in notes) and "setup" not in deck["asked"]
+    await _go(deck["store"], again, steps)
+    assert calls == []
+    report = (folder2 / funnel_eval.REPORT).read_text()
+    assert "Verdicts right: 2 of 2 (100%)" in report and "Wrong keeps: 0" in report
+    assert "Not on the tape: 0 of 1 searches, 0 of 2 pages" in report
+    # a worse funnel shows in the score
+    bad = funnel_eval.score(folder2, tmp_path / "set" / "expected.csv")
+    assert bad["verdicts_right"] == 2
+    (tmp_path / "strict.csv").write_text("name,verdict\nA,drop\nB,keep\nC,keep\n")
+    bad = funnel_eval.score(folder2, tmp_path / "strict.csv")
+    assert bad["wrong_keeps"] == ["A"] and bad["missed_keeps"] == ["B"] and bad["not_looked_at"] == ["C"]
