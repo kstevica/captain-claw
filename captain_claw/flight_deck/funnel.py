@@ -82,6 +82,10 @@ DECIDE_TOKENS = 8192
 OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500, "owner": 3000, "look": 300, "group": 200}
 LOOK_STEPS = 4              # what one look into a nearly-there item may do (config funnel_look_steps)
 LOOK_MAX = 60               # items looked into per step (config funnel_look_max)
+LOOK_FILES = 400            # the owner's files a look is told of, by name
+LISTED_WHOLE = 60           # lines of the folder shown to the setup with first rows and first lines
+LISTED_NAMES = 400          # files past those, shown by name only
+SOURCES_MAX = 400           # files one pattern in a recipe's source may stand for
 DECIDE_PER_ITEM = 600       # more room for a judging call with several short rows
 THINKING_TOKENS = 16_000    # a judging call's room when the run turns thinking on
 LINKS_AS_ITEMS = 5          # a links file with fewer links is reference, not a list to go through
@@ -632,6 +636,31 @@ def _group_queries(group: str, place: str, size: re.Match | None, item: str = ""
     return list(dict.fromkeys(" ".join(q.split()) for q in qs))[:24]
 
 
+def _spread_patterns(sources: list[dict[str, Any]], folder: Path, output: str = "") -> list[dict[str, Any]]:
+    """A source whose path is a pattern ("extra/report_*") as one source per file it
+    matches, in name order: a table as a table, a document as a document. A folder of
+    many files alike is then one line of the recipe, not one a file."""
+    out: list[dict[str, Any]] = []
+    have = {s.get("path") for s in sources if s.get("path")}
+    for s in sources:
+        path = str(s.get("path") or "")
+        if s["kind"] not in ("file", "document") or not any(c in path for c in "*?["):
+            out.append(s)
+            continue
+        root = folder.resolve()
+        for p in sorted(folder.glob(path))[:SOURCES_MAX]:
+            rel = p.relative_to(folder).as_posix()
+            ext = p.suffix.lower()
+            if (not p.is_file() or p.name.startswith(".") or p.name == LEDGER_FILE or rel == output or rel in have
+                    or root not in p.resolve().parents):
+                continue
+            kind = "file" if ext in fx.TABLE_EXTS else "document" if ext in fx.DOC_EXTS else ""
+            if kind:
+                have.add(rel)
+                out.append({**s, "kind": kind, "path": rel})
+    return out
+
+
 def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -> dict[str, Any]:
     """What code puts right in a model's recipe: a group's searches that never name it
     (copied from another group) are written for it; a file the charter points to for
@@ -661,6 +690,8 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
                                 for q in s["queries"]]
                 s["country"] = _search_country(code)
     refs = list(recipe.get("reference") or [])
+    if folder is not None:
+        recipe["sources"] = _spread_patterns(recipe["sources"], folder, recipe.get("output") or "")
     for s in list(recipe["sources"]):
         path = s.get("path") or ""
         name = Path(path).name if path else ""
@@ -848,7 +879,7 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
  "target": <rows wanted, 0 = every item that passes>,
  "sources": [
    {"kind": "file", "path": "<table in the folder>", "group": ""},
-   {"kind": "document", "path": "<pdf/docx/text to pull items out of>", "group": ""},
+   {"kind": "document", "path": "<pdf/docx/text to pull items out of; many files alike: one pattern, extra/report_*>", "group": ""},
    {"kind": "links", "path": "<links file>", "as": "items|pages"},
    {"kind": "page", "url": "<a page that lists many items>", "group": ""},
    {"kind": "search", "queries": ["<query>", ...], "group": "<group>", "country": "US", "count": 20,
@@ -874,6 +905,9 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
  "reference": ["<files that describe something the rows need (your product, rules, a price list), not items>"]}
 
 Rules:
+- A folder of many files alike (one item or a few in each) is one source with a pattern in its path
+  ("extra/report_*", "extra/*.pdf"), never a source per file. A table to look a fact up in (people, places,
+  codes, corrections) is no source: the items are looked up in it as they are judged.
 - Use the owner's own files and links first; they cost nothing to read. Search only when the list has to be
   found on the web, and then write 10-25 searches per group that find pages listing many of the right items
   (directories, catalogues, databases, rankings, "best of" and category pages), not one item each.
@@ -934,16 +968,23 @@ def _folder_listing(folder: Path) -> str:
     the setup call: tables with their columns and first rows, documents' first lines,
     links files' first links."""
     lines: list[str] = []
+    more = 0
     places = [folder / "extra", folder]
     seen: set[Path] = set()
     for place in places:
         if not place.is_dir():
             continue
         for p in sorted(place.iterdir()):
-            if not p.is_file() or p.name.startswith(".") or p in seen or len(lines) > 60 or p.name == LEDGER_FILE:
+            if not p.is_file() or p.name.startswith(".") or p in seen or p.name == LEDGER_FILE:
                 continue
             seen.add(p)
             rel = p.relative_to(folder).as_posix()
+            if len(lines) > LISTED_WHOLE:  # a large folder: the rest by name, so none goes unseen
+                if len(seen) <= LISTED_NAMES:
+                    lines.append(f"- {rel}")
+                else:
+                    more += 1
+                continue
             ext = p.suffix.lower()
             try:
                 if ext in fx.TABLE_EXTS:
@@ -961,6 +1002,8 @@ def _folder_listing(folder: Path) -> str:
                                      + " ".join(text[:400].split()))
             except Exception as e:  # noqa: BLE001 — listed as unreadable
                 lines.append(f"- {rel}: can't be read ({str(e)[:120]})")
+    if more:
+        lines.append(f"- … and {more} more files")
     return "\n".join(lines) or "(no files)"
 
 
@@ -1211,7 +1254,12 @@ async def plan(run: dict) -> list[dict] | None:
         if s.get("group") and s["group"] not in tagged:
             tagged.append(s["group"])
     if untagged or not tagged:
-        what = ", ".join(sorted({_source_words(s) for s in untagged})) or "its sources"
+        named = sorted({_source_words(s) for s in untagged})
+        files = [s for s in untagged if s["kind"] in ("file", "document")]
+        if len(files) > 4:  # a folder of files: counted, not named one by one
+            rest = sorted({_source_words(s) for s in untagged if s not in files})
+            named = [f"{len(files)} of the owner's files"] + rest
+        what = ", ".join(named) or "its sources"
         add(f"Go through {what} for {plural} and check each", "work")
     for g in tagged:
         n = recipe["groups"].get(g) or 0
@@ -2566,7 +2614,7 @@ class Work:
             return []
         return [f"extra/{p.name}" for p in sorted(extra.iterdir())
                 if p.is_file() and not p.name.startswith(".") and p.name != LEDGER_FILE
-                and p.suffix.lower() in fx.TABLE_EXTS + fx.DOC_EXTS][:30]
+                and p.suffix.lower() in fx.TABLE_EXTS + fx.DOC_EXTS][:LOOK_FILES]
 
     def _file_text(self, rel: str, find: str = "") -> str:
         """A file of the run's as text; with ``find``, only its lines that carry one of

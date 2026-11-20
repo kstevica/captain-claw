@@ -26,9 +26,9 @@ from captain_claw.flight_deck import crew_attach
 from captain_claw.flight_deck import first_mate_store as fms
 from captain_claw.flight_deck.first_mate_store import FirstMateError
 
-MAX_FILES = 30
+MAX_FILES = 200
 MAX_BYTES = 200_000_000
-RUN_MAX_FILES = 60
+RUN_MAX_FILES = 200
 RUN_MAX_BYTES = 400_000_000
 _META = ".meta.json"
 _ORIGINS = ".origins.json"  # in a run's extra/: where each file came from, for the page
