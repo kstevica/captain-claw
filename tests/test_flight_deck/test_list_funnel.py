@@ -2155,3 +2155,15 @@ async def test_an_items_link_is_read_as_its_site_and_read_once(deck):
     twin = next(r for r in funnel._read_csv(folder / funnel.ITEMS) if r["key"] == "lipa zagreb")
     assert (twin["status"], twin["stage"]) == ("dropped", "duplicate") and "already looked at as Konoba Lipa" in twin["reason"]
     assert sum("Lipa" in p for p in deck["decide_prompts"]) == 1  # one judging call, not two
+
+
+def test_a_filter_on_a_column_the_listing_doesnt_give_drops_nothing(tmp_path):
+    """Every restaurant was dropped before reading: a setup filter "Adresa matches
+    Zagreb" ran on search hits, which give no address."""
+    contract = [{"id": "a", "text": "x", "check": {"type": "table", "path": "r.csv", "columns": ["Naziv", "Adresa", "Web"]}}]
+    recipe = funnel.normalize_recipe({"filters": [{"column": "Adresa", "op": "regex", "value": "Zagreb"}]},
+                                     funnel.from_contract(contract))
+    w = funnel.Work({"id": "r", "config": {}}, {"step_key": "step-1"}, recipe, tmp_path)
+    assert w.passes({"fields": {"name": "Konoba A", "url": "https://konoba-a.example"}}) == ""  # not known yet
+    assert w.passes({"fields": {"name": "Konoba B", "Adresa": "Ilica 5, Zagreb"}}) == ""
+    assert w.passes({"fields": {"name": "Konoba C", "Adresa": "Riva 2, Split"}}) == "Adresa doesn't match"
