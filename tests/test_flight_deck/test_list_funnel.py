@@ -184,6 +184,12 @@ async def deck(tmp_path, monkeypatch):
         return state["tools"]
 
     monkeypatch.setattr(funnel, "make_tools", no_tools)
+    from captain_claw.flight_deck import jev_routes
+
+    async def no_jev(*_a, **_k):  # no Jev here unless a test connects one
+        raise jev_routes.JevNotConnected()
+
+    monkeypatch.setattr(jev_routes, "ask_for_owner", no_jev)
     state["store"] = store
     yield state
     await store.close()
@@ -2301,3 +2307,89 @@ async def test_a_rules_own_alternative_is_applied_by_code(deck):
     assert got["Konoba B"][0] == "maybe"
     assert got["Konoba C"][0] == "kept"  # not shown is not broken, and the charter says how to take it
     assert "procijenjeno da je dobar" in got["Konoba C"][1]
+
+
+CUISINES = [{"id": "fm1", "text": "r.csv; po 2 u skupini", "check": {
+    "type": "table", "path": "r.csv", "columns": ["Naziv", "Kuhinja", "Telefon"], "min_per": {"Kuhinja": 2},
+    "allowed": {"Kuhinja": ["hrvatska kuhinja", "talijanska kuhinja", "azijska kuhinja"]}}}]
+
+
+async def test_an_items_group_is_typed_and_jev_decides_it(deck, monkeypatch):
+    """A Japanese restaurant was dropped in the Croatian step: its reason named all three
+    groups, so code read none. an Italian one's said "Italian-leaning", which no group's words
+    matched; a fusion bar's also named a phone not found. The group is now a typed answer, and
+    Jev (when connected) decides it."""
+    from captain_claw.flight_deck import jev_routes
+    asked = []
+
+    async def no_jev(owner, state, questions, model=None, *, source, agent=""):
+        asked.append(state["item"])
+        raise jev_routes.JevNotConnected()
+
+    monkeypatch.setattr(jev_routes, "ask_for_owner", no_jev)
+    run, folder = await _run(deck["store"], CUISINES, {"funnel_loosen": "never"}, rid="bat_typedgrp")
+    (folder / "extra" / "hr.csv").write_text("Naziv,Telefon\nSora,01 555 0101\nOsteria Uno,01 555 0202\nBao Bar,\n"
+                                             "Hotelski,01 555 0303\nOsteria Due,01 555 0404\n")
+    kitchen, phone, hotel, rating = ("Kuhinja je jedna od tri", "Ima telefon na vlastitoj stranici",
+                                     "Nije hotelski restoran", "Ocjena 4.5 ili viša")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "group_by": "Kuhinja", "decide": "Restorani.",
+                      "sources": [{"kind": "file", "path": "extra/hr.csv", "group": "hrvatska kuhinja"}],
+                      "rules": [{"rule": kitchen, "kind": "must", "fact": "identity", "columns": ["Kuhinja"]},
+                                {"rule": phone, "kind": "must", "fact": "contact", "columns": ["Telefon"]},
+                                {"rule": hotel, "kind": "must", "fact": "identity"},
+                                {"rule": rating, "kind": "must", "fact": "measured"}]}
+
+    def decide(items):
+        said = {"Sora": ([kitchen], "", "azijska kuhinja",
+                          "Japanska kuhinja ne pripada nijednoj od tri (hrvatska, talijanska, azijska)."),
+                "Osteria Uno": ([kitchen], "", "talijanska kuhinja", "Mediterranean, Italian-leaning; not Croatian."),
+                "Bao Bar": ([kitchen, phone], "", "azijska kuhinja", "Fusion/Asian street food; no phone read."),
+                "Hotelski": ([hotel], "hotel", "talijanska kuhinja", "A hotel's restaurant."),
+                "Osteria Due": ([rating], "4.3", "talijanska kuhinja", "Ocjena 4.3, talijanska kuhinja.")}
+        return [{"id": i, "verdict": "drop", "broken": said[f["Naziv"]][0], "shown": said[f["Naziv"]][1],
+                 "group": said[f["Naziv"]][2], "reason": said[f["Naziv"]][3], "row": {"Naziv": f["Naziv"]}}
+                for i, f in items]
+
+    (folder / "extra" / "hr.csv").write_text((folder / "extra" / "hr.csv").read_text()
+                                             .replace("Hotelski,01 555 0303", "Hotelski,hotel 01 555 0303")
+                                             .replace("Osteria Due,01 555 0404", "Osteria Due,4.3 01 555 0404"))
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert 'also carries "group"' in deck["decide_prompts"][0]
+    got = {r["name"]: (r["status"], r["group"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["Sora"] == ("handed", "azijska kuhinja")  # its typed group, not words of its reason
+    assert got["Osteria Uno"] == ("handed", "talijanska kuhinja")
+    assert got["Bao Bar"] == ("handed", "azijska kuhinja")  # a phone not found is no reason to keep it from its group
+    assert got["Hotelski"][0] == "dropped"  # what it is breaks another rule: out everywhere
+    assert got["Osteria Due"][0] == "dropped"  # a 4.3 rating read fails there too
+    assert asked == ["Sora"]  # Jev asked only where a drop for its kind goes, and not again once it isn't connected
+
+    # Jev connected and sure: its choice decides; "none" keeps the drop
+    async def jev(owner, state, questions, model=None, *, source, agent=""):
+        pick = {"Sora": ("talijanska kuhinja", 0.9), "Osteria Uno": ("none", 0.9), "Bao Bar": ("hrvatska kuhinja", 0.3)}
+        choice, conf = pick[state["item"]]
+        assert set(questions["group"]["options"]) == {"hrvatska kuhinja", "talijanska kuhinja", "azijska kuhinja", "none"}
+        return {"answers": {"group": {"type": "choice", "choice": choice, "confidence": conf}}}
+
+    monkeypatch.setattr(jev_routes, "ask_for_owner", jev)
+    w = funnel.Work(await deck["store"].get_run(run["id"]), {"step_key": "step-x"}, funnel.load_recipe(folder),
+                    folder, group="hrvatska kuhinja")
+    v = {"broken": [kitchen], "shown": "", "group": "azijska kuhinja"}
+    assert await w._drop_goes_to(v, {"fields": {"name": "Sora"}, "evidence": []}, "x") == "talijanska kuhinja"
+    assert await w._drop_goes_to(v, {"fields": {"name": "Osteria Uno"}, "evidence": []}, "x") == ""
+    assert await w._drop_goes_to(v, {"fields": {"name": "Bao Bar"}, "evidence": []}, "x") == "azijska kuhinja"  # unsure
+
+
+async def test_a_near_misses_missing_rules_are_kept(deck):
+    run, folder = await _run(deck["store"], CUISINES, {"funnel_loosen": "never"}, rid="bat_missingrl")
+    (folder / "extra" / "hr.csv").write_text("Naziv,Telefon\nKonoba A,\n")
+    phone = "Ima telefon na vlastitoj stranici"
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "group_by": "Kuhinja", "decide": "Restorani.",
+                      "sources": [{"kind": "file", "path": "extra/hr.csv", "group": "hrvatska kuhinja"}],
+                      "rules": [{"rule": phone, "kind": "must", "fact": "contact", "columns": ["Telefon"]}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "maybe", "missing": [phone], "group": "hrvatska kuhinja",
+                                     "reason": "Nema telefona.", "row": {"Naziv": f["Naziv"]}} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert funnel._read_csv(folder / funnel.MAYBE)[0]["missing"] == phone

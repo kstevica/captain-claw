@@ -705,6 +705,28 @@ alternative, whether or not rules may be read loosely (a drop that shows nothing
 becomes that maybe first). A maybe that also lacks a fact with no alternative (a
 phone) stays nearly there. The conventions show each rule's alternative.
 
+Which group an item is in was read from words: the judging call wrote the group into
+its row, and for a drop code looked in its free-text reason for exactly one other
+group's name or phrase. That failed three ways in one step: a Japanese restaurant's
+reason listed all three groups (two others named: no guess), an Italian one's said
+"Italian-leaning" (the group is "talijanska kuhinja", its phrases end in "zagreb"),
+and a fusion bar's also named a phone not found, which blocked the hand-over. Now:
+
+- every judging answer carries a typed "group": exactly one of the list's groups, or
+  "none". A keep or maybe with no group in its column takes it; a drop about its kind
+  goes to that group's step;
+- when the owner has Jev connected, Jev decides where such a drop goes: one typed
+  choice question (the list's groups and "none", each with its group words), taken
+  when Jev's confidence is 0.6 or more; "none" keeps the drop; not connected, unsure
+  or failed, the typed group decides (and reason words last);
+- a drop is kept from the group it fits only by a rule shown broken: what the item is
+  (a hotel's restaurant), or a fact read (a 4.3 rating). A fact not found is no
+  reason;
+- the rule about the list's groups is marked when the recipe is tidied (its group
+  column is taken off its columns, so it couldn't be told before);
+- a fact asked for "if shown" or "if visible" has the alternative "left empty", and
+  each near miss records the rules it was missing (`maybe.csv`), to trace why.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
