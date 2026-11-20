@@ -566,6 +566,79 @@ The same run showed three more general faults, fixed:
   merge, when loose rows fill a group, when the finishing step adds rows, and in the
   came-close file.
 
+The next run of the same list showed the duplicate check too strict, and other faults:
+
+- **An address written two ways isn't two branches.** "Ilička ulica" and "Ilička",
+  "Lipova 10" and "Ul. Lipove 10" (another grammatical case) made one restaurant two.
+  Now two rows are apart only when both give a phone and the phones differ, or both
+  give house numbers and none is shared, or both give street words and none is shared
+  (words compared by their first four letters; postal codes and city names left
+  out). A word of the name shared with the same phone or email, or with the same
+  address, is the same item too, even when one row cites a guide's page.
+- **A cell left empty isn't a rule broken.** Twelve items were dropped for "Adresa is
+  empty", "Web is empty", "Preporuka is empty". Now a required column left empty
+  makes the item nearly there (the finishing step and the came-close file get it),
+  or loose when the column belongs to a soft rule.
+- **The address was filled only when every cell of the place rule was empty.** A
+  district named left the address empty. Now each empty address column is filled;
+  a phone column in any language ("Telefon") is filled from the item's own pages.
+- **A source column holding a name.** A review count was checked against "Google", a
+  name, not a link, so every row with a review count failed. A source that isn't a
+  link names no page: anything read counts.
+- **Phones written another way.** "+385 1 …" against "01 …" on the page: phones are
+  compared by their last eight digits.
+- **A size filter from a limit on locations.** "Not a chain with more than 3
+  locations" became a staff-size filter of 3. The setup prompt says size filters
+  count people only.
+- **Handed over for the wrong reason.** The Italian step handed a hotel's restaurant
+  and a fast-food place to the Croatian group: "restoran" and "food" were words of the
+  Croatian group's phrases. Now a text names a group by the stems of the group's own
+  name or by one of its phrases whole, and a drop that broke any rule other than the
+  one about the groups (not a hotel's restaurant, not fast food, a rating) stays a drop.
+
+That run ended by itself (24 rows, 22 on the looser reading). Its reviewers named two
+more faults, fixed:
+
+- **The charter's file names.** It asked for `sazetak.md` and `iskljuceni.md`; the run
+  wrote `summary.md` and `exclusions.md`. The setup now gives the names the charter
+  uses for the summary and the dropped items (`files`), and the merge writes them
+  there (a name outside the run's folder, or not a text file, is ignored).
+- **The came-close file's group column** kept a page's word ("Sushi"); it is now the
+  list's group.
+
+Only 1 of 24 rows had a rating, though the setup searched each restaurant's rating:
+the 11 that came back with a rating and review count were the ones dropped by the
+named-source check fixed above. The run's results also show the list itself first
+now: a file a table or document check reads is what the run was asked to deliver.
+
+The next run (record of earlier runs forgotten) built 24 different restaurants in 16
+minutes, 7 with a rating, under the charter's file names. Three general faults left:
+
+- **One unproven value dropped the whole item.** A phone cited from an Instagram or
+  Facebook page Captain can't read, a review count not in anything read. Now a value
+  what was read doesn't bear out is left out: a fact the item's own pages show takes
+  its place (their phone, not a wrong one); a soft rule left with nothing shown is
+  met by its looser reading; any other cell left empty makes the item nearly there.
+  Never a kept row with a value that wasn't read, nor with a cell the list needs
+  left empty.
+- **A place in an item's own name was taken for where it is.** "Royal India" was "not
+  in Croatia (its listing says India)". Places its name has in it don't count, on its
+  listing or on its own pages.
+- **What one row is read as a sentence.** "a restaurant in Zagreb suitable for a
+  business lunch", cut at 40 characters, made notes like "the same a restaurant in
+  Zagreb suitable for a bu as …". Now the leading article and everything from "in",
+  "for", "suitable", "with"… go ("restaurant"), and a long one is cut at a word.
+
+That run's reviewers said 18 of its 24 rows met the rating or contact rule only by
+its looser reading, while the charter accepts a short list when the summary explains
+it ("8 per group, or sazetak.md explains the shortfall"). Now the setup says so
+(`shortage_ok`) when the charter itself accepts fewer rows with the reason given;
+then no rule is read loosely (as with the factory's "never loosen"), whatever the
+factory's setting: what meets a rule only loosely comes close and goes to the
+came-close file, the summary's "Short" section says the charter accepts it, and a
+short list settles the review as a complete one does, so no agents are sent to fill
+it.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left

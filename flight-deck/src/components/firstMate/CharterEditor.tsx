@@ -272,7 +272,7 @@ export function RunnerPicker({ value, leftovers, loosen, onChange, listy }: {
           <label className="mt-1.5 flex cursor-pointer items-start gap-2 text-[11px] text-zinc-400">
             <input type="checkbox" checked={loosen} onChange={(e) => onChange(value, leftovers, e.target.checked)}
               className="mt-0.5 h-3.5 w-3.5 accent-violet-600" />
-            <span>When a group runs short, loosen the soft rules: rows that miss only evidence many never publish (recent news, a signal, a rating) fill it after every strict row. The run says which rules it reads as soft.</span>
+            <span>When a group runs short, loosen the soft rules: rows that miss only evidence many never publish (recent news, a signal, a rating) fill it after every strict row. The run says which rules it reads as soft. Not when the charter itself accepts a short list with the reason given: then every rule is kept as written.</span>
           </label>
         </>
       )}

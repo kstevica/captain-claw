@@ -247,16 +247,18 @@ async def test_an_offline_list_needs_no_web(deck):
     work, merged = await _go(deck["store"], run, steps)
     assert deck["asked"] == ["setup", "decide:3"]  # one call for the three rows left after code's filters
     assert work["ok"] and work["output"].startswith("1 kept of 3. Short: its sources ran out.")
-    assert "Looked at 4 items: 1 kept, 1 maybe" in work["output"]
+    assert "Looked at 4 items: 1 kept, 2 maybe" in work["output"]
     assert (folder / "people.csv").read_text().splitlines() == ["Name,Email,Team", "Ana,ana@acme.example,a"]
     dropped = (folder / "exclusions.md").read_text()
-    assert "matches what's excluded" in dropped and "bo@wrong.example" in dropped and "isn't in what was read" in dropped
-    assert "di@delta.example" in (folder / funnel.MAYBE).read_text()
+    assert "matches what's excluded" in dropped
+    maybe = (folder / funnel.MAYBE).read_text()  # an email it got wrong is left out, never on the list: Bo came close
+    assert "di@delta.example" in maybe and "couldn't confirm Email 'bo@wrong.example'" in maybe
+    assert "bo@wrong.example" not in json.dumps([m["row"] for m in funnel._read_csv(folder / funnel.MAYBE)])
     statuses = [r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)]
-    assert sorted(statuses) == ["dropped", "dropped", "kept", "maybe"]  # the duplicate was never looked at twice
+    assert sorted(statuses) == ["dropped", "kept", "maybe", "maybe"]  # the duplicate was never looked at twice
     note = (folder / "progress" / "step-1.md").read_text()
-    assert "Kept so far: 1 of 3" in note and "1 kept, 1 maybe, 2 dropped" in note
-    assert merged["output"].startswith("`people.csv`: 1 rows of 3.") and "`exclusions.md`: 2 dropped" in merged["output"]
+    assert "Kept so far: 1 of 3" in note and "1 kept, 2 maybe, 1 dropped" in note
+    assert merged["output"].startswith("`people.csv`: 1 rows of 3.") and "`exclusions.md`: 1 dropped" in merged["output"]
     # run again (a restart, a Continue): nothing is looked at twice
     again = await bat_routes._bat_attempt(await deck["store"].get_run(run["id"]), steps[0])
     assert "Looked at 0 items" in again["output"] and deck["asked"].count("decide:3") == 1
@@ -326,7 +328,7 @@ def _web_deck(deck, recent):
     deck["tools"] = _Tools(
         pages={"https://alpha.example/": f"Alpha. News {recent}-10: we use AI for reports.",
                "https://alpha.example/contact": "Write to hello@alpha.example",
-               "https://gamma.example/": "Gamma consulting.", "https://gamma.example/contact": "gamma@gamma.example"},
+               "https://gamma.example/": "Gamma consulting.", "https://gamma.example/contact": "Write to us with the form."},
         results={"x firms list": "list results",
                  '"Alpha" site:linkedin.com/company': _result("Alpha", "https://linkedin.com/company/alpha", "11-50 employees"),
                  '"Beta" site:linkedin.com/company': _result("Beta", "https://linkedin.com/company/beta", "51-200 employees"),
@@ -366,9 +368,10 @@ async def test_a_web_list_checks_size_first_and_proves_its_sources(deck):
     assert deck["asked"].count("decide:1") == 3 and "queries" in deck["asked"]  # still short: asked for more
     rows = funnel._read_csv(folder / "firms.csv")
     assert [r["Firm"] for r in rows] == ["Alpha"] and rows[0]["Email"] == "hello@alpha.example"
-    why = {r["key"]: r["reason"] for r in funnel._read_csv(folder / funnel.ITEMS) if r["status"] == "dropped"}
-    assert why["beta.example"].startswith("51-200 people")
-    assert "boss@gamma.example" in why["gamma.example"] and "isn't in https://gamma.example/contact" in why["gamma.example"]
+    why = {r["key"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert why["beta.example"][0] == "dropped" and why["beta.example"][1].startswith("51-200 people")
+    # an email that isn't on the page it cites is left out, never on the list: Gamma came close
+    assert why["gamma.example"] == ("maybe", "couldn't confirm Email 'boss@gamma.example' in what was read")
     assert work["output"].startswith("x: 1 of 2 kept. Short: its sources ran out.")
     queries = json.loads((folder / funnel.QUERIES).read_text())
     assert queries["searches"] == 5 and queries["used"] == ["x firms list"]  # 1 list, 3 size bands, 1 site lookup
@@ -945,7 +948,7 @@ async def test_a_size_read_off_a_page_about_something_else_is_no_size(deck):
     why = {r["key"]: r["reason"] for r in funnel._read_csv(folder / funnel.ITEMS)}
     assert not any(w.startswith("201-500") for w in why.values()), why
     assert why["beta.example"].startswith("51-200 people")  # its own page still counts
-    assert "isn't in https://gamma.example/contact" in why["gamma.example"]  # read and judged, not cut on size
+    assert "couldn't confirm Email 'boss@gamma.example'" in why["gamma.example"]  # read and judged, not cut on size
     assert [r["Firm"] for r in funnel._read_csv(folder / funnel.ROWS)] == ["Alpha"]
 
 
@@ -1050,7 +1053,9 @@ async def test_a_short_list_takes_rows_on_a_looser_reading_after_every_strict_on
     assert "# Rule tiers" in deck["decide_prompts"][0] and "looser: no code link" in deck["decide_prompts"][0]
     assert work["output"].startswith("1 kept of 3, 2 more on a looser reading. Looked at 5 items")
     why = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
-    assert why["Delta"][0] == "dropped" and "made-up" in why["Delta"][1]  # a value given must still be in its source
+    # a value given must still be in its source: the link it made up is left out, and then its 2 citations fail
+    assert why["Delta"] == ("dropped", "check: Cites 2 is under 10")
+    assert "made-up" not in (folder / funnel.LOOSE).read_text() + (folder / funnel.ROWS).read_text()
     assert why["Beta"][0] == "dropped" and "Cites 3 is under 10" in why["Beta"][1]  # loosened only the code rule
     assert why["Gamma"][0] == why["Eps"][0] == "loose"
     # the run panel counts them as ready: a group full of loose rows isn't "0 of N"
@@ -1426,7 +1431,9 @@ async def test_a_firm_reached_by_its_contact_page_never_gets_a_guessed_address(d
     await _go(deck["store"], run, steps[:1])
     got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
     assert got["A"][0] == "loose"  # reached by its contact page, no address
-    assert got["B"][0] == "dropped" and "Email" in got["B"][1]  # an address not on a page read never passes
+    # an address not on a page read never passes: left out, B is reached by its contact page too
+    assert got["B"][0] == "loose" and "couldn't confirm Email 'guess@b.example'" in got["B"][1]
+    assert {r["Firm"]: r["Email"] for r in funnel._read_csv(folder / funnel.LOOSE)}["B"] == ""
     assert "Never loosened" not in funnel.conventions(funnel.load_recipe(folder)).split("## Rules")[0]
     assert "contact page or form" in funnel.conventions(funnel.load_recipe(folder))
 
@@ -1767,6 +1774,25 @@ def test_groups_named_by_a_word_every_group_shares_are_no_group(tmp_path):
     assert w._group_named("Azijska") == "azijska kuhinja" and w._group_named("kuhinja") == ""
 
 
+def test_a_word_inside_a_groups_phrases_doesnt_name_it(tmp_path):
+    """The Italian step handed a hotel's restaurant ("Hotelski restoran") and a fast-food
+    place ("Fast food") to the Croatian group: "restoran" and "food" were words of its
+    phrases ("restoran hrvatske kuhinje", "traditional croatian food"). And breaking
+    another rule of what the item is (not a hotel's) is no reason to hand it over."""
+    words = {"hrvatska kuhinja": ["konoba", "restoran hrvatske kuhinje", "traditional croatian food"],
+             "talijanska kuhinja": ["trattoria", "italian restaurant"], "azijska kuhinja": ["sushi", "asian restaurant"]}
+    recipe = funnel.normalize_recipe({"group_by": "Kuhinja", "group_words": words}, funnel.from_contract([{
+        "id": "a", "text": "x", "check": {"type": "table", "path": "r.csv", "columns": ["Naziv", "Kuhinja"],
+                                          "min_per": {"Kuhinja": 2}, "allowed": {"Kuhinja": list(words)}}}]))
+    w = funnel.Work({"id": "r", "config": {}}, {"step_key": "step-2"}, recipe, tmp_path, group="talijanska kuhinja")
+    assert w._other_group("Hotelski restoran (hotel u centru)") == ""
+    assert w._other_group("Fast food/zalogajnica") == ""
+    assert w._other_group("Tradicionalna konoba s domaćom hranom.") == "hrvatska kuhinja"  # a phrase of its own
+    assert w._other_group("Serves traditional Croatian food.") == "hrvatska kuhinja"
+    assert w._is_group_rule({"rule": "Kuhinja je točno jedna od: hrvatska, talijanska, azijska"})
+    assert not w._is_group_rule({"rule": "Nije hotelski restoran"})
+
+
 async def test_a_drop_that_broke_another_rule_stays_a_drop(deck):
     """"Rating 4.3 is below 4.5; cuisine is Italian, not Croatian": the Italian step
     would drop it for the rating too."""
@@ -1792,7 +1818,8 @@ async def test_the_place_rules_address_comes_from_its_own_pages(deck):
     """Seven restaurants came out nearly there with Adresa and Kvart empty, their
     address printed on their own pages."""
     contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv",
-                                                     "columns": ["Naziv", "Web", "Adresa", "Kvart"], "min_rows": 2}}]
+                                                     "columns": ["Naziv", "Web", "Adresa", "Kvart", "Telefon"],
+                                                     "min_rows": 2}}]
     run, folder = await _run(deck["store"], contract, rid="bat_address01")
     run = {**run, "task": "Pronađi restorane u Zagrebu."}
     deck["recipe"] = {"item": "restoran", "key": "Naziv", "site_column": "Web",
@@ -1803,13 +1830,16 @@ async def test_the_place_rules_address_comes_from_its_own_pages(deck):
     deck["extract"] = lambda user: {"items": [{"name": "Konoba Lipa", "url": "https://konoba-lipa.example",
                                                "fields": {"Naziv": "Konoba Lipa", "Web": "https://konoba-lipa.example"}}]}
     deck["tools"] = _Tools(pages={"https://konoba-lipa.example": "Konoba Lipa\nNajbolja domaća kuhinja",
-                                  "https://konoba-lipa.example/kontakt": "Kontakt\nLipova 10, 10000 Zagreb\nRadno vrijeme 12-23"},
+                                  "https://konoba-lipa.example/kontakt": "Kontakt\nLipova 10, 10000 Zagreb\n"
+                                                                         "Tel. +385 1 234 5678\nRadno vrijeme 12-23"},
                            results={"restorani Zagreb": "list results"})
-    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {**f}} for i, f in items]
+    # it named the district but left the address (and phone) empty
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {**f, "Kvart": "Donji grad"}} for i, f in items]
     steps = await funnel.plan(run)
     await bat_routes._bat_attempt({**(await deck["store"].get_run(run["id"])), "task": run["task"]}, steps[0])
     rows = funnel._read_csv(folder / funnel.ROWS)
-    assert rows and rows[0]["Adresa"] == "Lipova 10, 10000 Zagreb"
+    assert rows and rows[0]["Adresa"] == "Lipova 10, 10000 Zagreb" and rows[0]["Kvart"] == "Donji grad"
+    assert fx.in_text(rows[0]["Telefon"], "+385 1 234 5678")  # "Telefon" is a phone column too
 
 
 async def test_what_came_close_is_a_result_of_its_own(deck):
@@ -1905,6 +1935,18 @@ def test_an_item_found_again_under_another_name_is_the_same_item():
     assert same.of({"Naziv": "Restac Maksimir", "Adresa": "Maksimirska 5", "Web": "https://restac.example",
                     "Telefon": "+385 1 999 8888"}) == ""
     assert same.of({"Naziv": "Bob C", "Web": "https://instagram.com/bob"}) == ""  # a shared site: its own page
+    # the same address written two ways isn't another branch
+    same.add({"Naziv": "Kotač", "Adresa": "Ilička ulica", "Web": "https://kotac.example", "Telefon": "01 555 0101"})
+    same.add({"Naziv": "Lipa", "Adresa": "Lipova 10, 10000 Zagreb", "Web": "https://lipa-zg.example"})
+    assert same.of({"Naziv": "Restoran Kotač", "Adresa": "Ilička", "Web": "https://kotac.example"}) == "Kotač"
+    assert same.of({"Naziv": "Restoran Lipa", "Adresa": "Ul. Lipove 10", "Web": "https://lipa-zg.example/"}) == "Lipa"
+    # one row cites a guide's page, not its own site: a word of its name and the same address, or phone
+    same.add({"Naziv": "ResLUK (Luk)", "Adresa": "Brežna 140", "Web": "https://guide.example/en/restaurants/luk"})
+    assert same.of({"Naziv": "Restoran LUK", "Adresa": "Brežna 140, 10000 Zagreb",
+                    "Web": "https://restaurant-luk.example"}) == "ResLUK (Luk)"
+    assert same.of({"Naziv": "Kotač bistro", "Web": "https://guide.example/kotac", "Telefon": "+385 1 555 0101"}) == "Kotač"
+    assert same.of({"Naziv": "Restoran Mak", "Adresa": "Savska ulica 140", "Web": "https://mak.example"}) == ""
+    assert same.of({"Naziv": "Kotač Novi", "Adresa": "Savska 1", "Web": "https://kotac.example"}) == ""  # another street
     assert same.of({"Naziv": "Nowhere", "Web": ""}) == ""
     assert funnel.SameItems({"columns": ["Naziv"], "key": "Naziv"}).of({"Naziv": "x"}) == ""  # no site column
 
@@ -1932,3 +1974,155 @@ async def test_the_same_item_under_another_name_isnt_kept_twice(deck):
     funnel._append_csv(folder / funnel.ROWS, recipe["columns"] + [funnel._GROUP_COL],
                        {"Naziv": "Konoba A 900", "Adresa": "Ilica 1", "Web": "https://konoba-a.example"})
     assert [r["Naziv"] for r in funnel.write_list(folder, recipe)] == ["Konoba A", "Konoba A Maksimir"]
+
+
+def test_a_named_source_and_a_phone_written_another_way_are_in_evidence():
+    """A review count was checked against "Google" (the source column held a name, not a
+    link), and a phone written "+385 1 ..." wasn't found where the page wrote "01 ..."."""
+    recipe = {"checks": [{"column": "Recenzije", "op": "in_evidence", "source_column": "Izvor"},
+                         {"column": "Telefon", "op": "in_evidence", "source_column": "Web"}]}
+    read = {"https://lipa.example": "Rezervacije 01 555 0202", "https://guide.example/lipa": "1.234 recenzija"}
+    row = {"Recenzije": "1.234", "Izvor": "Google", "Telefon": "+385 1 555 0202", "Web": "https://lipa.example"}
+    assert funnel.check_row(recipe, row, read) == ""
+    assert "isn't in what was read" in funnel.check_row(recipe, {**row, "Recenzije": "999"}, read)
+    assert "isn't in https://lipa.example" in funnel.check_row(recipe, {**row, "Telefon": "+385 1 555 0203"}, read)
+    assert not fx.in_text("2023-2024", "from 2023 to 2024")
+
+
+EMPTY_CELLS = [{"id": "fm1", "text": "r.csv", "check": {"type": "table", "path": "r.csv",
+                                                       "columns": ["Naziv", "Adresa", "Web", "Preporuka"], "min_rows": 4}}]
+
+
+async def test_a_cell_left_empty_is_nearly_there_not_a_rule_broken(deck):
+    """Twelve restaurants were dropped for "Adresa is empty", "Web is empty" or
+    "Preporuka is empty": a fact not found isn't a rule broken."""
+    run, folder = await _run(deck["store"], EMPTY_CELLS, rid="bat_emptycel")
+    (folder / "extra" / "r.csv").write_text(
+        "Naziv,Adresa,Web,Preporuka\nKonoba A,Ilica 1,https://a.example,štrukli\nKonoba B,Ilica 2,https://b.example,\n"
+        "Konoba C,,https://c.example,juha\nKonoba D,Ilica 4,,sarma\n")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "site_column": "Web",
+                      "sources": [{"kind": "file", "path": "extra/r.csv"}], "decide": "Restorani.",
+                      "rules": [{"rule": "Restoran u Zagrebu", "kind": "must", "fact": "place", "columns": ["Adresa"]},
+                                {"rule": "Preporuka je jelo s jelovnika", "kind": "prefer", "fact": "other",
+                                 "columns": ["Preporuka"], "looser": "prazno kad jelovnik nije objavljen"}],
+                      "checks": [{"column": c, "op": "required"} for c in ("Naziv", "Adresa", "Web", "Preporuka")]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": f} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["Konoba A"][0] == "kept"
+    assert got["Konoba B"] == ("loose", "meets only the looser reading of: Preporuka je jelo s jelovnika")
+    assert got["Konoba C"][0] == "maybe"  # its address: the finishing step and the came-close file get it
+    assert got["Konoba D"] == ("maybe", "left Web empty")
+    assert "dropped" not in {st for st, _ in got.values()}
+    maybe = {m["name"]: json.loads(m["row"]) for m in funnel._read_csv(folder / funnel.MAYBE)}
+    assert maybe["Konoba D"] == {"Naziv": "Konoba D", "Adresa": "Ilica 4", "Preporuka": "sarma"}
+
+
+def test_a_size_filter_counts_people_only():
+    """"Not a chain with more than 3 locations" became a size filter of 3 (people)."""
+    assert "size_max and size_min count people (staff, employees) only" in funnel.SETUP_SYSTEM
+    assert "a limit on locations" in funnel.SETUP_SYSTEM
+
+
+async def test_the_summary_and_the_dropped_items_go_under_the_charters_names(deck):
+    """The charter asked for sazetak.md and iskljuceni.md; the run wrote summary.md and
+    exclusions.md, and the reviewers said the files were missing."""
+    run, folder = await _run(deck["store"], PEOPLE, rid="bat_charnames")
+    (folder / "extra" / "people.csv").write_text("Name,Email,Team\nAna,ana@x.example,a\nBo,bo@x.example,c\n")
+    deck["recipe"] = {"item": "person", "key": "Email", "sources": [{"kind": "file", "path": "extra/people.csv"}],
+                      "decide": "People in team a or b.",
+                      "files": {"summary": "sazetak.md", "exclusions": "../iskljuceni.md"}}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": f} for i, f in items]
+    steps = await funnel.plan(run)
+    merged = (await _go(deck["store"], run, steps))[-1]
+    recipe = funnel.load_recipe(folder)
+    assert funnel.summary_name(recipe) == "sazetak.md"
+    assert funnel.exclusions_name(recipe) == "exclusions.md"  # a name outside the folder isn't taken
+    assert (folder / "sazetak.md").is_file() and not (folder / funnel.SUMMARY).exists()
+    assert "`sazetak.md`: how it went" in merged["output"]
+    bare = funnel.normalize_recipe({"files": {"summary": "people.csv", "exclusions": "notes.pdf"}},
+                                   funnel.from_contract(PEOPLE))
+    assert funnel.summary_name(bare) == "summary.md" and funnel.exclusions_name(bare) == "exclusions.md"
+
+
+def test_the_came_close_group_is_written_as_the_list_names_it(tmp_path):
+    recipe = funnel.normalize_recipe({"group_by": "Kuhinja"}, funnel.from_contract(KITCHENS))
+    funnel._append_csv(tmp_path / funnel.MAYBE, funnel._MAYBE_COLS,
+                       {"key": "gyo", "name": "Gyo bar", "group": "talijanska kuhinja",
+                        "fields": json.dumps({"Naziv": "Gyo bar", "Kuhinja": "Sushi"}), "why": "no address"})
+    got = funnel.write_came_close(tmp_path, recipe)
+    assert [(r["Naziv"], r["Kuhinja"]) for r in got] == [("Gyo bar", "talijanska kuhinja")]
+
+
+PHONES = [{"id": "fm1", "text": "r.csv", "check": {"type": "table", "path": "r.csv", "columns": ["Naziv", "Web", "Telefon"],
+                                                  "min_rows": 3}}]
+
+
+async def test_a_value_that_isnt_borne_out_is_left_out_not_the_item(deck):
+    """Two restaurants were dropped because the phone the judging call gave came from an
+    Instagram or Facebook page Captain can't read: the value goes, not the item. One
+    its own pages print is taken instead of a wrong one."""
+    run, folder = await _run(deck["store"], PHONES, rid="bat_unproven")
+    (folder / "extra" / "r.csv").write_text("Naziv,Web\nKonoba A,https://konoba-a.example\n"
+                                            "Konoba B,https://www.instagram.com/konoba_b/\n")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "site_column": "Web", "decide": "Restorani.",
+                      "sources": [{"kind": "file", "path": "extra/r.csv"}],
+                      "gather": [{"kind": "fetch", "url": "{Web}", "paths": [""]}],
+                      "rules": [{"rule": "Ima telefon na vlastitoj stranici", "kind": "must", "fact": "contact",
+                                 "columns": ["Telefon"]}],
+                      "checks": [{"column": "Telefon", "op": "in_evidence", "source_column": "Web"}]}
+    deck["tools"] = _Tools(pages={"https://konoba-a.example": "Konoba A\nRezervacije: 01 555 0303"}, results={})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {
+        **f, "Telefon": "+385 1 555 9999" if f["Naziv"] == "Konoba A" else "+385 91 000 1111"}} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["Konoba A"][0] == "kept"  # the phone its own page prints, not the one it was given
+    assert fx.in_text(funnel._read_csv(folder / funnel.ROWS)[0]["Telefon"], "01 555 0303")
+    assert got["Konoba B"][0] == "loose" and "couldn't confirm Telefon '+385 91 000 1111'" in got["Konoba B"][1]
+    assert funnel._read_csv(folder / funnel.LOOSE)[0]["Telefon"] == ""
+
+
+def test_a_place_in_an_items_own_name_isnt_where_it_is():
+    """"Royal India" was dropped as "not in Croatia (its listing says India)"."""
+    assert fx.foreign_place("Royal India, authentic food from India", ["HR"], name="Royal India") == ""
+    assert fx.foreign_place("Royal India, authentic food from India", ["HR"]) == "India"
+    assert fx.foreign_place("Konoba X, Beograd", ["HR"], name="Konoba X") == "Beograd"  # elsewhere still counts
+    assert fx.foreign_on_own_pages("Royal India. India in every bite.", "royal-india.example", ["HR"],
+                                   name="Royal India") == ""
+
+
+def test_what_one_row_is_reads_as_a_noun():
+    """Notes read "the same a restaurant in Zagreb suitable for a bu as …"."""
+    assert funnel._short_item("a restaurant in Zagreb suitable for a business lunch") == "restaurant"
+    assert funnel._short_item("The independent bookshop with a cafe") == "independent bookshop"
+    assert funnel._short_item("small US knowledge firm") == "small US knowledge firm"
+    assert funnel._short_item("an open-source Python library for data validation and parsing") == "open-source Python library"
+    assert funnel._short_item("") == "item"
+
+
+async def test_a_charter_that_accepts_a_short_list_keeps_its_rules_as_written(deck):
+    """"8 per group, or the summary explains the shortfall": 18 of 24 rows were on a
+    looser reading, and the reviewers said the charter would rather have the shortage."""
+    run, folder = await _run(deck["store"], PAPERS, rid="bat_shortok01")
+    _papers(deck, folder)
+    deck["recipe"] = {**deck["recipe"], "shortage_ok": True}
+    steps = await funnel.plan(run)
+    notes = [e["message"] for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note"]
+    assert any("since the charter accepts a short list with the reason given" in n for n in notes)
+    recipe = funnel.load_recipe(folder)
+    assert recipe["shortage_ok"] and not funnel.loosen_on(await deck["store"].get_run(run["id"]), recipe)
+    assert "every rule is kept as written" in (folder / "shared" / "conventions.md").read_text()
+    await _go(deck["store"], run, steps)
+    assert "# Rule tiers" not in deck["decide_prompts"][0]
+    assert [r["Title"] for r in funnel._read_csv(folder / "papers.csv")] == ["Alpha"]  # no row on a looser reading
+    assert {r["Title"] for r in funnel._read_csv(folder / "papers-came-close.csv")} >= {"Gamma", "Eps"}
+    summary = (folder / funnel.SUMMARY).read_text()
+    assert "## Short" in summary and "The charter accepts a short list with the reason given" in summary
+    # short, as the charter allows: the review's points don't send agents to fill it
+    settled = funnel.review_settled(await deck["store"].get_run(run["id"]), "- more rows wanted")
+    assert settled.startswith("The list is short (the list 2 more), which the charter accepts")
+    assert "## Open points from the review" in (folder / funnel.SUMMARY).read_text()
+    # a charter that wants it full: still short, fix rounds go on
+    assert funnel.normalize_recipe({}, funnel.from_contract(PAPERS))["shortage_ok"] is False

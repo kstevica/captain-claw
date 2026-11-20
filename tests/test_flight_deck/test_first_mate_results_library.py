@@ -337,3 +337,13 @@ async def test_a_finished_run_says_what_it_made_and_how_long(home, tmp_path, mon
         assert progress["timing"] == finished["timing"]
     finally:
         await bat.close()
+
+
+def test_the_list_a_table_check_reads_is_the_result():
+    """A list run's summary.md was its result and the list itself one of the "other"
+    files: the table its done-checks read is what it was asked to deliver."""
+    run = {"config": {"contract": [
+        {"check": {"type": "table", "path": "./restorani.csv", "columns": ["Naziv"]}},
+        {"check": {"type": "document", "path": "report.docx"}},
+        {"check": {"type": "judge"}}]}}
+    assert results.named_by_checks(run) == {"restorani.csv", "report.docx"}

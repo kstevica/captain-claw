@@ -511,11 +511,19 @@ def place_phrase(code: str) -> str:
     return f"the {name}" if code in _THE else name
 
 
-def foreign_place(text: str, targets: list[str] | tuple[str, ...] = ("US",)) -> str:
+def _places_but(text: str, name: str = "") -> list[tuple[str, str]]:
+    """The places a text names, but those its item's own name has in it ("Royal India",
+    "Bombay Grill" are where they serve food from, not where they are)."""
+    own = {w.lower() for _code, w in places_named(name)} if name else set()
+    return [(code, w) for code, w in places_named(text) if w.lower() not in own]
+
+
+def foreign_place(text: str, targets: list[str] | tuple[str, ...] = ("US",), name: str = "") -> str:
     """The place outside ``targets`` a text names, when it names none of them; ""
     otherwise. For an item's listing: one in Belgrade, and nowhere in Croatia, isn't on
-    a Croatian list; one in Ontario, and nowhere American, isn't on a US list."""
-    named = places_named(text)
+    a Croatian list; one in Ontario, and nowhere American, isn't on a US list. A place
+    the item's ``name`` has in it doesn't count."""
+    named = _places_but(text, name)
     if not named or any(code in targets for code, _ in named):
         return ""
     return named[0][1]
@@ -583,10 +591,11 @@ def _tld_country(domain: str) -> str:
     return code if code in PLACES else ""
 
 
-def country_hints(text: str, own_domain: str = "") -> set[str]:
-    """The countries an organization's own pages point to: places they name, the
-    country domain of its site and of the addresses they print, phone country codes."""
-    out = {code for code, _ in places_named(text)}
+def country_hints(text: str, own_domain: str = "", name: str = "") -> set[str]:
+    """The countries an organization's own pages point to: places they name (but one
+    its own ``name`` has in it), the country domain of its site and of the addresses
+    they print, phone country codes."""
+    out = {code for code, _ in _places_but(text, name)}
     for d in [own_domain] + [e.split("@", 1)[1] for e in emails(text)]:
         if _tld_country(d):
             out.add(_tld_country(d))
@@ -597,10 +606,10 @@ def country_hints(text: str, own_domain: str = "") -> set[str]:
     return out
 
 
-def foreign_on_own_pages(text: str, own_domain: str, targets: list[str] | tuple[str, ...]) -> str:
+def foreign_on_own_pages(text: str, own_domain: str, targets: list[str] | tuple[str, ...], name: str = "") -> str:
     """The country outside ``targets`` an organization's own pages point to, when they
     point to none of the targets (a US address counts for the US); "" otherwise."""
-    hints = country_hints(text, own_domain)
+    hints = country_hints(text, own_domain, name)
     if not hints or any(code in targets for code in hints):
         return ""
     if "US" in targets and us_state(text, address_only=True):
@@ -639,6 +648,10 @@ def _norm(s: str) -> str:
     return " ".join(re.sub(r"[‘’“”]", "'", str(s or "")).lower().split())
 
 
+_PHONE_VALUE = re.compile(r"\+?[\d\s()./-]*\d(?:[\d\s()./-]*\d){6,}")  # at least 7 digits, nothing else
+_PHONE_RUN = re.compile(r"\+?\d[\d\s()./-]{5,}\d")
+
+
 def in_text(value: str, text: str) -> bool:
     """Does the text hold the value: case and spacing aside, and for a long value
     (over 60 characters, a sentence written about the source) its first 40
@@ -650,6 +663,9 @@ def in_text(value: str, text: str) -> bool:
         return True
     if "@" in v:  # an email may sit in a mailto: link, percent-encoded or not
         return v.replace("@", "%40") in t
+    if _PHONE_VALUE.fullmatch(v):  # a phone written another way: "+385 1 234 5678", "01/234-5678"
+        want = re.sub(r"\D", "", v)[-8:]
+        return any(re.sub(r"\D", "", m.group(0)).endswith(want) for m in _PHONE_RUN.finditer(t))
     return len(v) > 60 and v[:40] in t
 
 
