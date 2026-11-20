@@ -116,6 +116,7 @@ REFERENCE_CHARS = 3000   # what a judging call reads of the run's reference file
 CHARTER_CHARS = 3500     # and of the owner's charter (the columns' own rules)
 JEV_TIMEOUT_S = 20       # one typed question to Jev about an item's group
 JEV_SURE = 0.6           # Jev's confidence a group pick needs to stand over the judging answer
+JEV_NO = 0.4             # below this p(yes), Jev says an item doesn't meet a charter's alternative
 # Words a group shares with others: a group's searches name it by the rest.
 _GROUP_STOP = {"firms", "firm", "shops", "shop", "agencies", "agency", "boutiques", "boutique", "companies",
                "company", "services", "service", "groups", "group", "small", "and", "the", "for", "with"}
@@ -2103,14 +2104,19 @@ class Work:
             loosened = []
             if verdict == "maybe":
                 met, rest = self._alternatives(v)
-                if met and not rest and isinstance(v.get("row"), dict) and any(
-                        str(x).strip() for x in v["row"].values()):
-                    # what it lacked, the charter itself says how to take ("with no rating, judged good
-                    # enough"): met, not nearly there, whether or not rules may be read loosely
-                    verdict = "keep"
-                    note = "met by the charter's own words for a fact not found: " + "; ".join(
-                        f"{r['rule']} ({r['if_not_shown']})" for r in met)
-                    reason = f"{reason}; {note}" if reason else note
+                has_row = isinstance(v.get("row"), dict) and any(str(x).strip() for x in v["row"].values())
+                if met and not rest and has_row:
+                    doubt = await self._alternative_doubt(v, it, met, reason)
+                    if not doubt:
+                        # what it lacked, the charter itself says how to take ("with no rating, judged
+                        # good enough"): met, not nearly there, whether or not rules may be read loosely
+                        verdict = "keep"
+                        note = "met by the charter's own words for a fact not found: " + "; ".join(
+                            f"{r['rule']} ({r['if_not_shown']})" for r in met)
+                        reason = f"{reason}; {note}" if reason else note
+                    else:  # its own alternative isn't met after all: nearly there, saying why
+                        reason = f"{reason}; {doubt}" if reason else doubt
+                        v = {**v, "_lacked": [r["rule"] for r in met]}
                 elif met:  # what's left to find; the near miss still records all it lacked
                     v = {**v, "missing": [r["rule"] for r in rest], "_lacked": [r["rule"] for r in met + rest]}
             if verdict == "maybe" and self.loosen:
@@ -2567,6 +2573,47 @@ class Work:
             return True
         read = "\n".join(e.get("text", "") for e in item.get("evidence") or [])
         return not fx.in_text(shown, read)
+
+    async def _alternative_doubt(self, v: dict, item: dict, met: list[dict[str, Any]], reason: str) -> str | None:
+        """Why an item that lacks only facts the charter gives an alternative for still
+        isn't kept on that alternative, or "" when it is. Its typed group must be one of
+        the list's (one the judging call says is "none" fits no group, whatever it lacks);
+        and when the owner has Jev connected, Jev is asked, from what was read, whether
+        the item meets each alternative ("judged good from what was read"): a confident
+        no keeps it nearly there. No Jev, or unsure: kept, as the judging call's maybe
+        said it seemed to fit."""
+        if self.recipe["groups"] and " ".join(str(v.get("group") or "").split()).lower() == "none":
+            return "its kind fits none of the list's groups, so the charter's alternative doesn't make it one"
+        if self.jev_off:
+            return ""
+        from captain_claw import jev_client
+        from captain_claw.flight_deck import jev_routes
+        state = {"list": (self.recipe.get("decide") or "")[:800], "item": self._name_of(item),
+                 "judged": reason[:400],
+                 "what_was_read": "\n\n".join(e.get("text", "")[:1200] for e in (item.get("evidence") or [])[:4])}
+        questions = {f"r{n}": {"type": "noul", "instructions": f"From what was read about this item, does it meet "
+                               f"this, as the list's owner asks: {r['if_not_shown']} (for the rule: {r['rule']})?",
+                               "yes_means": "it meets it, on what was read",
+                               "no_means": "what was read shows it doesn't, or gives nothing to judge it by"}
+                     for n, r in enumerate(met, start=1)}
+        try:
+            out = await asyncio.wait_for(jev_routes.ask_for_owner(
+                str(self.run.get("owner_id") or ""), state, questions, source="list-funnel"), JEV_TIMEOUT_S)
+        except jev_routes.JevNotConnected:
+            self.jev_off = True
+            return ""
+        except (TimeoutError, jev_client.JevError) as e:
+            log.info("funnel: Jev didn't answer", run_id=self.run["id"], error=type(e).__name__)
+            return ""
+        except Exception as e:  # noqa: BLE001 — the judging answer decides
+            log.warning("funnel: Jev call failed", run_id=self.run["id"], error=str(e))
+            return ""
+        answers = (out or {}).get("answers") or {}
+        no = [r for n, r in enumerate(met, start=1)
+              if isinstance((answers.get(f"r{n}") or {}).get("noul"), (int, float))
+              and answers[f"r{n}"]["noul"] < JEV_NO]
+        return ("Jev: not met by the charter's own alternative: " + "; ".join(
+            f"{r['if_not_shown']} ({r['rule']})" for r in no)) if no else ""
 
     def _alternatives(self, v: dict) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """The rules a maybe names as missing, split: those the charter itself gives an

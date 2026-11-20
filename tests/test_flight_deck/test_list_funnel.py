@@ -2438,3 +2438,36 @@ async def test_rules_are_named_by_number_in_any_language(deck):
     assert len(deck["decide_prompts"]) == 2 and "Konoba C" in deck["decide_prompts"][1]
     assert funnel._read_csv(folder / funnel.MAYBE)[0]["missing"] == ("ocjena 4 ili viša na Googleu ili TripAdvisoru; "
                                                                       "telefon za rezervacije na vlastitoj stranici")
+
+
+async def test_a_keep_on_the_charters_alternative_is_checked(deck, monkeypatch):
+    """A restaurant was kept on "with no rating, judged good from what was read" though
+    the judging call said its cuisine fit none of the groups; and "judged good" was
+    taken on trust. Now its typed group must be one of the list's, and Jev, when
+    connected, is asked whether the alternative is met."""
+    from captain_claw.flight_deck import jev_routes
+    run, folder = await _run(deck["store"], CUISINES, {"funnel_loosen": "never"}, rid="bat_altguard1")
+    (folder / "extra" / "hr.csv").write_text("Naziv,Telefon\nKonoba A,01 555 0101\nBistro B,01 555 0202\n"
+                                             "Konoba C,01 555 0303\nKonoba D,01 555 0404\n")
+    rating = "Ocjena 4 ili viša"
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "group_by": "Kuhinja", "decide": "Restorani.",
+                      "sources": [{"kind": "file", "path": "extra/hr.csv", "group": "hrvatska kuhinja"}],
+                      "rules": [{"rule": rating, "kind": "must", "fact": "measured", "columns": ["Ocjena"],
+                                 "if_not_shown": "procijenjeno da je dobar"}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "maybe", "missing": [1], "reason": "Nema ocjene.",
+                                     "group": "none" if f["Naziv"] == "Bistro B" else "hrvatska kuhinja",
+                                     "row": {"Naziv": f["Naziv"], "Telefon": f["Telefon"],
+                                             "Kuhinja": "hrvatska kuhinja"}} for i, f in items]
+
+    async def jev(owner, state, questions, model=None, *, source, agent=""):
+        assert list(questions) == ["r1"] and "procijenjeno da je dobar" in questions["r1"]["instructions"]
+        return {"answers": {"r1": {"type": "noul", "noul": {"Konoba C": 0.15, "Konoba D": 0.5}.get(state["item"], 0.9)}}}
+
+    monkeypatch.setattr(jev_routes, "ask_for_owner", jev)
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["Konoba A"][0] == "kept"  # Jev: yes
+    assert got["Bistro B"][0] == "maybe" and "fits none of the list's groups" in got["Bistro B"][1]
+    assert got["Konoba C"][0] == "maybe" and "Jev: not met by the charter's own alternative" in got["Konoba C"][1]
+    assert got["Konoba D"][0] == "kept"  # Jev unsure: the judging call's maybe stands as "seems to fit"

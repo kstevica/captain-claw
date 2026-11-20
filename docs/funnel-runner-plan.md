@@ -738,6 +738,16 @@ exactly, in any language, and words only as a fallback. An item the judging call
 leaves out of its answer is asked again once, in a call of its own, instead of
 dropped.
 
+With rules named by number, the next run filled its first group in about 5 minutes
+(55 items; the run before needed 266), four restaurants kept on the charter's
+no-rating alternative. One was kept wrongly: its judging call said its cuisine fit
+none of the groups but named only the rating as missing, and code took "judged good
+from what was read" on trust. Now, before code keeps an item on an alternative, its
+typed group must be one of the list's (not "none"), and, when the owner has Jev
+connected, Jev answers one yes/no question per alternative from what was read ("does
+it meet: judged good from what was read?"); below 0.4 it stays nearly there, saying
+why. No Jev, or Jev unsure, and it's kept as before.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
