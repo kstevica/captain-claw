@@ -2306,18 +2306,22 @@ def shortfall(folder: Path, recipe: dict[str, Any]) -> dict[str, int]:
 
 
 def counts(folder: Path, recipe: dict[str, Any]) -> dict[str, Any]:
-    """How items went, per group and stage, for the run panel and the summary."""
+    """How items went, per group and stage, for the run panel and the summary.
+    ``on_list``: rows on the list now; ``loose_waiting``: rows on a looser reading
+    that will fill what's short at the merge (a group full of them is full)."""
     groups: dict[str, dict[str, int]] = {}
     for r in _read_csv(folder / ITEMS):
-        g = groups.setdefault(r.get("group", ""), {"looked": 0, **{st: 0 for st in STAGES}})
+        g = groups.setdefault(r.get("group", ""), {"looked": 0, "loose_waiting": 0, **{st: 0 for st in STAGES}})
         g["looked"] += 1
+        if r.get("status") == "loose":
+            g["loose_waiting"] += 1
         stage = r.get("stage") or ("kept" if r.get("status") == "kept" else "maybe" if r.get("status") == "maybe"
                                    else "judge")
         if stage in g:
             g[stage] += 1
     kept = kept_per_group(folder)
     for name, quota in (recipe["groups"] or {}).items():
-        groups.setdefault(name, {"looked": 0, **{st: 0 for st in STAGES}})
+        groups.setdefault(name, {"looked": 0, "loose_waiting": 0, **{st: 0 for st in STAGES}})
     for name, g in groups.items():
         g["quota"] = int((recipe["groups"] or {}).get(name) or 0)
         g["on_list"] = kept.get(name, 0)
