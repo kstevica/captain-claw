@@ -260,6 +260,7 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
     recipe["skip_sites"] = [d for d in (fx.domain_of(str(x)) for x in raw.get("skip_sites") or [] if isinstance(x, str))
                             if d and "." in d][:30]
     recipe["rules"] = _rules(raw.get("rules"), recipe)
+    recipe["shortage_ok"] = raw.get("shortage_ok") is True
     files = raw.get("files") if isinstance(raw.get("files"), dict) else {}
     for key in ("summary", "exclusions"):  # else summary.md and exclusions.md
         name = _rel(files.get(key))
@@ -421,8 +422,12 @@ def looser_of(rule: dict[str, Any]) -> str:
 def loosen_on(run: dict, recipe: dict[str, Any] | None = None) -> bool:
     """Whether rows on a looser reading may fill a group that runs short
     (``config.funnel_loosen``: ``short``, the default, or ``never``), and the recipe
-    has a rule to loosen."""
+    has a rule to loosen. Never when the charter itself accepts a short list with the
+    reason given (``shortage_ok``): its rules are kept as written, and what meets them
+    only loosely comes close."""
     on = str((run.get("config") or {}).get("funnel_loosen") or "short").lower() != "never"
+    if recipe is not None and recipe.get("shortage_ok"):
+        return False
     return on and (recipe is None or bool(loosenable(recipe)))
 
 
@@ -689,10 +694,13 @@ def conventions(recipe: dict[str, Any]) -> str:
         lines += ["", f"The list needs {recipe['target']} rows."]
     if recipe["decide"]:
         lines += ["", "## What belongs on the list", "", recipe["decide"]]
-    soft = loosenable(recipe)
+    soft = [] if recipe.get("shortage_ok") else loosenable(recipe)
     if recipe.get("rules"):
         fixed = [r["rule"] for r in recipe["rules"] if r not in soft]
         lines += ["", "## Rules", ""]
+        if recipe.get("shortage_ok"):
+            lines += ["The charter accepts a short list when the summary says why: every rule is kept as written, "
+                      "never read loosely to fill a group.", ""]
         if fixed:
             lines += ["Never loosened:"] + [f"- {r}" for r in fixed]
         if soft:
@@ -770,6 +778,7 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
             "looser": "<prefer only: the loosest reading that still serves the goal>",
             "columns": ["<the columns this rule is about>"]}],
  "skip_sites": ["<sites that list or mention items of this kind but are never one's own site>"],
+ "shortage_ok": <true when the charter says a short list is fine if the summary says why, else false>,
  "files": {"summary": "<the file the charter names for the run's summary, if it names one>",
            "exclusions": "<the file it names for the items left out with why, if it names one>"},
  "checks": [{"column": "<column>", "op": "required|in|regex|in_evidence|within_months|min|max",
@@ -790,6 +799,8 @@ Rules:
   count, amount, date or rating), contact (how to reach it), safety (what must never be done), other. Code reads
   these in any language: a measured or contact rule may be met loosely when rows run short; identity, place,
   safety and other never are.
+- shortage_ok: true only when the charter itself accepts fewer rows than it asks for, with the reason given ("8
+  per group, or the summary explains the shortfall"); then no rule is read loosely to fill the list.
 - files: when the charter names the file for the run's summary or for the items left out ("sazetak.md",
   "excluded.md"), give those names: code writes its summary and its list of dropped items under them.
 - group_words: for each group, the words pages and searches use for it ("legal" → law firm, attorney, advokat).
@@ -1120,6 +1131,9 @@ def rules_note(recipe: dict[str, Any], run: dict) -> str:
     if soft and loosen_on(run, recipe):
         text += " Loosened only when a group runs short — " + "; ".join(
             f"{r['rule']} (looser: {looser_of(r)})" for r in soft) + "."
+    elif soft and recipe.get("shortage_ok"):
+        text += (" Also kept as written, since the charter accepts a short list with the reason given (what meets "
+                 "them only loosely comes close) — " + "; ".join(r["rule"] for r in soft) + ".")
     elif soft:
         text += " Also kept strictly (the factory never loosens) — " + "; ".join(r["rule"] for r in soft) + "."
     return text[:1500]
@@ -3178,7 +3192,10 @@ def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
         why = (f"the run's {budget} searches were used" if got["searches"] >= budget
                else "the sources ran out of items that pass")
         lines += ["## Short", "", "; ".join(f"{g or 'the list'}: {n} more" for g, n in short.items())
-                  + f". Why: {why}." + (f" {close} came close (`{came_close_name(recipe)}`)." if close else ""), ""]
+                  + f". Why: {why}." + (f" {close} came close (`{came_close_name(recipe)}`)." if close else "")
+                  + (" The charter accepts a short list with the reason given, so no rule was read loosely to fill "
+                     "it: what meets a rule only loosely is among those that came close." if recipe.get("shortage_ok")
+                     else ""), ""]
     loose = loose_on_list(folder)
     if loose:
         soft = loosenable(recipe)
@@ -3248,23 +3265,27 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
 
 def review_settled(run: dict, findings: str) -> str:
     """Whether the reviewers' "not done" settles a funnel run's list anyway: when the
-    list is complete (no group short) and every row passed its checks by code, the run
-    is done and their points go into ``summary.md`` as open points. A note saying so,
-    or "" when the list is still short (fix rounds may still add rows)."""
+    list is complete (no group short), or short where the charter accepts a short list
+    with the reason given, and every row passed its checks by code, the run is done and
+    their points go into the summary as open points. A note saying so, or "" when the
+    list is still short and should be full (fix rounds may still add rows)."""
     if (run.get("config") or {}).get("engine") != ENGINE:
         return ""
     from captain_claw.flight_deck import bat_routes
     folder = bat_routes._run_folder(run)
     recipe = load_recipe(folder)
-    if recipe is None or not _read_csv(folder / ROWS) or shortfall(folder, recipe):
-        return ""
+    short = shortfall(folder, recipe) if recipe is not None else {}
+    if recipe is None or not _read_csv(folder / ROWS) or (short and not recipe.get("shortage_ok")):
+        return ""  # still short, and the charter wants it full: fix rounds may still add rows
     loose = loose_on_list(folder)
     summary = folder / summary_name(recipe)
+    state = ("complete" if not short else "short (" + "; ".join(f"{g or 'the list'} {n} more" for g, n in short.items())
+             + f"), which the charter accepts with the reason given in {summary_name(recipe)},")
     try:
         text = summary.read_text(encoding="utf-8") if summary.is_file() else ""
         if "## Open points from the review" not in text:
             summary.write_text(text.rstrip("\n") + "\n\n## Open points from the review\n\n"
-                               + "The reviewers didn't pass the list as it stands. It is complete and every row "
+                               + f"The reviewers didn't pass the list as it stands. It is {state} and every row "
                                "passed the checks by code"
                                + (f"; {len(loose)} rows meet some rules only by their looser reading, which the "
                                   "factory allows" if loose else "")
@@ -3272,7 +3293,7 @@ def review_settled(run: dict, findings: str) -> str:
                                + (findings or "- (no reason given)") + "\n", encoding="utf-8")
     except OSError:
         log.debug("funnel: couldn't add the review's points to the summary", exc_info=True)
-    return ("The list is complete and passes every check by code"
+    return (f"The list is {state} and passes every check by code"
             + (f" ({len(loose)} rows on a looser reading the factory allows)" if loose else "")
             + f": the run is done; the reviewers' points are in {summary_name(recipe)} as open points.")
 

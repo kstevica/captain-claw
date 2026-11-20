@@ -629,6 +629,16 @@ minutes, 7 with a rating, under the charter's file names. Three general faults l
   Zagreb suitable for a bu as …". Now the leading article and everything from "in",
   "for", "suitable", "with"… go ("restaurant"), and a long one is cut at a word.
 
+That run's reviewers said 18 of its 24 rows met the rating or contact rule only by
+its looser reading, while the charter accepts a short list when the summary explains
+it ("8 per group, or sazetak.md explains the shortfall"). Now the setup says so
+(`shortage_ok`) when the charter itself accepts fewer rows with the reason given;
+then no rule is read loosely (as with the factory's "never loosen"), whatever the
+factory's setting: what meets a rule only loosely comes close and goes to the
+came-close file, the summary's "Short" section says the charter accepts it, and a
+short list settles the review as a complete one does, so no agents are sent to fill
+it.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
