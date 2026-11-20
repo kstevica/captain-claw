@@ -79,13 +79,15 @@ DECIDE_TOKENS = 8192
 # nothing more): with it on, Qwen thought 160k characters on the setup call, looped,
 # and never answered, twice. A small limit also keeps a loop from running for minutes
 # on the tier's whole output.
-OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500, "owner": 3000, "look": 300, "group": 200}
+OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500, "owner": 3000, "look": 300, "group": 200, "columns": 600}
 LOOK_STEPS = 4              # what one look into a nearly-there item may do (config funnel_look_steps)
 LOOK_MAX = 60               # items looked into per step (config funnel_look_max)
 LOOK_FILES = 400            # the owner's files a look is told of, by name
 LISTED_WHOLE = 60           # lines of the folder shown to the setup with first rows and first lines
 LISTED_NAMES = 400          # files past those, shown by name only
 SOURCES_MAX = 400           # files one pattern in a recipe's source may stand for
+JOIN_ROWS = 10              # rows of the owner's other tables one item may be given
+JOIN_TABLE_ROWS = 5000      # a table larger than this isn't looked items up in
 DECIDE_PER_ITEM = 600       # more room for a judging call with several short rows
 THINKING_TOKENS = 16_000    # a judging call's room when the run turns thinking on
 LINKS_AS_ITEMS = 5          # a links file with fewer links is reference, not a list to go through
@@ -714,6 +716,37 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
         n = int(window.group(1)) * (12 if window.group(2).lower().startswith("year") else 1)
         recipe["checks"].append({"column": dates[0], "op": "within_months", "value": n})
     return recipe
+
+
+def _column_words(name: str) -> list[str]:
+    return [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", str(name))]
+
+
+_NAMING_WORDS = {"id", "no", "nr", "number", "num", "name", "code", "key", "ref"}
+
+
+def _same_column(theirs: str, mine: str) -> bool:
+    """A table's column that is the list's by its name: the same letters ("Strain ID"),
+    the same but for a word that only says it names something ("Strain" and "StrainID",
+    never "Researcher" and "ResearcherEmail"), or every word of the list's name among
+    the table's ("zone", "mm" in "mean_zone_mm")."""
+    a, b = _column_words(theirs), _column_words(mine)
+    if not a or not b:
+        return False
+    plain = lambda ws: "".join(ws)  # noqa: E731
+    bare = lambda ws: [w for w in ws if w not in _NAMING_WORDS] or ws  # noqa: E731
+    if plain(a) == plain(b) or plain(bare(a)) == plain(bare(b)):
+        return True
+    return set(b) <= set(a)
+
+
+def _join_value(v: Any) -> str:
+    """A cell as a key to look up by: its words and numbers, case, punctuation and
+    leading zeros aside ("NG-0101" and "ng 101"). "" for an empty cell, a bare number or
+    one too short to name anything."""
+    parts = [str(int(x)) if x.isdigit() else x for x in re.findall(r"[^\W\d_]+|\d+", _fold(str(v or "")))]
+    out = " ".join(parts)
+    return out if len(out) >= 3 and not all(x.isdigit() for x in parts) else ""
 
 
 def render(template: str, item: dict[str, str], site_column: str = "") -> str | None:
@@ -1671,6 +1704,11 @@ def tools_for(run: dict, step: dict) -> Tools | TapeTools:
 
 # ── a step's work ──────────────────────────────────────────────────────
 
+COLUMNS_SYSTEM = """A table is read as items for a list, but its columns are named differently from the list's.
+Say which of the table's columns holds each of the list's columns, from the names and the sample rows. Map a column
+only when it holds that very thing (a measurement of something else is not it); leave out what the table doesn't
+have. Reply ONLY with JSON: {"columns": {"<the table's column>": "<the list's column>"}}"""
+
 EXTRACT_SYSTEM = """Pull the items out of this text: each {item} it names that could belong on the list.
 Reply ONLY with JSON: {{"items": [{{"name": "...", "url": "<its own website or page, if the text gives one>",
 "fields": {{"<column>": "<value the text gives>"}}}}], "pages": ["<links in the text to pages that list more such
@@ -1772,6 +1810,7 @@ class Work:
         self.seen: set[str] = set()
         self.same = SameItems(recipe, self.skip_sites)
         self.jev_off = False  # the owner has no Jev connected: don't ask again this step
+        self._tables: dict[str, list[tuple[str, int, dict]]] | None = None  # the owner's tables, by key value
         self.again: list[dict] = []  # items to judge once more: left unanswered, or just looked into
         self.look = look_on(run)
         self.look_steps = _int(self.cfg.get("funnel_look_steps"), 1, 12, LOOK_STEPS)
@@ -1943,6 +1982,15 @@ class Work:
             except (OSError, ValueError) as e:
                 await self._event("funnel", f"couldn't read {src['path']}: {e}")
                 return
+            named = await self._table_columns(src["path"], _cols, rows)
+            if named is None:
+                await self._event("funnel", f"couldn't read {src['path']} as {self.recipe['item']}s: none of its "
+                                            f"columns ({', '.join(_cols[:12])}) is the list's {self.recipe['key']}")
+                return
+            if named:  # the list's own names beside the table's, so its key, filters and checks find them
+                rows = [{**r, **{mine: r[theirs] for theirs, mine in named.items()
+                                 if str(r.get(theirs) or "").strip() and not str(r.get(mine) or "").strip()}}
+                        for r in rows]
             for i in range(0, len(rows), 25):
                 yield [{"fields": r, "origin": f"{src['path']} row {i + j + 2}",
                         "text": "\n".join(f"{k}: {v}" for k, v in r.items() if v)}
@@ -1993,6 +2041,101 @@ class Work:
                 if not ok:
                     continue
                 yield await self.extract(text, f"search: {q}", about=src.get("about", ""))
+
+    async def _table_columns(self, path: str, cols: list[str], rows: list[dict]) -> dict[str, str] | None:
+        """Which of a table's columns hold the list's, when the table names them its own
+        way ("Strain" for the list's "StrainID"): a row with nothing under the list's key
+        got no key and was passed over without a word. {} when the table needs none (it
+        has the key column, a name or a link); None when its key can't be found in it.
+        By their names where only one fits, else by one short call with sample rows."""
+        key = self.recipe["key"]
+        low = {c.lower() for c in cols}
+        site = str(self.recipe.get("site_column") or "").lower()
+        if not key or key == "domain" or key.lower() in low or low & {"name", "url", "website"} or (site and site in low):
+            return {}
+        mine = [c for c in self.recipe["columns"] if c.lower() not in low]
+        mine_low = {c.lower() for c in self.recipe["columns"]}  # a column the list has by that name stays that
+        named: dict[str, str] = {}
+        for c in mine:
+            fits = [t for t in cols if t.lower() not in mine_low and _same_column(t, c)]
+            if len(fits) == 1 and fits[0] not in named:
+                named[fits[0]] = c
+        if len(named) < len(mine):
+            about = "\n".join(f"- {c}" + (f": {self.recipe['about'][c]}" if self.recipe["about"].get(c) else "")
+                              for c in self.recipe["columns"])
+            sample = "\n".join(json.dumps(r, ensure_ascii=False)[:400] for r in rows[:4])
+            try:
+                got = await self._ask("columns", COLUMNS_SYSTEM,
+                                      f"# The list\n{(self.recipe.get('decide') or self.recipe['item'])[:600]}\n\n"
+                                      f"# The list's columns\n{about}\n\n# The table ({path})\n"
+                                      f"Columns: {', '.join(cols)}\nFirst rows:\n{sample}")
+            except RuntimeError:
+                raise  # no model to call at all
+            except Exception as e:  # noqa: BLE001 — what the names alone gave
+                log.warning("funnel columns call failed", run_id=self.run["id"], error=str(e))
+                got = None
+            said = got.get("columns") if isinstance(got, dict) and isinstance(got.get("columns"), dict) else {}
+            taken = set(named.values())
+            for theirs, ours in said.items():
+                ours = next((c for c in mine if c.lower() == str(ours).strip().lower()), "")
+                if theirs in cols and theirs.lower() not in mine_low and ours and ours not in taken and theirs not in named:
+                    named[theirs] = ours
+                    taken.add(ours)
+        if key not in named.values():
+            return None
+        await self._event("funnel", f"{path}: read as " + ", ".join(f"{t} = {c}" for t, c in named.items()))
+        return named
+
+    def _owner_tables(self) -> dict[str, list[tuple[str, int, dict]]]:
+        """The owner's tables as places to look an item up: each table's rows by the value
+        of its key column, the first column whose values are all different (an ID, a
+        name). Read once a step."""
+        if self._tables is not None:
+            return self._tables
+        index: dict[str, list[tuple[str, int, dict]]] = {}
+        extra = self.folder / "extra"
+        for p in sorted(extra.iterdir()) if extra.is_dir() else []:
+            if not p.is_file() or p.name.startswith(".") or p.name == LEDGER_FILE or p.suffix.lower() not in fx.TABLE_EXTS:
+                continue
+            try:
+                cols, rows = fx.read_table(p, limit=JOIN_TABLE_ROWS + 1)
+            except (OSError, ValueError):
+                continue
+            if len(rows) < 2 or len(rows) > JOIN_TABLE_ROWS:
+                continue
+            for c in cols:
+                vals = [_join_value(r.get(c)) for r in rows]
+                if all(vals) and len(set(vals)) == len(vals):
+                    for i, (r, v) in enumerate(zip(rows, vals)):
+                        index.setdefault(v, []).append((f"extra/{p.name}", i + 2, r))
+                    break
+        self._tables = index
+        return index
+
+    def _joined(self, item: dict) -> list[dict]:
+        """Rows of the owner's other tables that are about this item: one whose key is the
+        item's own key or name, or a value the item carries (the person it names, a code),
+        and then one such value on from those rows. Found by code, before the item is
+        judged: a fact kept in another file was otherwise left empty unless a rule
+        happened to need it. Never the row the item itself came from."""
+        index = self._owner_tables()
+        if not index:
+            return []
+        out: list[dict] = []
+        took = {str(item.get("origin") or "")}
+        values = [self._name_of(item)] + [str(v) for v in item["fields"].values()]
+        for _hop in range(2):
+            more: list[str] = []
+            for v in values:
+                for rel, n, row in index.get(_join_value(v), []):
+                    where = f"{rel} row {n}"
+                    if where in took or len(out) >= JOIN_ROWS:
+                        continue
+                    took.add(where)
+                    out.append({"source": where, "text": "\n".join(f"{k}: {x}" for k, x in row.items() if x)})
+                    more += [str(x) for x in row.values()]
+            values = more
+        return out
 
     async def extract(self, text: str, origin: str, about: str = "") -> list[dict]:
         """The items in a text (a search's results, a page, a part of a document), by a
@@ -2179,6 +2322,7 @@ class Work:
         snippet), so an item that fails one isn't read any further."""
         evidence = [{"source": item["origin"], "text": item.get("text") or
                      "\n".join(f"{k}: {v}" for k, v in item["fields"].items() if v)}]
+        evidence += await asyncio.to_thread(self._joined, item)
         site = self.recipe.get("site_column") or ""
         if site and not self._site_of(item) and any(g["kind"] == "fetch" for g in self.recipe["gather"]):
             await self.find_site(item, evidence)

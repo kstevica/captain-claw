@@ -164,6 +164,9 @@ async def deck(tmp_path, monkeypatch):
                 state["asked"].append("look")
                 state.setdefault("look_prompts", []).append(user)
                 return _Reply(json.dumps(state.get("look", lambda u: {"do": "stop"})(user)))
+            if system.startswith("A table is read as items for a list"):
+                state["asked"].append("columns")
+                return _Reply(json.dumps({"columns": state.get("columns", lambda u: {})(user)}))
             if system.startswith("A list sorts its items into groups"):
                 state["asked"].append("group")
                 state.setdefault("group_prompts", []).append(user)
@@ -2804,7 +2807,8 @@ async def test_a_look_reads_the_owners_files_when_the_run_has_no_web(deck):
                                                      "columns": ["Lab", "Founded"], "min_rows": 2}}]
     run, folder = await _run(deck["store"], contract, {"funnel_look": "on", "funnel_loosen": "never"}, rid="bat_golook02")
     (folder / "extra" / "labs.csv").write_text("Lab\nBeta Lab\n")
-    (folder / "extra" / "founding.csv").write_text("Lab,Year\nAlpha Lab,2001\nBeta Lab,2019\n")
+    # keyed by a code the item doesn't carry, so code can't join it: the look has to find it
+    (folder / "extra" / "founding.csv").write_text("Code,Lab,Year\nA1,Alpha Lab,2001\nB7,Beta Lab,2019\n")
     deck["recipe"] = {"item": "lab", "key": "Lab", "decide": "Labs with their founding year.",
                       "sources": [{"kind": "file", "path": "extra/labs.csv"}],
                       "rules": [{"rule": "its founding year is known", "kind": "must", "fact": "measured",
@@ -2897,3 +2901,59 @@ async def test_a_folder_of_many_files_is_one_pattern_and_every_file_is_seen(deck
     work = funnel.Work(run, {"step_key": "step-1"}, recipe, folder, "")
     assert "extra/zz_founding.csv" in work._look_files() and len(work._look_files()) == 71
     assert 'one source with a pattern' in funnel.SETUP_SYSTEM
+
+
+async def test_a_table_named_its_own_way_is_read_and_other_tables_are_joined(deck):
+    """A list from the owner's files: a table whose ID column was "Strain" (the list's:
+    "StrainID") was passed over without a word, a third of the items with it; and an
+    email kept in a directory, a species in a results table, stayed empty, since a look
+    only goes for what a rule needs. Now a table's columns are matched to the list's,
+    and rows of the owner's other tables about an item join what is read of it."""
+    cols = ["StrainID", "ZoneMm", "Species", "Researcher", "Email"]
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "active.csv", "columns": cols,
+                                                     "min_rows": 2}}]
+    run, folder = await _run(deck["store"], contract, {"funnel_loosen": "never"}, rid="bat_tablejoin1")
+    extra = folder / "extra"
+    (extra / "batch.csv").write_text("Strain,S_aureus_zone_mm,E_coli_zone_mm,Researcher\n"
+                                     "NG-0101,22,0,Ana Test\nNG-0102,9,30,Ben Test\n")
+    (extra / "sequencing.csv").write_text("Strain,Closest match\nNG101,Bacillus exampli\nNG-0102,Bacillus otheri\n")
+    (extra / "staff.csv").write_text("Name,Email\nAna Test,ana@lab.example\nBen Test,ben@lab.example\n")
+    (extra / "codes.csv").write_text("Code,Meaning\n22,twenty-two\n9,nine\n")  # a bare number is no key to join by
+    deck["recipe"] = {"item": "isolate", "key": "StrainID", "decide": "Active isolates.",
+                      "sources": [{"kind": "file", "path": "extra/batch.csv"}],
+                      "filters": [{"column": "ZoneMm", "op": "min", "value": 15}]}
+    asked = []
+
+    def columns(user):
+        asked.append(user)
+        return {"S_aureus_zone_mm": "ZoneMm", "E_coli_zone_mm": "ZoneMm", "Nothing": "Species"}
+
+    deck["columns"] = columns
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "reason": "", "row": {
+        "StrainID": f["StrainID"], "ZoneMm": f["ZoneMm"], "Researcher": f["Researcher"],
+        "Species": "Bacillus exampli", "Email": "ana@lab.example"}} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["stage"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got == {"NG-0101": ("kept", "kept"), "NG-0102": ("dropped", "filter")}  # read, and the zone filter found it
+    assert len(asked) == 1 and "S_aureus_zone_mm" in asked[0]  # "Strain" by its name; the two zones needed the call
+    prompt = deck["decide_prompts"][0]
+    assert "Closest match: Bacillus exampli" in prompt  # its row in another table, the ID written another way
+    assert "Email: ana@lab.example" in prompt and "ben@lab.example" not in prompt  # by the person its row names
+    assert "twenty-two" not in prompt
+    row = funnel._read_csv(folder / funnel.ROWS)[0]
+    assert (row["Species"], row["Email"]) == ("Bacillus exampli", "ana@lab.example")
+
+
+async def test_a_table_with_no_column_for_the_key_is_said_so(deck):
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "active.csv",
+                                                     "columns": ["StrainID", "ZoneMm"], "min_rows": 1}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_tablejoin2")
+    (folder / "extra" / "budget.csv").write_text("Month,Spent\nJan,100\nFeb,120\n")
+    deck["recipe"] = {"item": "isolate", "key": "StrainID", "decide": "Active isolates.",
+                      "sources": [{"kind": "file", "path": "extra/budget.csv"}]}
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    events = [json.dumps(e, ensure_ascii=False, default=str) for e in await deck["store"].list_events(run["id"])]
+    assert any("couldn't read extra/budget.csv as isolates" in m and "StrainID" in m for m in events)
+    assert funnel._read_csv(folder / funnel.ITEMS) == []
