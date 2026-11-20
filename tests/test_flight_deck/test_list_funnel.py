@@ -2217,7 +2217,8 @@ async def test_a_strict_run_drops_only_what_is_shown_to_break_a_rule(deck):
     await _go(deck["store"], run, steps[:1])
     got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
     assert got == {"Konoba A": "dropped", "Konoba B": "maybe", "Bistro C": "dropped"}
-    assert '"missing": ["<rule>"], "broken": ["<rule>"]' in funnel.DECIDE_STRICT and "loose" not in funnel.DECIDE_STRICT
+    assert '"missing": [<rule number>], "broken": [<rule number>]' in funnel.DECIDE_STRICT
+    assert "loose" not in funnel.DECIDE_STRICT
 
 
 def test_a_rule_with_its_own_alternative_is_judged_not_left_nearly_there():
@@ -2227,7 +2228,7 @@ def test_a_rule_with_its_own_alternative_is_judged_not_left_nearly_there():
     for prompt in (funnel.DECIDE_SYSTEM, funnel.DECIDE_LOOSE, funnel.DECIDE_STRICT):
         assert "judge the item on what was read and keep or drop it on that" in prompt
         assert "that fact being missing is never the reason for maybe" in prompt
-    assert '"missing": ["<rule>"]' in funnel.DECIDE_STRICT and '"loosened"' in funnel.DECIDE_LOOSE  # the variants still differ
+    assert '"missing": [<rule number>]' in funnel.DECIDE_STRICT and '"loosened"' in funnel.DECIDE_LOOSE  # still differ
 
 
 async def test_a_stopped_run_still_writes_what_it_found(deck, monkeypatch):
@@ -2393,3 +2394,47 @@ async def test_a_near_misses_missing_rules_are_kept(deck):
     steps = await funnel.plan(run)
     await _go(deck["store"], run, steps[:1])
     assert funnel._read_csv(folder / funnel.MAYBE)[0]["missing"] == phone
+
+
+async def test_rules_are_named_by_number_in_any_language(deck):
+    """15 of 16 near misses named no missing rule: the judging call wrote "rating 4+ on
+    Google" for "ocjena 4 ili viša na Googleu…", and code found no rule holding those
+    words, so the charter's own alternative never applied. Rules are now numbered."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv",
+                                                     "columns": ["Naziv", "Ocjena", "Telefon"], "min_rows": 3}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_numbered1")
+    (folder / "extra" / "r.csv").write_text("Naziv,Ocjena,Telefon\nKonoba A,,01 555 0101\nKonoba B,,\nKonoba C,,01 555 0303\n")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "sources": [{"kind": "file", "path": "extra/r.csv"}],
+                      "decide": "Restorani.", "shortage_ok": True,
+                      "rules": [{"rule": "ocjena 4 ili viša na Googleu ili TripAdvisoru", "kind": "must",
+                                 "fact": "measured", "columns": ["Ocjena"], "if_not_shown": "procijenjeno da je dobar"},
+                                {"rule": "telefon za rezervacije na vlastitoj stranici", "kind": "must", "fact": "contact",
+                                 "columns": ["Telefon"]}]}
+    first = []
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            row = {"Naziv": f["Naziv"], "Telefon": f["Telefon"]}
+            if f["Naziv"] == "Konoba A":
+                out.append({"id": i, "verdict": "maybe", "missing": [1], "reason": "No rating 4+ on Google.", "row": row})
+            elif f["Naziv"] == "Konoba B":
+                out.append({"id": i, "verdict": "maybe", "missing": ["R1", "rule 2"], "reason": "No rating, no phone.",
+                            "row": row})
+            elif not first:  # Konoba C is left out of the first answer
+                first.append(1)
+            else:
+                out.append({"id": i, "verdict": "maybe", "missing": ["1"], "reason": "No rating.", "row": row})
+        return out
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    prompt = deck["decide_prompts"][0]
+    assert "# Rules by number" in prompt and "1. ocjena 4 ili viša" in prompt
+    assert "— if its fact isn't found: procijenjeno da je dobar" in prompt
+    got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got == {"Konoba A": "kept", "Konoba B": "maybe", "Konoba C": "kept"}  # C: asked again, not dropped
+    assert len(deck["decide_prompts"]) == 2 and "Konoba C" in deck["decide_prompts"][1]
+    assert funnel._read_csv(folder / funnel.MAYBE)[0]["missing"] == ("ocjena 4 ili viša na Googleu ili TripAdvisoru; "
+                                                                      "telefon za rezervacije na vlastitoj stranici")

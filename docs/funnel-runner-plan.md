@@ -727,6 +727,17 @@ and a fusion bar's also named a phone not found, which blocked the hand-over. No
 - a fact asked for "if shown" or "if visible" has the alternative "left empty", and
   each near miss records the rules it was missing (`maybe.csv`), to trace why.
 
+That record showed the root of several faults at once: 15 of 16 near misses named no
+missing rule. The judging call wrote the rules in its own words ("rating 4+ on
+Google"), and code looked for those words inside the rule ("ocjena 4 ili viša na
+Googleu…"): no match, so no rule. The charter's alternative, a fact not found being
+nearly there, and the looser readings all hang on which rules an answer names. Now
+every judging call gets the rules numbered (each with its own alternative) and names
+them in "missing", "broken" and "loosened" by number; code maps a number to its rule
+exactly, in any language, and words only as a fallback. An item the judging call
+leaves out of its answer is asked again once, in a call of its own, instead of
+dropped.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
