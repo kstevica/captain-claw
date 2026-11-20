@@ -2565,3 +2565,67 @@ async def test_a_pages_footer_is_read(deck):
     assert len(prompt) < 30_000  # within the same reading budget
     # code read the whole page: the phone in its footer fills the row
     assert fx.in_text(funnel._read_csv(folder / funnel.ROWS)[0]["Telefon"], "01 555 0661")
+
+
+async def test_an_item_never_reads_another_items_search_result(deck):
+    """Four restaurants were judged on another's facts ("what was read is about Konoba
+    Lav"): their links were a guide's pages, a guide's list page on that host was
+    taken as their own result, and with none found the whole results page was theirs."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv", "columns": ["Naziv"],
+                                                     "min_rows": 3}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_borrowed1")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "decide": "Restorani.",
+                      "sources": [{"kind": "search", "group": "", "queries": ["konobe"]}]}
+    results = ("[QUERY: konobe]\n\n"
+               "1. Top 10 konoba in the city - Guide\n   URL: https://guide.example/konobe\n"
+               "   Snippet: Konoba Lav: 4.6, open daily 12-23.\n"
+               "2. Best places to eat\n   URL: https://other.example/best\n"
+               "   Snippet: Konoba Ruža serves fish, 4.5 on its reviews.\n")
+    deck["extract"] = lambda user: {"items": [
+        {"name": "Konoba Ruža", "url": "https://guide.example/Konoba-Ruza", "fields": {"Naziv": "Konoba Ruža"}},
+        {"name": "Konoba Mir", "url": "https://guide.example/Konoba-Mir", "fields": {"Naziv": "Konoba Mir"}}]}
+    deck["tools"] = _Tools(pages={}, results={"konobe": results})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "maybe", "row": {"Naziv": f["Naziv"]}} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    prompt = "\n".join(deck["decide_prompts"])
+    parts = {p.split("\n", 1)[0]: p for p in prompt.split("## id ")[1:]}
+    ruza = next(p for p in parts.values() if "Konoba Ruža" in p)
+    mir = next(p for p in parts.values() if "Konoba Mir" in p and "Ruža" not in p)
+    assert "serves fish" in ruza and "Lav" not in ruza  # its own result, found by its name in a snippet
+    assert "Lav" not in mir and "serves fish" not in mir  # none of its own: nothing borrowed
+
+
+async def test_an_items_pages_are_found_by_its_own_links_not_guessed(deck):
+    """Every site had /kontakt, /contact, /jelovnik, /menu and /about fetched, about 400
+    guesses in a run, most of them missing; the real pages were at other addresses."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv",
+                                                     "columns": ["Naziv", "Web", "Telefon"], "min_rows": 2}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_sitelinks")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "site_column": "Web", "decide": "Restorani.",
+                      "sources": [{"kind": "search", "group": "", "queries": ["restorani"]}],
+                      "gather": [{"kind": "fetch", "url": "{Web}",
+                                  "paths": ["", "/kontakt", "/contact", "/jelovnik", "/menu", "/about"]}]}
+    deck["extract"] = lambda user: {"items": [
+        {"name": "Konoba X", "url": "https://konoba-x.example", "fields": {"Naziv": "Konoba X"}},
+        {"name": "Bistro Y", "url": "https://bistro-y.example", "fields": {"Naziv": "Bistro Y"}}]}
+    home = ("Konoba X. Početna (https://konoba-x.example/) Jelovnik (https://konoba-x.example/nasa-ponuda/jelovnik) "
+            "Kontakt (https://konoba-x.example/hr/kontakt-nas) Facebook (https://facebook.com/konobax) "
+            "Rezervacije (https://konoba-x.example/#rezervacije) Galerija (https://konoba-x.example/galerija)")
+    deck["tools"] = _Tools(pages={"https://konoba-x.example": home,
+                                  "https://konoba-x.example/hr/kontakt-nas": "Telefon 01 555 0808",
+                                  "https://konoba-x.example/nasa-ponuda/jelovnik": "Štrukli",
+                                  "https://bistro-y.example": "Bistro Y, a page read as plain text",
+                                  "https://bistro-y.example/kontakt": "Telefon 01 555 0909"},
+                           results={"restorani": "list results"})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Naziv": f["Naziv"]}} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    fetched = [u for k, u in deck["tools"].calls if k == "fetch"]
+    x = [u for u in fetched if "konoba-x" in u]
+    assert x == ["https://konoba-x.example", "https://konoba-x.example/nasa-ponuda/jelovnik",
+                 "https://konoba-x.example/hr/kontakt-nas"]  # its own links the recipe asks for, nothing guessed
+    assert not any("facebook" in u or "galerija" in u for u in fetched)
+    assert "https://bistro-y.example/kontakt" in fetched  # a page with no links: the recipe's paths, as before
+    phones = {r["Naziv"]: r["Telefon"] for r in funnel._read_csv(folder / funnel.ROWS)}
+    assert fx.in_text(phones["Konoba X"], "01 555 0808")

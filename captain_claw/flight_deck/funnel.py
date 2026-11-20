@@ -738,6 +738,37 @@ def conventions(recipe: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+_LABELLED_LINK = re.compile(r"([^\n()]{0,80}?)\s*\((https?://[^)\s]+)\)")
+
+
+def site_links(text: str, base: str, paths: list[str], most: int = 5) -> list[str] | None:
+    """The pages of an item's own site its page links to that the recipe's paths ask for:
+    links on the same site (never another's, never the same page or an anchor on it)
+    whose address or label carries a word of those paths ("kontakt", "menu", "o-nama"
+    → "Kontakt (…/hr/kontakt-nas)", "Jelovnik (…/nasa-ponuda/jelovnik)"). None when the
+    page shows no links at all (read as plain text): then the paths are all there is."""
+    found = _LABELLED_LINK.findall(text or "")
+    bare = fx.links(text or "")
+    if not found and not bare:
+        return None
+    words = {w for p in paths for w in re.findall(r"[a-z]+", _fold(p)) if len(w) >= 3}
+    if not words:
+        return []
+    host = fx.domain_of(base)
+    labelled = {u.rstrip(".,;:!?"): label for label, u in found}
+    out: list[str] = []
+    for url in list(labelled) + [u for u in bare if u not in labelled]:
+        page = url.split("#", 1)[0]
+        if not page or not fx.same_site(fx.domain_of(page), host) or page.rstrip("/") == base.rstrip("/"):
+            continue
+        said = _fold(f"{urlsplit(page).path} {labelled.get(url, '')}")
+        if any(w in said for w in words) and page not in out:
+            out.append(page)
+        if len(out) >= most:
+            break
+    return out
+
+
 def page_excerpt(text: str, share: int, marks: list[str] | None = None) -> str:
     """What a judging call reads of one page, in ``share`` characters: all of it when it
     fits; else its start, its end (a site's footer: its address, phone, opening hours,
@@ -1331,12 +1362,18 @@ def _own_result(results: list[dict[str, str]], name: str, url: str) -> str:
     was said of it alone, not of the other results beside it."""
     d = fx.domain_of(url)
     low = name.lower()
+    front = d and not _site_page(url)  # its link is a site's front page: any page of that site is its own
     for r in results:
-        if url and (r["url"].rstrip("/") == url.rstrip("/") or (d and fx.domain_of(r["url"]) == d
-                                                                  and not any(fx.same_site(d, s) for s in _SKIP_SITES))):
+        same = url and r["url"].rstrip("/") == url.rstrip("/")
+        own_site = front and fx.domain_of(r["url"]) == d and not any(fx.same_site(d, s) for s in _SKIP_SITES)
+        if same or own_site:  # a list page on the host of its directory link ("restaurantguru.com/…") isn't
             return f"{r['text']}\n{r['url']}"
     for r in results:
         if low and low in r["title"].lower():
+            return f"{r['text']}\n{r['url']}"
+    words = name_words(name)  # its name in a result's words: a list result's snippet names it
+    for r in results:
+        if words and names_item(words, _fold(r["url"]), _fold(r["text"])):
             return f"{r['text']}\n{r['url']}"
     return ""
 
@@ -1786,8 +1823,11 @@ class Work:
             if it.get("url"):
                 fields.setdefault("url", str(it["url"]).strip())
             own = _own_result(results, fields["name"], str(it.get("url") or ""))
+            # never the whole page for an item it isn't alone on: what it says of the others
+            # ("Konoba Lav: 4.6, open daily") would be read as this item's facts
+            alone = len([x for x in items or [] if isinstance(x, dict) and str(x.get("name") or "").strip()]) == 1
             out.append({"fields": fields, "origin": origin,
-                        "text": own or (text if len(text) <= 3000 else "")})
+                        "text": own or (text if alone and len(text) <= 3000 else "")})
         return out
 
     def item_key(self, item: dict) -> str:
@@ -1971,6 +2011,7 @@ class Work:
                     base = "https://" + base.lstrip("/")
                 parts = urlsplit(base)
                 root = f"{parts.scheme}://{parts.netloc}/"
+                tools = await self._tools()
                 if self._shared_site(base):
                     # the item's page on a directory or social site (its LinkedIn page, no
                     # site of its own found): that page only. The site's own about, news
@@ -1978,10 +2019,20 @@ class Work:
                     # another company's size).
                     urls = [base] if parts.path.strip("/") else []
                 else:
-                    urls = list(dict.fromkeys(base if not p else urljoin(root, p.lstrip("/")) for p in g["paths"]))
+                    # its own site: the page first, then the pages its own links lead to that
+                    # the recipe asks for ("Kontakt (…/hr/kontakt-nas)"), never guessed
+                    # addresses; guessed only when the page couldn't be read or shows no links
+                    ok, text = await tools.fetch(base)
+                    await self._event("web_fetch", f"url={base}")
+                    if ok and text.strip():
+                        evidence.append({"source": base, "text": text[:FETCH_CHARS]})
+                    followed = site_links(text if ok else "", base, g["paths"])
+                    if followed is None:
+                        followed = [u for u in dict.fromkeys(urljoin(root, p.lstrip("/")) for p in g["paths"] if p)
+                                    if u.rstrip("/") != base.rstrip("/")]
+                    urls = followed
                 if not urls:
                     continue
-                tools = await self._tools()
                 got = await asyncio.gather(*(tools.fetch(u) for u in urls))
                 for u, (ok, text) in zip(urls, got):
                     await self._event("web_fetch", f"url={u}")

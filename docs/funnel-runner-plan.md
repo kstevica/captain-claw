@@ -778,6 +778,23 @@ facts filled from the item's own pages see the footer; and what a judging call r
 of each page, in the same share, is its start, its end and short windows around the
 facts code found on it.
 
+Four restaurants were then judged on another's facts ("what was read is about Konoba
+Lav"). They came from one search's results, with links to a guide's pages: a
+guide's list page on that host was taken as their own result (same domain), and with
+none found the whole results page became their text. Now a result is an item's own
+when it is the same page, or any page of its own site when its link is a site's
+front page; else when its name is in a result's title or snippet. An item with no
+result of its own gets only the fields pulled out for it, never the page it shares
+with others (a page about one item alone still is).
+
+And every own site had the recipe's paths fetched blindly: "", /kontakt, /contact,
+/jelovnik, /menu, /about, about 400 guesses in one run, most of them missing, while
+the real pages sat at other addresses (/hr/kontakt-nas). web_fetch keeps a page's
+links in its text ("Kontakt (https://...)"). Now the page is read first, then only the
+pages of the same site its links lead to whose address or label carries a word of
+the recipe's paths (never another site, never an anchor on the same page); the paths
+are guessed only when the page couldn't be read or shows no links at all.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
