@@ -639,6 +639,23 @@ came-close file, the summary's "Short" section says the charter accepts it, and 
 short list settles the review as a complete one does, so no agents are sent to fill
 it.
 
+The next run (rules kept as written) found 3 of 8 for its first group after 67
+items. Most that came close lacked a visible rating, which is the charter's
+strictness. But two general faults showed too, fixed:
+
+- **An item's own site wasn't read when the listing gave it as its link.** Items
+  pulled out of a page carry their site as "url"; the recipe reads "{Web}" (the site
+  column), so the template came out empty and nothing was fetched, and the "find its
+  site" search didn't run since a site was known. 13 of 25 near misses had a site and
+  no page of it read. Now the site column is filled from wherever the item's own site
+  is before anything is read.
+- **The same item judged several times.** "Konoba X" was kept, then "konoba-x.hr"
+  (the same restaurant, keyed by its domain) judged again. Now an item is checked
+  against those already looked at, as their listings show them (the same rules as
+  the duplicate check: the same site, no address or phone that differs), before it is
+  read or judged, and again once a search finds its site; a repeat is dropped as a
+  duplicate, with the item it repeats named.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left

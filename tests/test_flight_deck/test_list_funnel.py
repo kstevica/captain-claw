@@ -1968,7 +1968,8 @@ async def test_the_same_item_under_another_name_isnt_kept_twice(deck):
     await _go(deck["store"], run, steps)
     assert [r["Naziv"] for r in funnel._read_csv(folder / "mjesta.csv")] == ["Konoba A", "Konoba A Maksimir"]
     twin = next(r for r in funnel._read_csv(folder / funnel.ITEMS) if r["name"] == "Konoba A 900")
-    assert (twin["status"], twin["stage"]) == ("dropped", "duplicate") and "the same mjesto as Konoba A" in twin["reason"]
+    assert (twin["status"], twin["stage"]) == ("dropped", "duplicate") and "already looked at as Konoba A" in twin["reason"]
+    assert not any("Konoba A 900" in p for p in deck["decide_prompts"])  # caught before a judging call
     # rows already written twice (a run from before) go on the list once
     recipe = funnel.load_recipe(folder)
     funnel._append_csv(folder / funnel.ROWS, recipe["columns"] + [funnel._GROUP_COL],
@@ -2126,3 +2127,31 @@ async def test_a_charter_that_accepts_a_short_list_keeps_its_rules_as_written(de
     assert "## Open points from the review" in (folder / funnel.SUMMARY).read_text()
     # a charter that wants it full: still short, fix rounds go on
     assert funnel.normalize_recipe({}, funnel.from_contract(PAPERS))["shortage_ok"] is False
+
+
+async def test_an_items_link_is_read_as_its_site_and_read_once(deck):
+    """13 restaurants came close with no page of their own read: the listing gave their
+    site as their link ("url"), the recipe reads "{Web}", so nothing was fetched. And one
+    restaurant was judged three times, found again under its domain."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv",
+                                                     "columns": ["Naziv", "Web", "Telefon"], "min_rows": 3}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_urlassite")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "site_column": "Web",
+                      "sources": [{"kind": "search", "group": "", "queries": ["restorani"]}],
+                      "gather": [{"kind": "fetch", "url": "{Web}", "paths": ["", "kontakt"]}], "decide": "Restorani."}
+    deck["extract"] = lambda user: {"items": [
+        {"name": "Konoba Lipa", "url": "https://konoba-lipa.example", "fields": {"Naziv": "Konoba Lipa"}},
+        {"name": "konoba-lipa.example", "url": "https://www.konoba-lipa.example/", "fields": {"Naziv": "Lipa Zagreb"}}]}
+    deck["tools"] = _Tools(pages={"https://konoba-lipa.example": "Konoba Lipa",
+                                  "https://konoba-lipa.example/kontakt": "Rezervacije 01 555 0404"},
+                           results={"restorani": "list results"})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {**f}} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    fetched = [u for k, u in deck["tools"].calls if k == "fetch"]
+    assert "https://konoba-lipa.example/kontakt" in fetched  # its own pages, though only its link was given
+    rows = funnel._read_csv(folder / funnel.ROWS)
+    assert [r["Naziv"] for r in rows] == ["Konoba Lipa"] and fx.in_text(rows[0]["Telefon"], "01 555 0404")
+    twin = next(r for r in funnel._read_csv(folder / funnel.ITEMS) if r["key"] == "lipa zagreb")
+    assert (twin["status"], twin["stage"]) == ("dropped", "duplicate") and "already looked at as Konoba Lipa" in twin["reason"]
+    assert sum("Lipa" in p for p in deck["decide_prompts"]) == 1  # one judging call, not two

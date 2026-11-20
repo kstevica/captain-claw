@@ -1471,6 +1471,18 @@ class Work:
         self.recent: list[str] = []
         self.queries = self._load_queries()
         self.stopped = ""
+        # the items looked at, as their listings show them: one found again under another
+        # name ("Konoba X", then "konoba-x.hr") isn't judged twice
+        self.looked = SameItems(recipe, self.skip_sites)
+        for r in _read_csv(folder / ROWS) + _read_csv(folder / LOOSE):
+            self.looked.add(r)
+        for m in _read_csv(folder / MAYBE):
+            try:
+                got = json.loads(m.get("row") or "{}")
+            except ValueError:
+                got = {}
+            if isinstance(got, dict):
+                self.looked.add(got)
         for r in _read_csv(folder / ITEMS):
             self.seen.add(r.get("key", ""))
             g = r.get("group", "")
@@ -1786,6 +1798,15 @@ class Work:
                 continue
             if self.recipe.get("site_column") and any(fx.same_site(key, s) for s in self.skip_sites):
                 continue  # items with sites of their own: a directory or a social page isn't one
+            listing = self._listing_row(item)
+            twin = self.looked.of(listing) if listing.get(self.recipe.get("site_column") or "") else ""
+            if twin:  # looked at under another name: the same site, no address or phone that differs
+                item["key"] = key
+                self.seen.add(key)
+                await self.record(item, "dropped", f"already looked at as {twin} (the same site)", stage="duplicate")
+                continue
+            self.looked.add(listing)
+            item["site_seen"] = bool(listing.get(self.recipe.get("site_column") or ""))
             item["key"] = key
             self.seen.add(key)
             self.counts["looked"] += 1
@@ -1807,6 +1828,13 @@ class Work:
                 log.warning("funnel: reading an item failed", run_id=self.run["id"], error=str(err))
                 await self.record(it, "dropped", f"couldn't be read ({_plain_error(err)})", stage="read")
                 continue
+            if not it.get("site_seen") and self._site_of(it):  # a site found for it by a search
+                listing = self._listing_row(it)
+                twin = self.looked.of(listing)
+                if twin:
+                    await self.record(it, "dropped", f"already looked at as {twin} (the same site)", stage="duplicate")
+                    continue
+                self.looked.add(listing)
             why = self.passes(it, it.get("found") or {}) or self._foreign_site(it)
             if why:
                 await self.record(it, "dropped", why, stage="read")
@@ -1824,6 +1852,10 @@ class Work:
         site = self.recipe.get("site_column") or ""
         if site and not self._site_of(item) and any(g["kind"] == "fetch" for g in self.recipe["gather"]):
             await self.find_site(item, evidence)
+        own_site = self._site_of(item) if site else ""
+        slot = next((k for k in item["fields"] if k.lower() == site.lower()), site) if site else ""
+        if own_site and not str(item["fields"].get(slot) or "").strip():
+            item["fields"][slot] = own_site  # its site, listed as its "url": what {Web} reads
         item["evidence"], item["found"] = evidence, self.facts(item, evidence)
         for g in self.recipe["gather"]:
             if self.passes(item, item["found"]):
@@ -1898,6 +1930,17 @@ class Work:
             if d and "." in d and not any(fx.same_site(d, s) for s in self.skip_sites):
                 return v
         return ""
+
+    def _listing_row(self, item: dict) -> dict[str, str]:
+        """An item as its listing shows it, in the list's columns (its site and name too)."""
+        low = {str(k).lower(): str(v or "") for k, v in item["fields"].items()}
+        row = {c: low.get(c.lower(), "") for c in self.recipe["columns"]}
+        site = self.recipe.get("site_column") or ""
+        if site and not row.get(site):
+            row[site] = self._site_of(item)
+        if self.recipe["key"] and not row.get(self.recipe["key"]):
+            row[self.recipe["key"]] = self._name_of(item)
+        return row
 
     def _name_of(self, item: dict) -> str:
         f = item["fields"]
