@@ -160,7 +160,7 @@ main { padding: 12px; display: flex; flex-direction: column; gap: 12px; }
 .chips.types { margin-top: 6px; gap: 4px; }
 .links-row button:disabled { opacity: .45; cursor: default; }
 
-textarea, input[type=text], input[type=url] {
+textarea, input[type=text], input[type=url], input[type=password] {
   width: 100%; padding: 8px 10px; border-radius: 8px;
   border: 1px solid var(--border-strong); background: var(--panel); resize: vertical;
 }
@@ -325,10 +325,19 @@ details.anon-back[open] > summary .ic.chev { transform: rotate(180deg); }
 .rstep .link-btn { margin: 3px 0 0 -6px; display: inline-flex; align-items: center; gap: 4px; }
 .rstep textarea { margin-top: 5px; min-height: 44px; }
 .rstep-note { border-color: var(--accent); background: var(--accent-soft); }
-.rstep-ask { display: flex; align-items: center; gap: 6px; margin-top: 5px; font-size: calc(12px * var(--fs)); color: var(--muted); }
-.rstep-ask input { accent-color: var(--accent); }
+.rstep-ask { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: calc(12px * var(--fs)); color: var(--muted); }
+.rstep-ask span { flex: none; }
+.rstep-ask .select { padding-top: 4px; padding-bottom: 4px; }
+.rstep-ask + .dim { margin-top: 3px; }
 .rstep-tools { display: flex; gap: 0; flex: none; }
 .rstep-tools .icon-btn { width: 22px; height: 22px; }
 .rstep-tools .icon-btn:disabled { opacity: .3; cursor: default; }
 .rec-bar { display: flex; gap: 8px; position: sticky; bottom: 0; padding: 8px 0 2px; background: var(--bg); }
 .rec-item .rec-about { margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* ── an agent's question ── */
+.ask-layer { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .45); display: flex; align-items: flex-end; padding: 10px; }
+.ask-layer[hidden] { display: none; }
+.ask-box { width: 100%; max-height: calc(100vh - 20px); overflow: auto; display: flex; flex-direction: column; gap: 10px; border-color: var(--accent); box-shadow: 0 8px 30px rgba(0, 0, 0, .35); }
+.ask-q { display: flex; flex-direction: column; gap: 4px; }
+.ask-text { font-weight: 600; overflow-wrap: anywhere; }

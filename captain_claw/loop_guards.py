@@ -246,3 +246,27 @@ def forget_repeats_after_change(counts: dict[str, int], changed_path: str, *, pa
             counts[sig] = 0
             zeroed.append(sig)
     return zeroed
+
+
+# ── The browser: a page is live ───────────────────────────────────────
+
+# Browser actions that only look. Anything else (a click, typing, a
+# navigation, a key, a scroll, a wait for the page) may leave another page
+# behind it, so the same look afterwards is a new call.
+BROWSER_LOOK_ACTIONS = frozenset({
+    "read_page", "find", "page_text", "page_files", "screenshot", "zoom", "observe", "accessibility_tree",
+    "find_element", "status", "tabs", "console", "network_requests", "network_list", "list_sessions",
+    "credentials_list", "workflow_list", "workflow_show", "extension_list",
+})
+
+
+def forget_browser_looks_after_act(counts: dict[str, int], action: str) -> None:
+    """After a browser call that acted on the page, the looks counted so far
+    this turn are forgotten: read → click → read again is how a page is
+    worked, and the second read is of another page. Back-to-back looks with
+    nothing done in between still count up."""
+    if str(action or "").strip().lower() in BROWSER_LOOK_ACTIONS:
+        return
+    for key in [k for k in counts if k.lower().startswith("browser|")]:
+        counts.pop(key, None)
+

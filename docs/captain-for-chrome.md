@@ -229,9 +229,32 @@ window. The toolbar shows `REC`, the page a small "Captain is recording" mark.
 **Review** (the panel). The person's instructions on steps are the panel's
 own (`recNotes`) until Stop, which folds them into a draft (`recDraft`, local
 storage — it survives the panel closing). In the draft: a name, what it's for,
-an instruction per step, a typed value changed, **Different each time — ask
-me** (`ask`) on a typed or chosen value, steps removed or moved, and steps in
-the person's own words (`kind: "do"`).
+an instruction per step, a typed value changed, where a typed or chosen value
+comes from on a run (`ask`, below), steps removed or moved, and steps in the
+person's own words (`kind: "do"`).
+
+**A value that differs each time** — `ask` on a `type` or `select` step:
+
+| `ask` | In the panel | On a run |
+|---|---|---|
+| (none) | Always the same | the recorded value |
+| `before` | Ask me before it starts | a field on the Run form; the run is refused without it; the step is written with that value |
+| `during` | Ask me when it gets there | the step tells the agent to ask with `ask_user` and wait; cancelled → stop there |
+| `agent` | The agent decides | the step tells the agent to choose from what the run is for and the page, and to say what it used |
+
+For `during` and `agent` the recorded value is given as "when I recorded it,
+it was …". (`ask: true`, from 0.4.0, reads as `before`.)
+
+**The agent's question in the panel.** `ask_user` puts the question on Flight
+Deck (`person_asks`), which until now refused a turn that came from the
+extension ("ask in your reply"): `in_flight_deck("browser")` is now true —
+not `browser:mac`, Captain for Mac has no dialog. While the panel follows a
+run it waits on `GET /fd/clip/asks?wait=&known=` and shows the first open
+question as a box over the panel (text, one or several of a list, yes/no, a
+masked box for `request_secret`); `POST /fd/clip/asks/<id>` answers, or
+declines for Cancel. The same question is open in Flight Deck's tabs and
+closes there once answered here. Only agents' questions go to the extension:
+approval cards stay in Flight Deck — an extension's token doesn't approve.
 
 **The deck** (`browser_recordings.py`, routes under `/fd/clip/recordings`):
 `GET` the list, `GET /{id}`, `POST` (new, or with `id` the same one changed),
@@ -254,6 +277,14 @@ this browser" off the turn tells the agent to say so and stop rather than use
 its own, signed-out browser. The run is followed like a clip's
 (`/fd/clip/runs/<id>`); a follow-up in its folder is worded as one about the
 recording.
+
+**A run that stopped at step 5 of 10 (staging, 2026-11-20).** The agent read
+the page, clicked, read again, typed, read again, clicked — and its fourth
+`read_page` was refused by the duplicate-call guard ("called with these exact
+arguments 3 times this turn with nothing written in between"), since every
+`read_page` has the same arguments. Now a browser call that acts on the page
+(anything but a look: `loop_guards.BROWSER_LOOK_ACTIONS`) forgets the looks
+counted so far; looks with nothing done in between still count up.
 
 Not yet: scheduled runs (a Scheduled task whose prompt is the recording),
 recordings in Flight Deck's own pages, sharing one with a teammate, scroll /
