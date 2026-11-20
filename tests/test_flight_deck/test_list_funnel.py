@@ -2537,3 +2537,31 @@ async def test_the_done_checks_and_the_charters_alternative_agree(deck):
     assert failed and "Kvart is empty in 1 rows" in failed[0].get("note", "")
     # any other run's done-checks are as they were
     assert funnel.contract_for_checks({"config": {}}, FILLED) == FILLED
+
+
+async def test_a_pages_footer_is_read(deck):
+    """A restaurant came close for "no phone or e-mail on its own site, opening not
+    confirmed": its home page has 15,000 characters and its phone, hours and rating are
+    in the footer, past the 6,000 Captain kept of a page and the first 1,500 a judging
+    call read of it."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv",
+                                                     "columns": ["Naziv", "Web", "Telefon"], "min_rows": 2}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_footer01")
+    footer = ("Kontakt Adresa Ilička ulica 76, Zagreb Telefon 01 555 0661 Radno vrijeme Pon–Sub 11–24 "
+              "★ 4.7 Google Reviews (755+ recenzija)")
+    page = "Konoba Lipa. " + "Naša konoba nudi domaća jela s roštilja i iz krušne peći. " * 260 + footer
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "site_column": "Web", "decide": "Restorani.",
+                      "sources": [{"kind": "search", "group": "", "queries": ["restorani"]}],
+                      "gather": [{"kind": "fetch", "url": "{Web}", "paths": [""]}]}
+    deck["extract"] = lambda user: {"items": [{"name": "Konoba Lipa", "url": "https://konoba-lipa.example",
+                                               "fields": {"Naziv": "Konoba Lipa"}}]}
+    deck["tools"] = _Tools(pages={"https://konoba-lipa.example": page}, results={"restorani": "list results"})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Naziv": f["Naziv"]}} for i, f in items]
+    assert len(page) > 14_000
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    prompt = deck["decide_prompts"][0]
+    assert "Telefon 01 555 0661" in prompt and "Pon–Sub 11–24" in prompt and "4.7 Google Reviews" in prompt  # the footer reaches the judging call
+    assert len(prompt) < 30_000  # within the same reading budget
+    # code read the whole page: the phone in its footer fills the row
+    assert fx.in_text(funnel._read_csv(folder / funnel.ROWS)[0]["Telefon"], "01 555 0661")
