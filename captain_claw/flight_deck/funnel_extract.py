@@ -429,10 +429,30 @@ PLACES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
 _PLACE_NAMES = sorted(((n, code) for code, (_, names, _) in PLACES.items() for n in names), key=lambda x: -len(x[0]))
 _PLACE_RE = re.compile(r"(?<![\w-])(" + "|".join(re.escape(n) for n, _ in _PLACE_NAMES) + r")(?![\w-])")
 _PLACE_OF = {n: code for n, code in _PLACE_NAMES}
+# A place named in an inflected form, as many languages do ("u Zagrebu", "u Hrvatskoj",
+# "w Warszawie" aside): a one-word name of five letters or more, its last vowel
+# dropped, with a common case ending. Endings English words take ("-s", "-ing") aren't
+# among them, so "splits" is never Split.
+_CASE_ENDINGS = r"(?:u|a|e|i|o|y|om|em|im|oj|ju|ja|ji|ia|ie|iu|ou|ii|ach|ami|ima|ama)"
+_PLACE_STEMS = {}
+for _name, _code in _PLACE_NAMES:
+    if len(_name) >= 5 and _name.isalpha():
+        _PLACE_STEMS.setdefault(_name[:-1] if _name[-1].lower() in "aeiou" else _name, _code)
+_PLACE_INFLECTED_RE = re.compile(r"(?<![\w-])(" + "|".join(re.escape(b) for b in sorted(_PLACE_STEMS, key=len, reverse=True))
+                                 + r")" + _CASE_ENDINGS + r"(?![\w-])")
 _DEMONYM_RE = re.compile(r"(?<![\w-])(" + "|".join(
     re.escape(d) for _, (_, _, ds) in PLACES.items() for d in ds) + r")(?![\w-])")
 _DEMONYM_OF = {d: code for code, (_, _, ds) in PLACES.items() for d in ds}
 _MEXICO = re.compile(r"(?<!New )(?<![\w-])Mexico(?![\w-])")
+
+
+def place_stem(words: str) -> str:
+    """A place's words without a case ending ("Zagrebu" and "Zagreb" → "zagreb"), to
+    tell whether two texts name the same place."""
+    w = str(words or "")
+    m = _PLACE_INFLECTED_RE.fullmatch(w)
+    base = m.group(1) if m else (w[:-1] if len(w) >= 5 and w.isalpha() and w[-1].lower() in "aeiou" else w)
+    return base.lower()
 
 
 def places_named(text: str) -> list[tuple[str, str]]:
@@ -443,6 +463,9 @@ def places_named(text: str) -> list[tuple[str, str]]:
     out: list[tuple[int, str, str]] = []
     for m in _PLACE_RE.finditer(t):
         out.append((m.start(), _PLACE_OF[m.group(1)], m.group(1)))
+    for m in _PLACE_INFLECTED_RE.finditer(t):
+        if m.group(0) not in _PLACE_OF:  # its plain form is matched above
+            out.append((m.start(), _PLACE_STEMS[m.group(1)], m.group(0)))
     for m in _MEXICO.finditer(t):
         out.append((m.start(), "MX", "Mexico"))
     m = _STATE_ABBR.search(t)

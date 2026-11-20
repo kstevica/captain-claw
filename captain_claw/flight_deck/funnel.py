@@ -53,6 +53,7 @@ STATE = "shared/funnel"
 ITEMS = f"{STATE}/items.csv"      # every item looked at: what became of it, and why
 ROWS = f"{STATE}/rows.csv"        # the kept rows, the merge's input
 MAYBE = f"{STATE}/maybe.csv"      # nearly there: what the finishing step works on
+HANDOVER = f"{STATE}/handover.csv"  # items one group's step found that fit another group
 LOOSE = f"{STATE}/loose.csv"      # rows that meet the soft rules only by their looser reading
 QUERIES = f"{STATE}/queries.json"  # searches made, queries used, new-query rounds
 FINISH = f"{STATE}/finish.csv"            # rows the finishing agent adds, checked at the merge
@@ -60,6 +61,7 @@ FINISH_ITEMS = f"{STATE}/finish-items.csv"  # the nearly-there items it's given
 COUNTS = f"{STATE}/counts.json"    # per group: how items went, stage by stage (for the run panel)
 SUMMARY = "summary.md"
 EXCLUSIONS = "exclusions.md"
+CLOSE_SUFFIX = "-came-close"  # <the list>-came-close.csv: the items that nearly made it, a result of its own
 LEDGER_FILE = "already-checked.csv"  # in extra/: what the factory's earlier runs checked (first_mate_ledger)
 
 SEARCH_BUDGET = 1000
@@ -86,7 +88,8 @@ SOURCE_KINDS = ("search", "page", "links", "file", "document")
 FILTER_OPS = ("regex", "not_regex", "in", "not_in", "min", "max", "size_max", "size_min")
 CHECK_OPS = ("required", "in", "regex", "in_evidence", "within_months", "min", "max")
 _ITEM_COLS = ["key", "name", "group", "status", "stage", "reason", "source", "step", "at"]
-_MAYBE_COLS = ["key", "name", "group", "fields", "why", "sources"]
+_MAYBE_COLS = ["key", "name", "group", "fields", "why", "sources", "row"]  # row: the cells the judging call filled
+_HANDOVER_COLS = ["key", "name", "group", "fields", "origin", "why", "from"]
 _LOOSE_COL = "_loosened"
 RULES_MAX = 12
 # A group counts its loose rows only once it has looked at this many items (3 per row
@@ -1114,6 +1117,10 @@ def _read_csv(path: Path) -> list[dict[str, str]]:
         return []
 
 
+def rows_in(path: Path) -> int:
+    return len(_read_csv(path))
+
+
 def _append_csv(path: Path, cols: list[str], row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     new = not path.is_file() or path.stat().st_size == 0
@@ -1405,6 +1412,9 @@ class Work:
         self.tools: Tools | None = None
         self.creds: dict | None = None
         self.seen: set[str] = set()
+        self.same = SameItems(recipe, self.skip_sites)  # rows on the list or waiting, by their own site
+        for r in _read_csv(folder / ROWS) + _read_csv(folder / LOOSE):
+            self.same.add(r)
         self.kept: dict[str, int] = {}
         self.loose: dict[str, int] = {}       # rows on a looser reading, per group
         self.looked_in: dict[str, int] = {}   # items judged or ruled out, per group
@@ -1511,6 +1521,8 @@ class Work:
     async def run_step(self) -> dict:
         sources = [s for s in self.recipe["sources"] if (s.get("group") or "") == self.group]
         try:
+            if self.group:
+                await self._take_handover()
             for src in sources:
                 if self.full() or self.stopped:
                     break
@@ -1908,7 +1920,11 @@ class Work:
         cols = "\n".join(f"- {c}" + (f": {self.recipe['about'][c]}" if self.recipe["about"].get(c) else "")
                          for c in self.recipe["columns"])
         groups = (f"\n# {self.recipe['group_by']}\n" + ", ".join(self.recipe["groups"])
-                  + (f"\nThis step looks for: {self.group}" if self.group else "")) if self.recipe["groups"] else ""
+                  + (f"\nThis step looks for: {self.group}. An item that fits another of these groups instead is "
+                     f"that group's find: keep it (or answer loose or maybe) with that group in "
+                     f"{self.recipe['group_by']}, never drop it for not being {self.group}. Drop an item for its "
+                     "kind only when it fits none of them; one that fits several takes the closest."
+                     if self.group else "")) if self.recipe["groups"] else ""
         try:
             got = await self._ask("decide", DECIDE_LOOSE if self.loosen else DECIDE_SYSTEM,
                                   f"# Today\n{time.strftime('%Y-%m-%d')} (a date up to today is in the past, never "
@@ -1958,14 +1974,24 @@ class Work:
                     verdict, reason = "maybe", "shows nothing for: " + "; ".join(unshown)
             if verdict in ("keep", "loose"):
                 row = {c: " ".join(str((v.get("row") or {}).get(c) or "").split()) for c in self.recipe["columns"]}
+                named = self._group_named(row.get(self.recipe["group_by"], "")) if self.recipe["group_by"] else ""
+                if named:  # a group written loosely ("Italian") is the list's group, written as the list does
+                    row[self.recipe["group_by"]] = named
                 relax = {c for r in loosened for c in r.get("columns") or []}
                 problem = check_row(self.recipe, row, {e["source"]: e["text"] for e in it.get("evidence") or []},
                                     relax=relax)
                 if problem:
                     await self.record(it, "dropped", f"check: {problem}", stage="check")
                     continue
-                group = row.get(self.recipe["group_by"], "") if self.recipe["group_by"] else ""
-                group = next((g for g in self.recipe["groups"] if g.lower() == group.lower()), group) or self.group
+                group = self._group_named(row.get(self.recipe["group_by"], "") if self.recipe["group_by"] else "") \
+                    or self.group
+                if self.recipe["group_by"] and group in self.recipe["groups"]:
+                    row[self.recipe["group_by"]] = group  # as the list names it
+                twin = self.same.of(row)
+                if twin:  # found again under another name: its own site (and phone or email) say so
+                    await self.record(it, "dropped", f"the same {self.recipe['item']} as {twin}, found under "
+                                      "another name (the same website)", group=group, stage="duplicate")
+                    continue
                 if self.quota(group) and self.kept.get(group, 0) >= self.quota(group):
                     await self.record(it, "dropped", f"{group} is already full", group=group, stage="full")
                     continue
@@ -1975,6 +2001,7 @@ class Work:
                                       + (" in an earlier run" if key in self.known else ""), stage="duplicate")
                     continue
                 self.seen.add(key)
+                self.same.add(row)
                 if verdict == "loose":
                     names = "; ".join(r["rule"] for r in loosened)
                     self.loose[group] = self.loose.get(group, 0) + 1
@@ -1988,14 +2015,29 @@ class Work:
                 await self.record(it, "kept", reason or "meets the rules", group=group)
             elif verdict == "maybe":
                 hint = str((v.get("row") or {}).get(self.recipe["group_by"]) or "") if self.recipe["group_by"] else ""
-                group = self.group or next((g for g in self.recipe["groups"] if g.lower() == hint.lower()), "")
+                group = self._group_named(hint) or self.group
                 await self.record(it, "maybe", reason or "a fact it needs wasn't found", group=group)
                 name = it["fields"].get("name") or next(iter(it["fields"].values()), "")
+                got = v.get("row") if isinstance(v.get("row"), dict) else {}
+                cells = {c: " ".join(str(got.get(c) or "").split()) for c in self.recipe["columns"]}
+                if self.recipe["group_by"] and group in self.recipe["groups"]:
+                    cells[self.recipe["group_by"]] = group
+                read = {e["source"]: e["text"] for e in it.get("evidence") or []}
+                for c in self.recipe["checks"]:  # a value that isn't in what was read isn't passed on
+                    if c["op"] == "in_evidence" and cells.get(c["column"]) and check_row(
+                            {**self.recipe, "checks": [c]}, cells, read):
+                        cells[c["column"]] = ""
                 _append_csv(self.folder / MAYBE, _MAYBE_COLS,
                             {"key": it["key"], "name": name, "group": group,
                              "fields": json.dumps(it["fields"], ensure_ascii=False),
-                             "why": reason, "sources": " ".join(e["source"] for e in it.get("evidence") or [])})
+                             "why": reason, "sources": " ".join(e["source"] for e in it.get("evidence") or []),
+                             "row": json.dumps({c: x for c, x in cells.items() if x}, ensure_ascii=False)})
             else:
+                broke = [r for r in self._named(v.get("broken")) if _fact_of(r) != "identity"]
+                other = "" if broke else self._other_group(reason)  # a rating shown too low fails there too
+                if other:  # "Italian, not Croatian": the Italian step judges it
+                    await self._hand_over(it, other, reason)
+                    continue
                 await self.record(it, "dropped", reason or "breaks a rule")
 
     def _fill_from_facts(self, row: dict, item: dict) -> None:
@@ -2031,6 +2073,15 @@ class Work:
         phone_col = next((c for c in cols if re.search(r"phone|tel\b|telephone", c, re.I) and not re.search(r"source|url", c, re.I)), "")
         if phones and empty(phone_col):
             row[phone_col] = phones[0][0]
+        for rule in self.recipe.get("rules") or []:
+            if rule.get("kind") != "must" or _fact_of(rule) != "place" or not rule.get("columns"):
+                continue
+            rcols = [c for c in rule["columns"] if c in cols]
+            if not rcols or any(str(row.get(c) or "").strip() for c in rcols):
+                continue
+            line = place_line("\n".join(e.get("text", "") for e in own), rule["rule"], self.places)
+            if line:
+                row[next((c for c in rcols if _ADDRESS.search(c)), rcols[0])] = line
         state_col = next((c for c in cols if re.fullmatch(r"(us\s*)?state", c.strip(), re.I)), "")
         if "US" in self.places and empty(state_col):
             state = fx.us_state("\n".join(e.get("text", "") for e in own), address_only=True)
@@ -2077,6 +2128,71 @@ class Work:
             for c in cols:
                 if not str(v["row"].get(c) or "").strip() and str(fill.get(c) or "").strip():
                     v["row"][c] = " ".join(str(fill[c]).split())[:500]
+
+    def _group_named(self, value: str) -> str:
+        """The list's group a value names: exactly, else by its words and the words the
+        setup gave for each group ("Italian" → "talijanska kuhinja"); "" for none."""
+        v = " ".join(str(value or "").split())
+        if not v or not self.recipe["groups"]:
+            return ""
+        exact = next((g for g in self.recipe["groups"] if g.lower() == v.lower()), "")
+        if exact:
+            return exact
+        said = set(_group_words(v))
+        words = {g: set(_group_words(g, (self.recipe.get("group_words") or {}).get(g))) for g in self.recipe["groups"]}
+        shared = set.intersection(*words.values()) if words else set()
+        scores = {g: len(said & (words[g] - shared)) for g in self.recipe["groups"]}
+        best = max(scores.values(), default=0)
+        tops = [g for g, n in scores.items() if n == best]
+        return tops[0] if best and len(tops) == 1 else ""
+
+    def _other_group(self, reason: str) -> str:
+        """Another group of the list a drop's reason says the item fits ("serves Italian
+        food, not Croatian"); "" when it names none, or more than one."""
+        if not self.group or len(self.recipe["groups"]) < 2 or not reason:
+            return ""
+        said = set(re.findall(r"[a-z0-9]+", _fold(reason)))
+        stems = {w[:6] for w in said} | said
+        words = {g: set(_group_words(g, (self.recipe.get("group_words") or {}).get(g))) for g in self.recipe["groups"]}
+        shared = set.intersection(*words.values()) if words else set()  # "kuhinja" in every group says nothing
+        hits = [g for g in self.recipe["groups"] if g != self.group
+                and any(w in stems or any(x.startswith(w) for x in said) for w in words[g] - shared)]
+        return hits[0] if len(hits) == 1 else ""
+
+    async def _hand_over(self, item: dict, group: str, reason: str) -> None:
+        """An item this step found that fits another group: that group's step judges it
+        (or, if that step is done, the finishing step sees it as nearly there)."""
+        name = item["fields"].get("name") or next(iter(item["fields"].values()), "") or item.get("key", "")
+        _append_csv(self.folder / HANDOVER, _HANDOVER_COLS,
+                    {"key": item.get("key", ""), "name": name, "group": group,
+                     "fields": json.dumps(item["fields"], ensure_ascii=False), "origin": item.get("origin", ""),
+                     "why": reason, "from": self.group})
+        _append_csv(self.folder / MAYBE, _MAYBE_COLS,
+                    {"key": item.get("key", ""), "name": name, "group": group,
+                     "fields": json.dumps(item["fields"], ensure_ascii=False),
+                     "why": f"fits {group}: {reason}", "sources": " ".join(e["source"] for e in item.get("evidence") or [])})
+        await self.record(item, "handed", f"fits {group} instead, handed to its step ({reason})", group=group,
+                          stage="handover")
+
+    async def _take_handover(self) -> None:
+        """Items other groups' steps found for this group, judged here first."""
+        taken = {r.get("key") for r in _read_csv(self.folder / ITEMS)
+                 if r.get("group") == self.group and r.get("stage") not in ("handover", "")}
+        todo = []
+        for h in _read_csv(self.folder / HANDOVER):
+            if h.get("group") != self.group or h.get("key") in taken:
+                continue
+            try:
+                fields = json.loads(h.get("fields") or "{}")
+            except ValueError:
+                continue
+            taken.add(h.get("key"))
+            todo.append({"fields": fields, "origin": h.get("origin") or "handed over", "text": "", "key": h.get("key", "")})
+        for i in range(0, len(todo), CONCURRENCY):
+            if self.full() or self.stopped:
+                break
+            self.counts["looked"] += len(todo[i:i + CONCURRENCY])
+            await self._gather_wave(todo[i:i + CONCURRENCY])
 
     def _tiers_text(self) -> str:
         """The rule tiers for a judging call, when rows may be on a looser reading."""
@@ -2149,7 +2265,8 @@ class Work:
         return [r for r in named_rules if r in soft]
 
     async def record(self, item: dict, status: str, reason: str, group: str = "", stage: str = "") -> None:
-        self.counts[status if status in ("kept", "maybe", "loose") else "dropped"] += 1
+        if status != "handed":
+            self.counts[status if status in ("kept", "maybe", "loose") else "dropped"] += 1
         g = group or self.group
         self.looked_in[g] = self.looked_in.get(g, 0) + 1
         if status == "dropped":
@@ -2304,6 +2421,11 @@ def check_row(recipe: dict[str, Any], row: dict[str, str], texts: dict[str, str]
             where = texts.get(src) if src and src in texts else None
             if where is None and src:
                 where = next((t for s, t in texts.items() if s.rstrip("/") == src.rstrip("/")), None)
+            site = _site_pages(src, texts)
+            if site is not None and (where is None or not fx.in_text(v, where)):
+                # the item's own site: the value may be on any page read there (the phone on
+                # its contact page while the row cites its homepage, or "www." not read as such)
+                where = site
             if src and where is None:
                 return f"{col}'s source {src} isn't a page Captain read"
             if not fx.in_text(v, where if where is not None else every):
@@ -2344,6 +2466,128 @@ def number_span(text: str) -> tuple[float, float] | None:
     return nums[0], nums[0]
 
 
+# A column for an address, in a few languages; else a place rule's first column.
+_ADDRESS = re.compile(r"addr|adres|anschrift|indirizzo|direcci|endere|street|ulica|straße|strasse", re.I)
+
+
+def place_line(text: str, rule: str, targets: list[str]) -> str:
+    """An address on an item's own pages for a place rule: the shortest line that
+    names the rule's place (or the list's) and holds a number, a house number or a
+    postcode ("Ilica 12, 10000 Zagreb"); "" when none does."""
+    named = fx.places_named(rule)
+    stems = {fx.place_stem(w) for _code, w in named}  # the rule's own place ("u gradu Zagrebu"), in any case
+    codes = {code for code, _w in named} or set(targets)
+    if not codes:
+        return ""
+    best = ""
+    for raw in re.split(r"[\n\r|•·]+|\s{3,}", text or ""):
+        line = " ".join(raw.split()).strip(" ,;-")
+        if not (8 <= len(line) <= 120) or not re.search(r"\d", line):
+            continue
+        here = fx.places_named(line)
+        if any(code in codes and (not stems or fx.place_stem(w) in stems or w.lower() in stems) for code, w in here):
+            if not best or len(line) < len(best):
+                best = line
+    return best
+
+
+def _site_pages(src: str, texts: dict[str, str]) -> str | None:
+    """Everything read on the site a source link is on, when that is one site's own
+    pages (not a directory or social site, where pages are other people's); None when
+    nothing was read there."""
+    d = fx.domain_of(src) if re.match(r"https?://|www\.", str(src or ""), re.I) else ""
+    if not d or any(fx.same_site(d, s) for s in _SKIP_SITES):
+        return None
+    pages = [t for s, t in texts.items() if fx.same_site(fx.domain_of(s), d)]
+    return "\n".join(pages) if pages else None
+
+
+_PHONE_COL = re.compile(r"phone|telef|^tel\b|mobil|handy|cell|m[oó]vil|celular|gsm", re.I)
+_LANG_PART = re.compile(r"^[a-z]{2}(?:[-_][a-z]{2})?$", re.I)
+_HOME_PARTS = {"index.html", "index.htm", "index.php", "home", "default.aspx"}
+_PROFILE_PARTS = {"in", "company", "companies", "pub", "pages", "people", "profile", "user", "users", "channel",
+                  "c", "u", "r", "groups", "biz", "school", "org"}
+
+
+def site_id(url: str, shared: tuple[str, ...] = _SKIP_SITES) -> str:
+    """Who an item's own site says it is: ``example.com`` for its home page (a language
+    part such as ``/en`` aside), host and path for a page deeper in; on a site many
+    share (a social or directory site) the item's page there (``instagram.com/restac``),
+    and "" for such a site's own pages or anything that isn't a link."""
+    u = str(url or "").strip()
+    if not u or " " in u or "." not in u:
+        return ""
+    d = fx.domain_of(u)
+    if not d or "." not in d:
+        return ""
+    try:
+        path = urlsplit(u if "://" in u else "http://" + u).path
+    except ValueError:
+        return ""
+    parts = [x.lower() for x in path.split("/") if x and x.lower() not in _HOME_PARTS]
+    if any(fx.same_site(d, x) for x in shared):
+        parts = parts[:2] if parts and parts[0] in _PROFILE_PARTS else parts[:1]
+        if not parts or parts[-1] in _PROFILE_PARTS:
+            return ""
+        return f"{d}/{'/'.join(parts)}"
+    while parts and _LANG_PART.match(parts[0]):
+        parts.pop(0)
+    return d + ("/" + "/".join(parts) if parts else "")
+
+
+class SameItems:
+    """The rows on a list, to tell an item found again under another name ("Restac" and
+    "Restac 900"): the same own site (its home page, or the same page on it), or the same
+    host with the same phone or email; never when a column that tells places apart (an
+    address, a phone) differs, so two branches of one chain stay two."""
+
+    def __init__(self, recipe: dict[str, Any], skip: tuple[str, ...] = ()) -> None:
+        self.site = recipe.get("site_column") or ""
+        self.key = recipe["key"]
+        cols = recipe["columns"]
+        self.phones = [c for c in cols if _PHONE_COL.search(c)]
+        self.places = [c for c in cols if _ADDRESS.search(c)] + self.phones
+        self.shared = tuple(dict.fromkeys(_SKIP_SITES + tuple(skip)))
+        self.rows: dict[str, list[dict[str, Any]]] = {}
+
+    def _place(self, col: str, v: str) -> str:
+        if col in self.phones:
+            return re.sub(r"\D", "", v)[-8:]
+        return re.sub(r"[\W_]+", "", v.lower())
+
+    def _seen(self, row: dict[str, str]) -> dict[str, Any] | None:
+        if not self.site:
+            return None
+        url = str(row.get(self.site) or "")
+        sid = site_id(url, self.shared)
+        if not sid:
+            return None
+        shared = any(fx.same_site(fx.domain_of(url), x) for x in self.shared)
+        contacts = {re.sub(r"\D", "", str(row.get(c) or ""))[-8:] for c in self.phones
+                    if len(re.sub(r"\D", "", str(row.get(c) or ""))) >= 7}
+        contacts |= {v.strip().lower() for v in row.values() if re.fullmatch(r"\s*[^@\s]+@[^@\s]+\.\w+\s*", str(v or ""))}
+        name = str(row.get(self.key) or "") or next((str(v) for v in row.values() if v), sid)
+        return {"sid": sid, "bucket": sid if shared else sid.split("/")[0], "contacts": contacts, "name": name,
+                "places": {c: self._place(c, str(row.get(c) or "")) for c in self.places if str(row.get(c) or "").strip()}}
+
+    def of(self, row: dict[str, str]) -> str:
+        """The name of the row on the list this one repeats, or ""."""
+        me = self._seen(row)
+        if me is None:
+            return ""
+        for other in self.rows.get(me["bucket"], []):
+            if any(other["places"].get(c, v) != v for c, v in me["places"].items()):
+                continue  # another address or phone: another place of the same name or site
+            if other["sid"] == me["sid"] or me["contacts"] & other["contacts"]:
+                return other["name"]
+        return ""
+
+    def add(self, row: dict[str, str]) -> None:
+        me = self._seen(row)
+        if me is not None:
+            self.rows.setdefault(me["bucket"], []).append(me)
+
+
 def kept_per_group(folder: Path) -> dict[str, int]:
     out: dict[str, int] = {}
     for r in _read_csv(folder / ROWS):
@@ -2372,7 +2616,11 @@ def fill_from_loose(folder: Path, recipe: dict[str, Any]) -> list[dict[str, str]
     if not short or not loose:
         return []
     key = recipe["key"]
-    on_list = {norm_key(r.get(key, "")) for r in _read_csv(folder / ROWS)} if key else set()
+    listed = _read_csv(folder / ROWS)
+    on_list = {norm_key(r.get(key, "")) for r in listed} if key else set()
+    same = SameItems(recipe, tuple(recipe.get("skip_sites") or ()))
+    for r in listed:
+        same.add(r)
     ranked = sorted(enumerate(loose), key=lambda x: (len([n for n in x[1].get(_LOOSE_COL, "").split(";") if n.strip()]),
                                                      x[0]))
     added: list[dict[str, str]] = []
@@ -2382,9 +2630,10 @@ def fill_from_loose(folder: Path, recipe: dict[str, Any]) -> list[dict[str, str]
         if short.get(slot, 0) <= 0:
             continue
         k = norm_key(r.get(key, "")) if key else ""
-        if k and k in on_list:
+        if (k and k in on_list) or same.of(r):
             continue
         on_list.add(k)
+        same.add(r)
         short[slot] -= 1
         _append_csv(folder / ROWS, recipe["columns"] + [_GROUP_COL], {**r, _GROUP_COL: group})
         name = next((r.get(c, "") for c in recipe["columns"] if r.get(c)), k)
@@ -2570,7 +2819,11 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
         return 0, 0, 0
     done = {r.get("key") for r in _read_csv(folder / ITEMS) if r.get("stage") in ("agent", "agent-check")}
     kept = kept_per_group(folder)
-    on_list = {norm_key(r.get(recipe["key"], "")) for r in _read_csv(folder / ROWS)} if recipe["key"] else set()
+    listed = _read_csv(folder / ROWS)
+    on_list = {norm_key(r.get(recipe["key"], "")) for r in listed} if recipe["key"] else set()
+    same = SameItems(recipe, tuple(recipe.get("skip_sites") or ()))
+    for r in listed + _read_csv(folder / LOOSE):
+        same.add(r)
     sources = sorted({c["source_column"] for c in recipe["checks"] if c["op"] == "in_evidence" and c.get("source_column")})
     unsourced_check = any(c["op"] == "in_evidence" and not c.get("source_column") for c in recipe["checks"])
     soft = loosenable(recipe) if loosen_on(run, recipe) else []
@@ -2611,6 +2864,9 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
             unshown = unshown_musts(recipe, row)
             if not problem and unshown:
                 problem = "it shows nothing for: " + "; ".join(unshown)
+            twin = same.of(row)
+            if not problem and twin:
+                problem = f"it is {twin} under another name (the same website)"
             if not problem and recipe["groups"] and recipe["groups"].get(group) and kept.get(group, 0) >= recipe["groups"][group]:
                 problem = f"{group} is already full"
             item = {"key": key, "name": str(name)[:120], "group": group, "source": "finishing step",
@@ -2624,6 +2880,7 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
             if unsourced_check and not sources:
                 unsourced += 1
             on_list.add(key)
+            same.add(row)
             if loosened:  # waits with the funnel's loose rows: on the list only where a group is still short
                 names = "; ".join(r["rule"] for r in loosened)
                 _append_csv(folder / LOOSE, recipe["columns"] + [_GROUP_COL, _LOOSE_COL],
@@ -2650,12 +2907,14 @@ def write_list(folder: Path, recipe: dict[str, Any]) -> list[dict[str, str]]:
     """The kept rows as the list: its columns in order, no two with the same key."""
     cols = recipe["columns"]
     out, seen = [], set()
+    same = SameItems(recipe, tuple(recipe.get("skip_sites") or ()))
     for r in _read_csv(folder / ROWS):
         k = norm_key(r.get(recipe["key"], "")) if recipe["key"] in cols else ""
-        if k and k in seen:
+        if (k and k in seen) or same.of(r):
             continue
         if k:
             seen.add(k)
+        same.add(r)
         out.append({c: r.get(c, "") for c in cols})
     target = folder / recipe["output"]
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -2663,6 +2922,91 @@ def write_list(folder: Path, recipe: dict[str, Any]) -> list[dict[str, str]]:
         w = csv.DictWriter(fh, fieldnames=cols)
         w.writeheader()
         w.writerows(out)
+    return out
+
+
+def came_close_name(recipe: dict[str, Any]) -> str:
+    """Where the items that came close go: next to the list, named after it."""
+    out = Path(recipe["output"])
+    return str(out.with_name(f"{out.stem}{CLOSE_SUFFIX}.csv"))
+
+
+_CLOSE_WHY, _CLOSE_SRC = "Why it came close", "Sources"
+
+
+def _cells_from_fields(fields: dict[str, Any], cols: list[str]) -> dict[str, str]:
+    """An item's own fields (a source file's columns, a search hit's name and link)
+    put under the list's columns of the same name."""
+    low = {str(k).strip().lower(): v for k, v in (fields or {}).items()}
+    return {c: " ".join(str(low[c.lower()]).split()) for c in cols if str(low.get(c.lower()) or "").strip()}
+
+
+def write_came_close(folder: Path, recipe: dict[str, Any]) -> list[dict[str, str]]:
+    """``<the list>-came-close.csv``: the items that nearly made the list, in the list's
+    columns as far as they were found, with why and where they were read. Rows that
+    meet the soft rules only by their looser reading and weren't needed come first
+    (they were filled in full), then the items a fact the rules need wasn't found
+    for. Nothing already on the list, and nothing later dropped. With nothing that
+    came close there is no file (one an earlier merge wrote goes)."""
+    cols = list(recipe["columns"])
+    key, group_by = recipe["key"], recipe["group_by"]
+    on_list = {norm_key(r.get(key, "")) for r in _read_csv(folder / ROWS)} if key else set()
+    last = {}
+    for r in _read_csv(folder / ITEMS):
+        if r.get("stage") != "duplicate":  # found again under another name: what it was stands
+            last[r.get("key", "")] = r.get("status", "")
+    gone = {k for k, st in last.items() if k and st in ("dropped", "kept")}
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    same = SameItems(recipe, tuple(recipe.get("skip_sites") or ()))
+    for r in _read_csv(folder / ROWS):
+        same.add(r)
+
+    def add(k: str, row: dict[str, str], group: str, why: str, sources: str) -> None:
+        nk = norm_key(row.get(key, "")) if key and row.get(key) else ""
+        if any(x and (x in gone or x in seen) for x in (k, nk)) or (nk and nk in on_list) or same.of(row):
+            return
+        seen.update(x for x in (k, nk) if x)
+        same.add(row)
+        if group_by and group and not row.get(group_by):
+            row[group_by] = group
+        out.append({**{c: row.get(c, "") for c in cols}, _GROUP_COL: group, _CLOSE_WHY: why, _CLOSE_SRC: sources})
+
+    for r in _read_csv(folder / LOOSE):
+        names = "; ".join(n.strip() for n in (r.get(_LOOSE_COL) or "").split(";") if n.strip())
+        add("", {c: r.get(c, "") for c in cols}, r.get(_GROUP_COL, ""),
+            f"meets these rules only by their looser reading: {names}" if names else "meets a rule only by its looser reading",
+            "")
+    maybe = {}
+    for m in _read_csv(folder / MAYBE):
+        maybe[m.get("key") or m.get("name") or str(len(maybe))] = m  # the latest word on each item
+    for k, m in maybe.items():
+        try:
+            fields = json.loads(m.get("fields") or "{}")
+        except ValueError:
+            fields = {}
+        try:
+            filled = json.loads(m.get("row") or "{}")
+        except ValueError:
+            filled = {}
+        row = {**_cells_from_fields(fields if isinstance(fields, dict) else {}, cols),
+               **{c: str(v) for c, v in (filled if isinstance(filled, dict) else {}).items() if c in cols and v}}
+        if key and key in cols and not row.get(key):
+            row[key] = str(m.get("name") or "")
+        add(m.get("key", ""), row, m.get("group", ""), m.get("why") or "a fact the rules need wasn't found",
+            " ".join((m.get("sources") or "").split()[:5]))
+    order = {g: i for i, g in enumerate(recipe["groups"])}
+    out.sort(key=lambda r: order.get(r[_GROUP_COL], len(order)))  # stable: looser-reading rows first in each group
+    header = cols + ([] if not recipe["groups"] or group_by in cols else ["Group"]) + [_CLOSE_WHY, _CLOSE_SRC]
+    target = folder / came_close_name(recipe)
+    if not out:
+        target.unlink(missing_ok=True)
+        return out
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=header, extrasaction="ignore")
+        w.writeheader()
+        w.writerows([{**r, "Group": r[_GROUP_COL]} for r in out])
     return out
 
 
@@ -2697,12 +3041,12 @@ def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
             have = groups.get(g, {}).get("on_list", 0)
             lines.append(f"| {_md(g)} | {have} | {n or '-'} | {short.get(g, 0) or '-'} |")
         lines.append("")
+    close = rows_in(folder / came_close_name(recipe))
     if short:
-        maybe = sum(1 for m in _read_csv(folder / MAYBE))
         why = (f"the run's {budget} searches were used" if got["searches"] >= budget
                else "the sources ran out of items that pass")
         lines += ["## Short", "", "; ".join(f"{g or 'the list'}: {n} more" for g, n in short.items())
-                  + f". Why: {why}." + (f" {maybe} came close (`{MAYBE}`)." if maybe else ""), ""]
+                  + f". Why: {why}." + (f" {close} came close (`{came_close_name(recipe)}`)." if close else ""), ""]
     loose = loose_on_list(folder)
     if loose:
         soft = loosenable(recipe)
@@ -2734,10 +3078,11 @@ def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
     src = [f"`{s['path']}`" if s.get("path") else s.get("url") or f"{len(s.get('queries') or [])} planned searches"
            for s in recipe["sources"]]
     lines += ["", "## Sources", "", ", ".join(src) + f". Searches made: {got['searches']} of {budget}.", "",
-              "## Files", "", f"- `{recipe['output']}`: the list",
-              f"- `{EXCLUSIONS}`: every {item} dropped, where and why ({dropped})",
-              f"- `{ITEMS}`: everything looked at", f"- `{MAYBE}`: the ones that came close",
-              f"- `{RECIPE}`: the recipe the run followed"]
+              "## Files", "", f"- `{recipe['output']}`: the list"]
+    if close:
+        lines.append(f"- `{came_close_name(recipe)}`: the {close} that came close, with why (not on the list)")
+    lines += [f"- `{EXCLUSIONS}`: every {item} dropped, where and why ({dropped})",
+              f"- `{ITEMS}`: everything looked at", f"- `{RECIPE}`: the recipe the run followed"]
     text = "\n".join(lines) + "\n"
     (folder / SUMMARY).write_text(text, encoding="utf-8")
     return text
@@ -2749,6 +3094,7 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
     finished = await check_finish(run, step, folder, recipe)
     loosened = await asyncio.to_thread(fill_from_loose, folder, recipe) if loosen_on(run, recipe) else []
     out = await asyncio.to_thread(write_list, folder, recipe)
+    close = await asyncio.to_thread(write_came_close, folder, recipe)
     dropped = await asyncio.to_thread(write_exclusions, folder, recipe)
     budget = _int((run.get("config") or {}).get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
     await asyncio.to_thread(write_summary, folder, recipe, len(out), dropped, finished, budget)
@@ -2761,6 +3107,7 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
             + f".{per}" + (f" The finishing step added {added} (and {refused} that failed a check)." if added or refused else "")
             + (f" {len(loosened)} meet the soft rules only by their looser reading (listed in `{SUMMARY}`)."
                if loosened else "")
+            + (f" `{came_close_name(recipe)}`: {len(close)} that came close, with why." if close else "")
             + f" `{EXCLUSIONS}`: {dropped} dropped, with why. `{SUMMARY}`: how it went.")
     return {"ok": True, "output": text, "usd": 0.0, "tokens": 0, "error": ""}
 
@@ -2819,6 +3166,9 @@ def judge_note(run: dict) -> str:
     kept += len(loose)
     lines.append(f"It looked at {looked} items and kept {kept}; `{EXCLUSIONS}` says why each other one went. "
                  "Rules these checks don't cover are yours to judge.")
+    if rows_in(folder / came_close_name(recipe)):
+        lines.append(f"`{came_close_name(recipe)}` holds the items that came close, kept apart from the list on "
+                     "purpose with why each didn't make it: it isn't part of the list, so don't judge the list by it.")
     if loose:
         lines += ["", f"{len(loose)} rows meet some rules only by their looser reading. The factory lets the run use "
                       "them when a group runs short of rows that meet every rule as written, so they aren't faults "

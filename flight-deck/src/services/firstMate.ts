@@ -155,6 +155,8 @@ export interface RunResults {
   project: string
   timing: RunTiming | null
   main: ResultFile[]
+  /** What nearly made a list (a list funnel's `<list>-came-close.csv`), apart from it. */
+  close?: ResultFile[]
   other: ResultFile[]
   work: ResultFile[]
   total: number

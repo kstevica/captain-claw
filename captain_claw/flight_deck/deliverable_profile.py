@@ -42,6 +42,7 @@ _MAIN_NAME = re.compile(r"(^|[\W_])(final|result|results|report|output|deliverab
                         r"($|[\W_])", re.IGNORECASE)
 _WORK_NAME = re.compile(r"^(tmp|temp|scratch|test|debug)([\W_]|$)|[\W_](tmp|temp|scratch)$", re.IGNORECASE)
 _WORK_EXTS = {".pyc", ".log", ".bak", ".swp"}
+_CLOSE_NAME = re.compile(r"[\W_]came[\W_]close$", re.IGNORECASE)  # a list's near misses, a result of their own
 _CODE_EXTS = {".py": "Python", ".js": "JavaScript", ".mjs": "JavaScript", ".ts": "TypeScript", ".tsx": "TypeScript",
               ".jsx": "JavaScript", ".go": "Go", ".rs": "Rust", ".java": "Java", ".kt": "Kotlin", ".rb": "Ruby",
               ".php": "PHP", ".cs": "C#", ".swift": "Swift", ".c": "C", ".cpp": "C++", ".h": "C", ".sh": "Shell",
@@ -77,6 +78,8 @@ def _kind_of(rel: str, named: set[str]) -> str:
     stem, ext = Path(name).stem, Path(name).suffix.lower()
     if "/" in rel or ext in _WORK_EXTS or ext in _SCRIPT_EXTS or _WORK_NAME.search(stem):
         return "work"
+    if _CLOSE_NAME.search(stem):
+        return "close"
     return "main" if _MAIN_NAME.search(stem) else "other"
 
 
@@ -90,9 +93,10 @@ def is_code_project(found: list[tuple[float, str, Path, int]]) -> bool:
 
 
 def sort_files(found: list[tuple[float, str, Path, int]], named: set[str]) -> dict[str, list[tuple[float, str, Path, int]]]:
-    """``found`` (newest first, from ``bat_routes._run_files``) into main / other / work.
-    A code project is one result: its files are all "main"."""
-    groups: dict[str, list[tuple[float, str, Path, int]]] = {"main": [], "other": [], "work": []}
+    """``found`` (newest first, from ``bat_routes._run_files``) into main / close / other /
+    work ("close": what nearly made a list, ``<list>-came-close.csv``). A code project is
+    one result: its files are all "main"."""
+    groups: dict[str, list[tuple[float, str, Path, int]]] = {"main": [], "close": [], "other": [], "work": []}
     if is_code_project(found):
         groups["main"] = list(found)
         return groups

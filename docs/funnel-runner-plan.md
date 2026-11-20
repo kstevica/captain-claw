@@ -530,6 +530,51 @@ for any list:
 Not fixed: segment calls stay the judging call's (two misfits got through; Jev's
 choice questions are an option), and founder names are not checked against roles.
 
+A different list (Croatian charter: restaurants in Zagreb, three cuisines) showed a
+group's step dropping an item that fit another group of the same list ("Italian, not
+Croatian" in the Croatian step). Now: the judging prompt says an item that fits another
+group is that group's find (kept, loose or maybe with that group named); a group named
+loosely ("Italian") is matched to the list's group by its words and the setup's group
+words and written as the list names it; a maybe goes to the group it fits; and a drop
+whose reason names exactly one other group is handed to that group's step
+(`shared/funnel/handover.csv`), which judges it first (or, if that step is done, the
+finishing step sees it as nearly there). Words every group shares ("kuhinja" in each
+cuisine) name no group. A drop that also broke another rule (a rating shown too low)
+stays a drop: the other group's step would drop it too.
+
+The same run showed three more general faults, fixed:
+
+- **Evidence from one page only.** A value whose check names a source column (the Web
+  column) was looked for only on the page that column cites, so an email on the
+  item's contact page failed when the row cited its homepage. Now any page read on
+  the item's own site counts (not a directory or social site).
+- **Addresses outside the US were never filled.** Code filled a "place" must (a city,
+  a country) only through the US state lookup. Now the shortest line on the item's
+  own pages that has a number and names the rule's place (or the run's target
+  places) fills the address column, or the rule's first column.
+- **A place in another grammatical case wasn't recognised.** "u Zagrebu", "u
+  Hrvatskoj": a place name with a case ending (-u, -a, -om, -oj, -ama…) now matches
+  the place, so the run's target country and a rule's place are found in any
+  inflecting language, not only in the nominative.
+- **One item twice under two names.** "Konoba X" and "Konoba X 900": the same website,
+  address, phone and email, but duplicates were told only by name. Now an item's own
+  site says who it is (`site_id`: the home page's host, a language part aside; a
+  deeper page's host and path; on a shared social or directory site, the item's page
+  there). A row with the same site, or the same host and the same phone or email, is
+  the same item, unless an address or phone column differs (two branches of one
+  chain stay two). It is dropped as a duplicate when judged, and skipped at the
+  merge, when loose rows fill a group, when the finishing step adds rows, and in the
+  came-close file.
+
+Items that came close were only in the run's working files (`maybe.csv`). Now the
+merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
+they were found (the judging call's partial row; a value not in what was read is left
+empty), then why it came close and the pages read. Rows on a looser reading that
+the list didn't need come first in their group, then the items a fact the rules need
+wasn't found for. Nothing on the list and nothing later dropped is in it; with
+nothing that came close there is no file. The run's results show it as a group of
+its own ("Came close"), and the reviewers are told it isn't part of the list.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

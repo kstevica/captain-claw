@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { AlertTriangle, Archive, CheckCircle2, ChevronRight, Clock, Code2, Compass, Download, Eye, FolderArchive, Loader2, MessageSquareWarning, RefreshCw, Table2, Trophy, Wrench } from 'lucide-react'
+import { AlertTriangle, Archive, CheckCircle2, ChevronRight, CircleDashed, Clock, Code2, Compass, Download, Eye, FolderArchive, Loader2, MessageSquareWarning, RefreshCw, Table2, Trophy, Wrench } from 'lucide-react'
 import { getFactoryResults, durationText, whenText, RUN_LABELS, type ResultFile, type RunResults, type RunTiming } from '../../services/firstMate'
 import { vfsApi, type FolderRef } from '../../services/vfsApi'
 import { getFileTypeGroup, isViewable, type AgentFile } from '../../services/fileTransfer'
@@ -187,6 +187,8 @@ export function FactoryResults({ factoryId, onNotice }: { factoryId: string; onN
                     </li>
                   ))}
                 </ul>
+                <FileGroup title="Came close" hint="Items that nearly made the list, with why each didn't: not on the list" icon={CircleDashed}
+                  project={r.project} files={r.close ?? []} onOpen={openFile} canOpen={canOpen} onNotice={onNotice} startOpen />
                 <FileGroup title="Other files" icon={Archive} project={r.project} files={r.other} onOpen={openFile} canOpen={canOpen} onNotice={onNotice} />
                 <FileGroup title="Working files" hint="Scripts, temporary files and subfolders its workers used" icon={Wrench}
                   project={r.project} files={r.work} onOpen={openFile} canOpen={canOpen} onNotice={onNotice} />
@@ -211,9 +213,10 @@ export function FactoryResults({ factoryId, onNotice }: { factoryId: string; onN
   )
 }
 
-function FileGroup({ title, hint, icon: Icon, project, files, onOpen, canOpen, onNotice }: {
+function FileGroup({ title, hint, icon: Icon, project, files, onOpen, canOpen, onNotice, startOpen = false }: {
   title: string
   hint?: string
+  startOpen?: boolean
   icon: typeof Archive
   project: string
   files: ResultFile[]
@@ -221,7 +224,7 @@ function FileGroup({ title, hint, icon: Icon, project, files, onOpen, canOpen, o
   canOpen: (project: string, f: ResultFile) => boolean
   onNotice: (text: string) => void
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(startOpen)
   if (!files.length) return null
   const ref: FolderRef = { project, owner: '' }
   const btn = 'flex h-8 w-8 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200'

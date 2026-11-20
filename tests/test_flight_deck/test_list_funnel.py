@@ -1082,6 +1082,9 @@ async def test_a_factory_that_never_loosens_keeps_every_rule(deck):
     assert (folder / "papers.csv").read_text().splitlines() == ["Title,Year,Code,Cites",
                                                                 "Alpha,2023,https://code.example/alpha,40"]
     assert {r["status"] for r in funnel._read_csv(folder / funnel.ITEMS) if r["name"] in ("Gamma", "Eps")} == {"maybe"}
+    close = {r["Title"]: r for r in funnel._read_csv(folder / "papers-came-close.csv")}
+    assert set(close) == {"Beta", "Gamma", "Delta", "Eps"} and close["Eps"]["Cites"] == "15"
+    assert close["Delta"]["Code"] == ""  # the link it made up isn't in what was read: not passed on
 
 
 def test_loose_rows_count_only_once_enough_items_were_looked_at(tmp_path):
@@ -1682,3 +1685,250 @@ async def test_the_owner_fill_reads_what_was_read_about_the_item(deck):
     steps = await funnel.plan(run)
     await _go(deck["store"], run, steps[:1])
     assert seen and "read: Firm: A Website: https://a.example" in seen[0]
+
+
+# ── an item that fits another group ────────────────────────────────────
+
+KITCHENS = [{"id": "fm1", "text": "restorani.csv; po 2 u skupini", "check": {
+    "type": "table", "path": "restorani.csv", "columns": ["Naziv", "Kuhinja", "Adresa"],
+    "min_per": {"Kuhinja": 2}, "allowed": {"Kuhinja": ["hrvatska kuhinja", "talijanska kuhinja"]}}}]
+
+
+async def test_an_item_that_fits_another_group_is_that_groups_find(deck):
+    """The Croatian step dropped an Italian restaurant for not being Croatian, though
+    Italian was the next group of the same list."""
+    run, folder = await _run(deck["store"], KITCHENS, rid="bat_othergr01")
+    (folder / "extra" / "hr.csv").write_text("Naziv,Adresa\nKonoba A,Ilica 1\nPizzeria B,Ilica 2\nTrattoria C,Ilica 3\n"
+                                             "Tvornica D,Ilica 4\n")
+    (folder / "extra" / "it.csv").write_text("Naziv,Adresa\nOsteria E,Ilica 5\n")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "group_by": "Kuhinja",
+                      "group_words": {"talijanska kuhinja": ["italian", "talijanski", "pizzeria"],
+                                      "hrvatska kuhinja": ["croatian", "hrvatski", "konoba"]},
+                      "sources": [{"kind": "file", "path": "extra/hr.csv", "group": "hrvatska kuhinja"},
+                                  {"kind": "file", "path": "extra/it.csv", "group": "talijanska kuhinja"}],
+                      "decide": "Restorani u Zagrebu."}
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            n = f["Naziv"]
+            if n == "Konoba A":
+                out.append({"id": i, "verdict": "keep", "row": {**f, "Kuhinja": "hrvatska kuhinja"}})
+            elif n == "Pizzeria B":  # kept, its group named loosely
+                out.append({"id": i, "verdict": "keep", "row": {**f, "Kuhinja": "Italian"}})
+            elif n == "Trattoria C" and "talijanska kuhinja. An item" in deck["decide_prompts"][-1]:
+                out.append({"id": i, "verdict": "keep", "row": {**f, "Kuhinja": "talijanska kuhinja"}})
+            elif n == "Trattoria C":  # the Croatian step drops it, naming the other group
+                out.append({"id": i, "verdict": "drop", "reason": "Talijanski restoran, ne hrvatski."})
+            elif n == "Tvornica D":
+                out.append({"id": i, "verdict": "drop", "reason": "Not a restaurant: a factory."})
+            else:
+                out.append({"id": i, "verdict": "keep", "row": {**f, "Kuhinja": "talijanska kuhinja"}})
+        return out
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:2])
+    assert "An item that fits another of these groups instead is that group's find" in deck["decide_prompts"][0]
+    rows = {r["Naziv"]: r for r in funnel._read_csv(folder / funnel.ROWS)}
+    assert rows["Pizzeria B"]["Kuhinja"] == rows["Pizzeria B"]["_group"] == "talijanska kuhinja"  # named as the list does
+    assert rows["Trattoria C"]["_group"] == "talijanska kuhinja"  # handed over, then kept by the Italian step
+    items = funnel._read_csv(folder / funnel.ITEMS)
+    assert [(r["status"], r["group"]) for r in items if r["name"] == "Trattoria C"] == [
+        ("handed", "talijanska kuhinja"), ("kept", "talijanska kuhinja")]
+    assert next(r for r in items if r["name"] == "Tvornica D")["status"] == "dropped"  # fits none: dropped
+
+
+def test_a_value_on_any_page_of_the_items_own_site_is_in_evidence():
+    """A restaurant's email on its contact page was refused because the row cited its
+    homepage (its Web column)."""
+    recipe = {"checks": [{"column": "Email", "op": "in_evidence", "source_column": "Web"}]}
+    read = {"https://restac.example": "Dobro došli", "https://restac.example/kontakt": "Pišite na info@restac.example"}
+    assert funnel.check_row(recipe, {"Email": "info@restac.example", "Web": "https://restac.example"}, read) == ""
+    assert funnel.check_row(recipe, {"Email": "info@restac.example", "Web": "https://www.restac.example/"}, read) == ""
+    assert "isn't in" in funnel.check_row(recipe, {"Email": "made@up.example", "Web": "https://restac.example"}, read)
+    # another site's pages, or a social site's, are no item's own: the cited page itself
+    social = {"https://www.instagram.com/other": "info@restac.example"}
+    assert "isn't a page Captain read" in funnel.check_row(
+        recipe, {"Email": "info@restac.example", "Web": "https://www.instagram.com/restac"}, social)
+
+
+def test_groups_named_by_a_word_every_group_shares_are_no_group(tmp_path):
+    """"Kuhinja nije točno jedna od tri skupine (navedeno hrvatska, latinoamerička i
+    azijska)": a fusion bar dropped in the Croatian step fits the Asian group."""
+    recipe = funnel.normalize_recipe({"group_by": "Kuhinja"}, funnel.from_contract([{"id": "a", "text": "x", "check": {
+        "type": "table", "path": "r.csv", "columns": ["Naziv", "Kuhinja"], "min_per": {"Kuhinja": 2},
+        "allowed": {"Kuhinja": ["hrvatska kuhinja", "talijanska kuhinja", "azijska kuhinja"]}}}]))
+    w = funnel.Work({"id": "r", "config": {}}, {"step_key": "step-1"}, recipe, tmp_path, group="hrvatska kuhinja")
+    assert w._other_group("Kuhinja nije točno jedna od tri skupine (navedeno hrvatska, latinoamerička i azijska).") \
+        == "azijska kuhinja"
+    assert w._other_group("Kuhinja nije hrvatska.") == ""  # names no other group
+    assert w._other_group("Talijanska i azijska fuzija.") == ""  # two: no guess
+    assert w._group_named("Azijska") == "azijska kuhinja" and w._group_named("kuhinja") == ""
+
+
+async def test_a_drop_that_broke_another_rule_stays_a_drop(deck):
+    """"Rating 4.3 is below 4.5; cuisine is Italian, not Croatian": the Italian step
+    would drop it for the rating too."""
+    run, folder = await _run(deck["store"], KITCHENS, {"funnel_loosen": "short"}, rid="bat_brokeoth1")
+    (folder / "extra" / "hr.csv").write_text("Naziv,Adresa,Ocjena\nTrattoria Uno,Ilica 7,4.3\n")  # the rating it read
+    rating = "ocjena 4,5 ili viša"
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "group_by": "Kuhinja",
+                      "group_words": {"talijanska kuhinja": ["italian"], "hrvatska kuhinja": ["croatian"]},
+                      "rules": [{"rule": "kuhinja je jedna od skupina", "kind": "must", "fact": "identity"},
+                                {"rule": rating, "kind": "must", "fact": "measured", "columns": ["Adresa"]}],
+                      "sources": [{"kind": "file", "path": "extra/hr.csv", "group": "hrvatska kuhinja"}],
+                      "decide": "Restorani."}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "drop", "broken": [rating], "shown": "4.3",
+                                     "reason": "Rating 4.3 is below 4.5; cuisine is Italian, not Croatian."}
+                                    for i, _f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert [r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)] == ["dropped"]
+    assert not (folder / funnel.HANDOVER).exists()
+
+
+async def test_the_place_rules_address_comes_from_its_own_pages(deck):
+    """Seven restaurants came out nearly there with Adresa and Kvart empty, their
+    address printed on their own pages."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv",
+                                                     "columns": ["Naziv", "Web", "Adresa", "Kvart"], "min_rows": 2}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_address01")
+    run = {**run, "task": "Pronađi restorane u Zagrebu."}
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "site_column": "Web",
+                      "sources": [{"kind": "search", "group": "", "queries": ["restorani Zagreb"]}],
+                      "gather": [{"kind": "fetch", "url": "{Web}", "paths": ["", "kontakt"]}],
+                      "rules": [{"rule": "Restoran se nalazi u gradu Zagrebu", "kind": "must", "fact": "place",
+                                 "columns": ["Adresa", "Kvart"]}], "decide": "Restorani u Zagrebu."}
+    deck["extract"] = lambda user: {"items": [{"name": "Konoba Lipa", "url": "https://konoba-lipa.example",
+                                               "fields": {"Naziv": "Konoba Lipa", "Web": "https://konoba-lipa.example"}}]}
+    deck["tools"] = _Tools(pages={"https://konoba-lipa.example": "Konoba Lipa\nNajbolja domaća kuhinja",
+                                  "https://konoba-lipa.example/kontakt": "Kontakt\nLipova 10, 10000 Zagreb\nRadno vrijeme 12-23"},
+                           results={"restorani Zagreb": "list results"})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {**f}} for i, f in items]
+    steps = await funnel.plan(run)
+    await bat_routes._bat_attempt({**(await deck["store"].get_run(run["id"])), "task": run["task"]}, steps[0])
+    rows = funnel._read_csv(folder / funnel.ROWS)
+    assert rows and rows[0]["Adresa"] == "Lipova 10, 10000 Zagreb"
+
+
+async def test_what_came_close_is_a_result_of_its_own(deck):
+    """Items that nearly made the list sat in the run's working files only: they are a
+    result of their own, next to the list, in its columns as far as they were found."""
+    run, folder = await _run(deck["store"], KITCHENS, rid="bat_closeby01")
+    (folder / "extra" / "hr.csv").write_text("Naziv,Adresa\nKonoba A,Ilica 1\nBistro M,\nKonoba N,Ilica 9\n")
+    (folder / "extra" / "it.csv").write_text("Naziv,Adresa\nOsteria E,Ilica 5\nPizzeria F,Ilica 6\n")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "group_by": "Kuhinja",
+                      "group_words": {"talijanska kuhinja": ["italian", "talijanski"],
+                                      "hrvatska kuhinja": ["croatian", "hrvatski", "konoba"]},
+                      "sources": [{"kind": "file", "path": "extra/hr.csv", "group": "hrvatska kuhinja"},
+                                  {"kind": "file", "path": "extra/it.csv", "group": "talijanska kuhinja"}],
+                      "decide": "Restorani u Zagrebu."}
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            n = f["Naziv"]
+            if n == "Bistro M":  # nearly there: its group named loosely, no address found
+                out.append({"id": i, "verdict": "maybe", "reason": "Adresa nije pronađena.",
+                            "row": {"Naziv": n, "Kuhinja": "Croatian"}})
+            elif n == "Pizzeria F":
+                out.append({"id": i, "verdict": "maybe", "reason": "Ne zna se radi li za ručak.",
+                            "row": {**f, "Kuhinja": "talijanska kuhinja"}})
+            elif n == "Konoba N":
+                out.append({"id": i, "verdict": "drop", "reason": "Zatvoreno."})
+            else:
+                out.append({"id": i, "verdict": "keep", "row": {**f, "Kuhinja": "hrvatska kuhinja" if "Konoba" in n
+                                                                  else "talijanska kuhinja"}})
+        return out
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    merged = (await _go(deck["store"], run, steps))[-1]
+    name = "restorani-came-close.csv"
+    assert funnel.came_close_name(funnel.load_recipe(folder)) == name
+    close = funnel._read_csv(folder / name)
+    assert list(close[0]) == ["Naziv", "Kuhinja", "Adresa", "Why it came close", "Sources"]
+    assert [(r["Naziv"], r["Kuhinja"], r["Adresa"]) for r in close] == [
+        ("Bistro M", "hrvatska kuhinja", ""), ("Pizzeria F", "talijanska kuhinja", "Ilica 6")]
+    assert close[0]["Why it came close"] == "Adresa nije pronađena."  # Konoba N, dropped, isn't there
+    assert f"`{name}`: 2 that came close, with why." in merged["output"]
+    assert f"- `{name}`: the 2 that came close" in (folder / funnel.SUMMARY).read_text()
+    assert "isn't part of the list" in funnel.judge_note(await deck["store"].get_run(run["id"]))
+    # a result of its own in the run's results, not one of the other files
+    from captain_claw.flight_deck import deliverable_profile as dp
+    found = [(2.0, "restorani.csv", folder / "restorani.csv", 1), (1.0, name, folder / name, 1)]
+    assert {k: [f[1] for f in v] for k, v in dp.sort_files(found, {"restorani.csv"}).items() if v} == {
+        "main": ["restorani.csv"], "close": [name]}
+    # a row on a looser reading the list didn't need comes first in its group; one the
+    # finishing step added later, or dropped, isn't there
+    recipe = funnel.load_recipe(folder)
+    funnel._append_csv(folder / funnel.LOOSE, recipe["columns"] + [funnel._GROUP_COL, funnel._LOOSE_COL],
+                       {"Naziv": "Konoba L", "Kuhinja": "hrvatska kuhinja", "Adresa": "Ilica 8",
+                        funnel._GROUP_COL: "hrvatska kuhinja", funnel._LOOSE_COL: "ocjena 4.5 ili više"})
+    funnel._append_csv(folder / funnel.ROWS, recipe["columns"] + [funnel._GROUP_COL],
+                       {"Naziv": "Pizzeria F", "Kuhinja": "talijanska kuhinja", "Adresa": "Ilica 6",
+                        funnel._GROUP_COL: "talijanska kuhinja"})
+    got = funnel.write_came_close(folder, recipe)
+    assert [(r["Naziv"], r["Why it came close"]) for r in got] == [
+        ("Konoba L", "meets these rules only by their looser reading: ocjena 4.5 ili više"),
+        ("Bistro M", "Adresa nije pronađena.")]
+    # nothing that came close: no file
+    (folder / funnel.LOOSE).unlink()
+    (folder / funnel.MAYBE).unlink()
+    assert funnel.write_came_close(folder, recipe) == [] and not (folder / name).exists()
+
+
+def test_an_items_own_site_says_who_it_is():
+    assert funnel.site_id("https://www.restac.example/") == "restac.example"
+    assert funnel.site_id("restac.example/en/") == "restac.example"  # a language part aside
+    assert funnel.site_id("https://restac.example/kontakt") == "restac.example/kontakt"
+    assert funnel.site_id("https://instagram.com/restac/") == "instagram.com/restac"  # its page on a shared site
+    assert funnel.site_id("https://www.linkedin.com/in/ana-b") == "linkedin.com/in/ana-b"
+    assert funnel.site_id("https://instagram.com") == funnel.site_id("https://www.linkedin.com/company/") == ""
+    assert funnel.site_id("not a link") == funnel.site_id("") == ""
+
+
+def test_an_item_found_again_under_another_name_is_the_same_item():
+    """One restaurant was on the list twice ("Restac" and "Restac 900"): the same
+    website, address, phone and email under two names."""
+    recipe = {"columns": ["Naziv", "Adresa", "Web", "Telefon", "Email"], "key": "Naziv", "site_column": "Web"}
+    same = funnel.SameItems(recipe)
+    same.add({"Naziv": "Restac", "Adresa": "Ilica 1", "Web": "https://restac.example", "Telefon": "+385 1 111 2222",
+              "Email": "info@restac.example"})
+    same.add({"Naziv": "Ana B", "Web": "https://instagram.com/ana"})
+    assert same.of({"Naziv": "Restac 900", "Adresa": "Ilica 1", "Web": "https://www.restac.example/",
+                    "Telefon": "01 111 2222"}) == "Restac"
+    assert same.of({"Naziv": "Restac (kontakt)", "Web": "https://restac.example/kontakt",
+                    "Email": "INFO@restac.example"}) == "Restac"  # another page of its site, the same email
+    # another branch of the same chain: another address and phone
+    assert same.of({"Naziv": "Restac Maksimir", "Adresa": "Maksimirska 5", "Web": "https://restac.example",
+                    "Telefon": "+385 1 999 8888"}) == ""
+    assert same.of({"Naziv": "Bob C", "Web": "https://instagram.com/bob"}) == ""  # a shared site: its own page
+    assert same.of({"Naziv": "Nowhere", "Web": ""}) == ""
+    assert funnel.SameItems({"columns": ["Naziv"], "key": "Naziv"}).of({"Naziv": "x"}) == ""  # no site column
+
+
+PLACES_WEB = [{"id": "fm1", "text": "mjesta.csv; 3 mjesta", "check": {
+    "type": "table", "path": "mjesta.csv", "columns": ["Naziv", "Adresa", "Web", "Telefon"], "min_rows": 3}}]
+
+
+async def test_the_same_item_under_another_name_isnt_kept_twice(deck):
+    run, folder = await _run(deck["store"], PLACES_WEB, rid="bat_sameweb1")
+    (folder / "extra" / "m.csv").write_text(
+        "Naziv,Adresa,Web,Telefon\nKonoba A,Ilica 1,https://konoba-a.example,+385 1 111 2222\n"
+        "Konoba A 900,Ilica 1,https://www.konoba-a.example/,01 111 2222\n"
+        "Konoba A Maksimir,Maksimirska 5,https://konoba-a.example,+385 1 999 8888\n")
+    deck["recipe"] = {"item": "mjesto", "key": "Naziv", "site_column": "Web",
+                      "sources": [{"kind": "file", "path": "extra/m.csv"}], "decide": "Mjesta."}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": f} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    assert [r["Naziv"] for r in funnel._read_csv(folder / "mjesta.csv")] == ["Konoba A", "Konoba A Maksimir"]
+    twin = next(r for r in funnel._read_csv(folder / funnel.ITEMS) if r["name"] == "Konoba A 900")
+    assert (twin["status"], twin["stage"]) == ("dropped", "duplicate") and "the same mjesto as Konoba A" in twin["reason"]
+    # rows already written twice (a run from before) go on the list once
+    recipe = funnel.load_recipe(folder)
+    funnel._append_csv(folder / funnel.ROWS, recipe["columns"] + [funnel._GROUP_COL],
+                       {"Naziv": "Konoba A 900", "Adresa": "Ilica 1", "Web": "https://konoba-a.example"})
+    assert [r["Naziv"] for r in funnel.write_list(folder, recipe)] == ["Konoba A", "Konoba A Maksimir"]
