@@ -1255,13 +1255,15 @@ keep: it meets every rule and the row is filled from the facts. maybe: it seems 
 wasn't in what was read; also when nothing read came from the item's own website, unless a fact shown breaks a
 rule. drop: it breaks a rule.''',
     '''[{"id": <its id>, "verdict": "keep|loose|maybe|drop", "reason": "<one short line>",
-  "row": {"<column>": "<value>"}, "loosened": ["<rule>"], "missing": ["<rule>"]}]
+  "row": {"<column>": "<value>"}, "loosened": ["<rule>"], "missing": ["<rule>"], "broken": ["<rule>"],
+  "shown": "<the words read that break it>"}]
 keep: it meets every rule as written and the row is filled from the facts. loose: it meets every rule that never
 loosens, and each other rule as written or by its looser reading (a fact that isn't shown, with nothing saying
 the item breaks the rule, is met by "not shown"); name those rules in "loosened" and fill the row. maybe: a fact a
 rule that never loosens needs wasn't in what was read, or nothing read came from the item's own website; name in
 "missing" every rule whose fact wasn't shown, and fill the row with what was. drop: what was read shows it breaks
-a rule.''')
+a rule; name it in "broken" and copy into "shown" the words read that break it (a number, a date, a place), and
+fill the row with what was shown. Not finding a fact is never "shown".''')
 
 
 class Work:
@@ -1783,6 +1785,11 @@ class Work:
             reason = " ".join(str(v.get("reason") or "").split())[:200]
             if verdict == "loose" and not self.loosen:
                 verdict = "maybe"  # no looser reading in this run: it's nearly there
+            if verdict == "drop" and self.loosen and self._unbacked_drop(v, it):
+                # it named only rules that may go unshown, and quoted nothing read that breaks them:
+                # not finding a fact isn't breaking the rule
+                v = {**v, "missing": list(v.get("missing") or []) + list(v.get("broken") or [])}
+                verdict = "maybe"
             if verdict == "maybe" and self.loosen:
                 verdict, loosened = self._maybe_or_loose(v)
             else:
@@ -1856,6 +1863,21 @@ class Work:
             if isinstance(named, list) else []
         return [r for r in self.recipe.get("rules") or []
                 if any(x and (x in r["rule"].lower() or r["rule"].lower() in x) for x in said)]
+
+    def _unbacked_drop(self, v: dict, item: dict) -> bool:
+        """A drop that shows no fact: every rule it says is broken may go unshown, and the
+        words it quotes as proof (if any) aren't in what was read. An item shown to break
+        a rule (a stated 120 people, a dated post, a foreign address) stays dropped, as
+        does a drop that names no rule or one that never loosens."""
+        broken = self._named(v.get("broken"))
+        soft = loosenable(self.recipe)
+        if not broken or any(r not in soft for r in broken):
+            return False
+        shown = " ".join(str(v.get("shown") or "").split())
+        if not shown:
+            return True
+        read = "\n".join(e.get("text", "") for e in item.get("evidence") or [])
+        return not fx.in_text(shown, read)
 
     def _maybe_or_loose(self, v: dict) -> tuple[str, list[dict[str, Any]]]:
         """A maybe whose missing facts are all ones a looser reading lets go unshown is

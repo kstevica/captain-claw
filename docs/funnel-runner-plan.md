@@ -444,6 +444,22 @@ was read as 1150). And the judging call kept answering maybe for "meets every ru
 employee count not shown": with looser readings on, a maybe names the rules whose facts
 weren't shown, and code makes it loose when each of them may go unshown.
 
+The next run still dropped firms for "no dated AI signal found": the judging call
+called a missing soft fact broken. A drop now names the rule it breaks and copies the
+words read that break it; when every rule it names may go unshown and the words it
+quotes aren't in what was read (or it quotes none), code treats it as a missing fact
+(loose with a row, else maybe). A drop that shows its fact stays a drop.
+
+That run (no cap on its factory) also showed what still needs bounds: after the funnel
+steps found nothing, the finishing agent used about 6 million tokens in 45 minutes and
+was retried after it timed out, and Bat's fix rounds then ran agent steps of 3 to 16
+million tokens each, retrying those that came back short, to 54.7 million in all for
+20 rows. Open: a hard ceiling for runs with no cap, a token limit per agent step, no
+automatic retry of a funnel run's finishing or fix steps, the exclusion guard reading
+every check on the same file (an "agency" pattern from the exclusion check flagged a
+marketing agency because the segment names live in another check), and the rule tiers
+in the finishing agent's conventions.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
