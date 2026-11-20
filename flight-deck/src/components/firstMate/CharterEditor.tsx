@@ -229,11 +229,14 @@ const HOW: { value: HowItRuns; label: string; icon: typeof Bot; hint: string }[]
 /** How a factory's runs do the work: Bat's agents, or the list funnel (with or without
  *  an agent to finish what's short, and with or without rows on a looser reading of
  *  the soft rules when a group runs short). */
-export function RunnerPicker({ value, leftovers, loosen, onChange, listy }: {
+export function RunnerPicker({ value, leftovers, loosen, onChange, listy, searches, onSearches }: {
   value: HowItRuns
   leftovers: boolean
   loosen: boolean
   onChange: (value: HowItRuns, leftovers: boolean, loosen: boolean) => void
+  /** The searches a run may make, as typed ("" for the usual amount); with its setter, the field shows. */
+  searches?: string
+  onSearches?: (value: string) => void
   /** Its goals ask for an amount: it reads as a list. */
   listy: boolean
 }) {
@@ -274,6 +277,15 @@ export function RunnerPicker({ value, leftovers, loosen, onChange, listy }: {
               className="mt-0.5 h-3.5 w-3.5 accent-violet-600" />
             <span>When a group runs short, loosen the soft rules: rows that miss only evidence many never publish (recent news, a signal, a rating) fill it after every strict row. The run says which rules it reads as soft. Not when the charter itself accepts a short list with the reason given: then every rule is kept as written.</span>
           </label>
+          {onSearches && (
+            <label className="mt-2.5 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
+              <span>Searches a run may make</span>
+              <input inputMode="numeric" value={searches ?? ''} placeholder="Automatic" aria-label="Searches a run may make"
+                onChange={(e) => onSearches(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                className="h-7 w-24 rounded-lg border border-[var(--fd-line)] bg-zinc-950 px-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
+              <span className="basis-full text-zinc-500">Left empty: 1,000, or 12 for each row the list asks for when that is more. A run stops searching when they are used.</span>
+            </label>
+          )}
         </>
       )}
     </Field>
