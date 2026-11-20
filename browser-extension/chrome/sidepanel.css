@@ -341,3 +341,7 @@ details.anon-back[open] > summary .ic.chev { transform: rotate(180deg); }
 .ask-box { width: 100%; max-height: calc(100vh - 20px); overflow: auto; display: flex; flex-direction: column; gap: 10px; border-color: var(--accent); box-shadow: 0 8px 30px rgba(0, 0, 0, .35); }
 .ask-q { display: flex; flex-direction: column; gap: 4px; }
 .ask-text { font-weight: 600; overflow-wrap: anywhere; }
+
+/* ── a recording's extra data ── */
+.data-row { display: flex; align-items: center; gap: 6px; font-size: calc(12px * var(--fs)); padding: 2px 0; min-width: 0; }
+.data-row .icon-btn { width: 20px; height: 20px; flex: none; }

@@ -85,3 +85,81 @@ export function pairCodeFromLocation(): string {
   const raw = decodeURIComponent(window.location.hash.replace(/^#/, '')).toUpperCase().replace(/[^A-Z0-9]/g, '')
   return raw.length === 6 ? `${raw.slice(0, 3)}-${raw.slice(3)}` : ''
 }
+
+// ── Recordings (captain_claw/flight_deck/browser_recordings.py) ──
+//
+// A process the person recorded in Captain for Chrome, an agent does again.
+// Kept on the deck: its steps, the extra data every run reads first, and how
+// its runs went.
+
+export interface RecordingAsk { id: string; label: string; was: string; kind: string; options?: string[] }
+
+export interface RecordingSummary {
+  id: string
+  name: string
+  about: string
+  site: string
+  start_url: string
+  steps: number
+  asks: RecordingAsk[]
+  asks_during: string[]
+  agent_decides: string[]
+  created_at: string
+  updated_at: string
+  runs: number
+  last_run_at: string
+  data?: number
+}
+
+export interface RecordingData { id: string; name: string; size: number; type: string; origin: string; added_at: string }
+
+export interface RecordingRun {
+  id: string
+  recording: string
+  name: string
+  site: string
+  agent: string
+  agent_slug: string
+  browser: string
+  started_at: string
+  ended_at: string
+  /** thinking | done | error | stopped | lost (the deck restarted meanwhile) */
+  status: string
+  note: string
+  inputs: { label: string; value: string }[]
+  folder: string
+  vfs: string
+  extra: string[]
+  steps: number
+  result: string
+  error: string
+  steps_done?: string[]
+}
+
+export interface RecordingDetail extends Omit<RecordingSummary, 'data'> {
+  step_lines: string[]
+  data: RecordingData[]
+  /** How its runs went, the newest first (`runs` is how many). */
+  history: RecordingRun[]
+  limits: { files: number; bytes: number }
+}
+
+const rec = (id: string) => `/fd/browser-recordings/${encodeURIComponent(id)}`
+
+export const listRecordings = () =>
+  fdFetch<{ recordings: RecordingSummary[]; runs: RecordingRun[] }>('/fd/browser-recordings')
+export const getRecording = (id: string) => fdFetch<RecordingDetail>(rec(id))
+export const deleteRecording = (id: string) => fdFetch<{ ok: boolean }>(rec(id), { method: 'DELETE' })
+export const addRecordingData = (id: string, ids: string[]) =>
+  fdFetch<{ added: RecordingData[]; items: RecordingData[] }>(`${rec(id)}/data`, { method: 'POST', body: JSON.stringify({ ids }) })
+export const dropRecordingData = (id: string, itemId: string) =>
+  fdFetch<{ items: RecordingData[] }>(`${rec(id)}/data/${encodeURIComponent(itemId)}`, { method: 'DELETE' })
+/** A link that opens (or downloads) one file: the sign-in token rides along, as file links do. */
+export function recordingDataUrl(id: string, itemId: string, download = false): string {
+  const { token, authEnabled } = useAuthStore.getState()
+  const q = new URLSearchParams()
+  if (download) q.set('download', 'true')
+  if (authEnabled && token) q.set('fd_token', token)
+  const qs = q.toString()
+  return `${rec(id)}/data/${encodeURIComponent(itemId)}/file${qs ? `?${qs}` : ''}`
+}

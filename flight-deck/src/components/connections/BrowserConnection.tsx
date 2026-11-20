@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { AlertCircle, Check, Copy, Download, Globe, Loader2, Monitor, Trash2 } from 'lucide-react'
 import { EXTENSION_ZIP, MAC_APP_ZIP, listConnections, removeBrowser, type ConnectedBrowser } from '../../services/browserClip'
+import BrowserRecordings from './BrowserRecordings'
 
 // Connections → Browser: Captain for Chrome — how to put it in Chrome — and
 // Captain for Mac (the same for any app on a Mac), with the browsers and Macs
@@ -143,6 +144,8 @@ export default function BrowserConnection({ active = true, onStatus }: { active?
             Each can be read as an investor, a buyer, a lawyer, a skeptic, a competitor, an engineer, a newcomer, your team — or your own angle.
           </p>
         </section>
+
+        <BrowserRecordings active={active} />
 
         <section className="space-y-2 rounded-md border border-zinc-800 bg-zinc-950/40 px-4 py-3">
           <div className="flex items-center gap-2">

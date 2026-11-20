@@ -1775,9 +1775,93 @@ function viewRecs() {
 function openRecRun(id) {
   const rec = (S.recs || []).find((r) => r.id === id)
   if (!rec) return
-  S.recRun = { rec, note: '', inputs: Object.fromEntries((rec.asks || []).map((a) => [a.id, a.was || ''])), error: '', sending: false }
+  S.recRun = { rec, note: '', inputs: Object.fromEntries((rec.asks || []).map((a) => [a.id, a.was || ''])), error: '', sending: false,
+               data: null, files: [], runs: null, busy: false }
   S.view = 'rec-run'
   render()
+  loadRecExtras(S.recRun)
+}
+
+// The recording's extra data and how its earlier runs went.
+async function loadRecExtras(run) {
+  const base = `/fd/clip/recordings/${encodeURIComponent(run.rec.id)}`
+  const [data, runs] = await Promise.all([
+    api(S.conn, `${base}/data`).catch(() => null),      // an older Flight Deck has neither
+    api(S.conn, `${base}/runs`).catch(() => null),
+  ])
+  if (S.recRun !== run) return
+  run.data = data ? data.items || [] : false
+  run.runs = runs ? runs.runs || [] : false
+  if (S.view === 'rec-run') render()
+}
+
+function pickFiles(multiple = true) {
+  return new Promise((resolve) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.multiple = multiple
+    input.onchange = () => resolve([...input.files])
+    input.click()
+  })
+}
+
+async function recAddData() {
+  const run = S.recRun
+  if (!run || run.busy) return
+  const files = await pickFiles()
+  if (!files.length || S.recRun !== run) return
+  run.busy = true
+  run.error = ''
+  render()
+  try {
+    const form = new FormData()
+    for (const f of files) form.append('file', f, f.name)
+    const r = await upload(S.conn, `/fd/clip/recordings/${encodeURIComponent(run.rec.id)}/data`, form, () => {})
+    run.data = r.items || []
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    run.error = e.message
+  }
+  run.busy = false
+  if (S.recRun === run) render()
+}
+
+async function recDropData(itemId) {
+  const run = S.recRun
+  if (!run) return
+  try {
+    const r = await api(S.conn, `/fd/clip/recordings/${encodeURIComponent(run.rec.id)}/data/${encodeURIComponent(itemId)}/delete`, { method: 'POST' })
+    run.data = r.items || []
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    toast(e.message)
+  }
+  if (S.recRun === run) render()
+}
+
+async function recRunFiles() {
+  const run = S.recRun
+  if (!run) return
+  const files = await pickFiles()
+  if (S.recRun !== run) return
+  run.files = [...run.files, ...files].slice(0, 20)
+  render()
+}
+
+const RUN_STATUS = { done: 'Done', error: 'Went wrong', stopped: 'Stopped', thinking: 'Working…', starting: 'Starting…', lost: 'Ended — answer in Flight Deck' }
+
+// An earlier run, opened the way a finished clip is.
+function openPastRun(id) {
+  const r = (S.recRun?.runs || []).find((x) => x.id === id)
+  if (!r) return
+  const live = r.status === 'thinking' || r.status === 'starting'
+  S.run = { clip_id: r.id, folder: r.folder, vfs: r.vfs, agent: r.agent, agentSlug: r.agent_slug, title: r.name, url: S.recRun.rec.start_url || '',
+            action: 'recording', actionLabel: 'Recording', status: r.status, events: (r.steps_done || []).map((text) => ({ text })), next: 0,
+            result: r.result || '', live: '', error: r.error || '', files: [], done: !live, at: Date.parse(r.started_at) || Date.now(), followedEnd: true }
+  S.follow = true
+  S.view = 'run'
+  render()
+  if (live) { pollRun(S.run); watchAsks() }
 }
 
 function viewRecRun() {
@@ -1792,8 +1876,36 @@ function viewRecRun() {
   const asks = (rec.asks || []).map((a) => `
     <div>
       <label class="label" for="ask-${esc(a.id)}">${esc(a.label)}</label>
-      <input type="text" id="ask-${esc(a.id)}" data-ask-input="${esc(a.id)}" value="${esc(run.inputs[a.id] ?? '')}" placeholder="${esc(a.was ? `When recorded: ${a.was}` : '')}">
+      ${a.options?.length
+        ? `<select class="select" id="ask-${esc(a.id)}" data-ask-input="${esc(a.id)}">${[...new Set([...(a.options.includes(run.inputs[a.id]) || !run.inputs[a.id] ? [] : [run.inputs[a.id]]), ...a.options])].map((o) => `<option ${o === run.inputs[a.id] ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`
+        : `<input type="text" id="ask-${esc(a.id)}" data-ask-input="${esc(a.id)}" value="${esc(run.inputs[a.id] ?? '')}" placeholder="${esc(a.was ? `When recorded: ${a.was}` : '')}">`}
     </div>`).join('')
+  const dataRows = (run.data || []).map((d) => `
+    <div class="data-row">${icon('file', 'sm')}<span class="grow ellipsis" title="${esc(`${d.name} · ${d.origin || ''}`)}">${esc(d.name)}</span>
+      <span class="dim">${esc(human(d.size))}</span>
+      <button class="icon-btn" data-rec-data-del="${esc(d.id)}" title="Take it off">${icon('x', 'sm')}</button></div>`).join('')
+  const fileRows = run.files.map((f, i) => `
+    <div class="data-row">${icon('file', 'sm')}<span class="grow ellipsis">${esc(f.name)}</span><span class="dim">${esc(human(f.size))}</span>
+      <button class="icon-btn" data-rec-file-del="${i}" title="Take it off">${icon('x', 'sm')}</button></div>`).join('')
+  const extras = run.data === false ? '' : `
+    <details class="include card" ${run.dataOpen || run.files.length ? 'open' : ''} data-rec-extras>
+      <summary><span class="grow"><b>Extra data</b> <span class="dim">— ${run.data === null ? '…' : [run.data.length ? plural(run.data.length, 'file') + ' every run' : '', run.files.length ? plural(run.files.length, 'file') + ' this run' : ''].filter(Boolean).join(', ') || 'none'}</span></span>${icon('chevron', 'sm chev')}</summary>
+      <div style="margin-top:6px">
+        <div class="dim">What ${esc(ag?.name || 'the agent')} reads before it starts: how you want it done, lists, rules, examples.</div>
+        <div class="label" style="margin-top:8px">Every run</div>
+        ${dataRows || '<div class="dim">Nothing yet.</div>'}
+        <div class="links-row"><button data-act="rec-data-add" ${run.busy ? 'disabled' : ''}>${run.busy ? 'Adding…' : 'Add files'}</button></div>
+        <div class="dim">Agents' files, Flight Deck files, pasted text and links: add them in Flight Deck → Connections → Browser.</div>
+        <div class="label" style="margin-top:8px">This run only</div>
+        ${fileRows || '<div class="dim">Nothing.</div>'}
+        <div class="links-row"><button data-act="rec-run-files">Add files</button></div>
+      </div>
+    </details>`
+  const past = (run.runs || []).slice(0, 6).map((r) => `
+    <button class="history-item" data-rec-past="${esc(r.id)}">
+      <span class="ellipsis"><b>${esc(RUN_STATUS[r.status] || r.status)}</b> <span class="dim">· ${esc(r.agent || '')} · ${esc(new Date(r.started_at).toLocaleString())}</span></span>
+      ${r.inputs?.length || r.note ? `<span class="dim ellipsis">${esc([...(r.inputs || []).map((i) => `${i.label}: ${i.value}`), r.note].filter(Boolean).join(' · '))}</span>` : ''}
+    </button>`).join('')
   const handsOk = S.hands.on && S.handsStatus?.state !== 'denied'
   return `
     <div class="row"><button class="icon-btn" data-act="recs" title="Back">${icon('back')}</button>
@@ -1803,13 +1915,15 @@ function viewRecRun() {
     <div><label class="label" for="agent">Who does it</label><select class="select" id="agent">${agents}</select></div>
     ${asks}
     <div><textarea id="recRunNote" rows="2" placeholder="Anything different this time? (optional)">${esc(run.note)}</textarea></div>
+    ${extras}
     ${rec.asks_during?.length ? `<div class="dim">${icon('ask', 'sm')} It will stop and ask you for ${esc(rec.asks_during.map((l) => `“${l}”`).join(', '))} when it gets there — keep this panel open.</div>` : ''}
     ${rec.agent_decides?.length ? `<div class="dim">${icon('sparkles', 'sm')} It decides ${esc(rec.agent_decides.map((l) => `“${l}”`).join(', '))} itself.</div>` : ''}
     ${handsOk ? '' : `<div class="notice">${icon('globe')}<div class="grow">Your agents can't use this browser yet — without it the agent has only a browser of its own, where you aren't signed in.
       <div style="margin-top:6px"><button class="btn" data-act="rec-hands-on">Let agents use this browser</button></div></div></div>`}
     ${run.error ? `<div class="notice err">${esc(run.error)}</div>` : ''}
     <button class="btn primary block" data-act="rec-run-go" ${ag && !run.sending ? '' : 'disabled'}>${icon('play', 'sm')} ${run.sending ? 'Starting…' : ag ? `Run with ${esc(ag.name)}` : 'Pick an agent'}</button>
-    <div class="dim">${esc(ag?.name || 'The agent')} works in tabs of its own, grouped under its name — you can keep using yours. It stops and asks when a step doesn't fit what it sees.</div>`
+    <div class="dim">${esc(ag?.name || 'The agent')} works in tabs of its own, grouped under its name — you can keep using yours. It stops and asks when a step doesn't fit what it sees.</div>
+    ${past ? `<div class="label" style="margin-top:6px">Earlier runs</div>${past}` : ''}`
 }
 
 async function recRunGo() {
@@ -1820,10 +1934,17 @@ async function recRunGo() {
   run.error = ''
   render()
   try {
-    const res = await api(S.conn, `/fd/clip/recordings/${encodeURIComponent(run.rec.id)}/run`, {
-      method: 'POST',
-      body: JSON.stringify({ agent: ag.slug, note: run.note, inputs: run.inputs, browser: browserLabel(), hands: !!S.hands.on }),
-    })
+    const meta = { agent: ag.slug, note: run.note, inputs: run.inputs, browser: browserLabel(), hands: !!S.hands.on }
+    const path = `/fd/clip/recordings/${encodeURIComponent(run.rec.id)}/run`
+    let res
+    if (run.files.length) {
+      const form = new FormData()
+      form.append('meta', new Blob([JSON.stringify(meta)], { type: 'application/json' }), 'meta.json')
+      for (const f of run.files) form.append('file', f, f.name)
+      res = await upload(S.conn, path, form, () => {})
+    } else {
+      res = await api(S.conn, path, { method: 'POST', body: JSON.stringify(meta) })
+    }
     S.recRun = null
     startRun({ clip_id: res.clip_id, folder: res.folder, vfs: res.vfs, agent: res.agent || ag.name, agentSlug: ag.slug,
                title: run.rec.name, url: run.rec.start_url || '', action: 'recording', actionLabel: 'Recording' })
@@ -1841,9 +1962,16 @@ function draftStep(id) {
 }
 
 $view.addEventListener('click', (ev) => {
-  const el = ev.target.closest('[data-act^="rec"],[data-step-open],[data-step-del],[data-step-move],[data-rec-run],[data-rec-edit],[data-rec-del]')
+  const extras = ev.target.closest('details[data-rec-extras] > summary')
+  if (extras && S.recRun) { S.recRun.dataOpen = !extras.parentElement.open; return }
+  const el = ev.target.closest('[data-act^="rec"],[data-step-open],[data-step-del],[data-step-move],[data-rec-run],[data-rec-edit],[data-rec-del],[data-rec-data-del],[data-rec-file-del],[data-rec-past]')
   if (!el) return
   const d = el.dataset
+  if (d.recDataDel) return void recDropData(d.recDataDel)
+  if (d.recFileDel !== undefined && S.recRun) { S.recRun.files.splice(Number(d.recFileDel), 1); render(); return }
+  if (d.recPast) return openPastRun(d.recPast)
+  if (d.act === 'rec-data-add') return void recAddData()
+  if (d.act === 'rec-run-files') return void recRunFiles()
   if (d.stepOpen) {
     S.recNoteOpen.add(d.stepOpen)
     render()
@@ -1905,7 +2033,8 @@ $view.addEventListener('input', (ev) => {
 
 $view.addEventListener('change', (ev) => {
   const el = ev.target
-  if (el.dataset.stepAsk) {
+  if (el.dataset.askInput && S.recRun) S.recRun.inputs[el.dataset.askInput] = el.value
+  else if (el.dataset.stepAsk) {
     const s = draftStep(el.dataset.stepAsk)
     if (s) {
       if (el.value) s.ask = el.value
@@ -2133,7 +2262,7 @@ async function refreshAllSites() {
 $view.addEventListener('click', (ev) => {
   // Opened or closed now, not when the (later) toggle event comes: a redraw
   // in between would draw it the old way.
-  const summary = ev.target.closest('details.include > summary')
+  const summary = ev.target.closest('details.include:not([data-rec-extras]) > summary')
   if (summary) { S.includeOpen = !summary.parentElement.open; return }
   const el = ev.target.closest('[data-act],[data-action],[data-lens],[data-history],[data-file-path],[data-ftype],[data-text-size],[data-watch]')
   if (!el) return
@@ -2281,7 +2410,7 @@ $view.addEventListener('keydown', (ev) => {
 })
 
 $view.addEventListener('toggle', (ev) => {
-  if (ev.target.matches('details.include')) S.includeOpen = ev.target.open
+  if (ev.target.matches('details.include:not([data-rec-extras])')) S.includeOpen = ev.target.open
 }, true)
 
 $btnHistory.addEventListener('click', () => { S.view = S.view === 'history' ? 'main' : 'history'; render() })

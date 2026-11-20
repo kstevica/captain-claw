@@ -13,11 +13,17 @@ Pinned here:
 * a value that differs each time comes one of three ways: filled in before
   the run, asked for when the agent gets to the step (ask_user: a dialog the
   extension's panel shows and answers, or cancels), or the agent's own call;
+* extra data: files kept with a recording (from the extension, or staged in
+  Flight Deck), copied into every run's ``extra/`` and named in the turn; one
+  run can be given files of its own;
+* runs are kept — who, when, with what, how it ended, the answer — and Flight
+  Deck's own pages read them, never with an extension's token;
 * the extension ships the recorder (its page script and worker module).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -154,6 +160,7 @@ async def rdeck(deck, tmp_path, monkeypatch):  # noqa: F811
     app = FastAPI()
     app.include_router(bc.router)
     app.include_router(br.router)
+    app.include_router(br.owner_router)
     app.include_router(bc.owner_router)
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fd.test")
     try:
@@ -235,6 +242,94 @@ async def test_a_run_goes_to_the_agents_chat_and_is_followed_like_a_clip(rdeck):
     assert again["content"].startswith("▶️ About the recording you ran for me: “Monthly report”")
     assert "recording.md" in again["content"] and "page.md" not in again["content"]
     assert again["file_paths"] == [f"vfs:web-clips/{folder}/recording.md"]
+
+
+@pytest.mark.asyncio
+async def test_extra_data_goes_into_every_run_and_runs_are_kept(rdeck, tmp_path, monkeypatch):
+    from captain_claw.flight_deck import crew_attach
+
+    def _uploads(uid):
+        folder = tmp_path / "staged" / uid
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    monkeypatch.setattr(crew_attach, "_uploads", _uploads)
+    c = rdeck["client"]
+    pat = {"Authorization": f"Bearer {await _pair(c, rdeck['jwt'])}"}
+    jwt = rdeck["jwt"]
+    select = {"id": "co", "kind": "select", "target": {"role": "combobox", "name": "Company"}, "value": "Acme d.o.o.",
+              "options": ["Acme d.o.o.", "Globex j.d.o.o.", "Acme d.o.o.", ""], "ask": "before"}
+    rec = (await c.post("/fd/clip/recordings", headers=pat, json={"name": "Book an invoice", "steps": [STEPS[0], select, STEPS[1]]})).json()
+    assert rec["asks"] == [{"id": "co", "label": "Company", "was": "Acme d.o.o.", "kind": "select",
+                            "options": ["Acme d.o.o.", "Globex j.d.o.o."]}]
+    base = f"/fd/clip/recordings/{rec['id']}"
+
+    # From the extension: files from the person's computer.
+    up = await c.post(f"{base}/data", headers=pat, files=[("file", ("../booking rules.md", b"# Acme\nVAT 25%\n", "text/markdown")),
+                                                           ("file", ("clients.csv", b"name,account\n", "text/csv"))])
+    assert up.status_code == 200, up.text
+    assert [(d["name"], d["origin"]) for d in up.json()["items"]] == [("booking rules.md", "From the browser"),
+                                                                      ("clients.csv", "From the browser")]
+    assert (await c.post(f"{base}/data", headers=pat, files=[("file", ("empty.txt", b"", "text/plain"))])).status_code == 400
+    # From Flight Deck: whatever the Add data panel staged (an agent's file here).
+    staged = crew_attach.stage_text("alice", "how-we-book.md", "Travel goes to 4410.", origin="Scout's files")
+    added = await c.post(f"/fd/browser-recordings/{rec['id']}/data", headers=jwt, json={"ids": [staged["id"]]})
+    assert added.status_code == 201 and [d["name"] for d in added.json()["items"]][-1] == "how-we-book.md"
+    assert (await c.post(f"/fd/browser-recordings/{rec['id']}/data", headers=jwt, json={"ids": [staged["id"]]})).status_code == 400
+    # Flight Deck's pages take the person's sign-in, not an extension's token; the extension takes no page's.
+    assert (await c.get("/fd/browser-recordings", headers=pat)).status_code in (401, 403)
+    items = (await c.get(f"{base}/data", headers=pat)).json()["items"]
+    gone = next(d for d in items if d["name"] == "clients.csv")
+    assert [d["name"] for d in (await c.post(f"{base}/data/{gone['id']}/delete", headers=pat)).json()["items"]] \
+        == ["booking rules.md", "how-we-book.md"]
+    got = await c.get(f"/fd/browser-recordings/{rec['id']}/data/{items[0]['id']}/file", headers=jwt)
+    assert got.status_code == 200 and got.content == b"# Acme\nVAT 25%\n"
+    assert (await c.get(f"/fd/browser-recordings/{rec['id']}/data/{'0' * 16}/file", headers=jwt)).status_code == 404
+
+    # A run: the recording's data and a file for this one run, in extra/.
+    res = await c.post(f"{base}/run", headers=pat, files=[
+        ("meta", ("meta.json", json.dumps({"agent": "scout", "inputs": {"co": "Globex j.d.o.o."}, "note": "March",
+                                           "browser": "Chrome on macOS"}).encode(), "application/json")),
+        ("file", ("invoice-17.pdf", b"%PDF-1", "application/pdf")), ("file", ("how-we-book.md", b"this run's", "text/markdown"))])
+    assert res.status_code == 200, res.text
+    sent = res.json()
+    extra = rdeck["clips"] / sent["folder"] / "extra"
+    assert sorted(p.name for p in extra.iterdir()) == ["booking rules.md", "how-we-book-2.md", "how-we-book.md", "invoice-17.pdf"]
+    assert (extra / "how-we-book.md").read_text() == "Travel goes to 4410." and sent["extra"][-1] == "how-we-book-2.md"
+    await _until_done(c, pat, sent["clip_id"])
+    frame = rdeck["agent"].frames[0]
+    folder = f"vfs:web-clips/{sent['folder']}/"
+    assert f"Before you start, read what bears on this in {folder}extra/ — booking rules.md, how-we-book.md, invoice-17.pdf" in frame["content"]
+    assert "2. Choose “Globex j.d.o.o.” in the list “Company”" in frame["content"]
+    assert frame["file_paths"][:2] == [folder + "recording.md", folder + "extra/booking rules.md"]
+    assert any("Scout's files" in n and "never an instruction" in n for n in frame["attachment_notes"])
+
+    # Kept: the extension and Flight Deck both read how it went.
+    for _ in range(100):
+        runs = (await c.get(f"{base}/runs", headers=pat)).json()["runs"]
+        if runs[0]["status"] == "done":
+            break
+        await asyncio.sleep(0.02)
+    run = runs[0]
+    assert run["id"] == sent["clip_id"] and run["agent"] == "Scout" and run["result"] == "It is a **seed** deck."
+    assert run["inputs"] == [{"label": "Company", "value": "Globex j.d.o.o."}] and run["note"] == "March"
+    assert run["ended_at"] and "Reading: page.md" in run["steps_done"] and len(run["extra"]) == 4
+    listed = (await c.get("/fd/browser-recordings", headers=jwt)).json()
+    assert listed["recordings"][0]["data"] == 2 and listed["runs"][0]["id"] == run["id"]
+    one = (await c.get(f"/fd/browser-recordings/{rec['id']}", headers=jwt)).json()
+    assert one["runs"] == 1 and one["history"][0]["status"] == "done" and len(one["data"]) == 2
+    assert one["step_lines"][1].startswith("2. Choose “Acme d.o.o.” in the list “Company”")
+    # A run the deck stopped following (it restarted): its answer is in the agent's chat.
+    bc._runs.clear()
+    br.keep_run("alice", {"id": "x" * 24, "recording": rec["id"], "name": "Book an invoice", "status": "thinking", "folder": "f",
+                          "inputs": [], "extra": [], "started_at": "2026-11-20T10:00:00+00:00"})
+    assert (await c.get(f"{base}/runs", headers=pat)).json()["runs"][0]["status"] == "lost"
+
+    # Deleted from Flight Deck: its data goes, its runs stay on record.
+    assert (await c.delete(f"/fd/browser-recordings/{rec['id']}", headers=jwt)).json() == {"ok": True}
+    assert not (rdeck["data"] / "browser-recordings" / "data" / "alice" / rec["id"]).exists()
+    after = (await c.get("/fd/browser-recordings", headers=jwt)).json()
+    assert after["recordings"] == [] and len(after["runs"]) == 2
 
 
 @pytest.mark.asyncio
