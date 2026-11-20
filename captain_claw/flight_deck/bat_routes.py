@@ -1215,6 +1215,8 @@ async def _contract_checks(run: dict, has_shell: bool) -> tuple[list[Check], lis
         command_blocked = (r.get("check") or {}).get("type") == "command" and not has_shell
         rules.append({**r, "check": {"type": "judge"}} if command_blocked else r)
     folder = _run_folder(run)
+    from captain_claw.flight_deck import funnel
+    rules = funnel.contract_for_checks(run, rules)  # a list funnel's own alternatives: those cells may be empty
     res = await code_contract.validate(folder, rules, runner=_floor_runner, skip=WORK_DIRS)
     checks = [Check(f"acceptance: {r['text']}", passed=True, critical=r["severity"] != "minor")
               for r in res["passed"]]

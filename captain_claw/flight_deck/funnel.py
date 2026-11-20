@@ -153,7 +153,7 @@ def from_contract(contract: list[dict]) -> dict[str, Any]:
     """What the run's shaped checks already say about the list: its file, columns,
     groups and their amounts, the values a column allows, what must be unique."""
     out: dict[str, Any] = {"output": "", "columns": [], "target": 0, "group_by": "", "groups": {},
-                           "allowed": {}, "key": "", "exclude": ""}
+                           "allowed": {}, "key": "", "exclude": "", "required": []}
     for r in contract or []:
         check = r.get("check") or {}
         if check.get("type") != "table":
@@ -173,6 +173,7 @@ def from_contract(contract: list[dict]) -> dict[str, Any]:
             out["key"] = check["unique"][0]
         if check.get("exclude_pattern") and not out["exclude"]:
             out["exclude"] = check["exclude_pattern"]
+        out["required"] += [c for c in check.get("non_empty") or [] if c not in out["required"]]
     return out
 
 
@@ -264,6 +265,15 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
     recipe["skip_sites"] = [d for d in (fx.domain_of(str(x)) for x in raw.get("skip_sites") or [] if isinstance(x, str))
                             if d and "." in d][:30]
     recipe["rules"] = _rules(raw.get("rules"), recipe)
+    # a column the run's done-checks want filled in every row is required here too, so no
+    # row on the list fails them later; but never one a rule's own alternative lets be
+    # empty ("with no rating, judged good"): that alternative is the owner's word
+    optional = {c for r in recipe["rules"] if r.get("if_not_shown") for c in r.get("columns") or []}
+    for col in base.get("required") or []:
+        if col in columns and col not in optional and not any(
+                x["column"] == col and x["op"] == "required" for x in recipe["checks"]):
+            recipe["checks"].append({"column": col, "op": "required"})
+    recipe["checks"] = [x for x in recipe["checks"] if not (x["op"] == "required" and x["column"] in optional)]
     recipe["shortage_ok"] = raw.get("shortage_ok") is True
     files = raw.get("files") if isinstance(raw.get("files"), dict) else {}
     for key in ("summary", "exclusions"):  # else summary.md and exclusions.md
@@ -3577,6 +3587,27 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
             + (f" `{came_close_name(recipe)}`: {len(close)} that came close, with why." if close else "")
             + f" `{exclusions_name(recipe)}`: {dropped} dropped, with why. `{summary_name(recipe)}`: how it went.")
     return {"ok": True, "output": text, "usd": 0.0, "tokens": 0, "error": ""}
+
+
+def contract_for_checks(run: dict, rules: list[dict]) -> list[dict]:
+    """The run's done-checks as Captain runs them on a funnel run's list: a table check
+    that wants a column filled in every row doesn't ask it of a column a rule's own
+    alternative lets be empty ("with no rating, judged good from what was read"), so a
+    row the charter allows isn't failed for it. Any other run: the rules as they are."""
+    if (run.get("config") or {}).get("engine") != ENGINE:
+        return rules
+    from captain_claw.flight_deck import bat_routes
+    recipe = load_recipe(bat_routes._run_folder(run))
+    optional = {c for r in (recipe or {}).get("rules") or [] if r.get("if_not_shown") for c in r.get("columns") or []}
+    if not optional:
+        return rules
+    out = []
+    for r in rules:
+        check = r.get("check") or {}
+        if check.get("type") == "table" and check.get("non_empty"):
+            check = {**check, "non_empty": [c for c in check["non_empty"] if c not in optional]}
+        out.append({**r, "check": check})
+    return out
 
 
 async def write_on_stop(run: dict, why: str) -> str:
