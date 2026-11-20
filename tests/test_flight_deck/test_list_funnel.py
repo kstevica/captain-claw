@@ -2222,3 +2222,40 @@ def test_a_rule_with_its_own_alternative_is_judged_not_left_nearly_there():
         assert "judge the item on what was read and keep or drop it on that" in prompt
         assert "that fact being missing is never the reason for maybe" in prompt
     assert '"missing": ["<rule>"]' in funnel.DECIDE_STRICT and '"loosened"' in funnel.DECIDE_LOOSE  # the variants still differ
+
+
+async def test_a_stopped_run_still_writes_what_it_found(deck, monkeypatch):
+    """A run stopped after 70 minutes had 22 rows only in its working files: no list, no
+    summary, no dropped items."""
+    run, folder = await _run(deck["store"], PEOPLE, rid="bat_stopwrite")
+    (folder / "extra" / "contacts.csv").write_text(
+        "Name,Email,Team,Note\nAna,ana@acme.example,a,\nCy,cy@acme.example,a,student\nDi,di@delta.example,b,\n")
+    deck["recipe"] = {"item": "person", "sources": [{"kind": "file", "path": "extra/contacts.csv"}],
+                      "decide": "People with a work email.", "checks": [{"column": "Email", "op": "in_evidence"}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep" if f["Name"] == "Ana" else "maybe", "reason": "x",
+                                     "row": {"Name": f["Name"], "Email": f["Email"], "Team": f["Team"]}}
+                                    for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])  # the work step, then the owner stops it
+    assert not (folder / "people.csv").exists()
+    note = await funnel.write_on_stop(await deck["store"].get_run(run["id"]), "by its owner")
+    assert note.startswith("Stopped (by its owner): what it found so far is written: `people.csv` 1 rows")
+    assert (folder / "people.csv").read_text().splitlines() == ["Name,Email,Team", "Ana,ana@acme.example,a"]
+    assert (folder / "people-came-close.csv").is_file() and (folder / funnel.EXCLUSIONS).is_file()
+    assert "The run was stopped before it finished (by its owner)" in (folder / funnel.SUMMARY).read_text()
+    # what isn't a funnel run, or has nothing yet, writes nothing
+    assert await funnel.write_on_stop({"id": "x", "owner_id": "u1", "config": {}}, "by its owner") == ""
+    # Bat's driver does it when a run stops, not when it only loses its lease
+    from captain_claw.flight_deck.bat_loop import BatDriver
+    calls = []
+
+    async def fake(r, why):
+        calls.append(why)
+        return "written"
+
+    monkeypatch.setattr(funnel, "write_on_stop", fake)
+    driver = BatDriver(deck["store"])
+    await driver._stop(run["id"], "lost_lease", 1)
+    await driver._stop(run["id"], "cancelled", 1)
+    assert calls == ["by its owner"]
+    assert any(e["message"] == "written" for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note")

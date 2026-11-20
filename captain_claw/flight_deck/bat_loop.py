@@ -987,9 +987,26 @@ class BatDriver:
                                           detail=str(res.get("error", ""))[:200])
         return ""
 
+    async def _write_on_stop(self, run_id: str, reason: str) -> None:
+        """A list funnel run that stops before its merge still writes what it found."""
+        run = await self.store.get_run(run_id)
+        if not run:
+            return
+        why = {"cancelled": "by its owner", "llm_token_cap_reached": "its token cap ran out",
+               "llm_usd_cap_reached": "its spending cap ran out"}.get(reason, reason)
+        try:
+            from captain_claw.flight_deck import funnel
+            note = await funnel.write_on_stop(run, why)
+        except Exception as e:  # noqa: BLE001 — the run stops either way
+            log.warning("bat: writing a stopped funnel run's list failed", run_id=run_id, error=str(e))
+            return
+        if note:
+            await self.store.append_event(run_id, "note", note)
+
     async def _stop(self, run_id: str, reason: str, rounds: int) -> str:
         if reason not in ("lost_lease", "gone"):
             await self._stop_children(await self.store.get_run(run_id) or {"id": run_id})
+            await self._write_on_stop(run_id, reason)
         if reason == "cancelled":
             await self.store.append_event(run_id, "cancelled", "stopped by owner")
             # status already 'cancelled'
