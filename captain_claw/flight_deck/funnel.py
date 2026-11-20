@@ -720,6 +720,26 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
     return recipe
 
 
+def group_cell(recipe: dict[str, Any], group: str, current: str = "") -> str:
+    """What the column a list is grouped by holds for an item of ``group``: the group's
+    name, unless that column may only take values the name isn't one of. A list grouped
+    by two things at once ("US_company" under a Type that is company or individual)
+    had every good row dropped by its own check, the group's name written over the
+    cell. Then the cell keeps what was written when that is allowed, else takes the
+    allowed value the group's name carries ("company"), else stays as it was."""
+    col = recipe.get("group_by") or ""
+    allowed = [str(x) for c in recipe.get("checks") or [] if c.get("column") == col and c.get("op") == "in"
+               for x in c.get("value") or []]
+    if not allowed or group.lower() in {a.lower() for a in allowed}:
+        return group
+    kept = next((a for a in allowed if a.lower() == " ".join(str(current or "").split()).lower()), "")
+    if kept:
+        return kept
+    words = set(re.findall(r"[a-z0-9]+", _fold(group)))
+    carried = [a for a in allowed if set(re.findall(r"[a-z0-9]+", _fold(a))) <= words]
+    return carried[0] if len(carried) == 1 else str(current or "")
+
+
 def rows_wanted(recipe: dict[str, Any]) -> int:
     """How many rows the list asks for: its groups' amounts, else its target; 0 when it
     takes every item that passes."""
@@ -2671,10 +2691,11 @@ class Work:
                 row = {c: " ".join(str((v.get("row") or {}).get(c) or "").split()) for c in self.recipe["columns"]}
                 named = self._group_named(row.get(self.recipe["group_by"], "")) if self.recipe["group_by"] else ""
                 named = named or self._answer_group(v)  # its typed "group", when the column says none of them
-                if named:  # a group written loosely ("Italian") is the list's group, written as the list does
-                    row[self.recipe["group_by"]] = named
+                if named and self.recipe["group_by"]:
+                    # a group written loosely ("Italian") is the list's group, written as the list does
+                    row[self.recipe["group_by"]] = group_cell(self.recipe, named, row.get(self.recipe["group_by"], ""))
                 elif self.recipe["group_by"] and self.group and not row.get(self.recipe["group_by"]):
-                    row[self.recipe["group_by"]] = self.group  # no group said: this step's
+                    row[self.recipe["group_by"]] = group_cell(self.recipe, self.group)  # no group said: this step's
                 relax = {c for r in loosened for c in r.get("columns") or []}
                 read = {e["source"]: e["text"] for e in it.get("evidence") or []}
                 unproven = {c["column"]: row[c["column"]] for c in self.recipe["checks"]
@@ -2717,10 +2738,10 @@ class Work:
                 if problem:
                     await self.record(it, "dropped", f"check: {problem}", stage="check")
                     continue
-                group = self._group_named(row.get(self.recipe["group_by"], "") if self.recipe["group_by"] else "") \
-                    or self.group
-                if self.recipe["group_by"] and group in self.recipe["groups"]:
-                    row[self.recipe["group_by"]] = group  # as the list names it
+                group = named or self._group_named(row.get(self.recipe["group_by"], "")
+                                                   if self.recipe["group_by"] else "") or self.group
+                if self.recipe["group_by"] and group in self.recipe["groups"]:  # as the list names it
+                    row[self.recipe["group_by"]] = group_cell(self.recipe, group, row.get(self.recipe["group_by"], ""))
                 twin = self.same.of(row)
                 if twin:  # found again under another name: its own site (and phone or email) say so
                     await self.record(it, "dropped", f"the same {self.recipe['item']} as {twin}, found under "
@@ -2782,7 +2803,7 @@ class Work:
         name = it["fields"].get("name") or next(iter(it["fields"].values()), "")
         cells = {c: " ".join(str((got or {}).get(c) or "").split()) for c in self.recipe["columns"]}
         if self.recipe["group_by"] and group in self.recipe["groups"]:
-            cells[self.recipe["group_by"]] = group
+            cells[self.recipe["group_by"]] = group_cell(self.recipe, group, cells.get(self.recipe["group_by"], ""))
         read = {e["source"]: e["text"] for e in it.get("evidence") or []}
         for c in self.recipe["checks"]:
             if c["op"] == "in_evidence" and cells.get(c["column"]) and check_row(
@@ -4098,7 +4119,7 @@ def write_came_close(folder: Path, recipe: dict[str, Any]) -> list[dict[str, str
         seen.update(x for x in (k, nk) if x)
         same.add(row)
         if group_by and (group in recipe["groups"] or (group and not row.get(group_by))):
-            row[group_by] = group  # as the list names it, never a word a page used ("Sushi")
+            row[group_by] = group_cell(recipe, group, row.get(group_by, ""))  # as the list names it, never a word a page used ("Sushi")
         out.append({**{c: row.get(c, "") for c in cols}, _GROUP_COL: group, _CLOSE_WHY: why, _CLOSE_SRC: sources})
 
     for r in _read_csv(folder / LOOSE):
