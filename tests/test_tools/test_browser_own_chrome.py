@@ -81,6 +81,8 @@ async def test_live_an_agent_pairs_and_uses_its_own_chrome(tmp_path, monkeypatch
     monkeypatch.setattr(bh, "_MINTED", {})
     monkeypatch.setattr(bh, "_agent_store_path", lambda: tmp_path / "agent-browsers.json")
     monkeypatch.setattr(bh, "_clip_root", lambda user_id, project="web-clips": (tmp_path / "vfs" / project))
+    monkeypatch.setattr(bc, "_versions", None)
+    monkeypatch.setattr(bc, "_versions_path", lambda: tmp_path / "browser-versions.json")
     asks.reset_for_tests()
 
     def _caller(request, *, what):

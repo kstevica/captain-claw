@@ -372,6 +372,10 @@ async def hands_ws(ws: WebSocket) -> None:
                  version=one_line(first.get("version"), 20), agent_slug=str(row.get("agent_slug") or ""))
     conn.stopped = _stopped_list(first.get("stopped"))
     _register(conn)
+    if not conn.agent_slug:
+        from captain_claw.flight_deck.browser_clip import note_version
+
+        note_version(conn.token_id, conn.version)
     log.info("Browser hands connected: user=%s browser=%s", conn.user_id, conn.browser)
     try:
         await conn.send({"type": "welcome", "protocol": PROTOCOL,

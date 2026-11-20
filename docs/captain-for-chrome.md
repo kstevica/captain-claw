@@ -321,6 +321,30 @@ live (a folder read at run time rather than copied), sharing one with a teammate
 hover / drag steps, and a recording an agent tidies after a run ("step 4 is
 now called Export").
 
+## Versions: the extension against the deck's copy
+
+The extension is loaded unpacked, so nothing updates it — a deck that moves on
+leaves browsers behind without anyone noticing. So each side says its version:
+
+- The panel asks `/fd/clip/me?v=<its version>` when it opens (and again when a
+  panel left open for half an hour is looked at). The lending socket's hello
+  carries the version too.
+- The deck keeps what each connected browser last said
+  (`<FD_DATA_DIR>/browser-versions.json`, by token id; gone when the browser is
+  disconnected) and answers with `extension: {version, yours, state}` — its own
+  copy's version (the checkout's `manifest.json`, the one `/fd/clip/extension.zip`
+  hands out) and how the browser's stands against it: `same`, `update` (the deck
+  has a newer one), `ahead` (the browser's is newer), `""` when either isn't
+  known. Versions are compared as dotted numbers (`0.10.0` > `0.9.0`).
+- **Update:** the panel shows "Captain for Chrome X is ready" with **Download**
+  (the deck's zip), **Reload** (after the files are replaced) and **Later**,
+  which hides it for that version only; Settings always shows it.
+- **Ahead:** a warning that some things may not work until Flight Deck is updated.
+- Flight Deck → Connections → Browser shows each browser's version and the same
+  two notes, and the version the Download button gives.
+
+A deck without a copy of the extension (an installed one) says nothing.
+
 ## Security
 
 - The extension's origin reaches `/fd/clip/` only (origin guard + CORS);

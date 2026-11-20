@@ -210,6 +210,9 @@ details.include[open] > summary .ic.chev { transform: rotate(180deg); }
 
 .notice { display: flex; gap: 8px; align-items: flex-start; border-radius: 8px; padding: 9px 10px; font-size: calc(12px * var(--fs)); background: var(--panel-2); border: 1px solid var(--border); }
 .notice.err { background: var(--err-soft); border-color: transparent; color: var(--err); }
+.notice.ver { margin-bottom: 8px; }
+.notice.ver.update { border-color: var(--accent); background: var(--accent-soft); }
+.notice.ver.update > svg { color: var(--accent-text); flex: none; margin-top: 1px; }
 
 /* run */
 .watch-card { border-color: var(--accent); background: var(--accent-soft); }

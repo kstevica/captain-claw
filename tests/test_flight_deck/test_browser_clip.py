@@ -232,6 +232,8 @@ async def deck(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
     monkeypatch.setattr(bc, "_pairs", {})
     monkeypatch.setattr(bc, "_runs", {})
+    monkeypatch.setattr(bc, "_versions", None)
+    monkeypatch.setattr(bc, "_versions_path", lambda: tmp_path / "browser-versions.json")
     clips = tmp_path / "vfs" / "alice" / "web-clips"
 
     def _root(user_id, project=bc.CLIP_PROJECT):
@@ -505,6 +507,56 @@ def test_every_file_the_extension_loads_is_there_and_kept_by_git():
         return   # no git here (an installed deck): the files being there is the check
     if out.returncode != 128:   # 128 = not a checkout
         assert out.stdout.strip() == "", f"git ignores files the extension needs:\n{out.stdout}"
+
+
+def test_versions_are_compared_as_numbers():
+    assert bc.version_state("0.5.0", "0.5.0") == "same" and bc.version_state("0.5", "0.5.0") == "same"
+    assert bc.version_state("0.5.0", "0.5.1") == "update" and bc.version_state("0.9.0", "0.10.0") == "update"
+    assert bc.version_state("0.6.0", "0.5.9") == "ahead" and bc.version_state("1.0", "0.99.3") == "ahead"
+    # Not known, or not a version: nothing is said.
+    for yours, served in (("", "0.5.0"), ("0.5.0", ""), ("dev", "0.5.0"), ("0.5.0", "0.5.0-beta"), ("1.2.3.4.5", "1")):
+        assert bc.version_state(yours, served) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_deck_keeps_each_browsers_version_and_says_when_its_own_is_newer(deck, monkeypatch, tmp_path):
+    c, jwt = deck["client"], deck["jwt"]
+    pat = {"Authorization": f"Bearer {await _pair(c, jwt)}"}
+    monkeypatch.setattr(bc, "extension_version", lambda: "0.6.0")
+    # An extension from before this, or one that doesn't say: nothing to compare.
+    assert (await c.get("/fd/clip/me", headers=pat)).json()["extension"] == {"version": "0.6.0", "yours": "", "state": ""}
+    row = (await c.get("/fd/browsers", headers=jwt)).json()
+    assert row["extension_version"] == "0.6.0"
+    assert row["browsers"][0]["version"] == "" and row["browsers"][0]["version_state"] == ""
+
+    me = (await c.get("/fd/clip/me?v=0.5.0", headers=pat)).json()
+    assert me["extension"] == {"version": "0.6.0", "yours": "0.5.0", "state": "update"}
+    b = (await c.get("/fd/browsers", headers=jwt)).json()["browsers"][0]
+    assert b["version"] == "0.5.0" and b["version_state"] == "update"
+    # Kept across a restart.
+    monkeypatch.setattr(bc, "_versions", None)
+    assert (await c.get("/fd/browsers", headers=jwt)).json()["browsers"][0]["version"] == "0.5.0"
+
+    # They updated; then the deck fell behind them.
+    assert (await c.get("/fd/clip/me?v=0.6.0", headers=pat)).json()["extension"]["state"] == "same"
+    assert (await c.get("/fd/clip/me?v=0.7.0", headers=pat)).json()["extension"]["state"] == "ahead"
+    assert (await c.get("/fd/browsers", headers=jwt)).json()["browsers"][0]["version_state"] == "ahead"
+    # Something that isn't a version is not kept over the last real one.
+    assert (await c.get("/fd/clip/me?v=<b>x", headers=pat)).json()["extension"]["state"] == ""
+    assert (await c.get("/fd/browsers", headers=jwt)).json()["browsers"][0]["version"] == "0.7.0"
+
+    # A deck with no copy of the extension says nothing.
+    monkeypatch.setattr(bc, "extension_version", lambda: "")
+    assert (await c.get("/fd/clip/me?v=0.5.0", headers=pat)).json()["extension"]["state"] == ""
+    # A browser that goes takes its version with it.
+    await c.post("/fd/clip/disconnect", headers=pat)
+    assert json.loads((tmp_path / "browser-versions.json").read_text()) == {}
+
+
+def test_the_decks_own_version_is_the_manifests():
+    src = bc.extension_dir()
+    assert src is not None
+    assert bc.extension_version() == json.loads((src / "manifest.json").read_text("utf-8"))["version"]
 
 
 @pytest.mark.asyncio
