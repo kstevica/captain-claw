@@ -454,11 +454,16 @@ That run (no cap on its factory) also showed what still needs bounds: after the 
 steps found nothing, the finishing agent used about 6 million tokens in 45 minutes and
 was retried after it timed out, and Bat's fix rounds then ran agent steps of 3 to 16
 million tokens each, retrying those that came back short, to 54.7 million in all for
-20 rows. Open: a hard ceiling for runs with no cap, a token limit per agent step, no
-automatic retry of a funnel run's finishing or fix steps, the exclusion guard reading
-every check on the same file (an "agency" pattern from the exclusion check flagged a
-marketing agency because the segment names live in another check), and the rule tiers
-in the finishing agent's conventions.
+20 rows. Now bounded, for every Bat run: one with no token cap stops at the deck's
+safety ceiling (20M, `CLAW_BAT_TOKEN_CEILING`, counted from where it was last
+continued) as a cap would, so it can be continued; an agent step that uses its share
+(1.5M in a list funnel's run, a third of the ceiling in a run with no cap,
+`config.step_token_limit` to set it) is stopped and done with what it made; and a list
+funnel's agent steps (finishing, fix rounds) that time out or come back short are kept
+as they are, never run again. Still open: the exclusion guard reading every check on
+the same file (an "agency" pattern from the exclusion check flagged a marketing agency
+because the segment names live in another check), and the rule tiers in the finishing
+agent's conventions.
 
 ## 9. Risks
 
