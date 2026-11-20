@@ -51,7 +51,7 @@ def outcomes(folder: Path) -> dict[str, dict[str, str]]:
             continue
         for key in {funnel.norm_key(r.get("name", "")), funnel.norm_key(r.get("key", ""))} - {""}:
             out[key] = {"name": r.get("name", ""), "verdict": verdict, "group": r.get("group", ""),
-                        "reason": r.get("reason", "")}
+                        "reason": r.get("reason", ""), "stage": r.get("stage", "")}
     return out
 
 
@@ -102,12 +102,15 @@ def score(run_folder: Path, expected: Path | None = None) -> dict[str, Any]:
     got, rows = outcomes(run_folder), _list_rows(run_folder, recipe)
     out: dict[str, Any] = {"expected": len(want), "judged": 0, "verdicts_right": 0, "groups": 0, "groups_right": 0,
                            "cells": 0, "cells_right": 0, "wrong_keeps": [], "missed_keeps": [], "not_looked_at": [],
-                           "wrong": []}
+                           "wrong": [], "turned_away": []}
     for w in want:
         name, verdict = w.get("name", ""), w["verdict"].strip().lower()
         g = got.get(funnel.norm_key(name))
         if g is None:
             out["not_looked_at"].append(name)
+            continue
+        if g.get("stage") == "full":  # its group had its rows already: not judged, so neither right nor wrong
+            out["turned_away"].append(name)
             continue
         out["judged"] += 1
         if g["verdict"] == verdict:
@@ -152,6 +155,9 @@ def report(result: dict[str, Any]) -> str:
         lines.append(f"- Groups right: {share(result['groups_right'], result['groups'])}")
     if result["cells"]:
         lines.append(f"- Cells right on kept rows: {share(result['cells_right'], result['cells'])}")
+    if result.get("turned_away"):
+        lines.append(f"- Not judged, their group was full: {len(result['turned_away'])} "
+                     f"({', '.join(result['turned_away'][:12])})")
     if result["not_looked_at"]:
         lines.append(f"- Not looked at: {len(result['not_looked_at'])} of {result['expected']} expected "
                      f"({', '.join(result['not_looked_at'][:12])})")

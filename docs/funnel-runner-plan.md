@@ -863,6 +863,24 @@ own key or name, or a value the item carries (the person it names), joins what i
 of the item before it is judged, and then one such value on from those rows. By code,
 with no call; "NG-0101" and "ng 101" are the same key, a bare number is none.
 
+The second files run made every row the files allow, each cell right. Four items still
+differed from the known answers, none of them a wrong row:
+
+- One was ruled out before judging because "the plates were read by one person" had
+  been pulled out as 1 replicate. Now a number filter doesn't fire on a value a model
+  pulled out of a text that doesn't state it; the judging call reads the text. The
+  extraction call is told to leave out a number the text doesn't give.
+- Two whose measurement wasn't done yet were dropped ("the threshold can't be shown"):
+  a limit the setup had made a code check was no rule, so nothing could be named as
+  missing. Now each limit code checks on a column is also a rule for the judging call
+  ("ZoneMm is at least 15"), named as missing when its value isn't found.
+- One with a mixed culture came close where it should have been dropped: the rule was
+  typed as a measured fact, which may go unshown. The setup is now told that a state
+  that rules an item out (withdrawn, closed, contaminated) is what the item is.
+
+The score counted three good items turned away from a full group as wrong. It now
+lists them apart, as not judged.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

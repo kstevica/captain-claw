@@ -718,6 +718,24 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
     return recipe
 
 
+def limit_rules(recipe: dict[str, Any]) -> list[dict[str, Any]]:
+    """The limits code checks on a column ("ZoneMm at least 15"), as rules for the judging
+    call: a limit the setup made a check was no rule, so an item whose value wasn't found
+    at all could only be dropped ("the threshold can't be shown"), never come close. As
+    a rule it is named as missing when its value isn't found, and as broken, with the
+    words read, when a value fails it. None for a column a rule is already about."""
+    ruled = {c for r in recipe.get("rules") or [] for c in r.get("columns") or []}
+    out: list[dict[str, Any]] = []
+    for c in recipe.get("checks") or []:
+        col = c.get("column")
+        if c.get("op") not in ("min", "max") or not col or col in ruled or col not in (recipe.get("columns") or []):
+            continue
+        ruled.add(col)
+        out.append({"rule": f"{col} is {'at least' if c['op'] == 'min' else 'at most'} {c.get('value')}",
+                    "kind": "must", "fact": "measured", "columns": [col], "protected": False, "limit": True})
+    return out
+
+
 def _column_words(name: str) -> list[str]:
     return [w.lower() for w in re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", str(name))]
 
@@ -949,7 +967,8 @@ Rules:
   put the cheapest test first: a company's size band from a search snippet ("size_max" filter) before reading.
   size_max and size_min count people (staff, employees) only, never anything else: a limit on locations,
   branches, seats, products or years is a rule, not a size filter.
-- fact, for each rule: identity (what the item is: its kind, category, segment), place (where it is), measured (a
+- fact, for each rule: identity (what the item is: its kind, category, segment, and a state that rules it out:
+  withdrawn, closed, discontinued, contaminated, banned), place (where it is), measured (a
   count, amount, date or rating), contact (how to reach it), safety (what must never be done), other. Code reads
   these in any language: a measured or contact rule may be met loosely when rows run short; identity, place,
   safety and other never are.
@@ -1712,8 +1731,8 @@ have. Reply ONLY with JSON: {"columns": {"<the table's column>": "<the list's co
 EXTRACT_SYSTEM = """Pull the items out of this text: each {item} it names that could belong on the list.
 Reply ONLY with JSON: {{"items": [{{"name": "...", "url": "<its own website or page, if the text gives one>",
 "fields": {{"<column>": "<value the text gives>"}}}}], "pages": ["<links in the text to pages that list more such
-items>"]}}. Only what the text says; no item that is a directory, an article or a list itself. Keep your
-thinking short."""
+items>"]}}. Only what the text says; no item that is a directory, an article or a list itself. A number the text
+doesn't state is left out, never counted up or guessed from other words. Keep your thinking short."""
 
 DECIDE_SYSTEM = """You judge items for a list, one by one, from what Captain read about each. Use only the facts
 shown; a value you can't support from them stays empty, and a source is a link shown with that fact. A value that
@@ -1794,6 +1813,7 @@ class Work:
     run out."""
 
     def __init__(self, run: dict, step: dict, recipe: dict[str, Any], folder: Path, group: str = ""):
+        recipe = {**recipe, "rules": list(recipe.get("rules") or []) + limit_rules(recipe)}
         self.run, self.step, self.recipe, self.folder, self.group = run, step, recipe, folder, group
         self.key = step["step_key"]
         self.cfg = run.get("config") or {}
@@ -2172,7 +2192,7 @@ class Work:
             # never the whole page for an item it isn't alone on: what it says of the others
             # ("Konoba Lav: 4.6, open daily") would be read as this item's facts
             alone = len([x for x in items or [] if isinstance(x, dict) and str(x.get("name") or "").strip()]) == 1
-            out.append({"fields": fields, "origin": origin,
+            out.append({"fields": fields, "origin": origin, "extracted": True,
                         "text": own or (text if alone and len(text) <= 3000 else "")})
         return out
 
@@ -2242,6 +2262,10 @@ class Work:
                 if op == "not_in" and text.lower() in {str(x).lower() for x in val or []}:
                     return f"{col} is {text}"
                 if op in ("min", "max") and text:
+                    if item.get("extracted") and item.get("text") and not fx.in_text(text, item["text"]):
+                        # a value a model pulled out of a text that doesn't state it ("1" for "read by
+                        # one person"): no ground to rule the item out on; its judging call reads the text
+                        continue
                     span = number_span(text)
                     if span and ((op == "min" and span[1] < float(val)) or (op == "max" and span[0] > float(val))):
                         return f"{col} is {text}"

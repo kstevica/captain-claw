@@ -2957,3 +2957,59 @@ async def test_a_table_with_no_column_for_the_key_is_said_so(deck):
     events = [json.dumps(e, ensure_ascii=False, default=str) for e in await deck["store"].list_events(run["id"])]
     assert any("couldn't read extra/budget.csv as isolates" in m and "StrainID" in m for m in events)
     assert funnel._read_csv(folder / funnel.ITEMS) == []
+
+
+async def test_a_filter_never_fires_on_a_number_the_text_doesnt_state(deck):
+    """An isolate was ruled out before judging because "the plates were read by one
+    person" had been pulled out as 1 replicate; and one whose assay wasn't done yet could
+    only be dropped, since the limit code checks was no rule to be found missing."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "active.csv",
+                                                     "columns": ["Strain", "Zone", "Plates"], "min_rows": 2}}]
+    run, folder = await _run(deck["store"], contract, {"funnel_loosen": "never"}, rid="bat_inferred1")
+    extra = folder / "extra"
+    (extra / "a.md").write_text("# Strain A1\n\nZone 20 mm. The plates were read by one person.\n")
+    (extra / "b.md").write_text("# Strain B2\n\nZone 20 mm on 2 plates.\n")
+    (extra / "c.md").write_text("# Strain C3\n\nThe assay is still to be done. 4 plates are ready.\n")
+    deck["recipe"] = {"item": "strain", "key": "Strain", "decide": "Strains with a zone.",
+                      "sources": [{"kind": "document", "path": f"extra/{n}.md"} for n in "abc"],
+                      "rules": [{"rule": "the culture is pure", "kind": "must", "fact": "identity", "columns": []}],
+                      "filters": [{"column": "Plates", "op": "min", "value": 3}],
+                      "checks": [{"column": "Plates", "op": "min", "value": 3}, {"column": "Zone", "op": "min", "value": 15}]}
+    pulled = {"A1": {"Strain": "A1", "Zone": "20", "Plates": "1 (read by one person)"},
+              "B2": {"Strain": "B2", "Zone": "20", "Plates": "2"}, "C3": {"Strain": "C3", "Plates": "4"}}
+    deck["extract"] = lambda user: {"items": [{"name": n, "fields": f} for n, f in pulled.items()
+                                              if f"Strain {n}" in user]}
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            if f["Strain"] == "A1":  # the plates aren't counted in what was read
+                out.append({"id": i, "verdict": "maybe", "missing": [2], "reason": "Plates not stated.",
+                            "row": {"Strain": "A1", "Zone": "20"}})
+            else:  # no zone measured: "can't be met", a drop that shows nothing
+                out.append({"id": i, "verdict": "drop", "broken": [3], "shown": "", "reason": "No zone was measured.",
+                            "row": {"Strain": "C3", "Plates": "4"}})
+        return out
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["stage"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["A1"] == ("maybe", "maybe")  # not filtered on a number the text never gave
+    assert got["B2"] == ("dropped", "filter")  # "2 plates" is stated: the filter stands
+    assert got["C3"] == ("maybe", "maybe")  # its zone wasn't found, which is not a zone under the limit
+    prompt = deck["decide_prompts"][0]
+    assert "2. Plates is at least 3" in prompt and "3. Zone is at least 15" in prompt  # the limits, as rules by number
+    assert "a state that rules it out" in funnel.SETUP_SYSTEM and "never counted up or guessed" in funnel.EXTRACT_SYSTEM
+
+
+def test_the_score_leaves_out_items_turned_away_from_a_full_group(tmp_path):
+    from captain_claw.flight_deck import funnel_eval
+    (tmp_path / "shared" / "funnel").mkdir(parents=True)
+    (tmp_path / "shared" / "recipe.json").write_text(json.dumps({"columns": ["Name"], "key": "Name", "sources": []}))
+    with (tmp_path / funnel.ITEMS).open("w") as fh:
+        fh.write("key,name,group,status,stage,reason\na,A,g,kept,kept,\nb,B,g,dropped,full,g is already full\n")
+    (tmp_path / "expected.csv").write_text("name,verdict,group\nA,keep,g\nB,keep,g\n")
+    got = funnel_eval.score(tmp_path, tmp_path / "expected.csv")
+    assert (got["judged"], got["verdicts_right"], got["missed_keeps"], got["turned_away"]) == (1, 1, [], ["B"])
+    assert "Not judged, their group was full: 1 (B)" in funnel_eval.report(got)
