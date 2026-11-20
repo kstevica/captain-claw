@@ -3248,13 +3248,15 @@ _STAGE_WORDS = {"filter": "ruled out by code", "read": "ruled out after reading"
 
 
 def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
-                  finished: tuple[int, int, int], budget: int) -> str:
+                  finished: tuple[int, int, int], budget: int, stopped: str = "") -> str:
     """``summary.md``: how many, how short and why, how items went, how rows were
-    checked, and where everything is."""
+    checked, and where everything is. ``stopped``: why the run ended before its merge."""
     got = write_counts(folder, recipe)
     groups, target = got["groups"], got["target"]
     item = recipe["item"]
-    lines = [f"# {recipe['output']}: summary", "",
+    lines = [f"# {recipe['output']}: summary", ""] + (
+        [f"The run was stopped before it finished ({stopped}): this is what it had found by then.", ""]
+        if stopped else []) + [
              f"{rows} {item}{'' if rows == 1 else 's'} on the list" + (f" of {target} wanted" if target else "")
              + ". Built by the list funnel: code searched, read and checked; a model judged each item once.", ""]
     short = shortfall(folder, recipe)
@@ -3338,6 +3340,30 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
             + (f" `{came_close_name(recipe)}`: {len(close)} that came close, with why." if close else "")
             + f" `{exclusions_name(recipe)}`: {dropped} dropped, with why. `{summary_name(recipe)}`: how it went.")
     return {"ok": True, "output": text, "usd": 0.0, "tokens": 0, "error": ""}
+
+
+async def write_on_stop(run: dict, why: str) -> str:
+    """A funnel run that ends before its merge (its owner stopped it, a cap ran out)
+    still leaves its result: the list so far, what came close, the items dropped and
+    the summary, written by code alone (rows the finishing step added aren't taken,
+    their pages unread). A note saying so, or "" for a run with nothing to write."""
+    if (run.get("config") or {}).get("engine") != ENGINE:
+        return ""
+    from captain_claw.flight_deck import bat_routes
+    folder = bat_routes._run_folder(run)
+    recipe = load_recipe(folder)
+    if recipe is None or not (folder / ITEMS).is_file():
+        return ""
+    if loosen_on(run, recipe):
+        await asyncio.to_thread(fill_from_loose, folder, recipe)
+    out = await asyncio.to_thread(write_list, folder, recipe)
+    close = await asyncio.to_thread(write_came_close, folder, recipe)
+    dropped = await asyncio.to_thread(write_exclusions, folder, recipe)
+    budget = _int((run.get("config") or {}).get("funnel_search_budget"), 0, 100_000, SEARCH_BUDGET)
+    await asyncio.to_thread(write_summary, folder, recipe, len(out), dropped, (0, 0, 0), budget, why)
+    return (f"Stopped ({why}): what it found so far is written: `{recipe['output']}` {len(out)} rows"
+            + (f", `{came_close_name(recipe)}` {len(close)}" if close else "")
+            + f", `{exclusions_name(recipe)}` {dropped} dropped, `{summary_name(recipe)}`.")
 
 
 def review_settled(run: dict, findings: str) -> str:

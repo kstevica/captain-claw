@@ -688,6 +688,14 @@ judgement with the reason saying so, never maybe for that fact. (The factory's o
 goal still asked for a rating with its source, which pulled the other way: the owner's
 goals and charter should agree.)
 
+That run was stopped after 70 minutes with 22 rows, and left no list: a stopped run
+never reached its merge, so its rows were only in `shared/funnel/rows.csv`. Now a
+funnel run that stops before its merge (its owner stopped it, a cap ran out) still
+writes, by code alone, the list so far, what came close, the items dropped and the
+summary, which says the run was stopped and what it had found by then. Rows the
+finishing step added aren't taken (their pages unread). Continuing the run writes
+them all again at its merge.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
