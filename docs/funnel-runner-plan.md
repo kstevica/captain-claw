@@ -802,6 +802,14 @@ is that group (a region's style of a country's kind, a specialty within a field)
 a drop for its kind whose typed group, or Jev's sure pick, is the step's own group is
 nearly there, saying so, not dropped.
 
+Then the same restaurant came close with every fact read (its phone, hours, rating,
+address, dish) but its district, a column the done-checks require: the page gave only
+its street address, and the judging call leaves empty what isn't shown. Now a value
+that follows directly from a fact shown may be filled from it (the district a street
+address is in, the country of a city, the year of a full date); nothing else is. And a
+judging call's reason is kept up to 400 characters, so its last words (why it came
+close) aren't cut.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
