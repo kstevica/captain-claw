@@ -116,6 +116,37 @@ clicks, typing and screenshots in the agent's tabs — Chrome doesn't let an
 extension ask for it later) and **tab groups**. Nothing uses them until you
 turn the switch on.
 
+## Record a process — an agent does it after that
+
+**Record what I do** (under Send) starts a recording in the tab in front. Do
+the thing on the site the way you always do; the panel lists every step as you
+go — a page opened, a click, text typed into a field, a choice in a list, a
+tick, a file picked, Enter. Each step is told the way you'd say it ("Click the
+button “Delete” — in the row “September 2026”"), not as coordinates.
+
+- **Add an instruction** to any step, while recording or after: what to pick,
+  when to skip it, what to check ("only the oldest month").
+- **Stop and review**: name it, say what it's for, remove or reorder steps,
+  **add a step in your own words** ("wait until it says Ready, then download
+  it"), and tick **Different each time — ask me** on a value you type (a
+  period, an invoice number): each run asks for it.
+- **Passwords and codes are never recorded** — the step says one was typed,
+  and the agent asks you for it when it gets there.
+- **Recordings → Run** hands it to the agent you pick. It works through the
+  steps with its browser tool in this Chrome, signed in as you, in tabs of its
+  own (turn on *Agents can use this browser* — the Run form offers it), reads
+  the page as it is today, and stops to ask when a step doesn't fit what it
+  sees. You follow it in the panel like any clip.
+
+Recording follows the window: an address you type or a tab you switch to is a
+step too. On a site Captain hasn't been allowed to read yet the panel says so
+and offers **Allow on this site**. Not recorded: scrolling, hovering, drag and
+drop, right-clicks, and what happens inside frames from sites you haven't
+allowed.
+
+Recordings are kept on your Flight Deck (not in the browser), so they're there
+in every browser you connect.
+
 ## What lands where
 
 ```
@@ -129,6 +160,9 @@ vfs:web-clips/<day>-<site>-<title>/
   clip.json       where and when it came from
 ```
 
+A recording's run gets a folder of its own, `<day>-<site>-run-<name>/`, with
+`recording.md` (the steps, with the page and a selector for each as hints).
+
 Every agent of yours reaches the folder through `vfs:web-clips/…`; what the
 agent makes for a clip (notes, CSVs, a brief) goes there too.
 
@@ -139,7 +173,8 @@ agent makes for a clip (notes, CSVs, a brief) goes there too.
 - **pageCapture** — save the whole page as `.mhtml`.
 - **contextMenus, sidePanel, storage** — the right-click menu, the panel, your settings.
 - **Sites** are asked for one at a time (or all at once from settings): to read
-  a page you didn't open Captain on, and to download a file from another site.
+  a page you didn't open Captain on, to download a file from another site, and
+  to see what you do on a site while you record.
 - **debugger, tabGroups** — used only while "Agents can use this browser" is
   on: your agents work in tabs of their own, grouped under their name, with
   real clicks and typing. Chrome won't let an extension ask for the debugger

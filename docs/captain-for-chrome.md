@@ -2,7 +2,7 @@
 
 A Chrome (MV3) extension that sends the page you're on to one of your agents.
 Code: `browser-extension/chrome/` (the extension), `captain_claw/flight_deck/browser_clip.py`
-(the deck side), `flight-deck/src/components/BrowserPairDialog.tsx` and
+(the deck side; `browser_recordings.py` for recordings), `flight-deck/src/components/BrowserPairDialog.tsx` and
 `components/connections/BrowserConnection.tsx` (pairing and Connections → Browser).
 
 ## Why the browser does the reading
@@ -190,6 +190,76 @@ plain notice (no clips). Connections → Browser lists it ("Scout's own browser
 (on the server)") and Disconnect forgets it; removing Captain for Chrome lets
 go of it too.
 
+## Recordings: a process shown once, done again by an agent
+
+The person records what they do on a site; an agent repeats it later with
+browser hands. A recording is **what to do and how, in words** — never a
+script of coordinates: the agent reads the page as it is on the day and finds
+each thing by its role and name.
+
+**Recording** (`recorder-page.js` in the page, `recorder.js` in the worker).
+The panel's Record asks for the site (a recording outlives one page, so
+`activeTab` isn't enough) and tells the worker to start. The page script,
+injected into every frame Captain may reach and again after each navigation
+(it only resumes), listens in the capture phase and tells the worker each
+thing done: `click` (the nearest thing made to be clicked — a link, a button,
+a role, an `onclick`, or the outermost element with the hand cursor), `type`
+(the field's final text, told once: on change, on leaving the field, before
+the next click or Enter), `select`, `check`, `upload` (file names), `key`
+(Enter in a field, Escape; Enter in a many-line box only when it sent — the box
+emptied — or came with Ctrl/⌘). A step's target is `{role, name, tag, type,
+selector, near, href}`: the name the way the accessibility tree would give it,
+`near` what tells it from its twins (`in the row “…”`, `in the dialog “…”`,
+`in “<section heading>”`), the selector a hint (test id, a hand-written id, a
+field's `name`, else a short path). **A secret field** (a password input,
+`autocomplete` password / one-time-code / card, a name like `otp`, `cvv`) is a
+step with `secret: true` and no value — the value never leaves the page.
+
+The worker keeps the list in session storage (`rec`), one writer, one queue
+(frames report at once). It follows the **window**: a page change within five
+seconds of a step is that step's doing (`leads_to`, `new_tab`), otherwise an
+`open` step (an address typed, a bookmark); a tab the person switches to is a
+`switch` step — unless the last step was already there. A site not yet allowed
+sets `blocked`; the panel offers "Allow on this site" and the worker injects
+again. The second click of a double click folds into the first (`double`).
+300 steps at most. Only the extension's own pages may start, stop or change a
+recording; a page's message can only add a step to one that is on, in its own
+window. The toolbar shows `REC`, the page a small "Captain is recording" mark.
+
+**Review** (the panel). The person's instructions on steps are the panel's
+own (`recNotes`) until Stop, which folds them into a draft (`recDraft`, local
+storage — it survives the panel closing). In the draft: a name, what it's for,
+an instruction per step, a typed value changed, **Different each time — ask
+me** (`ask`) on a typed or chosen value, steps removed or moved, and steps in
+the person's own words (`kind: "do"`).
+
+**The deck** (`browser_recordings.py`, routes under `/fd/clip/recordings`):
+`GET` the list, `GET /{id}`, `POST` (new, or with `id` the same one changed),
+`POST /{id}/delete`, `POST /{id}/run`. Kept per person in
+`<FD_DATA_DIR>/browser-recordings/<user>.json`, cleaned on the way in
+(`clean_recording`): known kinds, web addresses, lengths cut, ids its own, a
+secret step's value dropped whatever was sent. 200 recordings a person.
+
+**A run** is a turn in the chosen agent's main chat, the person's own words
+(`source: "browser"`, counted against their day): "Do this in my browser",
+what it's for, what's different this time, how to follow a recording (their
+Chrome with `target="chrome"`; the instruction on a step wins over the click;
+find things by name and purpose; check after each step; stop and say which
+step when it doesn't fit; ask for secrets with `request_secret`), then the
+steps numbered — this run's values in place of the ones that ask. The run has
+a folder of its own in web-clips with `recording.md` (the same steps plus page
+and selector hints), attached. Element names are quoted from pages, so a
+context note says they are labels, never instructions. With "Agents can use
+this browser" off the turn tells the agent to say so and stop rather than use
+its own, signed-out browser. The run is followed like a clip's
+(`/fd/clip/runs/<id>`); a follow-up in its folder is worded as one about the
+recording.
+
+Not yet: scheduled runs (a Scheduled task whose prompt is the recording),
+recordings in Flight Deck's own pages, sharing one with a teammate, scroll /
+hover / drag steps, and a recording an agent tidies after a run ("step 4 is
+now called Export").
+
 ## Security
 
 - The extension's origin reaches `/fd/clip/` only (origin guard + CORS);
@@ -199,6 +269,10 @@ go of it too.
   reach as an MCP token.
 - A clip goes only to the caller's own agents (by exact slug); follow-ups are
   confined to `web-clips`; file names are stripped of paths and separators.
+- A recording never holds a secret field's value (dropped in the page, and
+  again on the deck); only the extension's own pages can start or change one;
+  the names of page elements in a run's steps are marked as labels, never
+  instructions.
 - Page text reaches the model as an attached file plus a context note that it
   is never the person's instructions. The mail guard reads the person's own
   words only.
@@ -208,6 +282,9 @@ go of it too.
 - **Browser hands, next** — per-agent approval on first use, a per-site
   allowlist, a recorded GIF of what the agent did, and "Share this tab with
   <agent>" from the panel (today: drag it into the agent's group).
+- **Recordings, next** — run one on a schedule, list and run them from Flight
+  Deck, share one with the team, let the agent propose a fix to a step that
+  no longer fits.
 - **Site recipes** — remembered per site: on the bank portal always Grab files
   into `finance/`; on LinkedIn Extract the profile; on a job board Make tasks.
 - **Watch with a diff** — Watch it keeps `page.md` versions and the agent

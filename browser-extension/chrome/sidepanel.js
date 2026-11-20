@@ -69,6 +69,15 @@ const S = {
   handsStopped: [],    // agents the person stopped
   handsSeen: 0,        // the newest act the panel has followed
   anon: null,          // the page or selection anonymized (/fd/clip/anonymize)
+  rec: null,           // the recording going on (the worker's, session storage "rec")
+  recNotes: {},        // the person's instructions on its steps, by step id
+  recNoteOpen: new Set(),
+  draft: null,         // a recording being reviewed or edited, not saved yet
+  draftError: '',
+  draftSaving: false,
+  recs: null,          // the saved recordings (Flight Deck's list)
+  recsError: '',
+  recRun: null,        // a recording about to be run: {rec, note, inputs}
 }
 
 // ── small helpers ──
@@ -129,7 +138,7 @@ function keepFocus(fn) {
 // list stays at its newest line unless the person scrolled it up.
 function listScroll() {
   const out = {}
-  for (const id of ['steps', 'fileList']) {
+  for (const id of ['steps', 'fileList', 'recSteps']) {
     const el = document.getElementById(id)
     if (el) out[id] = { top: el.scrollTop, atEnd: el.scrollTop + el.clientHeight >= el.scrollHeight - 8 }
   }
@@ -141,6 +150,9 @@ function restoreScroll(before) {
   if (steps) steps.scrollTop = !before.steps || before.steps.atEnd ? steps.scrollHeight : before.steps.top
   const files = document.getElementById('fileList')
   if (files && before.fileList) files.scrollTop = before.fileList.top
+  // A recording going on shows its newest step; a list being edited stays put.
+  const rec = document.getElementById('recSteps')
+  if (rec) rec.scrollTop = S.view === 'rec' && (!before.recSteps || before.recSteps.atEnd) ? rec.scrollHeight : before.recSteps?.top || 0
 }
 
 function render() {
@@ -164,11 +176,28 @@ function viewAgentOwned() {
     <div class="foot">Captain for Chrome ${esc(VERSION)}</div>`
 }
 
+// Recording, or a recording not saved yet, while the panel shows something else.
+function viewRecBanner() {
+  if (S.rec?.on) {
+    return `<div class="notice rec-on"><span class="status-pill rec"><span class="dot"></span>Recording</span>
+      <div class="grow">${plural(S.rec.steps.length, 'step')} so far</div><button class="btn" data-act="rec-show" style="padding:3px 9px">Show</button></div>`
+  }
+  if (S.draft && !S.draft.id) {
+    return `<div class="notice"><div class="grow">Your recording of ${plural(S.draft.steps.length, 'step')} isn't saved yet.</div>
+      <button class="btn" data-act="rec-review" style="padding:3px 9px">Review</button></div>`
+  }
+  return ''
+}
+
 function renderView() {
   keepFocus(() => {
     if (S.view === 'agent') $view.innerHTML = viewAgentOwned()
     else if (S.view === 'connect') $view.innerHTML = viewConnect()
-    else if (S.view === 'main') $view.innerHTML = viewHands() + viewMain()
+    else if (S.view === 'main') $view.innerHTML = viewRecBanner() + viewHands() + viewMain()
+    else if (S.view === 'rec') $view.innerHTML = viewRec()
+    else if (S.view === 'rec-edit') $view.innerHTML = viewRecEdit()
+    else if (S.view === 'recs') $view.innerHTML = viewRecs()
+    else if (S.view === 'rec-run') $view.innerHTML = viewRecRun()
     else if (S.view === 'run') $view.innerHTML = viewRun()
     else if (S.view === 'anon') $view.innerHTML = viewAnon()
     else if (S.view === 'history') $view.innerHTML = viewHistory()
@@ -723,6 +752,11 @@ function viewMain() {
     <button class="btn block" data-act="anonymize" ${t && scan && !S.scanning && !S.needsPermission ? '' : 'disabled'}
       title="Names, numbers and addresses out — the real ones kept in Flight Deck, in your vault “${esc(vaultOf(t?.url))}”">
       ${icon('shield', 'sm')} ${anonSource() === 'selection' ? 'Anonymize the selection' : 'Anonymize this page'}</button>
+    <div class="row">
+      <button class="btn grow" data-act="rec-start" ${recordable(t) && !S.rec?.on ? '' : 'disabled'}
+        title="Do something on this site once — an agent does it for you after that">${icon('record', 'sm')} Record what I do</button>
+      <button class="btn grow" data-act="recs">${icon('play', 'sm')} Recordings${S.recs?.length ? ` <span class="dim">${S.recs.length}</span>` : ''}</button>
+    </div>
     <div class="foot">${icon('folder', 'sm')} Saved in Shared folders → ${esc(S.me.folder || 'web-clips')}</div>`
 }
 
@@ -1398,7 +1432,7 @@ function viewRun() {
         <span class="elapsed" id="elapsed">${esc(elapsed(run.at))}</span>
         ${S.follow ? '' : `<button class="icon-btn" data-act="follow" title="Show the latest">${icon('chevron', 'sm')}</button>`}
       </div>` : ''}
-    ${files ? `<div class="card"><div class="label">In the clip folder</div><div class="out-files">${files}</div>
+    ${files ? `<div class="card"><div class="label">${run.action === 'recording' ? 'In the run’s folder' : 'In the clip folder'}</div><div class="out-files">${files}</div>
       <div class="dim" style="margin-top:6px">${esc(run.vfs || '')}</div></div>` : ''}
     ${run.done ? `
       <div class="row">
@@ -1407,7 +1441,7 @@ function viewRun() {
       </div>
       <div class="row" style="justify-content:center">${newTopicButton(run.agentSlug)}</div>
       <div>
-        <textarea id="followUp" rows="2" placeholder="Ask a follow-up about this page…">${esc(S.followUp)}</textarea>
+        <textarea id="followUp" rows="2" placeholder="${run.action === 'recording' ? 'Tell it what to do next, or what went wrong…' : 'Ask a follow-up about this page…'}">${esc(S.followUp)}</textarea>
         <button class="btn primary block" data-act="follow-up" style="margin-top:6px">${icon('send', 'sm')} Ask ${esc(run.agent)}</button>
       </div>` : ''}`
 }
@@ -1427,7 +1461,7 @@ async function sendFollowUp() {
   try {
     const res = await upload(S.conn, '/fd/clip/send', form, () => {})
     startRun({ clip_id: res.clip_id, folder: res.folder, vfs: res.vfs, agent: res.agent || run.agent, agentSlug: run.agentSlug,
-               title: run.title, url: run.url, action: 'ask', actionLabel: 'Follow-up' })
+               title: run.title, url: run.url, action: run.action === 'recording' ? 'recording' : 'ask', actionLabel: 'Follow-up' })
   } catch (e) {
     if (e instanceof AuthError) return disconnected(e.message)
     toast(e.message)
@@ -1449,6 +1483,416 @@ async function saveRunFile(path) {
     toast(/over or unknown/i.test(e.message) ? 'Open it in Flight Deck → Shared folders → web-clips.' : e.message)
   }
 }
+
+// ── recordings: show a process once, an agent does it again ──
+//
+// Record → the worker (recorder.js) and the page script (recorder-page.js)
+// list what the person does; here they add an instruction to any step, steps
+// in their own words, and mark values that differ each time. Saved on Flight
+// Deck (/fd/clip/recordings); Run hands it to an agent, which does it in this
+// browser with its browser tool.
+
+const ROLE_WORDS = {
+  button: 'button', link: 'link', textbox: 'field', searchbox: 'search field', combobox: 'list', listbox: 'list',
+  checkbox: 'checkbox', radio: 'option', switch: 'switch', tab: 'tab', menuitem: 'menu item', menuitemcheckbox: 'menu item',
+  menuitemradio: 'menu item', option: 'option', treeitem: 'item', file: 'file field', img: 'picture', slider: 'slider',
+  spinbutton: 'number field',
+}
+
+function targetText(t) {
+  t = t || {}
+  const word = ROLE_WORDS[t.role] || ''
+  if (t.name) return word ? `the ${word} “${t.name}”` : `“${t.name}”`
+  if (word) return `the ${word}${t.selector ? ` (${t.selector})` : ''}`
+  return t.selector ? `the element ${t.selector}` : 'the element'
+}
+
+// The same sentences Flight Deck writes for the agent (browser_recordings.step_text).
+function stepText(s) {
+  const what = targetText(s.target)
+  switch (s.kind) {
+    case 'do': return s.text || ''
+    case 'open': return `Open ${s.url}${s.new_tab ? ' in a new tab' : ''}`
+    case 'switch': return `Switch to the tab “${s.title || s.url}”`
+    case 'click': return `${s.double ? 'Double-click' : 'Click'} ${what}`
+    case 'type': return s.secret ? `Type the secret value into ${what} (not recorded)` : s.value ? `Type “${s.value}” into ${what}` : `Clear ${what}`
+    case 'select': return `Choose “${s.value}” in ${what}`
+    case 'check': return s.target?.role === 'radio' ? `Choose ${what}` : `${s.checked ? 'Tick' : 'Untick'} ${what}`
+    case 'upload': return `Pick the file “${s.value}” for ${what}`
+    case 'key': return `Press ${s.key}${s.target ? ` in ${what}` : ''}`
+    default: return s.kind
+  }
+}
+
+const shortUrl = (url) => { try { const u = new URL(url); return (u.host.replace(/^www\./, '') + (u.pathname === '/' ? '' : u.pathname)).slice(0, 60) } catch { return '' } }
+
+const recSend = (msg) => chrome.runtime.sendMessage(msg).catch((e) => ({ ok: false, error: String(e?.message || e) }))
+
+function recordable(tab = S.tab) {
+  return !!tab && /^https?:/i.test(tab.url || '')
+}
+
+async function recStart() {
+  const tab = (await currentTab()) || S.tab
+  if (!recordable(tab)) { toast('Open the site you want to record first.'); return }
+  if (S.draft && !S.draft.id && !confirm('You have a recording you haven\'t saved. Record a new one and drop it?')) return
+  // Asked in the click itself: a recording keeps seeing this site, page after page.
+  const asked = S.allSites ? Promise.resolve(true) : chrome.permissions.request({ origins: [`${originOf(tab.url)}/*`] }).catch(() => false)
+  asked.then(async (ok) => {
+    if (!ok) { toast(`Captain needs your OK to see what you do on ${hostOf(tab.url)}.`); return }
+    const res = await recSend({ type: 'captain-rec-start', tabId: tab.id })
+    if (!res?.ok) { toast(res?.error || "Couldn't start recording."); return }
+    S.recNotes = {}
+    S.recNoteOpen = new Set()
+    setDraft(null)
+    S.view = 'rec'
+    render()
+  })
+}
+
+let notesTimer = 0
+function saveRecNotes() {
+  clearTimeout(notesTimer)
+  notesTimer = setTimeout(() => chrome.storage.session.set({ recNotes: S.recNotes }).catch(() => {}), 300)
+}
+
+let draftTimer = 0
+function setDraft(draft, { now = false } = {}) {
+  S.draft = draft
+  clearTimeout(draftTimer)
+  const write = () => (draft ? setStore({ recDraft: draft }) : chrome.storage.local.remove('recDraft').catch(() => {}))
+  if (now || !draft) write()
+  else draftTimer = setTimeout(write, 400)
+}
+
+async function recStop(discard) {
+  const rec = S.rec
+  if (discard && rec?.steps?.length > 1 && !confirm('Drop this recording?')) return
+  if (!discard && rec) {
+    const first = rec.steps.find((s) => s.url)
+    const steps = rec.steps.map(({ at, tabId, ...s }) => ({ ...s, note: (S.recNotes[s.id] || '').trim() }))
+    setDraft({ name: '', about: '', site: hostOf(first?.url || ''), steps }, { now: true })
+  }
+  await recSend({ type: 'captain-rec-stop', discard: true })
+  S.rec = null
+  S.recNotes = {}
+  S.recNoteOpen = new Set()
+  if (!discard && S.draft?.steps.length) {
+    S.view = 'rec-edit'
+    render()
+    document.getElementById('recName')?.focus()
+  } else {
+    if (!discard) { setDraft(null); toast('Nothing was recorded.') }
+    S.view = 'main'
+    render()
+    scheduleScan(0)
+  }
+}
+
+function recStepRow(s, i, n, edit) {
+  const note = edit ? (s.note || '') : (S.recNotes[s.id] || '')
+  const open = !!note || S.recNoteOpen.has(s.id)
+  const where = [s.kind === 'open' || s.kind === 'switch' || s.kind === 'do' ? '' : shortUrl(s.url), s.target?.near || '',
+    s.frame ? 'in a frame' : '', s.leads_to ? `→ ${shortUrl(s.leads_to)}${s.new_tab ? ' (new tab)' : ''}` : ''].filter(Boolean).join(' · ')
+  const canAsk = edit && (s.kind === 'type' || s.kind === 'select') && !s.secret
+  const body = s.kind === 'do' && edit
+    ? `<textarea id="do-${esc(s.id)}" data-step-do="${esc(s.id)}" rows="2" placeholder="What should happen here, in your own words…">${esc(s.text || '')}</textarea>`
+    : `<div class="rstep-text">${esc(stepText(s))}</div>`
+  return `
+    <div class="rstep ${s.kind === 'do' ? 'own' : ''}">
+      <span class="rstep-n" title="${esc(s.kind)}">${i + 1}</span>
+      <div class="grow">
+        ${body}
+        ${where ? `<div class="dim ellipsis" title="${esc(where)}">${esc(where)}</div>` : ''}
+        ${canAsk && s.kind === 'type' ? `<input type="text" id="val-${esc(s.id)}" data-step-val="${esc(s.id)}" value="${esc(s.value || '')}" placeholder="What to type" ${s.ask ? 'disabled' : ''} style="margin-top:4px">` : ''}
+        ${canAsk ? `<label class="rstep-ask"><input type="checkbox" data-step-ask="${esc(s.id)}" ${s.ask ? 'checked' : ''}> Different each time — ask me</label>` : ''}
+        ${s.kind === 'do' ? '' : open
+          ? `<textarea id="note-${esc(s.id)}" class="rstep-note" data-step-note="${esc(s.id)}" rows="2" placeholder="Your instruction for this step — what to pick, when to skip it, what to check…">${esc(note)}</textarea>`
+          : `<button class="link-btn" data-step-open="${esc(s.id)}">${icon('pencil', 'sm')} Add an instruction</button>`}
+      </div>
+      <div class="rstep-tools">
+        ${edit ? `<button class="icon-btn" data-step-move="${esc(s.id)}" data-dir="-1" title="Move up" ${i ? '' : 'disabled'}>${icon('up', 'sm')}</button>
+          <button class="icon-btn" data-step-move="${esc(s.id)}" data-dir="1" title="Move down" ${i < n - 1 ? '' : 'disabled'}>${icon('down', 'sm')}</button>` : ''}
+        <button class="icon-btn" data-step-del="${esc(s.id)}" title="Remove this step">${icon('x', 'sm')}</button>
+      </div>
+    </div>`
+}
+
+function viewRec() {
+  const rec = S.rec
+  if (!rec) return '<div class="row dim"><div class="spinner"></div> Stopping…</div>'
+  const rows = rec.steps.map((s, i) => recStepRow(s, i, rec.steps.length, false)).join('')
+  return `
+    <div class="row"><span class="status-pill rec"><span class="dot"></span>Recording</span><span class="grow"></span>
+      <span class="dim" id="recElapsed">${esc(elapsed(rec.startedAt))}</span></div>
+    <div class="dim">Do it on the site the way you always do. Every step shows up here — add an instruction to any of them, now or after you stop.</div>
+    ${rec.blocked ? `<div class="notice">${icon('lock')}<div class="grow">Captain can't see what you do on <b>${esc(hostOf(rec.blocked))}</b> yet.
+      <div style="margin-top:6px"><button class="btn" data-act="rec-allow">Allow on this site</button></div></div></div>` : ''}
+    ${rec.full ? '<div class="notice">That\'s the most steps one recording holds — stop here and record the rest as a second one.</div>' : ''}
+    <div class="rsteps" id="recSteps">${rows || '<div class="dim" style="padding:10px">Nothing yet — click something on the page.</div>'}</div>
+    <div class="rec-bar">
+      <button class="btn primary grow" data-act="rec-stop">${icon('stop', 'sm')} Stop and review</button>
+      <button class="btn danger" data-act="rec-discard">Discard</button>
+    </div>`
+}
+
+function viewRecEdit() {
+  const d = S.draft
+  if (!d) return '<div class="dim">Nothing to review.</div><button class="btn block" data-act="back">Back</button>'
+  const rows = d.steps.map((s, i) => recStepRow(s, i, d.steps.length, true)).join('')
+  const secrets = d.steps.filter((s) => s.secret).length
+  return `
+    <div class="row"><button class="icon-btn" data-act="rec-edit-back" title="Back">${icon('back')}</button>
+      <div class="grow" style="font-weight:600">${d.id ? 'Edit the recording' : 'Review the recording'}</div></div>
+    <div>
+      <label class="label" for="recName">Name</label>
+      <input type="text" id="recName" maxlength="120" placeholder="${esc(d.site ? `What you did on ${d.site}` : 'What this does')}" value="${esc(d.name || '')}">
+    </div>
+    <div>
+      <label class="label" for="recAbout">What it's for</label>
+      <textarea id="recAbout" rows="2" placeholder="Anything the agent should know for the whole thing — the goal, what a good result looks like, when to stop and ask (optional)">${esc(d.about || '')}</textarea>
+    </div>
+    <div class="label-row" style="margin:0"><span class="label" style="margin:0">Steps</span><span class="grow"></span><span class="dim">${plural(d.steps.length, 'step')}</span></div>
+    <div class="rsteps edit" id="recSteps">${rows || '<div class="dim" style="padding:10px">No steps left.</div>'}</div>
+    <button class="btn block" data-act="rec-add-step">${icon('plus', 'sm')} Add a step in your own words</button>
+    ${secrets ? `<div class="dim">${icon('lock', 'sm')} ${secrets === 1 ? "A password or code you typed wasn't recorded" : "The passwords or codes you typed weren't recorded"} — the agent asks you when it gets there.</div>` : ''}
+    ${S.draftError ? `<div class="notice err">${esc(S.draftError)}</div>` : ''}
+    <div class="rec-bar">
+      <button class="btn primary grow" data-act="rec-save" ${d.steps.length && !S.draftSaving ? '' : 'disabled'}>${icon('check', 'sm')} ${S.draftSaving ? 'Saving…' : 'Save'}</button>
+      <button class="btn danger" data-act="rec-drop">${d.id ? 'Cancel' : 'Discard'}</button>
+    </div>`
+}
+
+async function loadRecs() {
+  if (!S.conn || S.conn.agent) return
+  try {
+    const r = await api(S.conn, '/fd/clip/recordings')
+    S.recs = r.recordings || []
+    S.recsError = ''
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    S.recsError = /404|answered 404/.test(e.message) ? 'This Flight Deck can\'t keep recordings yet — it needs an update.' : e.message
+  }
+  if (['recs', 'main'].includes(S.view)) render()
+}
+
+async function recSave() {
+  const d = S.draft
+  if (!d || S.draftSaving) return
+  const name = (d.name || '').trim()
+  if (!name) { S.draftError = 'Give it a name first.'; render(); document.getElementById('recName')?.focus(); return }
+  S.draftSaving = true
+  S.draftError = ''
+  render()
+  try {
+    const steps = d.steps.filter((s) => s.kind !== 'do' || (s.text || '').trim())
+    await api(S.conn, '/fd/clip/recordings', { method: 'POST', body: JSON.stringify({ id: d.id || undefined, name, about: d.about || '', steps }) })
+    setDraft(null)
+    S.draftSaving = false
+    S.view = 'recs'
+    render()
+    toast('Saved')
+    loadRecs()
+  } catch (e) {
+    S.draftSaving = false
+    if (e instanceof AuthError) return disconnected(e.message)
+    S.draftError = e.message
+    render()
+  }
+}
+
+async function recEdit(id) {
+  try {
+    const r = await api(S.conn, `/fd/clip/recordings/${encodeURIComponent(id)}`)
+    setDraft({ id: r.id, name: r.name, about: r.about || '', site: r.site || '', steps: r.steps || [] }, { now: true })
+    S.draftError = ''
+    S.view = 'rec-edit'
+    render()
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    toast(e.message)
+    loadRecs()
+  }
+}
+
+async function recDelete(id) {
+  const rec = (S.recs || []).find((r) => r.id === id)
+  if (!rec || !confirm(`Delete “${rec.name}”?`)) return
+  try {
+    await api(S.conn, `/fd/clip/recordings/${encodeURIComponent(id)}/delete`, { method: 'POST' })
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    toast(e.message)
+  }
+  loadRecs()
+}
+
+function viewRecs() {
+  const recs = S.recs
+  const items = (recs || []).map((r) => `
+    <div class="card rec-item">
+      <div style="font-weight:600" class="ellipsis" title="${esc(r.name)}">${esc(r.name)}</div>
+      <div class="dim ellipsis">${esc([r.site, plural(r.steps, 'step'), r.runs ? `ran ${r.runs}×` : ''].filter(Boolean).join(' · '))}</div>
+      ${r.about ? `<div class="dim rec-about">${esc(r.about)}</div>` : ''}
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary grow" data-rec-run="${esc(r.id)}">${icon('play', 'sm')} Run</button>
+        <button class="btn" data-rec-edit="${esc(r.id)}">Edit</button>
+        <button class="btn danger" data-rec-del="${esc(r.id)}" title="Delete">${icon('trash', 'sm')}</button>
+      </div>
+    </div>`).join('')
+  return `
+    <div class="row"><button class="icon-btn" data-act="back" title="Back">${icon('back')}</button>
+      <div class="grow" style="font-weight:600">Recordings</div>
+      <button class="btn" data-act="rec-start" style="padding:4px 10px" title="Record what you do in the tab in front">${icon('record', 'sm')} Record</button></div>
+    ${S.draft && !S.draft.id ? `<div class="notice"><div class="grow">A recording of ${plural(S.draft.steps.length, 'step')} isn't saved yet.</div><button class="btn" data-act="rec-review" style="padding:3px 9px">Review</button></div>` : ''}
+    ${S.recsError ? `<div class="notice err">${esc(S.recsError)}</div>` : ''}
+    ${recs === null && !S.recsError ? '<div class="row dim"><div class="spinner"></div> Loading…</div>' : ''}
+    ${items || (recs && !recs.length ? `<div class="card"><div style="font-weight:600;margin-bottom:4px">Show it once</div>
+      <div class="dim">Press Record, do the thing on the site the way you always do, and say what matters at each step. After that one of your agents does it for you — in this browser, signed in as you.</div></div>` : '')}`
+}
+
+function openRecRun(id) {
+  const rec = (S.recs || []).find((r) => r.id === id)
+  if (!rec) return
+  S.recRun = { rec, note: '', inputs: Object.fromEntries((rec.asks || []).map((a) => [a.id, a.was || ''])), error: '', sending: false }
+  S.view = 'rec-run'
+  render()
+}
+
+function viewRecRun() {
+  const run = S.recRun
+  if (!run) return ''
+  const rec = run.rec
+  const agents = (S.me?.agents || []).map((ag) => {
+    const up = ag.status === 'running' || ag.status === 'asleep'
+    return `<option value="${esc(ag.slug)}" ${ag.slug === S.agent ? 'selected' : ''} ${up ? '' : 'disabled'}>${ag.status === 'running' ? '●' : ag.status === 'asleep' ? '◐' : '○'} ${esc(ag.name)}${up ? '' : ` (${esc(ag.status)})`}</option>`
+  }).join('')
+  const ag = agentDef()
+  const asks = (rec.asks || []).map((a) => `
+    <div>
+      <label class="label" for="ask-${esc(a.id)}">${esc(a.label)}</label>
+      <input type="text" id="ask-${esc(a.id)}" data-ask-input="${esc(a.id)}" value="${esc(run.inputs[a.id] ?? '')}" placeholder="${esc(a.was ? `When recorded: ${a.was}` : '')}">
+    </div>`).join('')
+  const handsOk = S.hands.on && S.handsStatus?.state !== 'denied'
+  return `
+    <div class="row"><button class="icon-btn" data-act="recs" title="Back">${icon('back')}</button>
+      <div class="grow"><div style="font-weight:600" class="ellipsis">${esc(rec.name)}</div>
+        <div class="dim ellipsis">${esc([rec.site, plural(rec.steps, 'step')].filter(Boolean).join(' · '))}</div></div></div>
+    ${rec.about ? `<div class="dim">${esc(rec.about)}</div>` : ''}
+    <div><label class="label" for="agent">Who does it</label><select class="select" id="agent">${agents}</select></div>
+    ${asks}
+    <div><textarea id="recRunNote" rows="2" placeholder="Anything different this time? (optional)">${esc(run.note)}</textarea></div>
+    ${handsOk ? '' : `<div class="notice">${icon('globe')}<div class="grow">Your agents can't use this browser yet — without it the agent has only a browser of its own, where you aren't signed in.
+      <div style="margin-top:6px"><button class="btn" data-act="rec-hands-on">Let agents use this browser</button></div></div></div>`}
+    ${run.error ? `<div class="notice err">${esc(run.error)}</div>` : ''}
+    <button class="btn primary block" data-act="rec-run-go" ${ag && !run.sending ? '' : 'disabled'}>${icon('play', 'sm')} ${run.sending ? 'Starting…' : ag ? `Run with ${esc(ag.name)}` : 'Pick an agent'}</button>
+    <div class="dim">${esc(ag?.name || 'The agent')} works in tabs of its own, grouped under its name — you can keep using yours. It stops and asks when a step doesn't fit what it sees.</div>`
+}
+
+async function recRunGo() {
+  const run = S.recRun
+  const ag = agentDef()
+  if (!run || !ag || run.sending) return
+  run.sending = true
+  run.error = ''
+  render()
+  try {
+    const res = await api(S.conn, `/fd/clip/recordings/${encodeURIComponent(run.rec.id)}/run`, {
+      method: 'POST',
+      body: JSON.stringify({ agent: ag.slug, note: run.note, inputs: run.inputs, browser: browserLabel(), hands: !!S.hands.on }),
+    })
+    S.recRun = null
+    startRun({ clip_id: res.clip_id, folder: res.folder, vfs: res.vfs, agent: res.agent || ag.name, agentSlug: ag.slug,
+               title: run.rec.name, url: run.rec.start_url || '', action: 'recording', actionLabel: 'Recording' })
+    loadRecs()
+  } catch (e) {
+    run.sending = false
+    if (e instanceof AuthError) return disconnected(e.message)
+    run.error = e.message
+    render()
+  }
+}
+
+function draftStep(id) {
+  return S.draft?.steps.find((s) => s.id === id) || null
+}
+
+$view.addEventListener('click', (ev) => {
+  const el = ev.target.closest('[data-act^="rec"],[data-step-open],[data-step-del],[data-step-move],[data-rec-run],[data-rec-edit],[data-rec-del]')
+  if (!el) return
+  const d = el.dataset
+  if (d.stepOpen) {
+    S.recNoteOpen.add(d.stepOpen)
+    render()
+    document.getElementById(`note-${d.stepOpen}`)?.focus()
+  } else if (d.stepDel) {
+    if (S.view === 'rec') recSend({ type: 'captain-rec-remove', id: d.stepDel })
+    else if (S.draft) { setDraft({ ...S.draft, steps: S.draft.steps.filter((s) => s.id !== d.stepDel) }); render() }
+  } else if (d.stepMove && S.draft) {
+    const steps = [...S.draft.steps]
+    const i = steps.findIndex((s) => s.id === d.stepMove)
+    const j = i + Number(d.dir)
+    if (i < 0 || j < 0 || j >= steps.length) return
+    ;[steps[i], steps[j]] = [steps[j], steps[i]]
+    setDraft({ ...S.draft, steps })
+    render()
+  } else if (d.recRun) openRecRun(d.recRun)
+  else if (d.recEdit) recEdit(d.recEdit)
+  else if (d.recDel) recDelete(d.recDel)
+  else if (d.act === 'rec-start') recStart()
+  else if (d.act === 'recs') { S.view = 'recs'; render(); loadRecs() }
+  else if (d.act === 'rec-show') { S.view = 'rec'; render() }
+  else if (d.act === 'rec-stop') recStop(false)
+  else if (d.act === 'rec-discard') recStop(true)
+  else if (d.act === 'rec-allow' && S.rec?.blocked) {
+    chrome.permissions.request({ origins: [`${S.rec.blocked}/*`] }).then((ok) => { if (ok) recSend({ type: 'captain-rec-retry' }) }).catch(() => {})
+  } else if (d.act === 'rec-review' && S.draft) { S.view = 'rec-edit'; render() }
+  else if (d.act === 'rec-edit-back') { S.view = S.draft?.id ? 'recs' : 'main'; if (S.draft?.id) setDraft(null); render(); if (S.view === 'main') scheduleScan(0) }
+  else if (d.act === 'rec-add-step' && S.draft) {
+    const id = `d${Date.now().toString(36)}`
+    setDraft({ ...S.draft, steps: [...S.draft.steps, { id, kind: 'do', text: '' }] })
+    render()
+    document.getElementById(`do-${id}`)?.focus()
+  } else if (d.act === 'rec-save') recSave()
+  else if (d.act === 'rec-drop' && S.draft) {
+    const saved = !!S.draft.id
+    if (!saved && !confirm('Drop this recording?')) return
+    setDraft(null)
+    S.draftError = ''
+    S.view = saved ? 'recs' : 'main'
+    render()
+    if (!saved) scheduleScan(0)
+  } else if (d.act === 'rec-hands-on') turnHandsOn(true)
+  else if (d.act === 'rec-run-go') recRunGo()
+})
+
+$view.addEventListener('input', (ev) => {
+  const el = ev.target
+  const d = el.dataset
+  if (d.stepNote) {
+    if (S.view === 'rec') { S.recNotes[d.stepNote] = el.value; saveRecNotes() }
+    else { const s = draftStep(d.stepNote); if (s) { s.note = el.value; setDraft(S.draft) } }
+  } else if (d.stepDo) { const s = draftStep(d.stepDo); if (s) { s.text = el.value; setDraft(S.draft) } }
+  else if (d.stepVal) { const s = draftStep(d.stepVal); if (s) { s.value = el.value; setDraft(S.draft) } }
+  else if (el.id === 'recName' && S.draft) { S.draft.name = el.value; setDraft(S.draft) }
+  else if (el.id === 'recAbout' && S.draft) { S.draft.about = el.value; setDraft(S.draft) }
+  else if (el.id === 'recRunNote' && S.recRun) S.recRun.note = el.value
+  else if (d.askInput && S.recRun) S.recRun.inputs[d.askInput] = el.value
+})
+
+$view.addEventListener('change', (ev) => {
+  const el = ev.target
+  if (el.dataset.stepAsk) {
+    const s = draftStep(el.dataset.stepAsk)
+    if (s) { s.ask = el.checked; setDraft(S.draft); render() }
+  } else if (el.dataset.stepVal) render()   // the sentence above it says the new words
+})
+
+setInterval(() => {
+  if (S.view !== 'rec' || !S.rec) return
+  const el = document.getElementById('recElapsed')
+  if (el) el.textContent = elapsed(S.rec.startedAt)
+}, 1000)
 
 // ── history ──
 
@@ -1762,6 +2206,12 @@ async function takeFocus() {
 }
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && changes.focus?.newValue) takeFocus()
+  if (area === 'session' && changes.rec) {
+    const was = S.rec
+    S.rec = changes.rec.newValue?.on ? changes.rec.newValue : null
+    // Started from another window's panel: this one shows it too.
+    if (S.view === 'rec' || (S.view === 'main' && (!!was !== !!S.rec || was?.steps.length !== S.rec?.steps.length))) render()
+  }
   if (area === 'session' && (changes.handsLog || changes.handsStatus)) {
     if (changes.handsLog) S.handsLog = changes.handsLog.newValue || []
     if (changes.handsStatus) S.handsStatus = changes.handsStatus.newValue || null
@@ -1771,7 +2221,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && (changes.hands || changes.handsStopped)) {
     if (changes.hands) S.hands = { on: false, front: false, ...(changes.hands.newValue || {}) }
     if (changes.handsStopped) S.handsStopped = changes.handsStopped.newValue || []
-    if (S.view === 'main' || S.view === 'settings') render()
+    if (S.view === 'main' || S.view === 'settings' || S.view === 'rec-run') render()
   }
   // A size picked in another window's panel applies here too.
   if (area === 'local' && changes.prefs?.newValue && changes.prefs.newValue.textSize !== S.prefs.textSize) {
@@ -1785,7 +2235,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 async function start() {
   try { S.windowId = (await chrome.windows.getCurrent()).id } catch { S.windowId = null }
-  const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me', 'lenses', 'hands', 'handsStopped'])
+  const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me', 'lenses', 'hands', 'handsStopped', 'recDraft'])
+  S.draft = stored.recDraft && Array.isArray(stored.recDraft.steps) ? stored.recDraft : null
   S.agent = stored.agent || ''
   S.prefs = { snapshot: false, screenshot: false, textSize: 'small', watchEvery: 'daily', ...(stored.prefs || {}) }
   applyTextSize()
@@ -1795,7 +2246,9 @@ async function start() {
   S.hands = { on: false, front: false, ...(stored.hands || {}) }
   S.handsStopped = Array.isArray(stored.handsStopped) ? stored.handsStopped : []
   try {
-    const sess = await chrome.storage.session.get(['handsLog', 'handsStatus'])
+    const sess = await chrome.storage.session.get(['handsLog', 'handsStatus', 'rec', 'recNotes'])
+    S.rec = sess.rec?.on ? sess.rec : null
+    S.recNotes = sess.recNotes && typeof sess.recNotes === 'object' ? sess.recNotes : {}
     S.handsLog = Array.isArray(sess.handsLog) ? sess.handsLog : []
     S.handsStatus = sess.handsStatus || null
     S.handsSeen = S.handsLog.length ? S.handsLog[S.handsLog.length - 1].at : 0
@@ -1814,12 +2267,13 @@ async function start() {
     return
   }
   if (stored.me) S.me = stored.me   // drawn at once; refreshed below
-  S.view = 'main'
+  S.view = S.rec ? 'rec' : 'main'   // a recording going on is what the panel is for right now
   render()
   await loadMe()
   applyDefaults()
   render()
   loadLenses()
+  loadRecs()
   await scan()
   takeFocus()
 }

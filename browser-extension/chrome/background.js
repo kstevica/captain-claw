@@ -3,9 +3,11 @@
 // It opens the side panel (toolbar button, Alt+Shift+C, right-click menu)
 // and tells it what a right-click pointed at; the panel does the reading,
 // fetching and sending. With "Agents can use this browser" on, it also lends
-// the browser to the person's agents (hands.js).
+// the browser to the person's agents (hands.js). And it keeps the list of
+// what the person does while they record a process (recorder.js).
 
 import { startHands } from './hands.js'
+import { startRecorder } from './recorder.js'
 
 const MENU = [
   { id: 'captain-page', title: 'Send this page to Captain', contexts: ['page'] },
@@ -37,3 +39,4 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 })
 
 startHands()
+startRecorder()

@@ -513,7 +513,10 @@ def compose_turn(meta: dict, saved: dict, *, owner: str = "",
     folder = f"vfs:{CLIP_PROJECT}/{saved['folder']}/"
 
     follow_up = bool(meta.get("follow_up"))
-    if follow_up:
+    recording = follow_up and bool(saved.get("recording")) and not saved.get("page")
+    if recording:
+        head = f"▶️ About the recording you ran for me: “{title}”"
+    elif follow_up:
         head = f"🌐 About the page I sent: “{title}”"
     elif action["id"] == "ask":
         head = f"🌐 Question about “{title}”"
@@ -540,7 +543,10 @@ def compose_turn(meta: dict, saved: dict, *, owner: str = "",
         asks.append("Work on the part I selected (selection.md); the rest of the page is context.")
     if asks:
         lines += ["", " ".join(a for a in asks if a)]
-    lines += ["", f"The clip is in {folder} — read page.md first."]
+    if recording:
+        lines += ["", f"Its steps are in {folder}recording.md — in my own Chrome (target=\"chrome\"), as before."]
+    else:
+        lines += ["", f"The clip is in {folder} — read page.md first."]
     content = "\n".join(lines).strip()
 
     file_paths = []
@@ -562,6 +568,10 @@ def compose_turn(meta: dict, saved: dict, *, owner: str = "",
         f"Web page sent from {browser} ({when}). Clip folder {folder}: page.md (the page as text, its files "
         "and links listed)" + ("; " + "; ".join(extra) if extra else "") + ". Save what you make for it there too."
     ]
+    if recording:
+        file_paths.append(folder + "recording.md")
+        notes = [f"A follow-up from {browser} ({when}) on a recorded browser process. Folder {folder}: recording.md "
+                 "(the steps). Save what you make for it there too."]
     files = saved.get("files") or []
     if files:
         listed = ", ".join(f"{f['name']} ({human_size(int(f.get('size') or 0))})" for f in files[:80])
@@ -1459,6 +1469,20 @@ def _parse_meta(raw: Any) -> dict:
     return meta
 
 
+def agent_for_turn(user_id: str, wanted: Any) -> dict:
+    """The person's agent a clip or a recording goes to — by slug only: a near
+    match would hand it to an agent nobody picked. It must be up (or asleep)."""
+    from captain_claw.flight_deck.mcp_server_routes import _user_agents
+
+    wanted = str(wanted or "").strip()
+    agent = next((a for a in _user_agents(user_id) if wanted and a.get("slug") == wanted), None)
+    if agent is None:
+        raise HTTPException(404, "That agent isn't one of yours (or it's gone) — pick another.")
+    if not agent.get("port") or str(agent.get("status") or "").lower() not in ("running", "created", "asleep", "up"):
+        raise HTTPException(409, f"{agent.get('name')} isn't running — start it in Flight Deck.")
+    return agent
+
+
 @router.post("/send")
 async def clip_send(request: Request, user: dict = Depends(get_clip_user)):
     """A page from the browser: saved as a clip, then handed to the agent.
@@ -1474,7 +1498,6 @@ async def clip_send(request: Request, user: dict = Depends(get_clip_user)):
     ``screen`` (screen.md), ``selection`` and ``screenshot``; the actions are
     SCREEN_ACTIONS and the clip goes to screen-clips."""
     from captain_claw.flight_deck import usage_quota
-    from captain_claw.flight_deck.mcp_server_routes import _user_agents
 
     user_id = str(user["id"])
     try:
@@ -1496,13 +1519,7 @@ async def clip_send(request: Request, user: dict = Depends(get_clip_user)):
         raise HTTPException(400, f"Unknown action “{action}”.")
     if actions[action].get("needs_text") and not str(meta.get("note") or "").strip():
         raise HTTPException(400, "Write your question first.")
-    # By slug only: a near match would send the page to an agent nobody picked.
-    wanted = str(meta.get("agent") or "").strip()
-    agent = next((a for a in _user_agents(user_id) if wanted and a.get("slug") == wanted), None)
-    if agent is None:
-        raise HTTPException(404, "That agent isn't one of yours (or it's gone) — pick another.")
-    if not agent.get("port") or str(agent.get("status") or "").lower() not in ("running", "created", "asleep", "up"):
-        raise HTTPException(409, f"{agent.get('name')} isn't running — start it in Flight Deck.")
+    agent = agent_for_turn(user_id, meta.get("agent"))
 
     page = meta.get("page") if isinstance(meta.get("page"), dict) else {}
     screen = meta.get("screen") if isinstance(meta.get("screen"), dict) else {}
@@ -1531,6 +1548,7 @@ async def clip_send(request: Request, user: dict = Depends(get_clip_user)):
         saved["folder"] = folder
         saved["page"] = (root / folder / "page.md").is_file()
         saved["screen"] = (root / folder / "screen.md").is_file()
+        saved["recording"] = (root / folder / "recording.md").is_file()
         meta["follow_up"] = True
         meta["action"] = "ask"
     else:
