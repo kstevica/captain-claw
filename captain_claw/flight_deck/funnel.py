@@ -260,6 +260,11 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
     recipe["skip_sites"] = [d for d in (fx.domain_of(str(x)) for x in raw.get("skip_sites") or [] if isinstance(x, str))
                             if d and "." in d][:30]
     recipe["rules"] = _rules(raw.get("rules"), recipe)
+    files = raw.get("files") if isinstance(raw.get("files"), dict) else {}
+    for key in ("summary", "exclusions"):  # else summary.md and exclusions.md
+        name = _rel(files.get(key))
+        if name and name.lower().endswith((".md", ".markdown", ".txt")) and name not in (output, recipe.get("summary_file")):
+            recipe[f"{key}_file"] = name
     return recipe
 
 
@@ -707,6 +712,16 @@ def _check_words(c: dict) -> str:
     return f"is at {'least' if op == 'min' else 'most'} {v}"
 
 
+def summary_name(recipe: dict[str, Any]) -> str:
+    """The run's summary: under the name the charter gives it, else ``summary.md``."""
+    return recipe.get("summary_file") or SUMMARY
+
+
+def exclusions_name(recipe: dict[str, Any]) -> str:
+    """The items left out, with why: under the charter's name, else ``exclusions.md``."""
+    return recipe.get("exclusions_file") or EXCLUSIONS
+
+
 def load_recipe(folder: Path) -> dict[str, Any] | None:
     try:
         return json.loads((folder / RECIPE).read_text(encoding="utf-8"))
@@ -745,6 +760,8 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
             "looser": "<prefer only: the loosest reading that still serves the goal>",
             "columns": ["<the columns this rule is about>"]}],
  "skip_sites": ["<sites that list or mention items of this kind but are never one's own site>"],
+ "files": {"summary": "<the file the charter names for the run's summary, if it names one>",
+           "exclusions": "<the file it names for the items left out with why, if it names one>"},
  "checks": [{"column": "<column>", "op": "required|in|regex|in_evidence|within_months|min|max",
              "value": ..., "source_column": "<column with the link it came from>"}],
  "decide_batch": <items per judging call: 1 when each item has pages to read, up to 20 for short rows>,
@@ -763,6 +780,8 @@ Rules:
   count, amount, date or rating), contact (how to reach it), safety (what must never be done), other. Code reads
   these in any language: a measured or contact rule may be met loosely when rows run short; identity, place,
   safety and other never are.
+- files: when the charter names the file for the run's summary or for the items left out ("sazetak.md",
+  "excluded.md"), give those names: code writes its summary and its list of dropped items under them.
 - group_words: for each group, the words pages and searches use for it ("legal" → law firm, attorney, advokat).
 - columns "from": "owner" for a column filled from the owner's own material (a reference file), never from the
   item's pages; every row fills it.
@@ -3045,8 +3064,8 @@ def write_came_close(folder: Path, recipe: dict[str, Any]) -> list[dict[str, str
             return
         seen.update(x for x in (k, nk) if x)
         same.add(row)
-        if group_by and group and not row.get(group_by):
-            row[group_by] = group
+        if group_by and (group in recipe["groups"] or (group and not row.get(group_by))):
+            row[group_by] = group  # as the list names it, never a word a page used ("Sushi")
         out.append({**{c: row.get(c, "") for c in cols}, _GROUP_COL: group, _CLOSE_WHY: why, _CLOSE_SRC: sources})
 
     for r in _read_csv(folder / LOOSE):
@@ -3093,7 +3112,9 @@ def write_exclusions(folder: Path, recipe: dict[str, Any]) -> int:
              "| Item | Group | Where | Why | Found at |", "|---|---|---|---|---|"]
     lines += [f"| {_md(r.get('name') or r.get('key'))} | {_md(r.get('group'))} | {_md(r.get('stage'))} | "
               f"{_md(r.get('reason'))} | {_md(r.get('source'))} |" for r in dropped]
-    (folder / EXCLUSIONS).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    target = folder / exclusions_name(recipe)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(dropped)
 
 
@@ -3158,10 +3179,12 @@ def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
               "## Files", "", f"- `{recipe['output']}`: the list"]
     if close:
         lines.append(f"- `{came_close_name(recipe)}`: the {close} that came close, with why (not on the list)")
-    lines += [f"- `{EXCLUSIONS}`: every {item} dropped, where and why ({dropped})",
+    lines += [f"- `{exclusions_name(recipe)}`: every {item} dropped, where and why ({dropped})",
               f"- `{ITEMS}`: everything looked at", f"- `{RECIPE}`: the recipe the run followed"]
     text = "\n".join(lines) + "\n"
-    (folder / SUMMARY).write_text(text, encoding="utf-8")
+    target = folder / summary_name(recipe)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
     return text
 
 
@@ -3182,10 +3205,10 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
     added, refused, _ = finished
     text = (f"`{recipe['output']}`: {len(out)} rows" + (f" of {recipe['target']}" if recipe.get("target") else "")
             + f".{per}" + (f" The finishing step added {added} (and {refused} that failed a check)." if added or refused else "")
-            + (f" {len(loosened)} meet the soft rules only by their looser reading (listed in `{SUMMARY}`)."
+            + (f" {len(loosened)} meet the soft rules only by their looser reading (listed in `{summary_name(recipe)}`)."
                if loosened else "")
             + (f" `{came_close_name(recipe)}`: {len(close)} that came close, with why." if close else "")
-            + f" `{EXCLUSIONS}`: {dropped} dropped, with why. `{SUMMARY}`: how it went.")
+            + f" `{exclusions_name(recipe)}`: {dropped} dropped, with why. `{summary_name(recipe)}`: how it went.")
     return {"ok": True, "output": text, "usd": 0.0, "tokens": 0, "error": ""}
 
 
@@ -3202,7 +3225,7 @@ def review_settled(run: dict, findings: str) -> str:
     if recipe is None or not _read_csv(folder / ROWS) or shortfall(folder, recipe):
         return ""
     loose = loose_on_list(folder)
-    summary = folder / SUMMARY
+    summary = folder / summary_name(recipe)
     try:
         text = summary.read_text(encoding="utf-8") if summary.is_file() else ""
         if "## Open points from the review" not in text:
@@ -3217,7 +3240,7 @@ def review_settled(run: dict, findings: str) -> str:
         log.debug("funnel: couldn't add the review's points to the summary", exc_info=True)
     return ("The list is complete and passes every check by code"
             + (f" ({len(loose)} rows on a looser reading the factory allows)" if loose else "")
-            + ": the run is done; the reviewers' points are in summary.md as open points.")
+            + f": the run is done; the reviewers' points are in {summary_name(recipe)} as open points.")
 
 
 def judge_note(run: dict) -> str:
@@ -3241,7 +3264,7 @@ def judge_note(run: dict) -> str:
     lines += [f"- {c['column']} {_check_words(c)}" for c in checks] or ["- the required columns are filled"]
     loose = loose_on_list(folder)
     kept += len(loose)
-    lines.append(f"It looked at {looked} items and kept {kept}; `{EXCLUSIONS}` says why each other one went. "
+    lines.append(f"It looked at {looked} items and kept {kept}; `{exclusions_name(recipe)}` says why each other one went. "
                  "Rules these checks don't cover are yours to judge.")
     if rows_in(folder / came_close_name(recipe)):
         lines.append(f"`{came_close_name(recipe)}` holds the items that came close, kept apart from the list on "

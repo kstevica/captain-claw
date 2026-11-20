@@ -2016,3 +2016,33 @@ def test_a_size_filter_counts_people_only():
     """"Not a chain with more than 3 locations" became a size filter of 3 (people)."""
     assert "size_max and size_min count people (staff, employees) only" in funnel.SETUP_SYSTEM
     assert "a limit on locations" in funnel.SETUP_SYSTEM
+
+
+async def test_the_summary_and_the_dropped_items_go_under_the_charters_names(deck):
+    """The charter asked for sazetak.md and iskljuceni.md; the run wrote summary.md and
+    exclusions.md, and the reviewers said the files were missing."""
+    run, folder = await _run(deck["store"], PEOPLE, rid="bat_charnames")
+    (folder / "extra" / "people.csv").write_text("Name,Email,Team\nAna,ana@x.example,a\nBo,bo@x.example,c\n")
+    deck["recipe"] = {"item": "person", "key": "Email", "sources": [{"kind": "file", "path": "extra/people.csv"}],
+                      "decide": "People in team a or b.",
+                      "files": {"summary": "sazetak.md", "exclusions": "../iskljuceni.md"}}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": f} for i, f in items]
+    steps = await funnel.plan(run)
+    merged = (await _go(deck["store"], run, steps))[-1]
+    recipe = funnel.load_recipe(folder)
+    assert funnel.summary_name(recipe) == "sazetak.md"
+    assert funnel.exclusions_name(recipe) == "exclusions.md"  # a name outside the folder isn't taken
+    assert (folder / "sazetak.md").is_file() and not (folder / funnel.SUMMARY).exists()
+    assert "`sazetak.md`: how it went" in merged["output"]
+    bare = funnel.normalize_recipe({"files": {"summary": "people.csv", "exclusions": "notes.pdf"}},
+                                   funnel.from_contract(PEOPLE))
+    assert funnel.summary_name(bare) == "summary.md" and funnel.exclusions_name(bare) == "exclusions.md"
+
+
+def test_the_came_close_group_is_written_as_the_list_names_it(tmp_path):
+    recipe = funnel.normalize_recipe({"group_by": "Kuhinja"}, funnel.from_contract(KITCHENS))
+    funnel._append_csv(tmp_path / funnel.MAYBE, funnel._MAYBE_COLS,
+                       {"key": "gyo", "name": "Gyo bar", "group": "talijanska kuhinja",
+                        "fields": json.dumps({"Naziv": "Gyo bar", "Kuhinja": "Sushi"}), "why": "no address"})
+    got = funnel.write_came_close(tmp_path, recipe)
+    assert [(r["Naziv"], r["Kuhinja"]) for r in got] == [("Gyo bar", "talijanska kuhinja")]

@@ -48,12 +48,13 @@ def rows_of(path: Path) -> int | None:
 
 
 def named_by_checks(bat_run: dict[str, Any] | None) -> set[str]:
-    """The files a run's done-checks name: what it was asked to deliver."""
+    """The files a run's done-checks name: what it was asked to deliver (a list its
+    table check reads, a document its document check reads, too)."""
     out: set[str] = set()
     for rule in ((bat_run or {}).get("config") or {}).get("contract") or []:
         check = rule.get("check") if isinstance(rule, dict) else None
         path = str((check or {}).get("path") or "").strip().lstrip("./")
-        if path and (check or {}).get("type") in ("file_exists", "file_contains"):
+        if path and (check or {}).get("type") in ("file_exists", "file_contains", "table", "document"):
             out.add(path)
     return out
 
