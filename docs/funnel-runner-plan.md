@@ -748,6 +748,16 @@ connected, Jev answers one yes/no question per alternative from what was read ("
 it meet: judged good from what was read?"); below 0.4 it stays nearly there, saying
 why. No Jev, or Jev unsure, and it's kept as before.
 
+That run also read, for 40 restaurants whose "site" was a city guide's or a booking
+site's page about them, that site's own contact, menu and about pages: 200 fetches,
+and their phone or email could pass for the restaurant's. Now a site link counts as
+an item's page on a site many share, read alone and never as its own, when it is on a
+directory or social site, when several of the run's items have different pages on
+that host (a booking site, a guide), or when it points deep inside a host
+(`/restoran/grad-zagreb/konoba-mid/`). Nothing on such a page counts as the item's
+own (no phone or email taken from it); two links to one restaurant's own front page
+are still one own site.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
