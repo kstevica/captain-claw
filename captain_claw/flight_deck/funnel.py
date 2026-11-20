@@ -757,6 +757,8 @@ Rules:
 - Gather only what the checks and the rules need, from the pages this kind of item keeps them on (a firm's about,
   team and contact pages; a restaurant's menu and contact pages; a product's spec page; a person's profile), and
   put the cheapest test first: a company's size band from a search snippet ("size_max" filter) before reading.
+  size_max and size_min count people (staff, employees) only, never anything else: a limit on locations,
+  branches, seats, products or years is a rule, not a size filter.
 - fact, for each rule: identity (what the item is: its kind, category, segment), place (where it is), measured (a
   count, amount, date or rating), contact (how to reach it), safety (what must never be done), other. Code reads
   these in any language: a measured or contact rule may be met loosely when rows run short; identity, place,
@@ -1977,7 +1979,22 @@ class Work:
                 named = self._group_named(row.get(self.recipe["group_by"], "")) if self.recipe["group_by"] else ""
                 if named:  # a group written loosely ("Italian") is the list's group, written as the list does
                     row[self.recipe["group_by"]] = named
+                elif self.recipe["group_by"] and self.group and not row.get(self.recipe["group_by"]):
+                    row[self.recipe["group_by"]] = self.group  # no group said: this step's
                 relax = {c for r in loosened for c in r.get("columns") or []}
+                gaps = [c["column"] for c in self.recipe["checks"]
+                        if c["op"] == "required" and not row.get(c["column"]) and c["column"] not in relax]
+                if gaps:  # a cell it left empty isn't a rule broken: a soft rule's looser reading, or nearly there
+                    soft = [r for r in loosenable(self.recipe) if set(r.get("columns") or []) & set(gaps)] \
+                        if self.loosen else []
+                    still = [c for c in gaps if not any(c in (r.get("columns") or []) for r in soft)]
+                    if still:
+                        await self._nearly(it, row, named or self.group,
+                                           f"left {', '.join(still)} empty" + (f" ({reason})" if reason else ""))
+                        continue
+                    loosened = loosened + [r for r in soft if r not in loosened]
+                    verdict = "loose"
+                    relax |= {c for r in soft for c in r.get("columns") or []}
                 problem = check_row(self.recipe, row, {e["source"]: e["text"] for e in it.get("evidence") or []},
                                     relax=relax)
                 if problem:
@@ -1990,7 +2007,7 @@ class Work:
                 twin = self.same.of(row)
                 if twin:  # found again under another name: its own site (and phone or email) say so
                     await self.record(it, "dropped", f"the same {self.recipe['item']} as {twin}, found under "
-                                      "another name (the same website)", group=group, stage="duplicate")
+                                      "another name", group=group, stage="duplicate")
                     continue
                 if self.quota(group) and self.kept.get(group, 0) >= self.quota(group):
                     await self.record(it, "dropped", f"{group} is already full", group=group, stage="full")
@@ -2015,30 +2032,35 @@ class Work:
                 await self.record(it, "kept", reason or "meets the rules", group=group)
             elif verdict == "maybe":
                 hint = str((v.get("row") or {}).get(self.recipe["group_by"]) or "") if self.recipe["group_by"] else ""
-                group = self._group_named(hint) or self.group
-                await self.record(it, "maybe", reason or "a fact it needs wasn't found", group=group)
-                name = it["fields"].get("name") or next(iter(it["fields"].values()), "")
                 got = v.get("row") if isinstance(v.get("row"), dict) else {}
-                cells = {c: " ".join(str(got.get(c) or "").split()) for c in self.recipe["columns"]}
-                if self.recipe["group_by"] and group in self.recipe["groups"]:
-                    cells[self.recipe["group_by"]] = group
-                read = {e["source"]: e["text"] for e in it.get("evidence") or []}
-                for c in self.recipe["checks"]:  # a value that isn't in what was read isn't passed on
-                    if c["op"] == "in_evidence" and cells.get(c["column"]) and check_row(
-                            {**self.recipe, "checks": [c]}, cells, read):
-                        cells[c["column"]] = ""
-                _append_csv(self.folder / MAYBE, _MAYBE_COLS,
-                            {"key": it["key"], "name": name, "group": group,
-                             "fields": json.dumps(it["fields"], ensure_ascii=False),
-                             "why": reason, "sources": " ".join(e["source"] for e in it.get("evidence") or []),
-                             "row": json.dumps({c: x for c, x in cells.items() if x}, ensure_ascii=False)})
+                await self._nearly(it, got, self._group_named(hint) or self.group,
+                                   reason or "a fact it needs wasn't found")
             else:
-                broke = [r for r in self._named(v.get("broken")) if _fact_of(r) != "identity"]
-                other = "" if broke else self._other_group(reason)  # a rating shown too low fails there too
+                broke = [r for r in self._named(v.get("broken")) if not self._is_group_rule(r)]
+                other = "" if broke else self._other_group(reason)  # a hotel's restaurant, a low rating: fail there too
                 if other:  # "Italian, not Croatian": the Italian step judges it
                     await self._hand_over(it, other, reason)
                     continue
                 await self.record(it, "dropped", reason or "breaks a rule")
+
+    async def _nearly(self, it: dict, got: dict, group: str, reason: str) -> None:
+        """An item that seems to fit but lacks something: a maybe, with the cells found
+        so far (a value that isn't in what was read isn't passed on)."""
+        await self.record(it, "maybe", reason, group=group)
+        name = it["fields"].get("name") or next(iter(it["fields"].values()), "")
+        cells = {c: " ".join(str((got or {}).get(c) or "").split()) for c in self.recipe["columns"]}
+        if self.recipe["group_by"] and group in self.recipe["groups"]:
+            cells[self.recipe["group_by"]] = group
+        read = {e["source"]: e["text"] for e in it.get("evidence") or []}
+        for c in self.recipe["checks"]:
+            if c["op"] == "in_evidence" and cells.get(c["column"]) and check_row(
+                    {**self.recipe, "checks": [c]}, cells, read):
+                cells[c["column"]] = ""
+        _append_csv(self.folder / MAYBE, _MAYBE_COLS,
+                    {"key": it["key"], "name": name, "group": group,
+                     "fields": json.dumps(it["fields"], ensure_ascii=False),
+                     "why": reason, "sources": " ".join(e["source"] for e in it.get("evidence") or []),
+                     "row": json.dumps({c: x for c, x in cells.items() if x}, ensure_ascii=False)})
 
     def _fill_from_facts(self, row: dict, item: dict) -> None:
         """Cells a judging call left empty that code found on the item's own pages: its
@@ -2070,18 +2092,23 @@ class Work:
             if empty(kind) and shared and named:
                 row[kind] = shared if fx.SHARED_LOCAL.match(value.split("@", 1)[0]) else named
         phones = [(n, e["source"]) for e in own for n in fx.phones(e.get("text", ""))]
-        phone_col = next((c for c in cols if re.search(r"phone|tel\b|telephone", c, re.I) and not re.search(r"source|url", c, re.I)), "")
+        phone_col = next((c for c in cols if _PHONE_COL.search(c) and not re.search(r"source|url", c, re.I)), "")
         if phones and empty(phone_col):
             row[phone_col] = phones[0][0]
         for rule in self.recipe.get("rules") or []:
             if rule.get("kind") != "must" or _fact_of(rule) != "place" or not rule.get("columns"):
                 continue
             rcols = [c for c in rule["columns"] if c in cols]
-            if not rcols or any(str(row.get(c) or "").strip() for c in rcols):
+            addr = [c for c in rcols if _ADDRESS.search(c)]
+            if addr:  # its address, though another of the rule's cells (a district) was filled
+                to = next((c for c in addr if not str(row.get(c) or "").strip()), "")
+            else:
+                to = rcols[0] if rcols and not any(str(row.get(c) or "").strip() for c in rcols) else ""
+            if not to:
                 continue
             line = place_line("\n".join(e.get("text", "") for e in own), rule["rule"], self.places)
             if line:
-                row[next((c for c in rcols if _ADDRESS.search(c)), rcols[0])] = line
+                row[to] = line
         state_col = next((c for c in cols if re.fullmatch(r"(us\s*)?state", c.strip(), re.I)), "")
         if "US" in self.places and empty(state_col):
             state = fx.us_state("\n".join(e.get("text", "") for e in own), address_only=True)
@@ -2146,17 +2173,41 @@ class Work:
         tops = [g for g, n in scores.items() if n == best]
         return tops[0] if best and len(tops) == 1 else ""
 
+    def _naming(self) -> dict[str, tuple[set[str], list[str]]]:
+        """How a text names each group: the stems of its own name (but those every group's
+        name shares, "kuhinja"), and the setup's group words as whole phrases ("traditional
+        croatian food", never "food" alone)."""
+        names = {g: {w[:6] for w in re.findall(r"[a-z]+", _fold(g)) if len(w) >= 4 and w not in _GROUP_STOP}
+                 for g in self.recipe["groups"]}
+        common = set.intersection(*names.values()) if names else set()
+        phrases = {g: [" ".join(re.findall(r"[a-z0-9]+", _fold(x))) for x in
+                       (self.recipe.get("group_words") or {}).get(g) or []] for g in self.recipe["groups"]}
+        everyone = set.intersection(*(set(v) for v in phrases.values())) if phrases else set()
+        return {g: (names[g] - common, [x for x in phrases[g] if x and x not in everyone]) for g in self.recipe["groups"]}
+
+    def _names_group(self, group: str, text: str, naming: dict | None = None) -> bool:
+        stems, phrases = (naming or self._naming())[group]
+        folded = _fold(text)
+        words = re.findall(r"[a-z0-9]+", folded)
+        if any(w.startswith(st) for st in stems for w in words):
+            return True
+        return any(re.search(r"(?<![a-z0-9])" + r"[a-z0-9]*\W+".join(re.escape(w[:5]) for w in x.split())
+                             + r"[a-z0-9]*", folded) for x in phrases)
+
+    def _is_group_rule(self, rule: dict[str, Any]) -> bool:
+        """The rule that says which groups an item may be in ("cuisine is one of: ...")."""
+        if self.recipe["group_by"] and self.recipe["group_by"] in (rule.get("columns") or []):
+            return True
+        naming = self._naming()
+        return sum(self._names_group(g, rule.get("rule", ""), naming) for g in self.recipe["groups"]) >= 2
+
     def _other_group(self, reason: str) -> str:
         """Another group of the list a drop's reason says the item fits ("serves Italian
         food, not Croatian"); "" when it names none, or more than one."""
         if not self.group or len(self.recipe["groups"]) < 2 or not reason:
             return ""
-        said = set(re.findall(r"[a-z0-9]+", _fold(reason)))
-        stems = {w[:6] for w in said} | said
-        words = {g: set(_group_words(g, (self.recipe.get("group_words") or {}).get(g))) for g in self.recipe["groups"]}
-        shared = set.intersection(*words.values()) if words else set()  # "kuhinja" in every group says nothing
-        hits = [g for g in self.recipe["groups"] if g != self.group
-                and any(w in stems or any(x.startswith(w) for x in said) for w in words[g] - shared)]
+        naming = self._naming()
+        hits = [g for g in self.recipe["groups"] if g != self.group and self._names_group(g, reason, naming)]
         return hits[0] if len(hits) == 1 else ""
 
     async def _hand_over(self, item: dict, group: str, reason: str) -> None:
@@ -2416,6 +2467,8 @@ def check_row(recipe: dict[str, Any], row: dict[str, str], texts: dict[str, str]
             continue  # a link to a page that was read: it's where the value came from
         if op == "in_evidence":
             src = row.get(c.get("source_column", ""), "") if c.get("source_column") else ""
+            if src and not _LINK_LIKE.match(src.strip()):
+                src = ""  # a source named, not linked ("Google"): it names no page, so anything read counts
             if not src and unsourced_ok:
                 continue
             where = texts.get(src) if src and src in texts else None
@@ -2502,6 +2555,7 @@ def _site_pages(src: str, texts: dict[str, str]) -> str | None:
     return "\n".join(pages) if pages else None
 
 
+_LINK_LIKE = re.compile(r"(https?://|www\.)\S+$|[\w-]+(\.[\w-]+)+(/\S*)?$", re.I)
 _PHONE_COL = re.compile(r"phone|telef|^tel\b|mobil|handy|cell|m[oó]vil|celular|gsm", re.I)
 _LANG_PART = re.compile(r"^[a-z]{2}(?:[-_][a-z]{2})?$", re.I)
 _HOME_PARTS = {"index.html", "index.htm", "index.php", "home", "default.aspx"}
@@ -2535,57 +2589,80 @@ def site_id(url: str, shared: tuple[str, ...] = _SKIP_SITES) -> str:
     return d + ("/" + "/".join(parts) if parts else "")
 
 
+def _plain_words(text: str) -> list[str]:
+    t = unicodedata.normalize("NFKD", str(text or "").lower())
+    return re.findall(r"[a-z0-9]+", "".join(ch for ch in t if not unicodedata.combining(ch)))
+
+
+def _address_parts(text: str) -> tuple[frozenset[str], frozenset[str]]:
+    """An address's house numbers and street words (each word's first four letters, so
+    "Lipova" and "Lipove" agree), without postal codes and the names of places (the
+    city, the country)."""
+    places = {w for _code, name in fx.places_named(text) for w in _plain_words(name)}
+    words = [w for w in _plain_words(text) if w not in places]
+    numbers = frozenset(w for w in words if w.isdigit() and len(w) <= 4)
+    stems = frozenset(w[:4] for w in words if w.isalpha() and len(w) >= 4)
+    return numbers, stems
+
+
 class SameItems:
     """The rows on a list, to tell an item found again under another name ("Restac" and
-    "Restac 900"): the same own site (its home page, or the same page on it), or the same
-    host with the same phone or email; never when a column that tells places apart (an
-    address, a phone) differs, so two branches of one chain stay two."""
+    "Restac 900"). The same item: the same own site (its home page, or the same page on
+    it); the same host with the same phone or email; or a word of its name shared with
+    the same phone or email, or with the same address. Never when the two are apart: a
+    phone or an address that differs (another house number, another street), so two
+    branches of one chain stay two. An address written two ways ("Ilička ulica" and
+    "Ilička", "Lipova 10" and "Ul. Lipove 10") isn't apart."""
 
     def __init__(self, recipe: dict[str, Any], skip: tuple[str, ...] = ()) -> None:
         self.site = recipe.get("site_column") or ""
         self.key = recipe["key"]
         cols = recipe["columns"]
         self.phones = [c for c in cols if _PHONE_COL.search(c)]
-        self.places = [c for c in cols if _ADDRESS.search(c)] + self.phones
+        self.addresses = [c for c in cols if _ADDRESS.search(c) and c not in self.phones]
         self.shared = tuple(dict.fromkeys(_SKIP_SITES + tuple(skip)))
-        self.rows: dict[str, list[dict[str, Any]]] = {}
+        self.rows: list[dict[str, Any]] = []
 
-    def _place(self, col: str, v: str) -> str:
-        if col in self.phones:
-            return re.sub(r"\D", "", v)[-8:]
-        return re.sub(r"[\W_]+", "", v.lower())
-
-    def _seen(self, row: dict[str, str]) -> dict[str, Any] | None:
-        if not self.site:
-            return None
-        url = str(row.get(self.site) or "")
+    def _seen(self, row: dict[str, str]) -> dict[str, Any]:
+        url = str(row.get(self.site) or "") if self.site else ""
         sid = site_id(url, self.shared)
-        if not sid:
-            return None
-        shared = any(fx.same_site(fx.domain_of(url), x) for x in self.shared)
-        contacts = {re.sub(r"\D", "", str(row.get(c) or ""))[-8:] for c in self.phones
-                    if len(re.sub(r"\D", "", str(row.get(c) or ""))) >= 7}
-        contacts |= {v.strip().lower() for v in row.values() if re.fullmatch(r"\s*[^@\s]+@[^@\s]+\.\w+\s*", str(v or ""))}
+        host = "" if not sid or any(fx.same_site(fx.domain_of(url), x) for x in self.shared) else fx.domain_of(url)
+        phones = {re.sub(r"\D", "", str(row.get(c) or ""))[-8:] for c in self.phones
+                  if len(re.sub(r"\D", "", str(row.get(c) or ""))) >= 7}
+        mails = {str(v).strip().lower() for v in row.values()
+                 if re.fullmatch(r"\s*[^@\s]+@[^@\s]+\.\w+\s*", str(v or ""))}
+        address = " ".join(str(row.get(c) or "") for c in self.addresses).strip()
+        numbers, stems = _address_parts(address) if address else (frozenset(), frozenset())
         name = str(row.get(self.key) or "") or next((str(v) for v in row.values() if v), sid)
-        return {"sid": sid, "bucket": sid if shared else sid.split("/")[0], "contacts": contacts, "name": name,
-                "places": {c: self._place(c, str(row.get(c) or "")) for c in self.places if str(row.get(c) or "").strip()}}
+        return {"sid": sid, "host": host, "phones": phones, "contacts": phones | mails, "name": name,
+                "words": {w for w in _plain_words(name) if len(w) >= 3}, "numbers": numbers, "stems": stems}
+
+    @staticmethod
+    def _apart(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        if a["phones"] and b["phones"] and a["phones"].isdisjoint(b["phones"]):
+            return True
+        if a["numbers"] and b["numbers"] and a["numbers"].isdisjoint(b["numbers"]):
+            return True
+        return bool(a["stems"] and b["stems"] and a["stems"].isdisjoint(b["stems"]))
 
     def of(self, row: dict[str, str]) -> str:
         """The name of the row on the list this one repeats, or ""."""
         me = self._seen(row)
-        if me is None:
-            return ""
-        for other in self.rows.get(me["bucket"], []):
-            if any(other["places"].get(c, v) != v for c, v in me["places"].items()):
-                continue  # another address or phone: another place of the same name or site
-            if other["sid"] == me["sid"] or me["contacts"] & other["contacts"]:
+        for other in self.rows:
+            if self._apart(me, other):
+                continue  # another place of the same name, site or chain
+            same_contact = bool(me["contacts"] & other["contacts"])
+            if me["sid"] and me["sid"] == other["sid"]:
+                return other["name"]
+            if me["host"] and me["host"] == other["host"] and same_contact:
+                return other["name"]
+            if me["words"] & other["words"] and (same_contact or (
+                    me["numbers"] and me["numbers"] == other["numbers"] and me["stems"] == other["stems"])):
                 return other["name"]
         return ""
 
     def add(self, row: dict[str, str]) -> None:
-        me = self._seen(row)
-        if me is not None:
-            self.rows.setdefault(me["bucket"], []).append(me)
+        self.rows.append(self._seen(row))
 
 
 def kept_per_group(folder: Path) -> dict[str, int]:
@@ -2866,7 +2943,7 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
                 problem = "it shows nothing for: " + "; ".join(unshown)
             twin = same.of(row)
             if not problem and twin:
-                problem = f"it is {twin} under another name (the same website)"
+                problem = f"it is {twin} under another name"
             if not problem and recipe["groups"] and recipe["groups"].get(group) and kept.get(group, 0) >= recipe["groups"][group]:
                 problem = f"{group} is already full"
             item = {"key": key, "name": str(name)[:120], "group": group, "source": "finishing step",

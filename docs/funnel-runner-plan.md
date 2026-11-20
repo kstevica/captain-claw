@@ -566,6 +566,36 @@ The same run showed three more general faults, fixed:
   merge, when loose rows fill a group, when the finishing step adds rows, and in the
   came-close file.
 
+The next run of the same list showed the duplicate check too strict, and other faults:
+
+- **An address written two ways isn't two branches.** "Ilička ulica" and "Ilička",
+  "Lipova 10" and "Ul. Lipove 10" (another grammatical case) made one restaurant two.
+  Now two rows are apart only when both give a phone and the phones differ, or both
+  give house numbers and none is shared, or both give street words and none is shared
+  (words compared by their first four letters; postal codes and city names left
+  out). A word of the name shared with the same phone or email, or with the same
+  address, is the same item too, even when one row cites a guide's page.
+- **A cell left empty isn't a rule broken.** Twelve items were dropped for "Adresa is
+  empty", "Web is empty", "Preporuka is empty". Now a required column left empty
+  makes the item nearly there (the finishing step and the came-close file get it),
+  or loose when the column belongs to a soft rule.
+- **The address was filled only when every cell of the place rule was empty.** A
+  district named left the address empty. Now each empty address column is filled;
+  a phone column in any language ("Telefon") is filled from the item's own pages.
+- **A source column holding a name.** A review count was checked against "Google", a
+  name, not a link, so every row with a review count failed. A source that isn't a
+  link names no page: anything read counts.
+- **Phones written another way.** "+385 1 …" against "01 …" on the page: phones are
+  compared by their last eight digits.
+- **A size filter from a limit on locations.** "Not a chain with more than 3
+  locations" became a staff-size filter of 3. The setup prompt says size filters
+  count people only.
+- **Handed over for the wrong reason.** The Italian step handed a hotel's restaurant
+  and a fast-food place to the Croatian group: "restoran" and "food" were words of the
+  Croatian group's phrases. Now a text names a group by the stems of the group's own
+  name or by one of its phrases whole, and a drop that broke any rule other than the
+  one about the groups (not a hotel's restaurant, not fast food, a rating) stays a drop.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
