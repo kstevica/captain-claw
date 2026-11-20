@@ -842,6 +842,27 @@ A run couldn't say what its looks had earned. The items file now has a `looked` 
 (how many more pages, results or file parts the look read; 0 when it found none), and
 the summary says how many items were looked into and how they ended.
 
+The first list built from files alone (a folder of 37 made-up lab files with known
+answers: reports, batch tables, lookup tables, an errata) judged 25 of 26 items right,
+with no wrong keep, in four minutes. Two faults:
+
+Its batch tables were passed over without a word, a third of the items with them:
+their ID column was named its own way ("Strain" for the list's "StrainID"), a row with
+nothing under the list's key gets no key, and a row with no key is skipped. Now a
+table that lacks the list's key column has its columns matched to the list's, by name
+where only one fits ("Strain", "Strain ID"; never "Researcher" for "ResearcherEmail")
+and else by one short call with sample rows. The list's names are set beside the
+table's own, so the key, the filters and the checks find them. A table with no column
+for the key is said so in the run's events.
+
+A fact kept in another of the owner's tables (an email in a directory, a species in a
+results table) stayed empty: a look only goes for what a rule needs, and these were
+plain columns. Now each of the owner's tables is a place to look an item up, by its
+key column (the first whose values are all different). A row whose key is the item's
+own key or name, or a value the item carries (the person it names), joins what is read
+of the item before it is judged, and then one such value on from those rows. By code,
+with no call; "NG-0101" and "ng 101" are the same key, a bare number is none.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
