@@ -466,7 +466,7 @@ export const getMyAgent = () => call<MyAgent>('/fd/first-mate/my-agent')
 export const makeMyAgent = () => call<MyAgent & { slug: string; name: string }>('/fd/first-mate/my-agent', { method: 'POST' })
 
 /** A new factory drafted by a model from the owner's words or one of their Course goals; it waits for approval. */
-export const draftFactory = (body: { words?: string; goal_id?: string }) =>
+export const draftFactory = (body: { words?: string; goal_id?: string; rephrase?: boolean }) =>
   call<Factory & { cases: number }>('/fd/first-mate/draft', json('POST', body))
 export const getTemplates = () => call<{ templates: Template[] }>('/fd/first-mate/templates').then((r) => r.templates)
 export const listFactories = (includeRetired = false) =>

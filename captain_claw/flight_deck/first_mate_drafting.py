@@ -40,11 +40,10 @@ SENDS_PER_RUN = 3
 NEW_MAIL = {"kind": "events", "source": "gmail", "event_type": "new_email",
             "match": {"from": [], "label": [], "words": []}, "batch_minutes": None, "ask": False}
 
-SYSTEM = """You set up a standing job (a "factory") that an assistant runs again and again for one person. From what they want, write its first draft as one JSON object with these fields:
+_SYSTEM = """You set up a standing job (a "factory") that an assistant runs again and again for one person. From what they want, write its first draft as one JSON object with these fields:
 
 - "title": a short name, at most 5 words.
-- "charter": what one run does, written as the person asking ("Go through my inbox ..."): what to look at, what to do, what never to do, and what to finish with, named: the file (a list with its columns, a document or report with its sections, code that runs, or several of these). Say who or what is in and who is out, and where things must come from. 2 to 7 sentences. Keep every limit the person gave. Where their words leave the audience or the result open, take the sensible narrow reading and say it, so they can change it before approving.
-- "schedule": when it starts on its own: "daily HH:MM", "weekdays HH:MM", "weekly mon,thu HH:MM" (any days) or "every N h"; or "" when it should start on new mail instead, or only when they press Run.
+{charter}- "schedule": when it starts on its own: "daily HH:MM", "weekdays HH:MM", "weekly mon,thu HH:MM" (any days) or "every N h"; or "" when it should start on new mail instead, or only when they press Run.
 - "on_new_mail": true only when it should start when new mail arrives.
 - "done_when": 3 to 6 short lines checked on one run's result. Make the countable ones countable, so Captain checks them itself: the file and its kind ("final_leads.csv with columns Name, Email, Source, Reason"), how many or how long ("at least 500 rows", "1,500 to 3,000 words"), no duplicates, where things come from ("every Source is a link to the page the email is on", "personal emails, at most 20% role inboxes like info@"), who is out ("no university staff"), the sections a document must have, that code's tests pass. Then at most two lines on quality a reviewer judges ("each reason names a specific Captain feature"). When the person wrote their own "done when" lines, keep each one as its own line in their words, and keep every amount as they wrote it: "at least 60" stays "at least 60", never "60" or "exactly 60". Count anything you name (columns, sections) and make the number match the list.
 - "may_send_email": true only when the job itself must send or reply to email. Writing drafts for the person to send is not sending.
@@ -52,6 +51,31 @@ SYSTEM = """You set up a standing job (a "factory") that an assistant runs again
 - "cases": 0 to 3 test cases for jobs that react to an input such as an email or a request: realistic inputs this job might get, each {"title": ..., "input": ..., "good_result": [1 to 3 lines]}. [] for other jobs.
 
 Never let it spend money or open accounts. Keep your thinking short: only the JSON matters. Return ONLY the JSON object."""
+
+# The charter when the owner's words are rewritten for it (the usual way): everything a
+# run needs to be told once, so no run has to guess it. Each point is there because a
+# run went wrong without it: one step for four kinds of item, columns the setup made
+# up, a fact taken from a page about the item, a list filled by bending a rule.
+CHARTER_REPHRASED = """- "charter": their task rewritten as a complete brief for the runs, in their voice ("Find ...", "Go through my ..."). Keep every limit, number, name and link they gave, in their words. Add only what a run needs and they left unsaid; where their words leave something open, take the sensible narrow reading and say it plainly, so they can change it before approving. Cover what applies, in this order, in short paragraphs:
+  1. What one run does, and the result it finishes with, named: the file (a list with its columns, a document with its sections, code that runs).
+  2. For a list: what one row is, and who or what is in and who is out. When they name several kinds or several places, make them groups with an amount for each that adds up to their total, and say how you split it. The columns, named, in order. For each fact a row carries, where it must come from (the item's own site or profile, the files they gave); a fact from a page about the item doesn't count. What happens to an item when a fact isn't found: left out, the cell left empty, or what may stand in for it. Whether fewer rows than asked is acceptable: then say "give what there is and explain the shortage in the summary; do not relax a rule to fill it". Each item once.
+  3. When the test is whether something fits a product, a service or a topic, say in two or three lines what that is and who it is for, from their words. When they gave only its name or a link, keep the link and say the run reads it first.
+  4. For a document or report: its sections, its length, where its facts come from.
+  5. What a run must never do, their own limits first.
+  Up to about 250 words. No heading, no preamble.
+- "is_list": true when the result is a list of rows (leads, items, records) and nothing else, false otherwise.
+"""
+CHARTER_AS_WRITTEN = """- "charter": the person's own words, exactly as they wrote them. Do not rewrite, shorten or add to them.
+- "is_list": true when the result is a list of rows (leads, items, records) and nothing else, false otherwise.
+"""
+
+
+def system_for(rephrase: bool = True) -> str:
+    """The drafting prompt: the owner's task rewritten as a full charter, or kept as written."""
+    return _SYSTEM.replace("{charter}", CHARTER_REPHRASED if rephrase else CHARTER_AS_WRITTEN)
+
+
+SYSTEM = system_for(True)
 
 
 def _parse(text: str) -> dict[str, Any]:
@@ -107,7 +131,7 @@ def fields_of(data: dict[str, Any]) -> dict[str, Any]:
                           "input": str(c.get("input") or "").strip(),
                           "expect": _lines(c.get("good_result"), 10)})
     return {"title": title, "charter": charter, "triggers": fms.check_triggers(triggers),
-            "grants": fms.check_grants(grants),
+            "grants": fms.check_grants(grants), "is_list": data.get("is_list") is True,
             "checks": {"contract": _lines(data.get("done_when"), DONE_WHEN_MAX)},
             "cases": cases[:DRAFT_CASES_MAX]}
 
@@ -145,10 +169,13 @@ def words_of_goal(goal: dict[str, Any]) -> str:
 
 
 async def draft(store: fms.FirstMateStore, owner_id: str, words: str, *, goal: dict[str, Any] | None = None,
-                by: str = "first_mate") -> dict[str, Any]:
+                by: str = "first_mate", rephrase: bool = True) -> dict[str, Any]:
     """A new factory drafted from ``words`` (or a Course ``goal``), waiting for
     the owner's approval, with its Line card. Returns the factory's view, with
-    ``cases`` (how many sealed cases came with it)."""
+    ``cases`` (how many sealed cases came with it). ``rephrase``: the task is
+    rewritten as a full charter (groups and amounts, columns, where each fact must
+    come from, what to do when one isn't found); off, the charter is their words as
+    written and only the rest is drafted. A list is set to run as a list funnel."""
     owner = fms.norm_user(owner_id)
     words = (words or "").strip()[:WORDS_MAX]
     if goal is not None and not words:
@@ -166,7 +193,7 @@ async def draft(store: fms.FirstMateStore, owner_id: str, words: str, *, goal: d
         prompt = user if not last_error else (f"{user}\n\nYour last answer couldn't be used: {last_error}. Answer with "
                                               "the JSON object only, and keep your thinking short.")
         try:
-            text = await _ask_model(owner, SYSTEM, prompt, max_tokens=budget)
+            text = await _ask_model(owner, system_for(rephrase), prompt, max_tokens=budget)
         except FirstMateError:
             raise  # no model to ask: asking again changes nothing
         except Exception as exc:  # noqa: BLE001 — no model answer is no draft, never a half one
@@ -179,10 +206,13 @@ async def draft(store: fms.FirstMateStore, owner_id: str, words: str, *, goal: d
             budget = RETRY_TOKENS  # an answer that ran out of room gets more of it
     if fields is None:
         raise FirstMateError(f"couldn't draft it: {last_error}")
-    note = f"Drafted from the goal: {goal.get('title', '')}"[:fms.NOTE_MAX] if goal else "Drafted from your words"
+    if not rephrase:
+        fields["charter"] = words  # theirs, whatever the model returned
+    note = f"Drafted from the goal: {goal.get('title', '')}"[:fms.NOTE_MAX] if goal else (
+        "Drafted from your words, rewritten as a charter" if rephrase else "Drafted from your words, the charter as written")
     f = store.create(owner, title=fields["title"], charter=fields["charter"], triggers=fields["triggers"],
                      grants=fields["grants"], checks=fields["checks"], goal_id=(goal or {}).get("id", ""),
-                     note=note, created_by=by)
+                     runner="funnel" if fields["is_list"] else "bat", note=note, created_by=by)
     from captain_claw.flight_deck import first_mate_cases
     added = 0
     for c in fields["cases"]:

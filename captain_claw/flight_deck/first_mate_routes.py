@@ -285,7 +285,9 @@ async def draft_factory(body: Any = Body(...), user: dict = Depends(allowed_user
     their Course goals. It waits for their approval, with a card on the Line."""
     from captain_claw.flight_deck import first_mate_drafting
     body = _object(body)
-    _only(body, ("words", "goal_id"))
+    _only(body, ("words", "goal_id", "rephrase"))
+    if not isinstance(body.get("rephrase", True), bool):
+        raise HTTPException(400, "rephrase must be true or false")
     words = body.get("words") or ""
     if not isinstance(words, str):
         raise HTTPException(400, "words must be text")
@@ -295,7 +297,8 @@ async def draft_factory(body: Any = Body(...), user: dict = Depends(allowed_user
         from captain_claw.flight_deck import course
         goal = course.get_store().get(str(body["goal_id"]))
     try:
-        return await first_mate_drafting.draft(fms.get_store(), _uid(user), words, goal=goal, by="owner")
+        return await first_mate_drafting.draft(fms.get_store(), _uid(user), words, goal=goal, by="owner",
+                                               rephrase=body.get("rephrase", True))
     except FirstMateError as exc:
         raise _err(exc) from None
 
