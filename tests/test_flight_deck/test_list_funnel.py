@@ -2167,3 +2167,48 @@ def test_a_filter_on_a_column_the_listing_doesnt_give_drops_nothing(tmp_path):
     assert w.passes({"fields": {"name": "Konoba A", "url": "https://konoba-a.example"}}) == ""  # not known yet
     assert w.passes({"fields": {"name": "Konoba B", "Adresa": "Ilica 5, Zagreb"}}) == ""
     assert w.passes({"fields": {"name": "Konoba C", "Adresa": "Riva 2, Split"}}) == "Adresa doesn't match"
+
+
+async def test_the_charters_own_alternative_holds_when_nothing_is_loosened(deck):
+    """"Ako nema ocjene, procijeni koliko je dobar": the setup made the rating a plain
+    must and left that clause out, and with a short list accepted nothing was read
+    loosely, so a restaurant with no rating could never be listed."""
+    assert "that alternative is part of the rule: write it into" in funnel.SETUP_SYSTEM
+    assert "never drop such a clause" in funnel.SETUP_SYSTEM
+    run, folder = await _run(deck["store"], PAPERS, rid="bat_charteralt")
+    task = "Radovi o pretraživanju grafova. Ako nema citata, procijeni koliko je rad dobar."
+    _papers(deck, folder)
+    deck["recipe"] = {**deck["recipe"], "shortage_ok": True}
+    steps = await funnel.plan({**run, "task": task})
+    await bat_routes._bat_attempt({**(await deck["store"].get_run(run["id"])), "task": task}, steps[0])
+    prompt = deck["decide_prompts"][0]
+    assert "Ako nema citata, procijeni koliko je rad dobar." in prompt
+    assert "These words decide" in prompt and "such as what to do when a fact isn't found" in prompt
+
+
+async def test_a_strict_run_drops_only_what_is_shown_to_break_a_rule(deck):
+    """With every rule kept as written, about 8 restaurants were dropped for "No rating,
+    contact, or own website found": a fact not found is nearly there, not a rule broken."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv",
+                                                     "columns": ["Naziv", "Ocjena", "Kuhinja"], "min_rows": 3}}]
+    run, folder = await _run(deck["store"], contract, {"funnel_loosen": "never"}, rid="bat_strictdrop")
+    (folder / "extra" / "r.csv").write_text("Naziv,Ocjena,Kuhinja\nKonoba A,4.3,\nKonoba B,,\nBistro C,,\n")
+    rating, kitchen = "Ocjena 4.5 ili viša", "Kuhinja je hrvatska"
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "sources": [{"kind": "file", "path": "extra/r.csv"}],
+                      "decide": "Hrvatski restorani s ocjenom 4.5+.",
+                      "rules": [{"rule": rating, "kind": "must", "fact": "measured", "columns": ["Ocjena"]},
+                                {"rule": kitchen, "kind": "must", "fact": "identity", "columns": ["Kuhinja"]}]}
+
+    def decide(items):
+        said = {"Konoba A": ([rating], "4.3", "Ocjena 4.3 je ispod 4.5."),       # shown: dropped
+                "Konoba B": ([rating], "", "Nema ocjene ni kontakta."),          # nothing shown: nearly there
+                "Bistro C": ([kitchen], "", "Libanonska kuhinja, ne hrvatska.")}  # what it is: dropped
+        return [{"id": i, "verdict": "drop", "broken": said[f["Naziv"]][0], "shown": said[f["Naziv"]][1],
+                 "reason": said[f["Naziv"]][2], "row": {"Naziv": f["Naziv"]}} for i, f in items]
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got == {"Konoba A": "dropped", "Konoba B": "maybe", "Bistro C": "dropped"}
+    assert '"missing": ["<rule>"], "broken": ["<rule>"]' in funnel.DECIDE_STRICT and "loose" not in funnel.DECIDE_STRICT

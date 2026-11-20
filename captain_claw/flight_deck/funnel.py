@@ -772,7 +772,7 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
  "gather": [{"kind": "search", "query": "\\"{Name}\\" <where the facts the rules need are listed>", "count": 5},
             {"kind": "fetch", "url": "{Website}", "paths": ["", "<the item's pages that hold those facts>"]}],
  "extract": ["emails", "phones", "dates", "size_band", "us_state", "links"],
- "decide": "<the owner's rules for an item, short, in their words>",
+ "decide": "<the owner's rules for an item, short, in their words, every clause kept>",
  "rules": [{"rule": "<one of the owner's rules for an item>", "kind": "must|prefer",
             "fact": "identity|place|measured|contact|safety|other",
             "looser": "<prefer only: the loosest reading that still serves the goal>",
@@ -823,6 +823,10 @@ Rules:
   each prefer rule its looser reading: a wider time window, any mention undated, another kind of page (any page
   that states it: a directory, a profile, a register), or not shown at all. Unshown is not broken: an item is
   dropped for a rule only when what was read shows it breaks it.
+- When the charter itself says what to do when a fact isn't found or doesn't apply ("if there is no rating, judge
+  how good it is", "or a contact form if there's no email"), that alternative is part of the rule: write it into
+  the rule's own words ("a rating of 4+ on Google or TripAdvisor; with no rating, judged good enough on what was
+  read") and into "decide". It holds as written, even when no rule may be read loosely; never drop such a clause.
 - A rule that asks for a fact AND the page it must be shown on ("2-50 employees shown on LinkedIn or its team
   page", "revenue under $10M per its filings") is two rules: the exclusion is a must ("not shown to have more
   than 50 people"), the shown proof is a prefer, looser "stated on any page, or not shown". Rows on a looser
@@ -1437,6 +1441,24 @@ rule that never loosens needs wasn't in what was read, or nothing read came from
 a rule; name it in "broken" and copy into "shown" the words read that break it (a number, a date, a place), and
 fill the row with what was shown. Not finding a fact is never "shown".''')
 
+# The same when nothing is read loosely (every rule kept as written): no loose verdict,
+# but a drop still names the rule and the words read that break it, so code can tell a
+# rule broken from a fact not found (that one is nearly there, never dropped).
+DECIDE_STRICT = DECIDE_SYSTEM.replace(
+    '''[{"id": <its id>, "verdict": "keep|maybe|drop", "reason": "<one short line>",
+  "row": {"<column>": "<value>"}}]
+keep: it meets every rule and the row is filled from the facts. maybe: it seems to fit but a fact the rules need
+wasn't in what was read; also when nothing read came from the item's own website, unless a fact shown breaks a
+rule. drop: it breaks a rule.''',
+    '''[{"id": <its id>, "verdict": "keep|maybe|drop", "reason": "<one short line>",
+  "row": {"<column>": "<value>"}, "missing": ["<rule>"], "broken": ["<rule>"], "shown": "<the words read that break it>"}]
+keep: it meets every rule as written and the row is filled from the facts. maybe: it seems to fit but a fact a rule
+needs wasn't in what was read, or nothing read came from the item's own website; name in "missing" every rule
+whose fact wasn't shown, and fill the row with what was. drop: what was read shows it breaks a rule; name it in
+"broken" and copy into "shown" the words read that break it (a number, a date, a place, what it is), and fill the
+row with what was shown. Not finding a fact is never "shown": an item a fact wasn't found for is maybe.''')
+assert DECIDE_STRICT != DECIDE_SYSTEM
+
 
 class Work:
     """One work step: items from its sources, until its group is full or the sources
@@ -2017,12 +2039,14 @@ class Work:
                      "kind only when it fits none of them; one that fits several takes the closest."
                      if self.group else "")) if self.recipe["groups"] else ""
         try:
-            got = await self._ask("decide", DECIDE_LOOSE if self.loosen else DECIDE_SYSTEM,
+            got = await self._ask("decide", DECIDE_LOOSE if self.loosen else DECIDE_STRICT,
                                   f"# Today\n{time.strftime('%Y-%m-%d')} (a date up to today is in the past, never "
                                   "\"in the future\")\n\n"
                                   f"# Rules\n{self.recipe['decide'] or '(take every item that fits the list)'}\n\n"
                                   + self._tiers_text()
-                                  + (f"# The goal, in the owner's words (what each column takes)\n{self.charter}\n\n"
+                                  + (f"# The goal, in the owner's words\n{self.charter}\n(These words decide. What "
+                                     "each column takes, and any rule above that leaves out something they say, "
+                                     "such as what to do when a fact isn't found, follows them.)\n\n"
                                      if self.charter else "")
                                   + (f"# Reference\n{self.reference}\n\n" if self.reference else "")
                                   + f"# Columns\n{cols}{groups}\n\n# Items\n" + "\n\n".join(lines), items=len(batch))
@@ -2044,7 +2068,7 @@ class Work:
             reason = " ".join(str(v.get("reason") or "").split())[:200]
             if verdict == "loose" and not self.loosen:
                 verdict = "maybe"  # no looser reading in this run: it's nearly there
-            if verdict == "drop" and self.loosen and self._unbacked_drop(v, it):
+            if verdict == "drop" and self._unbacked_drop(v, it):
                 # it named only rules that may go unshown, and quoted nothing read that breaks them:
                 # not finding a fact isn't breaking the rule
                 v = {**v, "missing": list(v.get("missing") or []) + list(v.get("broken") or [])}
@@ -2387,9 +2411,14 @@ class Work:
         """A drop that shows no fact: every rule it says is broken may go unshown, and the
         words it quotes as proof (if any) aren't in what was read. An item shown to break
         a rule (a stated 120 people, a dated post, a foreign address) stays dropped, as
-        does a drop that names no rule or one that never loosens."""
+        does a drop that names no rule or one that never loosens. When nothing is read
+        loosely, any rule but what the item is (its kind, an exclusion) and what must
+        never be done may go unshown: "no rating, no contact found" is nearly there."""
         broken = self._named(v.get("broken"))
-        soft = loosenable(self.recipe)
+        if self.loosen:
+            soft = loosenable(self.recipe)
+        else:
+            soft = [r for r in self.recipe.get("rules") or [] if _fact_of(r) not in ("identity", "safety")]
         if not broken or any(r not in soft for r in broken):
             return False
         shown = " ".join(str(v.get("shown") or "").split())
