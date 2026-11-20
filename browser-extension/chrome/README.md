@@ -20,6 +20,13 @@ Works in Chrome, Edge, Brave and Arc (Chromium 116+).
 No password is kept in the extension — it holds a token of its own, which you
 can disconnect from Connections → Browser (or from the extension's settings).
 
+### Updating
+
+The panel tells you when your Flight Deck has a newer version: **Download** it,
+unzip it over the folder you loaded, then press **Reload** (or the reload arrow
+on `chrome://extensions`). If the extension is newer than the deck's copy, it
+says that instead — the deck needs updating.
+
 ## Use
 
 Open it with the toolbar icon, **Alt+Shift+C**, or right-click a page, a

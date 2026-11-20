@@ -30,6 +30,7 @@ const ACTIONS: [string, string][] = [
 export default function BrowserConnection({ active = true, onStatus }: { active?: boolean; onStatus?: (s: BrowsersStatus) => void }) {
   const [browsers, setBrowsers] = useState<ConnectedBrowser[] | null>(null)
   const [macApp, setMacApp] = useState(false)
+  const [extVersion, setExtVersion] = useState('')
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const [removing, setRemoving] = useState('')
@@ -37,9 +38,10 @@ export default function BrowserConnection({ active = true, onStatus }: { active?
 
   const load = useCallback(async () => {
     try {
-      const { browsers: list, macApp: hasMac } = await listConnections()
+      const { browsers: list, macApp: hasMac, extensionVersion } = await listConnections()
       setBrowsers(list)
       setMacApp(hasMac)
+      setExtVersion(extensionVersion)
       setError('')
       onStatus?.({ connected: list.length })
     } catch (e) {
@@ -113,6 +115,7 @@ export default function BrowserConnection({ active = true, onStatus }: { active?
               >
                 <Download className="h-3.5 w-3.5" /> Download the extension
               </a>
+              {extVersion && <span className="text-zinc-500"> {extVersion}</span>}
               <span className="text-zinc-500"> and unzip it.</span>
             </li>
             <li>
@@ -198,7 +201,22 @@ export default function BrowserConnection({ active = true, onStatus }: { active?
                     : <Globe className="h-4 w-4 text-zinc-500 shrink-0" />}
                   <div className="min-w-0 flex-1">
                     <div className="text-sm text-zinc-200 truncate">{b.name}</div>
-                    <div className="text-[11px] text-zinc-500">Connected {when(b.created_at)} · last used {when(b.last_used_at)}</div>
+                    <div className="text-[11px] text-zinc-500">
+                      Connected {when(b.created_at)} · last used {when(b.last_used_at)}
+                      {b.version ? ` · extension ${b.version}` : ''}
+                    </div>
+                    {b.version_state === 'update' && (
+                      <div className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">
+                        Version {extVersion} is ready —{' '}
+                        <a href={EXTENSION_ZIP} download className="underline hover:no-underline">download it</a>, unzip it over the
+                        folder this browser loaded, then reload the extension.
+                      </div>
+                    )}
+                    {b.version_state === 'ahead' && (
+                      <div className="mt-0.5 text-[11px] text-amber-600 dark:text-amber-400">
+                        Newer than this Flight Deck's copy ({extVersion}) — some things may not work until Flight Deck is updated.
+                      </div>
+                    )}
                   </div>
                   <button
                     onClick={() => remove(b)}

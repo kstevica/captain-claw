@@ -177,6 +177,36 @@ function viewAgentOwned() {
     <div class="foot">Captain for Chrome ${esc(VERSION)}</div>`
 }
 
+// ── this extension's version against the one Flight Deck hands out ──
+//
+// Flight Deck answers /fd/clip/me with its own copy's version and how ours
+// stands against it: "update" (the deck has a newer one), "ahead" (ours is
+// newer than the deck's — the deck wasn't updated), "same".
+
+function versionGap() {
+  const ext = S.me?.extension
+  // An answer kept from before this copy was put in says nothing about it.
+  if (!ext || ext.yours !== VERSION || !ext.version) return null
+  return ext.state === 'update' || ext.state === 'ahead' ? ext : null
+}
+
+/** The note about it; `always` = Settings, where "Later" doesn't hide it. */
+function viewVersion(always = false) {
+  const ext = versionGap()
+  if (!ext || (!always && S.verSkip === `${ext.state}:${ext.version}`)) return ''
+  if (ext.state === 'ahead') {
+    return `<div class="notice ver"><div class="grow">This Captain for Chrome (${esc(VERSION)}) is newer than the one your Flight Deck has (${esc(ext.version)}). Some things may not work until Flight Deck is updated.</div>
+      ${always ? '' : '<button class="btn" data-act="ver-later" style="padding:3px 9px">OK</button>'}</div>`
+  }
+  return `<div class="notice ver update">${icon('refresh')}<div class="grow"><b>Captain for Chrome ${esc(ext.version)} is ready</b> — this one is ${esc(VERSION)}.
+    <div class="dim" style="margin-top:3px">Download it, unzip it over the folder you loaded this from, then press Reload.</div>
+    <div class="row" style="margin-top:7px;gap:6px;flex-wrap:wrap">
+      <button class="btn primary" data-act="ver-get" style="padding:3px 10px">Download</button>
+      <button class="btn" data-act="ver-reload" style="padding:3px 10px">Reload</button>
+      ${always ? '' : '<button class="link-btn" data-act="ver-later">Later</button>'}
+    </div></div></div>`
+}
+
 // Recording, or a recording not saved yet, while the panel shows something else.
 function viewRecBanner() {
   if (S.rec?.on) {
@@ -194,7 +224,7 @@ function renderView() {
   keepFocus(() => {
     if (S.view === 'agent') $view.innerHTML = viewAgentOwned()
     else if (S.view === 'connect') $view.innerHTML = viewConnect()
-    else if (S.view === 'main') $view.innerHTML = viewRecBanner() + viewHands() + viewMain()
+    else if (S.view === 'main') $view.innerHTML = viewVersion() + viewRecBanner() + viewHands() + viewMain()
     else if (S.view === 'rec') $view.innerHTML = viewRec()
     else if (S.view === 'rec-edit') $view.innerHTML = viewRecEdit()
     else if (S.view === 'recs') $view.innerHTML = viewRecs()
@@ -295,7 +325,8 @@ async function pollPairing(p) {
 
 async function loadMe() {
   try {
-    S.me = await api(S.conn, '/fd/clip/me')
+    S.me = await api(S.conn, `/fd/clip/me?v=${encodeURIComponent(VERSION)}`)
+    S.meAt = Date.now()
     S.meError = ''
     await setStore({ me: S.me })
     if (!agentDef(S.agent)) {
@@ -2208,6 +2239,7 @@ function viewSettings() {
   const agents = (S.me?.agents || []).map((a) => `<option value="${esc(a.slug)}" ${a.slug === S.agent ? 'selected' : ''}>${esc(a.name)}</option>`).join('')
   return `
     <div class="row"><button class="icon-btn" data-act="back">${icon('back')}</button><div class="grow" style="font-weight:600">Settings</div></div>
+    ${viewVersion(true)}
     <div class="card">
       <div class="label">Connected</div>
       <div>${esc(hostOf(S.conn?.url || ''))}</div>
@@ -2235,7 +2267,7 @@ function viewSettings() {
     </div>
     <button class="btn block" data-act="open-deck">${icon('external', 'sm')} Open Flight Deck</button>
     <button class="btn block danger" data-act="disconnect">Disconnect this browser</button>
-    <div class="foot">Captain for Chrome ${esc(VERSION)}</div>`
+    <div class="foot">Captain for Chrome ${esc(VERSION)}${S.me?.extension?.version && S.me.extension.version !== VERSION ? ` · Flight Deck has ${esc(S.me.extension.version)}` : ''}</div>`
 }
 
 // ── text size ──
@@ -2341,6 +2373,14 @@ $view.addEventListener('click', (ev) => {
   } else if (act === 'copy' && S.run?.result) {
     navigator.clipboard.writeText(S.run.result).then(() => toast('Copied'), () => toast("Couldn't copy"))
   } else if (act === 'open-deck' && S.conn) chrome.tabs.create({ url: `${S.conn.url}/` })
+  else if (act === 'ver-get' && S.conn) chrome.tabs.create({ url: `${S.conn.url}/fd/clip/extension.zip` })
+  else if (act === 'ver-reload') chrome.runtime.reload()
+  else if (act === 'ver-later') {
+    const ext = versionGap()
+    S.verSkip = ext ? `${ext.state}:${ext.version}` : ''
+    setStore({ verSkip: S.verSkip })
+    render()
+  }
   else if (act === 'follow-up') sendFollowUp()
   else if (act === 'hands-show') handsShow(el.dataset.slug)
   else if (act === 'hands-stop') setHandsStopped([...S.handsStopped, el.dataset.slug]).then(() => toast(`${handsName(el.dataset.slug)} can't use this browser now`))
@@ -2504,13 +2544,24 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 })
 
+// A panel left open for hours: when it's looked at again, ask Flight Deck
+// anew — that's also when a newer version shows up.
+const ME_STALE_MS = 30 * 60 * 1000
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !S.conn || S.conn.agent || !S.meAt) return
+  if (Date.now() - S.meAt < ME_STALE_MS) return
+  S.meAt = Date.now()
+  loadMe().then(render)
+})
+
 // ── start ──
 
 async function start() {
   try { S.windowId = (await chrome.windows.getCurrent()).id } catch { S.windowId = null }
-  const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me', 'lenses', 'hands', 'handsStopped', 'recDraft'])
+  const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me', 'lenses', 'hands', 'handsStopped', 'recDraft', 'verSkip'])
   S.draft = stored.recDraft && Array.isArray(stored.recDraft.steps) ? stored.recDraft : null
   S.agent = stored.agent || ''
+  S.verSkip = stored.verSkip || ''
   S.prefs = { snapshot: false, screenshot: false, textSize: 'small', watchEvery: 'daily', ...(stored.prefs || {}) }
   applyTextSize()
   S.history = Array.isArray(stored.history) ? stored.history : []

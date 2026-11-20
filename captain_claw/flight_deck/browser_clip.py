@@ -933,15 +933,20 @@ async def list_browsers(user: dict = Depends(get_current_user)):
 
     rows = await get_db().list_pats(str(user["id"]))
     lent = connected_token_ids(str(user["id"]))   # open for the agents' browser tool now
+    served, seen = extension_version(), seen_versions()
     out = []
     for r in rows:
         kind = token_kind(r.get("name"))
         if not kind:
             continue
         name = str(r.get("name") or "")[len(TOKEN_PREFIXES[kind]):]
-        out.append({"id": r["id"], "kind": kind, "name": name or ("Mac" if kind == "desktop" else "Browser"),
-                    "created_at": r.get("created_at"), "last_used_at": r.get("last_used_at"),
-                    "agents_can_use": r["id"] in lent})
+        row = {"id": r["id"], "kind": kind, "name": name or ("Mac" if kind == "desktop" else "Browser"),
+               "created_at": r.get("created_at"), "last_used_at": r.get("last_used_at"),
+               "agents_can_use": r["id"] in lent}
+        if kind == "browser":
+            row["version"] = str((seen.get(str(r["id"])) or {}).get("version") or "")
+            row["version_state"] = version_state(row["version"], served)
+        out.append(row)
     from captain_claw.flight_deck.agent_names import display_name
     from captain_claw.flight_deck.browser_hands import agent_browser_rows
 
@@ -950,7 +955,8 @@ async def list_browsers(user: dict = Depends(get_current_user)):
         out.append({"id": r["id"], "kind": "agent", "name": f"{name}'s own browser (on the server)",
                     "created_at": r.get("created_at"), "last_used_at": None,
                     "agents_can_use": r["id"] in lent, "agent": r.get("slug")})
-    return {"browsers": out, "mac_app": mac_app_zip() is not None or bool(mac_app_url())}
+    return {"browsers": out, "mac_app": mac_app_zip() is not None or bool(mac_app_url()),
+            "extension_version": served}
 
 
 @owner_router.delete("/{token_id}")
@@ -967,6 +973,7 @@ async def remove_browser(token_id: str, user: dict = Depends(get_current_user)):
     from captain_claw.flight_deck.browser_hands import drop_token
 
     await drop_token(str(user["id"]), token_id)
+    forget_version(token_id)
     return {"ok": True}
 
 
@@ -1003,6 +1010,7 @@ async def disconnect_self(request: Request, user: dict = Depends(get_clip_user))
         from captain_claw.flight_deck.browser_hands import drop_token
 
         await drop_token(str(user["id"]), str(row["id"]))
+        forget_version(str(row["id"]))
     return {"ok": True}
 
 
@@ -1023,9 +1031,18 @@ def _agents_for(user_id: str) -> list[dict]:
 
 
 @router.get("/me")
-async def clip_me(user: dict = Depends(get_clip_user)):
-    """Who the browser is connected as, their agents, and what it can ask."""
+async def clip_me(request: Request, v: str = "", user: dict = Depends(get_clip_user)):
+    """Who the browser is connected as, their agents, and what it can ask.
+    ``v`` is the extension's own version: kept, and answered with this deck's."""
     from captain_claw.flight_deck import server as srv
+
+    if v:
+        try:   # which browser said so; never a reason for this call to fail
+            row = await get_db().get_pat_by_hash(hash_token(_bearer(request)))
+            if row and token_kind(row.get("name")) == "browser":
+                note_version(str(row["id"]), v)
+        except Exception:
+            pass
 
     try:
         cfg = await srv._get_system_config()
@@ -1037,6 +1054,7 @@ async def clip_me(user: dict = Depends(get_clip_user)):
         "agents": _agents_for(str(user["id"])),
         "folder": CLIP_PROJECT,
         "limits": {"file_bytes": MAX_FILE_BYTES, "clip_bytes": MAX_CLIP_BYTES, "files": MAX_FILES},
+        "extension": extension_note(v),
         **catalog(),
     }
 
@@ -1902,6 +1920,98 @@ def extension_dir() -> Path | None:
     return None
 
 
+# ── Which version each browser runs, against the one this deck hands out ──
+
+
+def extension_version() -> str:
+    """The version of the extension this deck hands out ("" = it has no copy)."""
+    src = extension_dir()
+    if src is None:
+        return ""
+    try:
+        return one_line(json.loads((src / "manifest.json").read_text("utf-8")).get("version"), 20)
+    except Exception:
+        return ""
+
+
+def _version_key(version: str) -> tuple[int, ...]:
+    """"0.5.0" → (0, 5); () for anything that isn't dotted numbers."""
+    parts = str(version or "").strip().split(".")
+    if not all(p.isdigit() for p in parts) or len(parts) > 4:
+        return ()
+    key = [int(p) for p in parts]
+    while len(key) > 1 and key[-1] == 0:
+        key.pop()
+    return tuple(key)
+
+
+def version_state(yours: str, served: str) -> str:
+    """How a browser's extension stands against this deck's copy: "same",
+    "update" (the deck hands out a newer one), "ahead" (the browser's is
+    newer than the deck's), "" when either isn't known."""
+    a, b = _version_key(yours), _version_key(served)
+    if not a or not b:
+        return ""
+    return "same" if a == b else ("update" if a < b else "ahead")
+
+
+def _versions_path() -> Path:
+    from captain_claw.flight_deck import server as srv
+
+    return Path(srv.DATA_DIR) / "browser-versions.json"
+
+
+_versions: dict[str, dict] | None = None
+
+
+def seen_versions() -> dict[str, dict]:
+    """Connected browser (its token's id) → ``{"version", "at"}`` as it last said."""
+    global _versions
+    if _versions is None:
+        try:
+            data = json.loads(_versions_path().read_text("utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        _versions = data if isinstance(data, dict) else {}
+    return _versions
+
+
+def _write_versions() -> None:
+    try:
+        path = _versions_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(seen_versions()), "utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
+
+
+def note_version(token_id: str, version: Any) -> None:
+    """A browser said which version of the extension it runs. Written only
+    when that changes — it says so on every open."""
+    version = one_line(version, 20)
+    if not token_id or not _version_key(version):
+        return
+    seen = seen_versions()
+    if (seen.get(token_id) or {}).get("version") == version:
+        return
+    seen[token_id] = {"version": version, "at": datetime.now(UTC).isoformat()}
+    _write_versions()
+
+
+def forget_version(token_id: str) -> None:
+    if seen_versions().pop(token_id, None) is not None:
+        _write_versions()
+
+
+def extension_note(yours: str) -> dict:
+    """What the extension is told about itself: this deck's version, and how
+    its own stands against it."""
+    served = extension_version()
+    return {"version": served, "yours": one_line(yours, 20), "state": version_state(yours, served)}
+
+
 # Captain for Mac as published on GitHub (its own release, never "latest": the
 # desktop app reads latest for its updates). A new app version moves this.
 MAC_APP_RELEASE_URL = "https://github.com/kstevica/captain-claw/releases/download/mac-v0.1.1/Captain-for-Mac.zip"
@@ -1951,10 +2061,7 @@ async def extension_zip():
         for p in sorted(src.rglob("*")):
             if p.is_file() and not any(part.startswith(".") for part in p.relative_to(src).parts):
                 zf.write(p, PurePosixPath("captain-for-chrome", p.relative_to(src).as_posix()).as_posix())
-    try:
-        version = json.loads((src / "manifest.json").read_text("utf-8")).get("version", "")
-    except Exception:
-        version = ""
+    version = extension_version()
     name = f"captain-for-chrome{'-' + version if version else ''}.zip"
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{name}"'})

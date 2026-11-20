@@ -45,6 +45,10 @@ export interface ConnectedBrowser {
   name: string
   created_at: string
   last_used_at: string | null
+  /** The extension's version as this browser last said it ('' = not said yet). */
+  version?: string
+  /** Against this deck's copy: 'update' = the deck has a newer one, 'ahead' = the browser's is newer. */
+  version_state?: '' | 'same' | 'update' | 'ahead'
 }
 
 export interface PairInfo {
@@ -66,8 +70,8 @@ export const listBrowsers = () => fdFetch<{ browsers: ConnectedBrowser[] }>('/fd
 
 /** The connected browsers and Macs, and whether this deck has Captain for Mac to hand out. */
 export const listConnections = () =>
-  fdFetch<{ browsers: ConnectedBrowser[]; mac_app?: boolean }>('/fd/browsers')
-    .then((r) => ({ browsers: r.browsers, macApp: !!r.mac_app }))
+  fdFetch<{ browsers: ConnectedBrowser[]; mac_app?: boolean; extension_version?: string }>('/fd/browsers')
+    .then((r) => ({ browsers: r.browsers, macApp: !!r.mac_app, extensionVersion: r.extension_version || '' }))
 
 export const removeBrowser = (id: string) =>
   fdFetch<{ ok: boolean }>(`/fd/browsers/${encodeURIComponent(id)}`, { method: 'DELETE' })
