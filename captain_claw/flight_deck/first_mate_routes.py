@@ -728,9 +728,10 @@ async def set_trust(factory_id: str, body: Any = Body(...), user: dict = Depends
 @router.post("/fd/first-mate/factories/{factory_id}/run")
 async def run_now(factory_id: str, body: Any = Body(default={}), user: dict = Depends(allowed_user)):
     """``data``: staged uploads (``/fd/context``) for this run alone, beside the
-    factory's own extra data."""
+    factory's own extra data. ``record``: a list funnel run keeps what it searched
+    and read (``shared/funnel/tape/``), to replay as a test set."""
     body = _object(body)
-    _only(body, ("note", "data"))
+    _only(body, ("note", "data", "record"))
     _mine(factory_id, user)
     note = body.get("note") or ""
     if not isinstance(note, str):
@@ -739,8 +740,11 @@ async def run_now(factory_id: str, body: Any = Body(default={}), user: dict = De
     if not isinstance(data, list) or not all(isinstance(i, str) for i in data):
         raise HTTPException(400, "data must be a list of staged upload ids")
     try:
+        if not isinstance(body.get("record", False), bool):
+            raise HTTPException(400, "record must be true or false")
         return await runs.start(factory_id, _uid(user), trigger="manual", note=note,
-                                data=data or None, uploader=_raw_uid(user))
+                                data=data or None, uploader=_raw_uid(user),
+                                extra={"funnel_record": True} if body.get("record") else None)
     except FirstMateError as exc:
         raise _err(exc) from None
 
