@@ -596,6 +596,21 @@ The next run of the same list showed the duplicate check too strict, and other f
   name or by one of its phrases whole, and a drop that broke any rule other than the
   one about the groups (not a hotel's restaurant, not fast food, a rating) stays a drop.
 
+That run ended by itself (24 rows, 22 on the looser reading). Its reviewers named two
+more faults, fixed:
+
+- **The charter's file names.** It asked for `sazetak.md` and `iskljuceni.md`; the run
+  wrote `summary.md` and `exclusions.md`. The setup now gives the names the charter
+  uses for the summary and the dropped items (`files`), and the merge writes them
+  there (a name outside the run's folder, or not a text file, is ignored).
+- **The came-close file's group column** kept a page's word ("Sushi"); it is now the
+  list's group.
+
+Only 1 of 24 rows had a rating, though the setup searched each restaurant's rating:
+the 11 that came back with a rating and review count were the ones dropped by the
+named-source check fixed above. The run's results also show the list itself first
+now: a file a table or document check reads is what the run was asked to deliver.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
