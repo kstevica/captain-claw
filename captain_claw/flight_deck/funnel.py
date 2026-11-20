@@ -88,7 +88,8 @@ SOURCE_KINDS = ("search", "page", "links", "file", "document")
 FILTER_OPS = ("regex", "not_regex", "in", "not_in", "min", "max", "size_max", "size_min")
 CHECK_OPS = ("required", "in", "regex", "in_evidence", "within_months", "min", "max")
 _ITEM_COLS = ["key", "name", "group", "status", "stage", "reason", "source", "step", "at"]
-_MAYBE_COLS = ["key", "name", "group", "fields", "why", "sources", "row"]  # row: the cells the judging call filled
+_MAYBE_COLS = ["key", "name", "group", "fields", "why", "sources", "row", "missing"]  # row: the cells the judging
+# call filled; missing: the rules it named as not shown (to trace why an item came close)
 _HANDOVER_COLS = ["key", "name", "group", "fields", "origin", "why", "from"]
 _LOOSE_COL = "_loosened"
 RULES_MAX = 12
@@ -113,6 +114,8 @@ _SKIP_SITES = ("linkedin.com", "facebook.com", "twitter.com", "x.com", "instagra
                "seamless.ai", "kompass.com", "angi.com", "houzz.com", "bark.com", "fiverr.com", "upwork.com")
 REFERENCE_CHARS = 3000   # what a judging call reads of the run's reference files, in all
 CHARTER_CHARS = 3500     # and of the owner's charter (the columns' own rules)
+JEV_TIMEOUT_S = 20       # one typed question to Jev about an item's group
+JEV_SURE = 0.6           # Jev's confidence a group pick needs to stand over the judging answer
 # Words a group shares with others: a group's searches name it by the rest.
 _GROUP_STOP = {"firms", "firm", "shops", "shop", "agencies", "agency", "boutiques", "boutique", "companies",
                "company", "services", "service", "groups", "group", "small", "and", "the", "for", "with"}
@@ -363,6 +366,8 @@ def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
             rule["protected"] = _protected(rule, recipe)
             if not rule["protected"] and _is_contact(rule) and not looser:
                 looser = CONTACT_LOOSER
+        if recipe["group_by"] and recipe["group_by"] in rule["columns"]:
+            rule["of_group"] = True  # which group an item is in: the rule about the list's groups
         rule["columns"] = [c for c in rule["columns"] if c not in fixed]
         if looser:
             rule["looser"] = looser
@@ -833,7 +838,8 @@ Rules:
 - When the charter itself says what to do when a fact isn't found or doesn't apply ("if there is no rating, judge
   how good it is", "or a contact form if there's no email"), that alternative is part of the rule: write it into
   the rule's own words ("a rating of 4+ on Google or TripAdvisor; with no rating, judged good enough on what was
-  read") and into "decide", and put the alternative alone in that rule's "if_not_shown". It holds as written, even
+  read") and into "decide", and put the alternative alone in that rule's "if_not_shown". A fact the charter asks
+  for only "if shown" or "if visible" ("its price per person, if visible") has the alternative "left empty". It holds as written, even
   when no rule may be read loosely; never drop such a clause, and never invent one the charter doesn't give.
 - A rule that asks for a fact AND the page it must be shown on ("2-50 employees shown on LinkedIn or its team
   page", "revenue under $10M per its filings") is two rules: the exclusion is a must ("not shown to have more
@@ -1490,7 +1496,8 @@ class Work:
         self.tools: Tools | None = None
         self.creds: dict | None = None
         self.seen: set[str] = set()
-        self.same = SameItems(recipe, self.skip_sites)  # rows on the list or waiting, by their own site
+        self.same = SameItems(recipe, self.skip_sites)
+        self.jev_off = False  # the owner has no Jev connected: don't ask again this step  # rows on the list or waiting, by their own site
         for r in _read_csv(folder / ROWS) + _read_csv(folder / LOOSE):
             self.same.add(r)
         self.kept: dict[str, int] = {}
@@ -2044,6 +2051,8 @@ class Work:
         cols = "\n".join(f"- {c}" + (f": {self.recipe['about'][c]}" if self.recipe["about"].get(c) else "")
                          for c in self.recipe["columns"])
         groups = (f"\n# {self.recipe['group_by']}\n" + ", ".join(self.recipe["groups"])
+                  + "\nEvery answer, a drop too, also carries \"group\": the one of these the item is (by what it "
+                  "is, whatever this step looks for), written exactly as here, or \"none\"."
                   + (f"\nThis step looks for: {self.group}. An item that fits another of these groups instead is "
                      f"that group's find: keep it (or answer loose or maybe) with that group in "
                      f"{self.recipe['group_by']}, never drop it for not being {self.group}. Drop an item for its "
@@ -2114,6 +2123,7 @@ class Work:
             if verdict in ("keep", "loose"):
                 row = {c: " ".join(str((v.get("row") or {}).get(c) or "").split()) for c in self.recipe["columns"]}
                 named = self._group_named(row.get(self.recipe["group_by"], "")) if self.recipe["group_by"] else ""
+                named = named or self._answer_group(v)  # its typed "group", when the column says none of them
                 if named:  # a group written loosely ("Italian") is the list's group, written as the list does
                     row[self.recipe["group_by"]] = named
                 elif self.recipe["group_by"] and self.group and not row.get(self.recipe["group_by"]):
@@ -2193,19 +2203,20 @@ class Work:
             elif verdict == "maybe":
                 hint = str((v.get("row") or {}).get(self.recipe["group_by"]) or "") if self.recipe["group_by"] else ""
                 got = v.get("row") if isinstance(v.get("row"), dict) else {}
-                await self._nearly(it, got, self._group_named(hint) or self.group,
-                                   reason or "a fact it needs wasn't found")
+                await self._nearly(it, got, self._group_named(hint) or self._answer_group(v) or self.group,
+                                   reason or "a fact it needs wasn't found", self._named(v.get("missing")))
             else:
-                broke = [r for r in self._named(v.get("broken")) if not self._is_group_rule(r)]
-                other = "" if broke else self._other_group(reason)  # a hotel's restaurant, a low rating: fail there too
-                if other:  # "Italian, not Croatian": the Italian step judges it
+                other = await self._drop_goes_to(v, it, reason)
+                if other:  # "Japanese, not Croatian": the Asian step judges it
                     await self._hand_over(it, other, reason)
                     continue
                 await self.record(it, "dropped", reason or "breaks a rule")
 
-    async def _nearly(self, it: dict, got: dict, group: str, reason: str) -> None:
+    async def _nearly(self, it: dict, got: dict, group: str, reason: str,
+                      missing: list[dict[str, Any]] | None = None) -> None:
         """An item that seems to fit but lacks something: a maybe, with the cells found
-        so far (a value that isn't in what was read isn't passed on)."""
+        so far (a value that isn't in what was read isn't passed on) and the rules the
+        judging call named as not shown."""
         await self.record(it, "maybe", reason, group=group)
         name = it["fields"].get("name") or next(iter(it["fields"].values()), "")
         cells = {c: " ".join(str((got or {}).get(c) or "").split()) for c in self.recipe["columns"]}
@@ -2220,7 +2231,8 @@ class Work:
                     {"key": it["key"], "name": name, "group": group,
                      "fields": json.dumps(it["fields"], ensure_ascii=False),
                      "why": reason, "sources": " ".join(e["source"] for e in it.get("evidence") or []),
-                     "row": json.dumps({c: x for c, x in cells.items() if x}, ensure_ascii=False)})
+                     "row": json.dumps({c: x for c, x in cells.items() if x}, ensure_ascii=False),
+                     "missing": "; ".join(dict.fromkeys(r["rule"] for r in missing or []))})
 
     def _fill_from_facts(self, row: dict, item: dict) -> None:
         """Cells a judging call left empty that code found on the item's own pages: its
@@ -2354,9 +2366,78 @@ class Work:
         return any(re.search(r"(?<![a-z0-9])" + r"[a-z0-9]*\W+".join(re.escape(w[:5]) for w in x.split())
                              + r"[a-z0-9]*", folded) for x in phrases)
 
+    def _answer_group(self, v: dict) -> str:
+        """The list's group a judging answer's typed "group" names, or ""."""
+        if not self.recipe["groups"]:
+            return ""
+        g = " ".join(str(v.get("group") or "").split())
+        if not g or g.lower() == "none":
+            return ""
+        return next((x for x in self.recipe["groups"] if x.lower() == g.lower()), "") or self._group_named(g)
+
+    async def _drop_goes_to(self, v: dict, item: dict, reason: str) -> str:
+        """Another group of the list a dropped item is that group's find, or "". Only for
+        a drop about its kind: one also shown to break another rule (a hotel's
+        restaurant, a 4.3 rating read) fails there too, while a fact not found (no phone
+        read) is no reason to keep it from the group it fits. Which group: Jev's choice
+        when the owner has Jev connected and it's sure, else the answer's typed "group",
+        else a group its reason names alone."""
+        if not self.group or len(self.recipe["groups"]) < 2:
+            return ""
+        read = "\n".join(e.get("text", "") for e in item.get("evidence") or [])
+        shown = " ".join(str(v.get("shown") or "").split())
+        shown_read = bool(shown) and fx.in_text(shown, read)
+        broke = [r for r in self._named(v.get("broken")) if not self._is_group_rule(r)]
+        if any(_fact_of(r) in ("identity", "safety") or shown_read for r in broke):
+            return ""
+        typed = self._answer_group(v)
+        by_words = self._other_group(reason)
+        if not (typed and typed != self.group) and not by_words and not any(
+                self._is_group_rule(r) for r in self._named(v.get("broken"))):
+            return ""  # nothing says it's about its kind
+        picked = await self._jev_group(item)
+        target = picked if picked is not None else (typed or by_words)
+        return target if target in self.recipe["groups"] and target != self.group else ""
+
+    async def _jev_group(self, item: dict) -> str | None:
+        """Which of the list's groups an item is, by Jev (a typed choice, calibrated), when
+        the owner has Jev connected and it's sure; "" when Jev says none fits; None when
+        Jev can't tell (not connected, unsure, failed): the judging answer decides."""
+        if self.jev_off:
+            return None
+        from captain_claw import jev_client
+        from captain_claw.flight_deck import jev_routes
+        words = self.recipe.get("group_words") or {}
+        options = {g: ("; ".join(words.get(g) or []) or g)[:300] for g in self.recipe["groups"]}
+        options["none"] = "none of these"
+        state = {"list": (self.recipe.get("decide") or "")[:800], "item": self._name_of(item),
+                 "what_was_read": "\n\n".join(e.get("text", "")[:1200] for e in (item.get("evidence") or [])[:4])}
+        questions = {"group": {"type": "choice", "options": options,
+                               "instructions": "Which of these groups is this item, by what it is (its kind, "
+                                               "its cuisine, its category), from what was read about it?"}}
+        try:
+            out = await asyncio.wait_for(jev_routes.ask_for_owner(
+                str(self.run.get("owner_id") or ""), state, questions, source="list-funnel"), JEV_TIMEOUT_S)
+        except jev_routes.JevNotConnected:
+            self.jev_off = True
+            return None
+        except (TimeoutError, jev_client.JevError) as e:
+            log.info("funnel: Jev didn't answer", run_id=self.run["id"], error=type(e).__name__)
+            return None
+        except Exception as e:  # noqa: BLE001 — the judging answer decides
+            log.warning("funnel: Jev call failed", run_id=self.run["id"], error=str(e))
+            return None
+        ans = ((out or {}).get("answers") or {}).get("group") or {}
+        choice, conf = ans.get("choice"), ans.get("confidence")
+        if not isinstance(conf, (int, float)) or conf < JEV_SURE:
+            return None
+        if choice == "none":
+            return ""
+        return choice if choice in self.recipe["groups"] else None
+
     def _is_group_rule(self, rule: dict[str, Any]) -> bool:
         """The rule that says which groups an item may be in ("cuisine is one of: ...")."""
-        if self.recipe["group_by"] and self.recipe["group_by"] in (rule.get("columns") or []):
+        if rule.get("of_group") or (self.recipe["group_by"] and self.recipe["group_by"] in (rule.get("columns") or [])):
             return True
         naming = self._naming()
         return sum(self._names_group(g, rule.get("rule", ""), naming) for g in self.recipe["groups"]) >= 2
