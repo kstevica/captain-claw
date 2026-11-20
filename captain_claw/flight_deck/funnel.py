@@ -334,6 +334,29 @@ def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def judgement_columns(recipe: dict[str, Any], reference: str = "") -> list[str]:
+    """Columns a judging call fills from the owner's own material, not from what an
+    item publishes: one named after a reference file (CaptainReason beside Captain.md),
+    and one whose fixed values come from the reference (a product feature to pitch).
+    Always filled, a row on a looser reading too. A column a rule is about never is."""
+    ruled = {c for r in recipe.get("rules") or [] for c in r.get("columns") or []}
+    fixed = {recipe.get("group_by") or "", recipe.get("key") or ""}
+    stems = {re.sub(r"[^a-z]", "", Path(str(ref)).stem.lower()) for ref in recipe.get("reference") or []}
+    stems = {st for st in stems if len(st) >= 4}
+    ref = (reference or "").lower()
+    out = []
+    for c in recipe["columns"]:
+        if c in fixed or c in ruled:
+            continue
+        values = [str(v) for x in recipe.get("checks") or [] if x["column"] == c and x["op"] == "in"
+                  for v in x.get("value") or []]
+        from_ref = bool(ref) and any(re.search(r"(?<![a-z])" + re.escape(v.lower()) + r"(?![a-z])", ref)
+                                     for v in values if len(v) >= 3)
+        if from_ref or any(st in c.lower() for st in stems):
+            out.append(c)
+    return out
+
+
 def soft_rules(recipe: dict[str, Any]) -> list[dict[str, Any]]:
     return [r for r in recipe.get("rules") or [] if r.get("kind") == "prefer"]
 
@@ -1270,7 +1293,9 @@ Reply ONLY with a JSON array, one object per item, in order:
 keep: it meets every rule and the row is filled from the facts. maybe: it seems to fit but a fact the rules need
 wasn't in what was read; also when nothing read came from the item's own website, unless a fact shown breaks a
 rule. drop: it breaks a rule. A column with a fixed set of values takes one of them exactly. Dates as YYYY-MM-DD,
-or YYYY-MM when there's no day.
+or YYYY-MM when there's no day. A column about the owner's own offer (a feature to pitch, why it fits, from
+the reference) is always filled for a row you keep: when the fact it would rest on isn't shown, tie it to what
+was read.
 Keep your thinking short."""
 
 # The same, when a group that runs short may take rows on a looser reading: a fact
@@ -1825,6 +1850,11 @@ class Work:
             if verdict == "loose" and not loosened:
                 verdict = "maybe"  # it named only rules that never loosen: what it lacks must still be found
             if verdict in ("keep", "loose"):
+                filled = v.get("row") if isinstance(v.get("row"), dict) else {}
+                empty = [c for c in judgement_columns(self.recipe, self.reference) if not str(filled.get(c) or "").strip()]
+                if empty:  # it fits, but the row isn't finished: nearly there, never on the list half-filled
+                    verdict, reason = "maybe", f"left {', '.join(empty)} empty" + (f" ({reason})" if reason else "")
+            if verdict in ("keep", "loose"):
                 row = {c: " ".join(str((v.get("row") or {}).get(c) or "").split()) for c in self.recipe["columns"]}
                 relax = {c for r in loosened for c in r.get("columns") or []}
                 problem = check_row(self.recipe, row, {e["source"]: e["text"] for e in it.get("evidence") or []},
@@ -2358,6 +2388,7 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
     sources = sorted({c["source_column"] for c in recipe["checks"] if c["op"] == "in_evidence" and c.get("source_column")})
     unsourced_check = any(c["op"] == "in_evidence" and not c.get("source_column") for c in recipe["checks"])
     soft = loosenable(recipe) if loosen_on(run, recipe) else []
+    ref_text = reference_text(folder, recipe)
     tools: Tools | None = None
     pages: dict[str, str] = {}
     added = refused = unsourced = 0
@@ -2388,6 +2419,9 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
             loosened = [r for r in soft if any(x in r["rule"].lower() or r["rule"].lower() in x for x in said)]
             relax = {c for r in loosened for c in r.get("columns") or []}
             problem = check_row(recipe, row, texts, unsourced_ok=True, relax=relax)
+            empty = [c for c in judgement_columns(recipe, ref_text) if not row.get(c)]
+            if not problem and empty:
+                problem = f"{', '.join(empty)} left empty"
             if not problem and recipe["groups"] and recipe["groups"].get(group) and kept.get(group, 0) >= recipe["groups"][group]:
                 problem = f"{group} is already full"
             item = {"key": key, "name": str(name)[:120], "group": group, "source": "finishing step",
@@ -2540,6 +2574,37 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
                if loosened else "")
             + f" `{EXCLUSIONS}`: {dropped} dropped, with why. `{SUMMARY}`: how it went.")
     return {"ok": True, "output": text, "usd": 0.0, "tokens": 0, "error": ""}
+
+
+def review_settled(run: dict, findings: str) -> str:
+    """Whether the reviewers' "not done" settles a funnel run's list anyway: when the
+    list is complete (no group short) and every row passed its checks by code, the run
+    is done and their points go into ``summary.md`` as open points. A note saying so,
+    or "" when the list is still short (fix rounds may still add rows)."""
+    if (run.get("config") or {}).get("engine") != ENGINE:
+        return ""
+    from captain_claw.flight_deck import bat_routes
+    folder = bat_routes._run_folder(run)
+    recipe = load_recipe(folder)
+    if recipe is None or not _read_csv(folder / ROWS) or shortfall(folder, recipe):
+        return ""
+    loose = loose_on_list(folder)
+    summary = folder / SUMMARY
+    try:
+        text = summary.read_text(encoding="utf-8") if summary.is_file() else ""
+        if "## Open points from the review" not in text:
+            summary.write_text(text.rstrip("\n") + "\n\n## Open points from the review\n\n"
+                               + "The reviewers didn't pass the list as it stands. It is complete and every row "
+                               "passed the checks by code"
+                               + (f"; {len(loose)} rows meet some rules only by their looser reading, which the "
+                                  "factory allows" if loose else "")
+                               + ", so the run ends here rather than sending agents to redo it. What they said:\n\n"
+                               + (findings or "- (no reason given)") + "\n", encoding="utf-8")
+    except OSError:
+        log.debug("funnel: couldn't add the review's points to the summary", exc_info=True)
+    return ("The list is complete and passes every check by code"
+            + (f" ({len(loose)} rows on a looser reading the factory allows)" if loose else "")
+            + ": the run is done; the reviewers' points are in summary.md as open points.")
 
 
 def judge_note(run: dict) -> str:

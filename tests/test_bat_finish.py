@@ -891,6 +891,30 @@ def _rule(text, check, severity="critical"):
     return {"id": "a1", "text": text, "severity": severity, "check": check}
 
 
+async def test_a_complete_funnel_list_is_done_though_the_reviewers_disagree(store, judge_env, monkeypatch):
+    """Reviewers judged a complete list funnel list against the charter as written and
+    fix rounds deleted its rows on a looser reading. Their points go to its summary."""
+    from captain_claw.flight_deck import funnel
+    judge_env["votes"] = ["DISAGREE"]
+    seen: list[str] = []
+
+    def settled(run, findings):
+        seen.append(findings)
+        return "The list is complete and passes every check by code: the run is done."
+
+    monkeypatch.setattr(funnel, "review_settled", settled)
+    run, steps = await _judged_run(store, [], cfg={"engine": "funnel"})
+    verdict = await bat_routes._bat_judge(run, steps)
+    assert verdict["done"] and verdict["reason"].startswith("The list is complete") and verdict["failing"] == []
+    assert seen and "section 3 is empty" in seen[0]  # the reviewers' points go along
+    # not a funnel run, or a funnel list still short: the reviewers' "not done" holds
+    monkeypatch.setattr(funnel, "review_settled", lambda run, findings: "")
+    run2, steps2 = await _judged_run(store, [], cfg={"engine": "funnel"})
+    assert not (await bat_routes._bat_judge(run2, steps2))["done"]
+    run3, steps3 = await _judged_run(store, [])
+    assert not (await bat_routes._bat_judge(run3, steps3))["done"]
+
+
 async def test_a_failed_file_check_blocks_done_without_asking_the_panel(store, judge_env):
     run, steps = await _judged_run(store, [_rule("report.md exists", {"type": "file_exists", "path": "report.md"})])
     verdict = await bat_routes._bat_judge(run, steps)

@@ -1437,3 +1437,70 @@ async def test_the_finishing_step_may_add_rows_on_a_looser_reading(deck):
     assert (added, refused) == (1, 0)
     assert [r["Firm"] for r in funnel._read_csv(folder / funnel.LOOSE)] == ["Firm A2"]  # waits with the loose rows
     assert funnel._read_csv(folder / funnel.ROWS) == []
+
+
+# ── a complete list is done; judgement columns are filled ──────────────
+
+PITCH = [{"id": "fm1", "text": "pitch.csv; at least 2", "check": {
+    "type": "table", "path": "pitch.csv", "min_rows": 2, "unique": ["Firm"],
+    "columns": ["Firm", "Website", "Email", "EmailType", "CaptainFeature", "CaptainReason"],
+    "allowed": {"CaptainFeature": ["Onboarding", "Flows"], "EmailType": ["personal", "shared"]}}}]
+
+
+def test_columns_about_the_owners_offer_are_judgement_columns():
+    r = funnel.normalize_recipe({"rules": [{"rule": "an email on its own site", "kind": "must",
+                                            "columns": ["Email", "EmailType"]}],
+                                 "reference": ["extra/Captain.md"]}, funnel.from_contract(PITCH))
+    ref = "# Captain\nOnboarding teaches agents your documents. Flows run steps."
+    assert funnel.judgement_columns(r, ref) == ["CaptainFeature", "CaptainReason"]  # EmailType is the email rule's
+    bare = funnel.normalize_recipe({"reference": ["extra/Captain.md"]}, funnel.from_contract(PITCH))
+    assert funnel.judgement_columns(bare, ref) == ["CaptainFeature", "CaptainReason"]  # "personal" isn't in it
+    assert funnel.judgement_columns(bare, "") == ["CaptainFeature", "CaptainReason"]  # named after the file
+
+
+async def test_a_row_left_without_its_pitch_is_nearly_there(deck):
+    """A run put 40 rows on its list, 33 of them with CaptainFeature and CaptainReason
+    empty: a reason "tied to the firm's signal" was skipped when no signal was shown."""
+    run, folder = await _run(deck["store"], PITCH, rid="bat_pitch0001")
+    (folder / "extra" / "firms.csv").write_text("Firm,Website\nA,https://a.example\nB,https://b.example\n")
+    (folder / "extra" / "Captain.md").write_text("# Captain\n\nOnboarding teaches agents your documents.")
+    deck["recipe"] = {"item": "firm", "key": "Firm", "sources": [{"kind": "file", "path": "extra/firms.csv"}],
+                      "reference": ["extra/Captain.md"], "decide": "Firms.",
+                      "checks": [{"column": "CaptainFeature", "op": "in", "value": ["Onboarding", "Flows"]}]}
+
+    def decide(items):
+        return [{"id": i, "verdict": "keep", "row": {**f, "CaptainFeature": "Onboarding",
+                                                     "CaptainReason": "their guides" if f["Firm"] == "A" else ""}}
+                for i, f in items]
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["A"][0] == "kept" and got["B"] == ("maybe", "left CaptainReason empty")
+    assert "always filled for a row you keep" in funnel.DECIDE_SYSTEM
+
+
+async def test_a_complete_list_settles_the_review(deck):
+    """Bat's reviewers judged a complete funnel list against the charter as written,
+    and fix rounds deleted its rows on a looser reading to hunt strict ones."""
+    run, folder = await _run(deck["store"], PAPERS, rid="bat_settle001")
+    _papers(deck, folder)
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    fresh = await deck["store"].get_run(run["id"])
+    note = funnel.review_settled(fresh, "- Reviewer: every row needs a code link")
+    assert note.startswith("The list is complete and passes every check by code (2 rows on a looser reading")
+    summary = (folder / funnel.SUMMARY).read_text()
+    assert "## Open points from the review" in summary and "every row needs a code link" in summary
+    funnel.review_settled(fresh, "- again")
+    assert (folder / funnel.SUMMARY).read_text().count("## Open points from the review") == 1
+    assert funnel.review_settled({**fresh, "config": {}}, "x") == ""  # not a funnel run
+
+
+async def test_a_short_list_leaves_the_review_to_go_on(deck):
+    run, folder = await _run(deck["store"], PAPERS, {"funnel_loosen": "never"}, rid="bat_settle002")
+    _papers(deck, folder)
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    assert funnel.review_settled(await deck["store"].get_run(run["id"]), "- short") == ""  # 1 of 3: fix rounds may add
