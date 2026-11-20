@@ -1499,7 +1499,8 @@ class Work:
         self.creds: dict | None = None
         self.seen: set[str] = set()
         self.same = SameItems(recipe, self.skip_sites)
-        self.jev_off = False  # the owner has no Jev connected: don't ask again this step  # rows on the list or waiting, by their own site
+        self.jev_off = False  # the owner has no Jev connected: don't ask again this step
+        self.site_hosts: dict[str, set[str]] = {}  # host → the pages items' sites are on it (several: a directory)  # rows on the list or waiting, by their own site
         for r in _read_csv(folder / ROWS) + _read_csv(folder / LOOSE):
             self.same.add(r)
         self.kept: dict[str, int] = {}
@@ -1826,6 +1827,11 @@ class Work:
         return ""
 
     async def handle(self, items: list[dict]) -> None:
+        for item in items:  # the hosts these items' sites are on, and which page, before any is read
+            site = self._site_of(item)
+            host = fx.domain_of(site)
+            if host:
+                self.site_hosts.setdefault(host, set()).add(_site_page(site))
         wave: list[dict] = []
         for item in items:
             if self.full() or self.stopped:
@@ -1928,7 +1934,7 @@ class Work:
                     base = "https://" + base.lstrip("/")
                 parts = urlsplit(base)
                 root = f"{parts.scheme}://{parts.netloc}/"
-                if any(fx.same_site(fx.domain_of(base), s) for s in self.skip_sites):
+                if self._shared_site(base):
                     # the item's page on a directory or social site (its LinkedIn page, no
                     # site of its own found): that page only. The site's own about, news
                     # or contact pages aren't the item's (linkedin.com/news gave two firms
@@ -1946,10 +1952,35 @@ class Work:
                         evidence.append({"source": u, "text": text[:FETCH_CHARS]})
             item["found"] = self.facts(item, evidence)
 
+    def _shared_site(self, url: str) -> bool:
+        """Whether a site link is an item's page on a site many share, not its own site:
+        a directory or social site; a host the sites of several of this run's items are
+        on (a booking site, a city guide); or a page deep inside a host
+        (/restoran/grad-zagreb/konoba-mid/), where an own site's front page never is.
+        Only that page is read there, and nothing on it counts as the item's own."""
+        d = fx.domain_of(url)
+        if not d:
+            return False
+        if any(fx.same_site(d, s) for s in _SKIP_SITES + tuple(self.skip_sites)):
+            return True
+        if len(self.site_hosts.get(d, ())) >= 2:  # different pages of one host: items listed on it
+            return True
+        try:
+            path = urlsplit(url if "://" in url else "http://" + url).path
+        except ValueError:
+            return False
+        parts = [x for x in path.split("/") if x]
+        if parts and _LANG_PART.match(parts[0]):
+            parts = parts[1:]
+        return len(parts) >= 2
+
     def _own_text(self, item: dict) -> tuple[str, str]:
-        """The item's own site and what was read on it (its pages, not results about it)."""
-        domain = fx.domain_of(self._site_of(item))
-        if not domain:
+        """The item's own site and what was read on it (its pages, not results about it).
+        Nothing for an item whose site is a page on a site many share (a directory's
+        phone or email is never the item's)."""
+        site = self._site_of(item)
+        domain = fx.domain_of(site)
+        if not domain or self._shared_site(site):
             return "", ""
         return domain, "\n".join(e.get("text", "") for e in item.get("evidence") or []
                                  if fx.same_site(fx.domain_of(e.get("source", "")), domain))
@@ -2019,8 +2050,8 @@ class Work:
     def facts(self, item: dict, evidence: list[dict]) -> dict[str, list[tuple[str, str]]]:
         """What code finds in what was read: each extractor's values, with the page."""
         site = self.recipe.get("site_column") or ""
-        domain = fx.domain_of(next((v for k, v in item["fields"].items()
-                                    if k.lower() in (site.lower(), "url", "website") and v), ""))
+        link = next((v for k, v in item["fields"].items() if k.lower() in (site.lower(), "url", "website") and v), "")
+        domain = "" if self._shared_site(str(link)) else fx.domain_of(link)  # a directory's emails aren't "its own"
         names = list(self.recipe["extract"])
         if any(f["op"] in ("size_max", "size_min") for f in self.recipe["filters"]):
             names += [n for n in ("size_band", "headcount") if n not in names]
@@ -2898,6 +2929,19 @@ _LANG_PART = re.compile(r"^[a-z]{2}(?:[-_][a-z]{2})?$", re.I)
 _HOME_PARTS = {"index.html", "index.htm", "index.php", "home", "default.aspx"}
 _PROFILE_PARTS = {"in", "company", "companies", "pub", "pages", "people", "profile", "user", "users", "channel",
                   "c", "u", "r", "groups", "biz", "school", "org"}
+
+
+def _site_page(url: str) -> str:
+    """The page a site link points to on its host, a language part and a home page
+    aside ("" for its front page): two links to one front page are one site."""
+    try:
+        path = urlsplit(url if "://" in url else "http://" + url).path
+    except ValueError:
+        return ""
+    parts = [x.lower() for x in path.split("/") if x and x.lower() not in _HOME_PARTS]
+    while parts and _LANG_PART.match(parts[0]):
+        parts.pop(0)
+    return "/".join(parts)
 
 
 def site_id(url: str, shared: tuple[str, ...] = _SKIP_SITES) -> str:

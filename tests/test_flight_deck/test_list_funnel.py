@@ -2471,3 +2471,38 @@ async def test_a_keep_on_the_charters_alternative_is_checked(deck, monkeypatch):
     assert got["Bistro B"][0] == "maybe" and "fits none of the list's groups" in got["Bistro B"][1]
     assert got["Konoba C"][0] == "maybe" and "Jev: not met by the charter's own alternative" in got["Konoba C"][1]
     assert got["Konoba D"][0] == "kept"  # Jev unsure: the judging call's maybe stands as "seems to fit"
+
+
+async def test_a_directory_listing_is_read_alone_and_is_never_the_items_own(deck):
+    """40 restaurants' "site" was a city guide's or booking site's page about them: the
+    run read that site's own contact, menu and about pages for each (200 fetches), and
+    their phone or email could pass for the restaurant's."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv",
+                                                     "columns": ["Naziv", "Web", "Email"], "min_rows": 4}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_dirsites1")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "site_column": "Web", "decide": "Restorani.",
+                      "sources": [{"kind": "search", "group": "", "queries": ["restorani"]}],
+                      "gather": [{"kind": "fetch", "url": "{Web}", "paths": ["", "kontakt"]}]}
+    deck["extract"] = lambda user: {"items": [
+        {"name": "Konoba A", "url": "https://guide.example/restoran/grad/konoba-a/", "fields": {"Naziv": "Konoba A"}},
+        {"name": "Bistro B", "url": "https://book.example/bistro-b", "fields": {"Naziv": "Bistro B"}},
+        {"name": "Bistro C", "url": "https://book.example/bistro-c", "fields": {"Naziv": "Bistro C"}},
+        {"name": "Konoba D", "url": "https://konoba-d.example", "fields": {"Naziv": "Konoba D"}}]}
+    deck["tools"] = _Tools(pages={
+        "https://guide.example/restoran/grad/konoba-a/": "Konoba A, Ilica 1. Pišite: info@guide.example",
+        "https://guide.example/kontakt": "Kontakt vodiča: info@guide.example",
+        "https://book.example/bistro-b": "Bistro B", "https://book.example/bistro-c": "Bistro C",
+        "https://book.example/kontakt": "info@book.example",
+        "https://konoba-d.example": "Konoba D", "https://konoba-d.example/kontakt": "Pišite na stol@konoba-d.example"},
+        results={"restorani": "list results"})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {k: v for k, v in f.items() if k == "Naziv"}}
+                                    for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    fetched = {u for k, u in deck["tools"].calls if k == "fetch"}
+    assert "https://guide.example/restoran/grad/konoba-a/" in fetched  # a page deep inside a host: that page alone
+    assert "https://guide.example/kontakt" not in fetched
+    assert "https://book.example/kontakt" not in fetched  # several items' pages on one host: a booking site
+    assert "https://konoba-d.example/kontakt" in fetched  # an own site: its pages
+    emails = {r["Naziv"]: r["Email"] for r in funnel._read_csv(folder / funnel.ROWS)}
+    assert emails["Konoba A"] == "" and emails["Konoba D"] == "stol@konoba-d.example"  # the guide's isn't its own
