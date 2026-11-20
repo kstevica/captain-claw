@@ -177,3 +177,22 @@ def test_a_factorys_recipe_is_pinned_per_charter(store, tmp_path, monkeypatch):
     v2 = store.live(fid)
     assert fr.pinned(fid, v2) is None and fr.view(fid, v2) == {"recipe": None, "stale": True}
     assert fr.forget(fid) and fr.view(fid, v2) == {"recipe": None, "stale": False}
+
+
+async def test_a_run_can_be_started_recording(store, bat, monkeypatch):
+    """Recording was a setting on the deck's start-up only: the Run button can ask for it."""
+    from captain_claw.flight_deck import first_mate_routes as routes
+    f = _live(store, runner="funnel")
+    seen = {}
+
+    async def start(factory_id, owner_id, **kw):
+        seen.update(kw)
+        return {"id": "fmr_x"}
+
+    monkeypatch.setattr(routes.runs, "start", start)
+    user = {"id": BOB, "role": "admin"}
+    await routes.run_now(f["id"], {"note": "", "record": True}, user)
+    assert seen["extra"] == {"funnel_record": True}
+    await routes.run_now(f["id"], {"note": ""}, user)
+    assert seen["extra"] is None
+    assert funnel.recording({"config": {"funnel_record": True}}) and not funnel.recording({"config": {}})

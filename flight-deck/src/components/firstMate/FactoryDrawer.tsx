@@ -154,6 +154,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
   const [busy, setBusy] = useState<string | null>(null)
   const [form, setForm] = useState<Form | null>(null)
   const [note, setNote] = useState('')
+  const [record, setRecord] = useState(false)
   const [withData, setWithData] = useState(false)
   // The Runs tab's archived view: the runs taken off it, to look at or restore.
   const [showArchived, setShowArchived] = useState(false)
@@ -413,7 +414,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
               <div className="fd-card flex flex-wrap items-center gap-2 p-3">
                 <input className={`${input} min-w-0 flex-1`} value={note} placeholder="A note for this run (optional)"
                   onChange={(e) => setNote(e.target.value)} disabled={!canRun} />
-                <button onClick={() => void act('run', async () => { await runNow(factoryId, note); setNote('') }, 'Run started')}
+                <button onClick={() => void act('run', async () => { await runNow(factoryId, note, [], record); setNote('') }, record ? 'Run started, recording what it reads' : 'Run started')}
                   disabled={!canRun || !!busy}
                   title={canRun ? 'Start a run now' : going ? 'A run is going' : 'Approve a charter first'}
                   className="inline-flex h-9 items-center gap-1.5 rounded-full bg-violet-600 px-4 text-xs font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60">
@@ -424,6 +425,13 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                   className="inline-flex h-9 items-center gap-1.5 rounded-full border border-[var(--fd-line)] px-3.5 text-xs font-medium text-zinc-300 transition-colors hover:border-violet-500/40 hover:text-zinc-100 disabled:opacity-60">
                   <Database className="h-3.5 w-3.5" /> Run with data…
                 </button>
+                {f.live?.runner === 'funnel' && (
+                  <label className="inline-flex h-9 cursor-pointer items-center gap-1.5 px-1 text-xs text-zinc-400"
+                    title="Keeps every search and page this run reads (in its folder, shared/funnel/tape), so the run can be replayed later as a test set">
+                    <input type="checkbox" checked={record} onChange={(e) => setRecord(e.target.checked)} disabled={!canRun} />
+                    Record this run
+                  </label>
+                )}
                 {(f.data?.length ?? 0) > 0 && (
                   <p className="w-full text-xs text-zinc-500">
                     Every run gets the factory's {f.data.length} file{f.data.length === 1 ? '' : 's'} of extra data.{' '}
@@ -446,7 +454,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                   action={(n) => (n ? `Run with ${n} file${n === 1 ? '' : 's'}` : 'Run with data')}
                   onDone={async (staged) => {
                     setError(null)
-                    await runNow(factoryId, note, staged.map((s) => s.id))
+                    await runNow(factoryId, note, staged.map((s) => s.id), record)
                     setNote('')
                     onNotice(`Run started with ${staged.length} file${staged.length === 1 ? '' : 's'} of extra data`)
                     void load()

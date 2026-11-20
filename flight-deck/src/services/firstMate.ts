@@ -495,8 +495,9 @@ export const setState = (id: string, state: OwnerState, reason = '') =>
 export const setTrust = (id: string, level: Trust, pin?: boolean) =>
   call<Factory>(`${f(id)}/trust`, json('POST', pin === undefined ? { level } : { level, pin }))
 /** `data`: staged uploads (contextApi) for this run alone, beside the factory's own extra data. */
-export const runNow = (id: string, note = '', data: string[] = []) =>
-  call<Run>(`${f(id)}/run`, json('POST', data.length ? { note, data } : { note }))
+/** `record`: a list funnel run keeps what it searched and read, to replay as a test set. */
+export const runNow = (id: string, note = '', data: string[] = [], record = false) =>
+  call<Run>(`${f(id)}/run`, json('POST', { note, ...(data.length ? { data } : {}), ...(record ? { record: true } : {}) }))
 
 export const addFactoryData = (id: string, ids: string[]) =>
   call<{ added: FactoryDataItem[]; items: FactoryDataItem[] }>(`${f(id)}/data`, json('POST', { ids }))
