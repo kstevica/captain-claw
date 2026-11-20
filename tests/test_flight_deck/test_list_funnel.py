@@ -1225,10 +1225,13 @@ FIRM_LEADS_RULES = [  # as a setup model sorted a real charter: the shown size k
 def test_only_a_must_about_something_measured_may_go_unshown():
     """A run dropped 45 of 87 firms for "no employee count shown": not found was read as
     broken. Any list: a count, an amount, a date or a rating many items never publish
-    may go unshown on a looser reading; what an item is, where, and how to reach it may not."""
+    may go unshown on a looser reading, and a way to reach the item may be its own
+    site's contact page; what an item is and where it is may not."""
     r = funnel.normalize_recipe({"rules": FIRM_LEADS_RULES}, funnel.from_contract(FIRM_LEADS))
     loosen = {x["rule"][:24] for x in funnel.loosenable(r)}
-    assert loosen == {"2-50 employees shown by ", "something dated in the l"}
+    assert loosen == {"2-50 employees shown by ", "something dated in the l", "own website prints a fou"}
+    email = r["rules"][3]
+    assert funnel.looser_of(email) == funnel.CONTACT_LOOSER and "never an address guessed" in funnel.CONTACT_LOOSER
     size = r["rules"][1]
     assert size["columns"] == ["Employees", "EmployeesSourceURL"] and not size["protected"]  # inferred from its words
     assert funnel.looser_of(size).startswith("not shown in what was read")
@@ -1236,7 +1239,7 @@ def test_only_a_must_about_something_measured_may_go_unshown():
     for rule, protected in (("rated 4.5 stars or more", False), ("over 1,000 members", False),
                             ("founded before 2015", False), ("revenue under $10M per its filings", False),
                             ("located in Zagreb", True), ("serves vegan food", True), ("peer reviewed", True),
-                            ("lists a phone number", True), ("has at least 2 office addresses", True)):
+                            ("lists a phone number", False), ("headquartered in Canada", True)):
         got = funnel.normalize_recipe({"rules": [{"rule": rule, "kind": "must"}]},
                                       funnel.from_contract(FIRM_LEADS))["rules"][0]["protected"]
         assert got is protected, rule
@@ -1261,8 +1264,8 @@ async def test_a_fact_a_firm_doesnt_publish_is_no_reason_to_drop_it(deck):
             size = "2-50 employees shown by its LinkedIn company page size band or its own team page"
             if f["Firm"] == "A":
                 out.append({"id": i, "verdict": "keep", "row": row})
-            elif f["Firm"] == "C":  # no email: a way to reach it never loosens
-                out.append({"id": i, "verdict": "loose", "row": row, "loosened": ["own website prints a founder's"]})
+            elif f["Firm"] == "C":  # no email printed (its contact page is how to reach it), size unshown
+                out.append({"id": i, "verdict": "loose", "row": row, "loosened": ["own website prints a founder's", size]})
             elif f["Firm"] == "D":  # size and AI both unshown
                 out.append({"id": i, "verdict": "loose", "row": row, "loosened": [size, "something dated"]})
             else:  # B: size unshown; E: says 120, so it's shown to break the rule
@@ -1273,12 +1276,12 @@ async def test_a_fact_a_firm_doesnt_publish_is_no_reason_to_drop_it(deck):
     steps = await funnel.plan(run)
     await _go(deck["store"], run, steps[:1])
     prompt = deck["decide_prompts"][0]
-    assert "Never loosened" in prompt and "own website prints a founder's" in prompt.split("Never loosened")[1].split(
-        "May be met")[0]
+    assert "Never loosened" in prompt and "own website prints a founder's" in prompt.split("May be met")[1]
+    assert "US knowledge firm headquartered in the US" in prompt.split("Never loosened")[1].split("May be met")[0]
     assert "Unshown is not broken" in prompt and "— looser: not shown in what was read" in prompt
     got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
     assert got["A"][0] == "kept" and got["B"][0] == got["D"][0] == "loose"
-    assert got["C"][0] == "maybe"  # it named only a rule that never loosens
+    assert got["C"][0] == "loose"  # no address printed, reached by its contact page
     assert got["E"][0] == "dropped" and "Employees 120 is over 50" in got["E"][1]
 
 
@@ -1331,7 +1334,7 @@ async def test_a_maybe_that_lacks_only_unshown_facts_is_loose(deck):
         for i, f in items:
             if f["Firm"] == "A":  # only the size isn't shown
                 out.append({"id": i, "verdict": "maybe", "row": f, "missing": [size]})
-            elif f["Firm"] == "B":  # no email either: that never loosens
+            elif f["Firm"] == "B":  # no email either: a contact page will do on a looser reading
                 out.append({"id": i, "verdict": "maybe", "row": f, "missing": [size, "own website prints"]})
             elif f["Firm"] == "C":  # names nothing it lacks
                 out.append({"id": i, "verdict": "maybe", "row": f, "reason": "unsure"})
@@ -1343,7 +1346,7 @@ async def test_a_maybe_that_lacks_only_unshown_facts_is_loose(deck):
     steps = await funnel.plan(run)
     await _go(deck["store"], run, steps[:1])
     got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
-    assert got == {"A": "loose", "B": "maybe", "C": "maybe", "D": "maybe"}
+    assert got == {"A": "loose", "B": "loose", "C": "maybe", "D": "maybe"}
     assert "Employees" in funnel._read_csv(folder / funnel.LOOSE)[0] and funnel._read_csv(folder / funnel.LOOSE)[0]["Firm"] == "A"
 
 
@@ -1371,7 +1374,7 @@ async def test_a_drop_must_show_the_fact(deck):
                 out.append({"id": i, "verdict": "drop", "row": row, "broken": [ai], "shown": "no AI signal found"})
             elif f["Firm"] == "B":  # really shown to be too big
                 out.append({"id": i, "verdict": "drop", "row": row, "broken": [size], "shown": "Team of 120 people"})
-            elif f["Firm"] == "C":  # no email: a rule that never loosens
+            elif f["Firm"] == "C":  # "no email" with nothing shown: not broken, its contact page will do
                 out.append({"id": i, "verdict": "drop", "row": row, "broken": ["own website prints a founder's"]})
             elif f["Firm"] == "D":  # names no rule: can't tell
                 out.append({"id": i, "verdict": "drop", "row": row, "reason": "no"})
@@ -1383,4 +1386,54 @@ async def test_a_drop_must_show_the_fact(deck):
     steps = await funnel.plan(run)
     await _go(deck["store"], run, steps[:1])
     got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
-    assert got == {"A": "loose", "B": "dropped", "C": "dropped", "D": "dropped", "E": "maybe"}
+    assert got == {"A": "loose", "B": "dropped", "C": "loose", "D": "dropped", "E": "maybe"}
+
+
+async def test_a_firm_reached_by_its_contact_page_never_gets_a_guessed_address(deck):
+    """The email rule loosens to a contact page on the firm's own site, the address
+    left empty. An address given must still be on the page it cites."""
+    run, folder = await _run(deck["store"], FIRM_LEADS, rid="bat_contact01")
+    (folder / "extra" / "firms.csv").write_text("Firm,Website,State\nA,https://a.example,TX\nB,https://b.example,NY\n")
+    deck["recipe"] = {"item": "firm", "key": "Firm", "sources": [{"kind": "file", "path": "extra/firms.csv"}],
+                      "decide": "US firms with an email on the site.", "rules": FIRM_LEADS_RULES[3:4],
+                      "checks": [{"column": "Email", "op": "required"},
+                                 {"column": "Email", "op": "in_evidence", "source_column": "EmailSourceURL"}]}
+    rule = "own website prints a founder's"
+
+    def decide(items):
+        return [{"id": i, "verdict": "loose", "loosened": [rule],
+                 "row": {**f, "EmailSourceURL": f"{f['Website']}/contact",
+                         "Email": "guess@b.example" if f["Firm"] == "B" else ""}} for i, f in items]
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["A"][0] == "loose"  # reached by its contact page, no address
+    assert got["B"][0] == "dropped" and "Email" in got["B"][1]  # an address not on a page read never passes
+    assert "Never loosened" not in funnel.conventions(funnel.load_recipe(folder)).split("## Rules")[0]
+    assert "contact page or form" in funnel.conventions(funnel.load_recipe(folder))
+
+
+async def test_the_finishing_step_may_add_rows_on_a_looser_reading(deck):
+    run, folder = await _run(deck["store"], FIRM_LEADS, rid="bat_finloose1")
+    (folder / "extra" / "firms.csv").write_text("Firm,Website,State\nA,https://a.example,TX\n")
+    deck["recipe"] = {"item": "firm", "key": "Firm", "sources": [{"kind": "file", "path": "extra/firms.csv"}],
+                      "decide": "US firms.", "rules": FIRM_LEADS_RULES, "target": 3,
+                      "checks": [{"column": "Email", "op": "required"}, {"column": "EmployeesSourceURL", "op": "required"}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "maybe", "reason": "x", "missing": ["US knowledge firm"]}
+                                    for i, _f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    fresh = await deck["store"].get_run(run["id"])
+    work = funnel.prepare_finish(fresh, steps[1])["work"]
+    assert "_loosened column" in work and "Don't spend long proving" in work
+    finish = folder / funnel.FINISH
+    assert finish.read_text().splitlines()[0].endswith(",_loosened")
+    with finish.open("a", encoding="utf-8") as fh:
+        fh.write("Firm A2,https://a2.example,TX,,,,https://a2.example/contact,,,"
+                 "own website prints a founder's; 2-50 employees shown\n")
+    added, refused, _ = await funnel.check_finish(fresh, steps[1], folder, funnel.load_recipe(folder))
+    assert (added, refused) == (1, 0)
+    assert [r["Firm"] for r in funnel._read_csv(folder / funnel.LOOSE)] == ["Firm A2"]  # waits with the loose rows
+    assert funnel._read_csv(folder / funnel.ROWS) == []

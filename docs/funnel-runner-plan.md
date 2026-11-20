@@ -460,10 +460,15 @@ continued) as a cap would, so it can be continued; an agent step that uses its s
 (1.5M in a list funnel's run, a third of the ceiling in a run with no cap,
 `config.step_token_limit` to set it) is stopped and done with what it made; and a list
 funnel's agent steps (finishing, fix rounds) that time out or come back short are kept
-as they are, never run again. Still open: the exclusion guard reading every check on
-the same file (an "agency" pattern from the exclusion check flagged a marketing agency
-because the segment names live in another check), and the rule tiers in the finishing
-agent's conventions.
+as they are, never run again. The exclusion guard now reads every check on the same
+file (an "agency" pattern from the exclusion check had flagged a marketing agency because
+the segment names live in another check). The finishing agent reads the rule tiers in
+`shared/conventions.md` and may add rows on a looser reading (named in a `_loosened`
+column; checked with those rules' columns relaxed; they wait with the funnel's loose
+rows). And on the owner's word, a rule about how to reach the item loosens too: its
+looser reading is a contact page or form on the item's own site, the address left
+empty, never an address guessed or taken from a contact-list site; an address given
+must still be on the page it cites.
 
 ## 9. Risks
 

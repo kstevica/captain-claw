@@ -274,17 +274,33 @@ def _rule_columns(text: str, recipe: dict[str, Any]) -> list[str]:
     return [c for c in recipe["columns"] if _stems(c) & words]
 
 
+# How the item may be reached on a looser reading: its own site's contact page or form,
+# never an address guessed or taken from a contact-list site. Many small firms print no
+# address at all, only a form; their row says how to reach them, the address left empty.
+CONTACT_LOOSER = ("a way to reach it on its own site: a contact page or form (its link kept, the address "
+                  "column left empty); never an address guessed or taken from a contact-list site")
+
+
+def _is_contact(rule: dict[str, Any]) -> bool:
+    return bool(_CONTACT.search(rule["rule"]) or any(_CONTACT.search(c) for c in rule.get("columns") or []))
+
+
 def _protected(rule: dict[str, Any], recipe: dict[str, Any]) -> bool:
-    """A must that is never loosened: every must, but one about something measured (a
-    count, an amount, a date, a rating) that many items never publish. Even then it
-    stays when it's about where the item is (a place) or how to reach it (an email, a
-    phone), or about the list's key, group or site column. Unshown, a protected must
-    leaves the item nearly there, never loose."""
+    """A must that is never loosened: every must, but one about how to reach the item
+    (met loosely by a contact page on its own site, ``CONTACT_LOOSER``) or about
+    something measured (a count, an amount, a date, a rating) that many items never
+    publish. Even then it stays when it's about where the item is (a place), or about
+    the list's key, group or site column. Unshown, a protected must leaves the item
+    nearly there, never loose."""
     text = rule["rule"]
-    fixed = {recipe["key"], recipe["group_by"], recipe.get("site_column") or ""} - {""}
-    if not _MEASURED.search(text) or _CONTACT.search(text) or fx.places_named(text):
+    if fx.places_named(text):
         return True
-    return bool(set(rule.get("columns") or []) & fixed) or any(_CONTACT.search(c) for c in rule.get("columns") or [])
+    if _is_contact(rule):
+        return False
+    fixed = {recipe["key"], recipe["group_by"], recipe.get("site_column") or ""} - {""}
+    if not _MEASURED.search(text):
+        return True
+    return bool(set(rule.get("columns") or []) & fixed)
 
 
 def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
@@ -307,6 +323,8 @@ def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
         rule: dict[str, Any] = {"rule": text, "kind": kind, "columns": given or _rule_columns(text, recipe)}
         if kind == "must":
             rule["protected"] = _protected(rule, recipe)
+            if not rule["protected"] and _is_contact(rule) and not looser:
+                looser = CONTACT_LOOSER
         rule["columns"] = [c for c in rule["columns"] if c not in fixed]
         if looser:
             rule["looser"] = looser
@@ -587,6 +605,16 @@ def conventions(recipe: dict[str, Any]) -> str:
         lines += ["", f"The list needs {recipe['target']} rows."]
     if recipe["decide"]:
         lines += ["", "## What belongs on the list", "", recipe["decide"]]
+    soft = loosenable(recipe)
+    if recipe.get("rules"):
+        fixed = [r["rule"] for r in recipe["rules"] if r not in soft]
+        lines += ["", "## Rules", ""]
+        if fixed:
+            lines += ["Never loosened:"] + [f"- {r}" for r in fixed]
+        if soft:
+            lines += ["", "May be met by a looser reading, only when a group runs short of rows that meet every "
+                          "rule as written (unshown is not broken; an item shown to break a rule is still out):"]
+            lines += [f"- {r['rule']} — looser: {looser_of(r)}" for r in soft]
     checks = [c for c in recipe["checks"] if c["op"] != "required"]
     if checks:
         lines += ["", "## What Captain checks in every row", ""]
@@ -2054,6 +2082,9 @@ def check_row(recipe: dict[str, Any], row: dict[str, str], texts: dict[str, str]
                     return f"{col} '{v}' doesn't match"
             except re.error:
                 continue
+        if op == "in_evidence" and re.match(r"https?://", v) and any(
+                s.rstrip("/") == v.rstrip("/") for s in texts):
+            continue  # a link to a page that was read: it's where the value came from
         if op == "in_evidence":
             src = row.get(c.get("source_column", ""), "") if c.get("source_column") else ""
             if not src and unsourced_ok:
@@ -2278,9 +2309,10 @@ def prepare_finish(run: dict, step: dict) -> dict:
         w.writeheader()
         w.writerows(items)
     finish = folder / FINISH
+    loose_ok = loosen_on(run, recipe)
     if not finish.is_file():
         with finish.open("w", encoding="utf-8", newline="") as fh:
-            csv.writer(fh).writerow(recipe["columns"])
+            csv.writer(fh).writerow(recipe["columns"] + ([_LOOSE_COL] if loose_ok else []))
     project = bat_routes._project_of(run)
     sourced = [c for c in recipe["checks"] if c["op"] == "in_evidence" and c.get("source_column")]
     lines = [
@@ -2296,6 +2328,11 @@ def prepare_finish(run: dict, step: dict) -> dict:
         lines.append("3. in " + ", ".join(sorted({c["source_column"] for c in sourced}))
                      + " put the link of the exact page the value is on: Captain reads that page again and drops "
                      "a row whose value isn't there.")
+    if loose_ok:
+        lines.append(f"4. a row that meets a rule only by its looser reading (the Rules in shared/conventions.md) "
+                     f"is fine: name those rules in its {_LOOSE_COL} column, separated by \";\", and leave a column "
+                     "empty when the looser reading gives no value. Don't spend long proving a fact the item "
+                     "simply doesn't publish.")
     lines += ["Stop once the short groups are full. Work only on these items: don't look for new ones, don't add "
               f"one already on the list, and don't change any other file in {STATE}/.", "", "The items:"]
     for m in items:
@@ -2320,6 +2357,7 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
     on_list = {norm_key(r.get(recipe["key"], "")) for r in _read_csv(folder / ROWS)} if recipe["key"] else set()
     sources = sorted({c["source_column"] for c in recipe["checks"] if c["op"] == "in_evidence" and c.get("source_column")})
     unsourced_check = any(c["op"] == "in_evidence" and not c.get("source_column") for c in recipe["checks"])
+    soft = loosenable(recipe) if loosen_on(run, recipe) else []
     tools: Tools | None = None
     pages: dict[str, str] = {}
     added = refused = unsourced = 0
@@ -2346,7 +2384,10 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
                     pages[url] = text[:FETCH_CHARS * 4] if ok else ""
                 if pages[url]:
                     texts[url] = pages[url]
-            problem = check_row(recipe, row, texts, unsourced_ok=True)
+            said = [x.strip().lower() for x in str(raw.get(_LOOSE_COL) or "").split(";") if x.strip()]
+            loosened = [r for r in soft if any(x in r["rule"].lower() or r["rule"].lower() in x for x in said)]
+            relax = {c for r in loosened for c in r.get("columns") or []}
+            problem = check_row(recipe, row, texts, unsourced_ok=True, relax=relax)
             if not problem and recipe["groups"] and recipe["groups"].get(group) and kept.get(group, 0) >= recipe["groups"][group]:
                 problem = f"{group} is already full"
             item = {"key": key, "name": str(name)[:120], "group": group, "source": "finishing step",
@@ -2359,8 +2400,16 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
             added += 1
             if unsourced_check and not sources:
                 unsourced += 1
-            kept[group] = kept.get(group, 0) + 1
             on_list.add(key)
+            if loosened:  # waits with the funnel's loose rows: on the list only where a group is still short
+                names = "; ".join(r["rule"] for r in loosened)
+                _append_csv(folder / LOOSE, recipe["columns"] + [_GROUP_COL, _LOOSE_COL],
+                            {**row, _GROUP_COL: group, _LOOSE_COL: names})
+                _append_csv(folder / ITEMS, _ITEM_COLS, {**item, "status": "loose", "stage": "agent",
+                                                         "reason": f"added by the finishing step on a looser reading "
+                                                                   f"of: {names}"})
+                continue
+            kept[group] = kept.get(group, 0) + 1
             _append_csv(folder / ROWS, recipe["columns"] + [_GROUP_COL], {**row, _GROUP_COL: group})
             _append_csv(folder / ITEMS, _ITEM_COLS, {**item, "status": "kept", "stage": "agent",
                                                      "reason": "added by the finishing step; its pages read again"})
