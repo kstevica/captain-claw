@@ -1975,6 +1975,7 @@ from captain_claw.flight_deck.browser_clip import owner_router as browser_owner_
 from captain_claw.flight_deck.browser_clip import router as browser_clip_router
 from captain_claw.flight_deck.browser_hands import agent_router as browser_hands_agent_router
 from captain_claw.flight_deck.browser_hands import router as browser_hands_router
+from captain_claw.flight_deck.browser_recordings import router as browser_recordings_router
 from captain_claw.flight_deck.device_bridge import router as device_router
 from captain_claw.flight_deck.device_firmware import router as device_firmware_router
 from captain_claw.flight_deck.device_backgrounds import router as device_backgrounds_router
@@ -2142,6 +2143,7 @@ app.include_router(agent_link_router)
 app.include_router(agent_link_http_router)
 # Captain for Chrome: pages from the person's browser to their agents.
 app.include_router(browser_clip_router)
+app.include_router(browser_recordings_router)   # … and what the person recorded there, run by an agent
 app.include_router(browser_owner_router)
 # … and the person's Chrome lent to their agents' browser tool (browser_hands.py).
 app.include_router(browser_hands_router)

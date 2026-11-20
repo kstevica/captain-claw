@@ -309,3 +309,26 @@ details.anon-back > summary::-webkit-details-marker { display: none; }
 details.anon-back > summary .ic { transition: transform .15s; }
 details.anon-back[open] > summary .ic.chev { transform: rotate(180deg); }
 
+
+/* ── recordings ── */
+.status-pill.rec { color: var(--err); border-color: var(--err); }
+.status-pill.rec .dot { background: var(--err); animation: recblink 1.4s infinite; }
+@keyframes recblink { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .status-pill.rec .dot { animation: none; } }
+.notice.rec-on { align-items: center; }
+.rsteps { display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 230px); min-height: 80px; overflow: auto; }
+.rsteps.edit { max-height: none; overflow: visible; }
+.rstep { display: flex; gap: 8px; align-items: flex-start; padding: 8px 8px 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); min-width: 0; }
+.rstep.own { border-style: dashed; }
+.rstep-n { flex: none; min-width: 18px; height: 18px; border-radius: 9px; background: var(--panel-2); color: var(--muted); font-size: calc(10px * var(--fs)); font-weight: 600; display: inline-flex; align-items: center; justify-content: center; font-variant-numeric: tabular-nums; margin-top: 1px; padding: 0 4px; }
+.rstep-text { font-size: calc(13px * var(--fs)); overflow-wrap: anywhere; }
+.rstep .link-btn { margin: 3px 0 0 -6px; display: inline-flex; align-items: center; gap: 4px; }
+.rstep textarea { margin-top: 5px; min-height: 44px; }
+.rstep-note { border-color: var(--accent); background: var(--accent-soft); }
+.rstep-ask { display: flex; align-items: center; gap: 6px; margin-top: 5px; font-size: calc(12px * var(--fs)); color: var(--muted); }
+.rstep-ask input { accent-color: var(--accent); }
+.rstep-tools { display: flex; gap: 0; flex: none; }
+.rstep-tools .icon-btn { width: 22px; height: 22px; }
+.rstep-tools .icon-btn:disabled { opacity: .3; cursor: default; }
+.rec-bar { display: flex; gap: 8px; position: sticky; bottom: 0; padding: 8px 0 2px; background: var(--bg); }
+.rec-item .rec-about { margin-top: 4px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
