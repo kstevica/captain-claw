@@ -426,10 +426,20 @@ def loosen_on(run: dict, recipe: dict[str, Any] | None = None) -> bool:
     return on and (recipe is None or bool(loosenable(recipe)))
 
 
+_ITEM_TAIL = re.compile(r"\s+(?:in|for|that|which|who|with|without|suitable|near|at|from|of the|serving|"
+                        r"offering|located|based|where|whose)\b.*$", re.I)
+
+
 def _short_item(v: Any) -> str:
-    """What one row is, as a noun ("small US knowledge firm"), never a sentence with lists."""
+    """What one row is, as a noun ("small US knowledge firm"), never a sentence: no list,
+    no "a" or "the" before it, nothing after "in", "for", "suitable"… ("a restaurant in
+    Zagreb suitable for a business lunch" → "restaurant"), and whole words only."""
     text = re.split(r"\s*[(\[,;:—–]\s*|\s+-\s+", str(v or "").strip())[0]
-    return " ".join(text.split())[:40] or "item"
+    text = re.sub(r"^(?:an?|the|one|each)\s+", "", " ".join(text.split()), flags=re.I)
+    text = _ITEM_TAIL.sub("", text).strip()
+    if len(text) > 40:
+        text = text[:41].rsplit(" ", 1)[0]
+    return text or "item"
 
 
 def _source(s: Any, groups: dict[str, int]) -> dict[str, Any] | None:
@@ -734,7 +744,7 @@ def load_recipe(folder: Path) -> dict[str, Any] | None:
 SETUP_SYSTEM = """You set up a list-building run. Code will do the searching, fetching and checking; a model
 will judge each item once, in a short call. Write the recipe it follows, as ONLY a JSON object:
 
-{"item": "<what one row is, e.g. firm, person, product, invoice>",
+{"item": "<what one row is, in a word or two: firm, person, product, restaurant>",
  "columns": [{"name": "<column>", "what": "<what it holds, where it comes from>",
               "from": "item|owner (owner: filled from the owner's own material, e.g. which of their products fits)"}],
  "key": "<the column no two rows share (a website, an email, an id)>",
@@ -1696,7 +1706,8 @@ class Work:
         it's found."""
         f = {k.lower(): v for k, v in item["fields"].items()}
         if found is None and self.places:
-            where = fx.foreign_place(f"{item.get('text') or ''}\n" + " ".join(map(str, f.values())), self.places)
+            where = fx.foreign_place(f"{item.get('text') or ''}\n" + " ".join(map(str, f.values())), self.places,
+                                     name=self._name_of(item))
             if where:
                 return f"not in {' or '.join(fx.place_phrase(c) for c in self.places)} (its listing says {where})"
         for flt in self.recipe["filters"]:
@@ -1861,7 +1872,7 @@ class Work:
         domain, text = self._own_text(item)
         if not text and not domain:
             return ""
-        where = fx.foreign_on_own_pages(text, domain, self.places)
+        where = fx.foreign_on_own_pages(text, domain, self.places, name=self._name_of(item))
         return f"its own site points to {where}, not {' or '.join(fx.place_phrase(c) for c in self.places)}" if where else ""
 
     def _site_of(self, item: dict) -> str:
@@ -2001,6 +2012,29 @@ class Work:
                 elif self.recipe["group_by"] and self.group and not row.get(self.recipe["group_by"]):
                     row[self.recipe["group_by"]] = self.group  # no group said: this step's
                 relax = {c for r in loosened for c in r.get("columns") or []}
+                read = {e["source"]: e["text"] for e in it.get("evidence") or []}
+                unproven = {c["column"]: row[c["column"]] for c in self.recipe["checks"]
+                            if c["op"] == "in_evidence" and row.get(c["column"])
+                            and check_row({**self.recipe, "checks": [c]}, row, read)}
+                if unproven:  # a value what was read doesn't bear out is left out, never the item with it
+                    for col in unproven:
+                        row[col] = ""
+                    self._fill_from_facts(row, it)  # what its own pages do show (their email, not a guessed one)
+                    unproven = {c: v for c, v in unproven.items() if not row.get(c)}
+                if unproven:
+                    note = "couldn't confirm " + ", ".join(f"{c} '{v[:60]}'" for c, v in unproven.items()) \
+                        + " in what was read"
+                    reason = f"{reason}; {note}" if reason else note
+                    soft = loosenable(self.recipe) if self.loosen else []
+                    covered = {c for r in soft for c in r.get("columns") or []}
+                    if any(c not in covered for c in unproven):  # a cell the list needs: nearly there
+                        await self._nearly(it, row, named or self.group, reason)
+                        continue
+                    eased = [r for r in soft if set(r.get("columns") or []) & set(unproven) and r not in loosened
+                             and not any(str(row.get(x) or "").strip() for x in r.get("columns") or [])]
+                    if eased:  # a soft rule now shown by nothing: met by its looser reading
+                        loosened, verdict = loosened + eased, "loose"
+                        relax |= {c for r in eased for c in r.get("columns") or []}
                 gaps = [c["column"] for c in self.recipe["checks"]
                         if c["op"] == "required" and not row.get(c["column"]) and c["column"] not in relax]
                 if gaps:  # a cell it left empty isn't a rule broken: a soft rule's looser reading, or nearly there
