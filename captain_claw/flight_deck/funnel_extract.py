@@ -639,6 +639,10 @@ def _norm(s: str) -> str:
     return " ".join(re.sub(r"[‘’“”]", "'", str(s or "")).lower().split())
 
 
+_PHONE_VALUE = re.compile(r"\+?[\d\s()./-]*\d(?:[\d\s()./-]*\d){6,}")  # at least 7 digits, nothing else
+_PHONE_RUN = re.compile(r"\+?\d[\d\s()./-]{5,}\d")
+
+
 def in_text(value: str, text: str) -> bool:
     """Does the text hold the value: case and spacing aside, and for a long value
     (over 60 characters, a sentence written about the source) its first 40
@@ -650,6 +654,9 @@ def in_text(value: str, text: str) -> bool:
         return True
     if "@" in v:  # an email may sit in a mailto: link, percent-encoded or not
         return v.replace("@", "%40") in t
+    if _PHONE_VALUE.fullmatch(v):  # a phone written another way: "+385 1 234 5678", "01/234-5678"
+        want = re.sub(r"\D", "", v)[-8:]
+        return any(re.sub(r"\D", "", m.group(0)).endswith(want) for m in _PHONE_RUN.finditer(t))
     return len(v) > 60 and v[:40] in t
 
 
