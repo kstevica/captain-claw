@@ -1415,7 +1415,10 @@ Reply ONLY with a JSON array, one object per item, in order:
   "row": {"<column>": "<value>"}}]
 keep: it meets every rule and the row is filled from the facts. maybe: it seems to fit but a fact the rules need
 wasn't in what was read; also when nothing read came from the item's own website, unless a fact shown breaks a
-rule. drop: it breaks a rule. A column with a fixed set of values takes one of them exactly. Dates as YYYY-MM-DD,
+rule. drop: it breaks a rule. A rule that says itself what to do when its fact isn't found ("if there is no rating,
+judge how good it is") is decided that way: judge the item on what was read and keep or drop it on that
+judgement, saying so in the reason; that fact being missing is never the reason for maybe. A column with a fixed
+set of values takes one of them exactly. Dates as YYYY-MM-DD,
 or YYYY-MM when there's no day. A column about the owner's own offer (a feature to pitch, why it fits, from
 the reference) is always filled for a row you keep: when the fact it would rest on isn't shown, tie it to what
 was read.
