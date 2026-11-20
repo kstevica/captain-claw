@@ -325,12 +325,15 @@ _STATE_ABBR = re.compile(r",\s*(" + "|".join(US_STATES) + r")\.?\s+\d{5}(?:-\d{4
 _STATE_NAME = re.compile(r"\b(" + "|".join(sorted(US_STATES.values(), key=len, reverse=True)) + r")\b")
 
 
-def us_state(text: str) -> str:
+def us_state(text: str, address_only: bool = False) -> str:
     """The two-letter US state of the first address in a text (", TX 78701"), else
-    of the first state named; "" when none."""
+    of the first state named; "" when none. ``address_only``: an address or nothing
+    (a state's name alone is no address: "Washington DC" isn't Washington state)."""
     m = _STATE_ABBR.search(text or "")
     if m:
         return m.group(1)
+    if address_only:
+        return ""
     m = _STATE_NAME.search(text or "")
     if m:
         return next(k for k, v in US_STATES.items() if v == m.group(1))
@@ -507,7 +510,82 @@ def links(text: str) -> list[str]:
     return out
 
 
-EXTRACTORS = ("emails", "phones", "dates", "size_band", "us_state", "links")
+# How many people an organization says it has, in its own words: "more than 100
+# lawyers and staff", "nearly 200 full-time professionals", "a team of 12". The
+# largest such number in a text (English words; a size band is ``size_band``).
+_HEADCOUNT = re.compile(
+    r"(?:(?:more than|over|nearly|almost|about|around|approximately|roughly|some|close to)\s+)?"
+    r"(\d{1,3}(?:,\d{3})*|\d+)\s*\+?\s+(?:full[- ]time\s+)?"
+    r"(?:people|employees|staff|professionals|lawyers|attorneys|consultants|advisors|advisers|accountants|"
+    r"engineers|developers|designers|researchers|analysts|specialists|experts|team members|colleagues)\b"
+    r"|\bteam of\s+(\d{1,3}(?:,\d{3})*|\d+)\b", re.I)
+
+
+def headcount(text: str) -> int | None:
+    """The largest number of people a text says the organization has; None when it
+    says none."""
+    text = text or ""
+    found = []
+    for m in _HEADCOUNT.finditer(text):
+        at = m.start(1) if m.group(1) else m.start(2)
+        if re.search(r"\d\s*(?:-|–|—|to)\s*$", text[max(0, at - 8):at], re.I):
+            continue  # the top of a range ("51-200 employees") is a size band, not a count
+        found.append(int((m.group(1) or m.group(2)).replace(",", "")))
+    return max(found) if found else None
+
+
+# A country an organization's own pages point to, besides naming it: its site's or its
+# addresses' country domain (.co.za, .ca), a phone's country code (+27). Endings many
+# use for other reasons (.io, .ai, .co, .me, .tv…) and +1 (shared by the US and
+# Canada) say nothing.
+_GENERIC_TLDS = {"io", "ai", "co", "me", "tv", "fm", "ly", "to", "cc", "ws", "gg", "so", "sh", "ac", "la", "im",
+                 "is", "it", "am", "be", "do", "in", "us"}
+_TLD_COUNTRY = {"uk": "GB"}
+_CALLING = {"27": "ZA", "44": "GB", "49": "DE", "33": "FR", "61": "AU", "64": "NZ", "91": "IN", "971": "AE",
+            "385": "HR", "381": "RS", "386": "SI", "387": "BA", "382": "ME", "389": "MK", "34": "ES", "39": "IT",
+            "31": "NL", "32": "BE", "41": "CH", "43": "AT", "46": "SE", "47": "NO", "45": "DK", "358": "FI",
+            "48": "PL", "420": "CZ", "421": "SK", "353": "IE", "351": "PT", "30": "GR", "36": "HU", "40": "RO",
+            "359": "BG", "90": "TR", "972": "IL", "65": "SG", "852": "HK", "81": "JP", "82": "KR", "86": "CN",
+            "55": "BR", "52": "MX", "54": "AR", "57": "CO", "56": "CL", "51": "PE", "234": "NG", "254": "KE",
+            "20": "EG", "212": "MA", "63": "PH", "60": "MY", "62": "ID", "66": "TH", "84": "VN", "92": "PK",
+            "880": "BD", "966": "SA", "974": "QA", "380": "UA", "370": "LT", "371": "LV", "372": "EE"}
+_PHONE_CC = re.compile(r"(?<![\w+])\+(\d{1,3})[\s.(-]")
+
+
+def _tld_country(domain: str) -> str:
+    tld = str(domain or "").lower().rstrip(".").rsplit(".", 1)[-1]
+    if len(tld) != 2 or tld in _GENERIC_TLDS:
+        return ""
+    code = _TLD_COUNTRY.get(tld, tld.upper())
+    return code if code in PLACES else ""
+
+
+def country_hints(text: str, own_domain: str = "") -> set[str]:
+    """The countries an organization's own pages point to: places they name, the
+    country domain of its site and of the addresses they print, phone country codes."""
+    out = {code for code, _ in places_named(text)}
+    for d in [own_domain] + [e.split("@", 1)[1] for e in emails(text)]:
+        if _tld_country(d):
+            out.add(_tld_country(d))
+    for m in _PHONE_CC.finditer(text or ""):
+        cc = next((m.group(1)[:n] for n in (3, 2, 1) if m.group(1)[:n] in _CALLING), "")
+        if cc:
+            out.add(_CALLING[cc])
+    return out
+
+
+def foreign_on_own_pages(text: str, own_domain: str, targets: list[str] | tuple[str, ...]) -> str:
+    """The country outside ``targets`` an organization's own pages point to, when they
+    point to none of the targets (a US address counts for the US); "" otherwise."""
+    hints = country_hints(text, own_domain)
+    if not hints or any(code in targets for code in hints):
+        return ""
+    if "US" in targets and us_state(text, address_only=True):
+        return ""
+    return PLACES[sorted(hints)[0]][0]
+
+
+EXTRACTORS = ("emails", "phones", "dates", "size_band", "headcount", "us_state", "links")
 
 
 def extract(name: str, text: str, *, domain: str = "") -> list[str]:
@@ -521,6 +599,9 @@ def extract(name: str, text: str, *, domain: str = "") -> list[str]:
     if name == "size_band":
         band = size_band(text)
         return [f"{band[0]}+" if band and band[1] >= 10**9 else f"{band[0]}-{band[1]}"] if band else []
+    if name == "headcount":
+        n = headcount(text)
+        return [str(n)] if n is not None else []
     if name == "us_state":
         s = us_state(text)
         return [s] if s else []

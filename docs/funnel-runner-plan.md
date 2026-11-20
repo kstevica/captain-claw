@@ -499,6 +499,37 @@ call left them empty; a row is nearly there only when that call leaves them empt
 Matching a fixed value's words in the reference no longer marks a column as the owner's
 ("personal" and "shared" are in any text).
 
+The first run to end by itself (40 of 40 rows in 81 minutes, 1.03M tokens) was then
+audited row by row against the firms' own pages: about 12 clean, 15 usable once fixed,
+13 breaking a rule that never loosens. What the engine got wrong, and what now holds
+for any list:
+
+- Facts read were left out: 11 firms had an email printed on their own pages, 9 a
+  state on a page read. Cells a judging call leaves empty are now filled from the
+  item's own pages: its email (on its own domain, with the page and whether it's a
+  shared inbox), its phone, its US state from an address (never from a state's name
+  alone: "Washington DC" isn't Washington state).
+- A size the pages stated was taken for "not shown" ("more than 100 lawyers and
+  staff"): a head count read on the item's own pages over the size limit drops it
+  before judging (the top of a range like "51-200" stays a size band).
+- Headquarters abroad were checked only in the listing: an item whose own pages point
+  only to another country (a country named, its site's or its addresses' country
+  domain, a phone country code; +1 and generic endings say nothing) is dropped before
+  judging.
+- The judging call didn't know the date and called 2026 "the future": it gets today's
+  date. A charter's "in the last N months/years" holds the list's date column to that
+  window whatever check the setup wrote.
+- "Lux Insights Inc." and "Lux Insights" were two items across runs: a company's legal
+  form (Inc., LLC, Ltd., GmbH, d.o.o. and others) never makes two items of one name.
+- 29 of 40 reasons were template sentences: the call that fills columns from the
+  owner's material now gets a little of what was read about each item and is told to
+  cite it.
+- A never-loosened place or identity rule with nothing shown for it (no State under
+  "headquartered in the US") leaves a row nearly there.
+
+Not fixed: segment calls stay the judging call's (two misfits got through; Jev's
+choice questions are an option), and founder names are not checked against roles.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

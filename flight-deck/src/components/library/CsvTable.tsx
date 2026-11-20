@@ -32,7 +32,7 @@ function kindOf(values: string[]): ColumnKind {
 
 interface Row { id: number; cells: string[] }
 
-export function CsvTable({ fileRef, path, name, extension, onClose, onSaved }: {
+export function CsvTable({ fileRef: given, path, name, extension, onClose, onSaved }: {
   fileRef: FolderRef
   path: string
   name: string
@@ -55,6 +55,10 @@ export function CsvTable({ fileRef, path, name, extension, onClose, onSaved }: {
   const [page, setPage] = useState(0)
   const [editing, setEditing] = useState<{ id: number; col: number } | null>(null)
   const [nextId, setNextId] = useState(0)
+  // The file it shows, by what it names: a caller that builds the object anew on every
+  // render (a drawer that reloads every few seconds) mustn't read the file again, and
+  // throw away unsaved edits, each time.
+  const fileRef = useMemo<FolderRef>(() => ({ project: given.project, owner: given.owner }), [given.project, given.owner])
 
   const load = useCallback(async () => {
     setLoading(true); setLoadError('')
