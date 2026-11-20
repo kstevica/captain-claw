@@ -866,7 +866,8 @@ def conventions(recipe: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-_LABELLED_LINK = re.compile(r"([^\n()]{0,80}?)\s*\((https?://[^)\s]+)\)")
+# A link's label stops at a table cell's edge: "| Zagreb | Web (…)" is labelled "Web".
+_LABELLED_LINK = re.compile(r"([^\n()|]{0,80}?)\s*\((https?://[^)\s]+)\)")
 
 
 def site_links(text: str, base: str, paths: list[str], most: int = 5) -> list[str] | None:
@@ -3586,14 +3587,20 @@ def place_line(text: str, rule: str, targets: list[str]) -> str:
         return ""
     best = ""
     for raw in re.split(r"[\n\r|•·]+|\s{3,}", text or ""):
-        line = " ".join(raw.split()).strip(" ,;-")
-        if not (8 <= len(line) <= 120) or not re.search(r"\d", line):
-            continue
-        here = fx.places_named(line)
-        if any(code in codes and (not stems or fx.place_stem(w) in stems or w.lower() in stems) for code, w in here):
-            if not best or len(line) < len(best):
-                best = line
+        line = " ".join(raw.split()).strip(" ,;-#")
+        # "Adresa: Ilica 12, …" (a list item or table cell keeps its label): the
+        # address without it is shorter, so it wins when it names the place too
+        for said in (line, _LABEL_LEAD.sub("", line, count=1)):
+            if not (8 <= len(said) <= 120) or not re.search(r"\d", said):
+                continue
+            here = fx.places_named(said)
+            if any(code in codes and (not stems or fx.place_stem(w) in stems or w.lower() in stems) for code, w in here):
+                if not best or len(said) < len(best):
+                    best = said
     return best
+
+
+_LABEL_LEAD = re.compile(r"^[^\d:()]{1,25}?\s*:\s*")  # "Adresa : ", "Address: ", "Find us: "
 
 
 def _site_pages(src: str, texts: dict[str, str]) -> str | None:

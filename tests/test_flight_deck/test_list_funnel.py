@@ -3062,3 +3062,25 @@ async def test_a_group_named_for_two_columns_isnt_written_over_one_of_them(deck)
     rows = {r["Name"]: r for r in funnel._read_csv(folder / funnel.ROWS)}
     assert rows["Acme"]["Type"] == "company" and rows["Acme"][funnel._GROUP_COL] == "US_company"
     assert rows["Beta"]["Type"] == "company" and rows["Beta"][funnel._GROUP_COL] == "UK_company"  # its own group kept
+
+
+# ── pages fetched with tables as Markdown rows ────────────────────────────
+
+def test_site_links_label_stops_at_a_table_cell():
+    page = ("| Alpha (https://alpha.example/) | Kontakt centar | Web (https://alpha.example/o-nama) |\n"
+            "| Beta | Zagreb | Kontakt (https://alpha.example/kontakt) |")
+    assert funnel.site_links(page, "https://alpha.example/", ["kontakt"]) == ["https://alpha.example/kontakt"]
+
+
+def test_a_table_row_is_read_cell_by_cell():
+    row = "| Gamma | Ilica 12 · 10000 Zagreb | +385 1 234 5678 |"
+    assert funnel.place_line(row, "in Zagreb", ["HR"]) == "10000 Zagreb"
+    assert fx.phones(row) == ["+385 1 234 5678"]
+
+
+def test_place_line_leaves_out_a_label_and_a_heading_mark():
+    assert funnel.place_line("- Adresa : Vrtna 20, 10000 Zagreb", "in Zagreb", ["HR"]) == \
+        "Vrtna 20, 10000 Zagreb"
+    assert funnel.place_line("## Ilica 12, 10000 Zagreb", "in Zagreb", ["HR"]) == "Ilica 12, 10000 Zagreb"
+    # a place before the colon is part of the address, not a label
+    assert funnel.place_line("Zagreb: Ilica 12", "in Zagreb", ["HR"]) == "Zagreb: Ilica 12"

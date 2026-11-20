@@ -8,7 +8,7 @@ import time
 from typing import Any
 from urllib.parse import urljoin
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, CData, NavigableString, Tag
 import httpx
 
 from captain_claw import research_images
@@ -269,17 +269,187 @@ def _extract_readable_text(html: str, base_url: str | None = None,
     if soup.title and soup.title.string:
         title = soup.title.string.strip()
 
-    raw_text = soup.get_text(separator="\n")
-    lines: list[str] = []
-    for line in raw_text.splitlines():
-        cleaned = re.sub(r"\s+", " ", line).strip()
-        if cleaned:
-            lines.append(cleaned)
+    try:
+        lines = _page_lines(soup)
+    except Exception as e:  # noqa: BLE001 — the layout pass is extra, never lose a page to it
+        log.debug("page layout pass failed", url=base_url, error=str(e))
+        lines = [t for t in (_plain(x) for x in soup.get_text(separator="\n").splitlines()) if t]
 
     text = "\n".join(lines)
-    if title and not text.startswith(title):
+    if title and not text.lstrip("# ").startswith(title):
         return f"{title}\n\n{text}" if text else title
     return text
+
+
+# ── Page layout: headings, lists and tables as Markdown ──────────────
+# Everything else keeps one line per piece of text, as before: code that reads
+# pages (the list funnel's address and phone finders) relies on short lines.
+# A heading is one line ("## Opening hours"), a list item starts with "- " or
+# "3. ", and a data table is one "| a | b |" line per row, so a directory's name,
+# town and phone stay together. A layout table (nested tables, long cells) is
+# read as ordinary text.
+
+_TEXT_TYPES = (NavigableString, CData)  # exact types: comments, doctypes etc. are subclasses
+_HEADINGS = {"h1": 1, "h2": 2, "h3": 3, "h4": 4, "h5": 5, "h6": 6}
+_BLOCKS = frozenset({
+    "address", "article", "aside", "blockquote", "dd", "details", "dialog", "div", "dl",
+    "dt", "fieldset", "figcaption", "figure", "footer", "form", "header", "hr", "li",
+    "main", "nav", "ol", "p", "pre", "section", "summary", "table", "tr", "ul",
+    *_HEADINGS,
+})
+_LIST_INNER = ["ul", "ol", "table", *_HEADINGS]
+_CELL_JOIN = " · "  # a line break inside a cell; not a phone or address character
+_CELL_MAX = 800  # a longer cell is a page laid out in a table, not data
+_CELL_AVG_MAX = 300
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parts(tag: Tag) -> list[str]:
+    """A tag's text as its lines: inline pieces joined by spaces, a new line at each
+    ``<br>`` or block inside it."""
+    parts: list[str] = []
+    now: list[str] = []
+    for node in tag.descendants:
+        if isinstance(node, Tag):
+            if node.name == "br" or node.name in _BLOCKS:
+                parts.append(" ".join(now))
+                now = []
+        elif type(node) in _TEXT_TYPES:
+            now.append(str(node))
+    parts.append(" ".join(now))
+    return [t for t in (_plain(p) for p in parts) if t]
+
+
+def _span(value: Any, most: int) -> int:
+    try:
+        n = int(str(value).strip())
+    except (TypeError, ValueError):
+        return 1
+    return min(max(n, 1), most)
+
+
+def _table_lines(table: Tag) -> list[str] | None:
+    """A data table as Markdown rows; None for a layout table (read as text)."""
+    if (table.get("role") or "").strip().lower() in ("presentation", "none") or table.find("table"):
+        return None
+    rows = table.find_all("tr")
+    if len(rows) < 2:
+        return None
+    grid: list[list[str]] = []
+    carry: dict[int, list] = {}  # column → [text, rows still to fill] for rowspan
+    for tr in rows:
+        cells = iter(tr.find_all(["td", "th"], recursive=False))
+        row: list[str] = []
+        col = 0
+        while True:
+            if col in carry:
+                text, left = carry[col]
+                row.append(text)
+                if left <= 1:
+                    del carry[col]
+                else:
+                    carry[col][1] = left - 1
+                col += 1
+                continue
+            cell = next(cells, None)
+            if cell is None:
+                if not any(c > col for c in carry):
+                    break
+                row.append("")
+                col += 1
+                continue
+            text = _CELL_JOIN.join(_parts(cell)).replace("|", "\\|")
+            down = _span(cell.get("rowspan"), len(rows))
+            for k in range(_span(cell.get("colspan"), 50)):
+                row.append(text if k == 0 else "")
+                if down > 1:
+                    carry[col] = [text if k == 0 else "", down - 1]
+                col += 1
+        grid.append(row)
+    width = max(len(r) for r in grid)
+    filled = [c for r in grid for c in r if c]
+    if width < 2 or not filled:
+        return None
+    if max(len(c) for c in filled) > _CELL_MAX or sum(map(len, filled)) / len(filled) > _CELL_AVG_MAX:
+        return None
+    first = rows[0]
+    head = (first.find_parent("thead") is not None
+            or all(c.name == "th" for c in first.find_all(["td", "th"], recursive=False)))
+    out: list[str] = []
+    caption = table.find("caption")
+    if caption and (said := " ".join(_parts(caption))):
+        out.append(said)
+    for i, row in enumerate(grid):
+        if not any(row):
+            continue
+        out.append("| " + " | ".join(row + [""] * (width - len(row))) + " |")
+        if i == 0 and head:
+            out.append("|" + " --- |" * width)
+    return out
+
+
+def _page_lines(root: Tag) -> list[str]:
+    """The page's text, one line per piece, with headings, list items and data
+    tables marked as Markdown. Walks with a stack: deep pages don't recurse."""
+    lines: list[str] = []
+    marker = ""  # a list item's "- " still waiting for its first line
+    numbers: dict[int, int] = {}  # id(<ol>) → the last item number given
+
+    def add(text: str, lead: str = "") -> None:
+        nonlocal marker
+        t = _plain(text)
+        if t:
+            lines.append(f"{marker}{lead}{t}")
+            marker = ""
+
+    stack = [iter(root.children)]
+    while stack:
+        node = next(stack[-1], None)
+        if node is None:
+            stack.pop()
+            continue
+        if type(node) in _TEXT_TYPES:
+            for piece in str(node).splitlines():
+                add(piece)
+            continue
+        if not isinstance(node, Tag):
+            continue
+        name = node.name
+        if name in _HEADINGS:
+            marker = ""  # a card in a list: its heading says enough
+            add(" ".join(_parts(node)), "#" * _HEADINGS[name] + " ")
+            continue
+        if name == "table":
+            rows = _table_lines(node)
+            if rows is not None:
+                marker = ""
+                lines.extend(rows)
+                continue
+        if name == "li":
+            parent = node.parent
+            depth = sum(1 for p in node.parents if p.name in ("ul", "ol"))
+            if parent is not None and parent.name == "ol":
+                key = id(parent)
+                if key not in numbers:
+                    numbers[key] = _span(parent.get("start"), 10**6) - 1
+                numbers[key] += 1
+                lead = f"{numbers[key]}. "
+            else:
+                lead = "- "
+            lead = "  " * max(depth - 1, 0) + lead
+            if node.find(_LIST_INNER) is None:
+                parts = _parts(node)
+                if parts:
+                    marker = ""
+                    lines.append(lead + parts[0])
+                    lines.extend(parts[1:])
+                continue
+            marker = lead  # nested list, table or heading: walk it, mark its first line
+        stack.append(iter(node.children))
+    return lines
 
 
 # ── Pictures for reports (research_images) ────────────────────────────
