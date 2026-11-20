@@ -1448,7 +1448,7 @@ keep: it meets every rule and the row is filled from the facts. maybe: it seems 
 wasn't in what was read; also when nothing read came from the item's own website, unless a fact shown breaks a
 rule. drop: it breaks a rule.''',
     '''[{"id": <its id>, "verdict": "keep|loose|maybe|drop", "reason": "<one short line>",
-  "row": {"<column>": "<value>"}, "loosened": ["<rule>"], "missing": ["<rule>"], "broken": ["<rule>"],
+  "row": {"<column>": "<value>"}, "loosened": [<rule number>], "missing": [<rule number>], "broken": [<rule number>],
   "shown": "<the words read that break it>"}]
 keep: it meets every rule as written and the row is filled from the facts. loose: it meets every rule that never
 loosens, and each other rule as written or by its looser reading (a fact that isn't shown, with nothing saying
@@ -1468,7 +1468,8 @@ keep: it meets every rule and the row is filled from the facts. maybe: it seems 
 wasn't in what was read; also when nothing read came from the item's own website, unless a fact shown breaks a
 rule. drop: it breaks a rule.''',
     '''[{"id": <its id>, "verdict": "keep|maybe|drop", "reason": "<one short line>",
-  "row": {"<column>": "<value>"}, "missing": ["<rule>"], "broken": ["<rule>"], "shown": "<the words read that break it>"}]
+  "row": {"<column>": "<value>"}, "missing": [<rule number>], "broken": [<rule number>],
+  "shown": "<the words read that break it>"}]
 keep: it meets every rule as written and the row is filled from the facts. maybe: it seems to fit but a fact a rule
 needs wasn't in what was read, or nothing read came from the item's own website; name in "missing" every rule
 whose fact wasn't shown, and fill the row with what was. drop: what was read shows it breaks a rule; name it in
@@ -2063,6 +2064,7 @@ class Work:
                                   f"# Today\n{time.strftime('%Y-%m-%d')} (a date up to today is in the past, never "
                                   "\"in the future\")\n\n"
                                   f"# Rules\n{self.recipe['decide'] or '(take every item that fits the list)'}\n\n"
+                                  + self._numbered_rules()
                                   + self._tiers_text()
                                   + (f"# The goal, in the owner's words\n{self.charter}\n(These words decide. What "
                                      "each column takes, and any rule above that leaves out something they say, "
@@ -2079,10 +2081,15 @@ class Work:
             if i in verdicts and isinstance(verdicts[i].get("row"), dict):
                 self._fill_from_facts(verdicts[i]["row"], it)
         await self._fill_owner_columns(verdicts, batch)
+        again: list[dict] = []
         for i, it in enumerate(batch, start=1):
             v = verdicts.get(i)
             if v is None:
-                await self.record(it, "dropped", "the judging call gave no answer for it")
+                if not it.get("asked_again"):  # left out of the answer: asked once more, never dropped for it
+                    it["asked_again"] = True
+                    again.append(it)
+                    continue
+                await self.record(it, "dropped", "the judging call gave no answer for it, twice")
                 continue
             verdict = str(v.get("verdict") or "").lower()
             reason = " ".join(str(v.get("reason") or "").split())[:200]
@@ -2104,8 +2111,8 @@ class Work:
                     note = "met by the charter's own words for a fact not found: " + "; ".join(
                         f"{r['rule']} ({r['if_not_shown']})" for r in met)
                     reason = f"{reason}; {note}" if reason else note
-                elif met:
-                    v = {**v, "missing": [r["rule"] for r in rest]}
+                elif met:  # what's left to find; the near miss still records all it lacked
+                    v = {**v, "missing": [r["rule"] for r in rest], "_lacked": [r["rule"] for r in met + rest]}
             if verdict == "maybe" and self.loosen:
                 verdict, loosened = self._maybe_or_loose(v)
             elif verdict == "loose":
@@ -2204,13 +2211,17 @@ class Work:
                 hint = str((v.get("row") or {}).get(self.recipe["group_by"]) or "") if self.recipe["group_by"] else ""
                 got = v.get("row") if isinstance(v.get("row"), dict) else {}
                 await self._nearly(it, got, self._group_named(hint) or self._answer_group(v) or self.group,
-                                   reason or "a fact it needs wasn't found", self._named(v.get("missing")))
+                                   reason or "a fact it needs wasn't found",
+                                   self._named(v.get("_lacked") or v.get("missing")))
             else:
                 other = await self._drop_goes_to(v, it, reason)
                 if other:  # "Japanese, not Croatian": the Asian step judges it
                     await self._hand_over(it, other, reason)
                     continue
                 await self.record(it, "dropped", reason or "breaks a rule")
+        if again:  # judged again now, in a call of their own
+            self.pending = again + self.pending
+            await self.flush()
 
     async def _nearly(self, it: dict, got: dict, group: str, reason: str,
                       missing: list[dict[str, Any]] | None = None) -> None:
@@ -2486,31 +2497,56 @@ class Work:
             self.counts["looked"] += len(todo[i:i + CONCURRENCY])
             await self._gather_wave(todo[i:i + CONCURRENCY])
 
+    def _numbered_rules(self) -> str:
+        """The rules, numbered, for a judging call to name in "missing", "broken" and
+        "loosened" by number: code then knows which rule it meant in any language or
+        wording ("rating 4+ on Google" for "ocjena 4 ili viša na Googleu…")."""
+        rules = self.recipe.get("rules") or []
+        if not rules:
+            return ""
+        lines = ["# Rules by number (name them by these numbers in missing, broken and loosened)"]
+        lines += [f"{n}. {r['rule']}" + (f" — if its fact isn't found: {r['if_not_shown']}" if r.get("if_not_shown") else "")
+                  for n, r in enumerate(rules, start=1)]
+        return "\n".join(lines) + "\n\n"
+
     def _tiers_text(self) -> str:
         """The rule tiers for a judging call, when rows may be on a looser reading."""
         if not self.loosen:
             return ""
         rules = self.recipe.get("rules") or []
         soft = loosenable(self.recipe)
-        fixed = [r["rule"] for r in rules if r not in soft]
+        num = {id(r): n for n, r in enumerate(rules, start=1)}
+        fixed = [f"{num[id(r)]}. {r['rule']}" for r in rules if r not in soft]
         lines = ["# Rule tiers"]
         if fixed:
             lines += ["Never loosened (what the item is, where it is, how to reach it): an item that breaks one is "
                       "dropped; one that doesn't show it is maybe:"] + [f"- {r}" for r in fixed]
         lines += ["May be met by a looser reading:"]
-        lines += [f"- {r['rule']} — looser: {looser_of(r)}" for r in soft]
+        lines += [f"- {num[id(r)]}. {r['rule']} — looser: {looser_of(r)}" for r in soft]
         lines += ['Verdict "loose": the item meets every never-loosened rule, and each other rule it doesn\'t meet as '
                   'written it meets by its looser reading. Unshown is not broken: a fact what was read simply doesn\'t '
                   'show, with nothing read saying the item breaks the rule, is met by "not shown". An item shown to '
-                  'break a rule is still dropped. Name the rules met loosely in "loosened": ["<rule>", ...]; a column '
+                  'break a rule is still dropped. Name the rules met loosely in "loosened", by their numbers; a column '
                   'the looser reading gives no value for stays empty. "keep" only when every rule is met as written.']
         return "\n".join(lines) + "\n\n"
 
     def _named(self, named: Any) -> list[dict[str, Any]]:
-        said = [" ".join(str(x).split()).lower() for x in named or [] if str(x).strip()] \
-            if isinstance(named, list) else []
-        return [r for r in self.recipe.get("rules") or []
-                if any(x and (x in r["rule"].lower() or r["rule"].lower() in x) for x in said)]
+        """The rules a judging answer names: by number (1, "3", "R2", "rule 4"), else by
+        words that are part of the rule or hold it."""
+        rules = self.recipe.get("rules") or []
+        if not isinstance(named, list):
+            named = [named] if isinstance(named, (int, str)) and str(named).strip() else []
+        out: list[dict[str, Any]] = []
+        for x in named:
+            m = re.fullmatch(r"\s*(?:r|rule|pravilo|#)?\s*\.?\s*(\d{1,3})\s*\.?\s*", str(x), re.I) \
+                if not isinstance(x, bool) else None
+            if m and 1 <= int(m.group(1)) <= len(rules):
+                hit = [rules[int(m.group(1)) - 1]]
+            else:
+                said = " ".join(str(x).split()).lower()
+                hit = [r for r in rules if said and (said in r["rule"].lower() or r["rule"].lower() in said)]
+            out += [r for r in hit if r not in out]
+        return out
 
     def _unbacked_drop(self, v: dict, item: dict) -> bool:
         """A drop that shows no fact: every rule it says is broken may go unshown, and the
