@@ -2259,3 +2259,45 @@ async def test_a_stopped_run_still_writes_what_it_found(deck, monkeypatch):
     await driver._stop(run["id"], "cancelled", 1)
     assert calls == ["by its owner"]
     assert any(e["message"] == "written" for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note")
+
+
+async def test_a_rules_own_alternative_is_applied_by_code(deck):
+    """Even with the alternative in the rule's words and the judging prompt told how to
+    use it, the judging call (Sonnet, Haiku) still answered maybe for "no rating read":
+    code applies the charter's own alternative, as it applies a looser reading."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv",
+                                                     "columns": ["Naziv", "Ocjena", "Telefon"], "min_rows": 3}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_rulealt01")
+    (folder / "extra" / "r.csv").write_text("Naziv,Ocjena,Telefon\nKonoba A,,01 555 0101\nKonoba B,,\nKonoba C,,01 555 0303\n")
+    rating, phone = "Ocjena 4 ili viša", "Ima telefon na vlastitoj stranici"
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "sources": [{"kind": "file", "path": "extra/r.csv"}],
+                      "decide": "Restorani.", "shortage_ok": True,
+                      "rules": [{"rule": rating, "kind": "must", "fact": "measured", "columns": ["Ocjena"],
+                                 "if_not_shown": "procijenjeno da je dobar"},
+                                {"rule": phone, "kind": "must", "fact": "contact", "columns": ["Telefon"]}]}
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            row = {"Naziv": f["Naziv"], "Telefon": f["Telefon"]}
+            if f["Naziv"] == "Konoba A":  # only the rating not found
+                out.append({"id": i, "verdict": "maybe", "missing": [rating], "reason": "Nema ocjene.", "row": row})
+            elif f["Naziv"] == "Konoba B":  # the phone too: still nearly there
+                out.append({"id": i, "verdict": "maybe", "missing": [rating, phone], "reason": "Nema ni telefona.",
+                            "row": row})
+            else:  # a drop that shows nothing
+                out.append({"id": i, "verdict": "drop", "broken": [rating], "shown": "", "reason": "Nema ocjene.",
+                            "row": row})
+        return out
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    recipe = funnel.load_recipe(folder)
+    assert recipe["rules"][0]["if_not_shown"] == "procijenjeno da je dobar"
+    assert "if its fact isn't found: procijenjeno da je dobar" in (folder / "shared" / "conventions.md").read_text()
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["Konoba A"][0] == "kept" and "met by the charter's own words for a fact not found" in got["Konoba A"][1]
+    assert got["Konoba B"][0] == "maybe"
+    assert got["Konoba C"][0] == "kept"  # not shown is not broken, and the charter says how to take it
+    assert "procijenjeno da je dobar" in got["Konoba C"][1]

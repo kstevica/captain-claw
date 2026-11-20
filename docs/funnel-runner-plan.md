@@ -696,6 +696,15 @@ summary, which says the run was stopped and what it had found by then. Rows the
 finishing step added aren't taken (their pages unread). Continuing the run writes
 them all again at its merge.
 
+The next run (on Sonnet and Haiku, the goal now agreeing with the charter) still had
+its judging call answer "maybe" for "no rating read", though the rule's words and the
+prompt both gave the charter's alternative. So code applies it now: the setup puts
+the charter's own words for a fact not found into the rule's `if_not_shown`, and a
+maybe whose missing facts are all for such rules is kept, its reason naming the
+alternative, whether or not rules may be read loosely (a drop that shows nothing
+becomes that maybe first). A maybe that also lacks a fact with no alternative (a
+phone) stays nearly there. The conventions show each rule's alternative.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
