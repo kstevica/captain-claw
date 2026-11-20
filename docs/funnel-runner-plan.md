@@ -795,6 +795,13 @@ pages of the same site its links lead to whose address or label carries a word o
 the recipe's paths (never another site, never an anchor on the same page); the paths
 are guessed only when the page couldn't be read or shows no links at all.
 
+With the footer read, a restaurant was then dropped in its country's group as
+"Dalmatian, not one of the three kitchens": a region's own style wasn't taken as its
+country's kind. Now the judging call is told a narrower or regional kind of a group
+is that group (a region's style of a country's kind, a specialty within a field); and
+a drop for its kind whose typed group, or Jev's sure pick, is the step's own group is
+nearly there, saying so, not dropped.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
