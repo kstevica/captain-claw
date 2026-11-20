@@ -79,7 +79,9 @@ DECIDE_TOKENS = 8192
 # nothing more): with it on, Qwen thought 160k characters on the setup call, looped,
 # and never answered, twice. A small limit also keeps a loop from running for minutes
 # on the tier's whole output.
-OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500, "owner": 3000}
+OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500, "owner": 3000, "look": 300}
+LOOK_STEPS = 4              # what one look into a nearly-there item may do (config funnel_look_steps)
+LOOK_MAX = 60               # items looked into per step (config funnel_look_max)
 DECIDE_PER_ITEM = 600       # more room for a judging call with several short rows
 THINKING_TOKENS = 16_000    # a judging call's room when the run turns thinking on
 LINKS_AS_ITEMS = 5          # a links file with fewer links is reference, not a list to go through
@@ -1108,8 +1110,16 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
             (folder / RECIPE).write_text(json.dumps(recipe, indent=1, ensure_ascii=False), encoding="utf-8")
             (folder / "shared" / "conventions.md").write_text(conventions(recipe), encoding="utf-8")
             return recipe, f"replayed from a recording (`{TAPE_IN}`): its recipe, searches and pages, not the web"
+    from captain_claw.flight_deck import first_mate_recipe
+    kept, how = await asyncio.to_thread(first_mate_recipe.for_run, run, folder)
+    if kept and kept.get("sources") and kept.get("columns"):  # one recipe per charter, not per run
+        (folder / STATE).mkdir(parents=True, exist_ok=True)
+        (folder / RECIPE).write_text(json.dumps(kept, indent=1, ensure_ascii=False), encoding="utf-8")
+        (folder / "shared" / "conventions.md").write_text(conventions(kept), encoding="utf-8")
+        return kept, how
     recipe: dict[str, Any] | None = None
     why = ""
+    built = False  # a model wrote it (not a fallback): worth pinning for the factory's later runs
     try:
         tiers, _ = await _load_owner_tiers(get_db(), run["owner_id"])
         creds = bat_routes._creds_for(tiers)
@@ -1138,6 +1148,7 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
                     recipe = normalize_recipe(raw, base)
                     if recipe["sources"]:
                         why = ""  # an earlier try's trouble is past
+                        built = True
                         break
                     why = "its recipe named no source to take items from"
                 else:
@@ -1164,6 +1175,8 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
     (folder / STATE).mkdir(parents=True, exist_ok=True)
     (folder / RECIPE).write_text(json.dumps(recipe, indent=1, ensure_ascii=False), encoding="utf-8")
     (folder / "shared" / "conventions.md").write_text(conventions(recipe), encoding="utf-8")
+    if built and recipe["sources"] and await asyncio.to_thread(first_mate_recipe.pin_for_run, run, recipe):
+        why = (why + "; " if why else "") + "pinned as the factory's recipe: its later runs follow it"
     return recipe, why
 
 
@@ -1653,6 +1666,15 @@ rule that never loosens needs wasn't in what was read, or nothing read came from
 a rule; name it in "broken" and copy into "shown" the words read that break it (a number, a date, a place), and
 fill the row with what was shown. Not finding a fact is never "shown".''')
 
+LOOK_SYSTEM = """An item nearly fits a list, but something the list needs wasn't in what was read about it.
+Find it. Choose ONE next step and reply ONLY with JSON:
+{"do": "fetch", "url": "<a page likely to show it: the item's own contact, about or detail page, a link seen>"}
+{"do": "search", "query": "<a short search that would find it>"}
+{"do": "read", "path": "<one of the owner's files>", "find": "<words to look for in it, or empty for its start>"}
+{"do": "stop"}
+Use only the kinds of step you are told you may. Prefer a link already seen over a guessed address. Stop when what
+is lacking was found in what you did so far, or when it isn't likely to be found."""
+
 # The same when nothing is read loosely (every rule kept as written): no loose verdict,
 # but a drop still names the rule and the words read that break it, so code can tell a
 # rule broken from a fact not found (that one is nearly there, never dropped).
@@ -1694,6 +1716,11 @@ class Work:
         self.seen: set[str] = set()
         self.same = SameItems(recipe, self.skip_sites)
         self.jev_off = False  # the owner has no Jev connected: don't ask again this step
+        self.again: list[dict] = []  # items to judge once more: left unanswered, or just looked into
+        self.look = look_on(run)
+        self.look_steps = _int(self.cfg.get("funnel_look_steps"), 1, 12, LOOK_STEPS)
+        self.look_max = _int(self.cfg.get("funnel_look_max"), 0, 10_000, LOOK_MAX)
+        self.looks = 0
         self.site_hosts: dict[str, set[str]] = {}  # host → the pages items' sites are on it (several: a directory)  # rows on the list or waiting, by their own site
         for r in _read_csv(folder / ROWS) + _read_csv(folder / LOOSE):
             self.same.add(r)
@@ -2325,7 +2352,7 @@ class Work:
             if i in verdicts and isinstance(verdicts[i].get("row"), dict):
                 self._fill_from_facts(verdicts[i]["row"], it)
         await self._fill_owner_columns(verdicts, batch)
-        again: list[dict] = []
+        again = self.again
         for i, it in enumerate(batch, start=1):
             v = verdicts.get(i)
             if v is None:
@@ -2345,6 +2372,13 @@ class Work:
                 v = {**v, "missing": list(v.get("missing") or []) + list(v.get("broken") or [])}
                 verdict = "maybe"
             loosened = []
+            if verdict in ("maybe", "loose") and not it.get("looked"):
+                # what it lacks is looked for first: a fact found beats a looser reading or an
+                # alternative for a fact not found
+                lacking = self._named(v.get("missing")) + self._named(v.get("loosened"))
+                if await self._go_look(it, reason, lacking):
+                    self.again.append(it)
+                    continue
             if verdict == "maybe":
                 met, rest = self._alternatives(v)
                 has_row = isinstance(v.get("row"), dict) and any(str(x).strip() for x in v["row"].values())
@@ -2474,15 +2508,19 @@ class Work:
                                        self._named(v.get("missing")))
                     continue
                 await self.record(it, "dropped", reason or "breaks a rule")
-        if again:  # judged again now, in a call of their own
-            self.pending = again + self.pending
+        if self.again:  # judged again now, in a call of their own (left unanswered, or looked into)
+            self.again, self.pending = [], self.again + self.pending
             await self.flush()
 
     async def _nearly(self, it: dict, got: dict, group: str, reason: str,
                       missing: list[dict[str, Any]] | None = None) -> None:
-        """An item that seems to fit but lacks something: a maybe, with the cells found
-        so far (a value that isn't in what was read isn't passed on) and the rules the
-        judging call named as not shown."""
+        """An item that seems to fit but lacks something. First it is looked into (once:
+        :meth:`_go_look`) and judged again on what that found; still lacking, it is a
+        maybe, with the cells found so far (a value that isn't in what was read isn't
+        passed on) and the rules the judging call named as not shown."""
+        if await self._go_look(it, reason, missing or []):
+            self.again.append(it)
+            return
         await self.record(it, "maybe", reason, group=group)
         name = it["fields"].get("name") or next(iter(it["fields"].values()), "")
         cells = {c: " ".join(str((got or {}).get(c) or "").split()) for c in self.recipe["columns"]}
@@ -2499,6 +2537,126 @@ class Work:
                      "why": reason, "sources": " ".join(e["source"] for e in it.get("evidence") or []),
                      "row": json.dumps({c: x for c, x in cells.items() if x}, ensure_ascii=False),
                      "missing": "; ".join(dict.fromkeys(r["rule"] for r in missing or []))})
+
+    def _look_files(self) -> list[str]:
+        """The owner's files a look may read: what the run was given, but the record of
+        earlier runs and a recording."""
+        extra = self.folder / "extra"
+        if not extra.is_dir():
+            return []
+        return [f"extra/{p.name}" for p in sorted(extra.iterdir())
+                if p.is_file() and not p.name.startswith(".") and p.name != LEDGER_FILE
+                and p.suffix.lower() in fx.TABLE_EXTS + fx.DOC_EXTS][:30]
+
+    def _file_text(self, rel: str, find: str = "") -> str:
+        """A file of the run's as text; with ``find``, only its lines that carry one of
+        those words (and the one after each), so a long file gives up the part asked for."""
+        path = self.folder / rel
+        if path.suffix.lower() in fx.TABLE_EXTS:
+            cols, rows = fx.read_table(path, limit=2000)
+            lines = [", ".join(cols)] + [", ".join(f"{k}: {v}" for k, v in r.items() if v) for r in rows]
+        else:
+            # by line, and by sentence where a reader gives the text as one run
+            lines = [x for x in re.split(r"\n+|(?<=[.!?])\s+", fx.read_document(path)) if x.strip()]
+        words = [w for w in re.findall(r"[^\W_]{3,}", _fold(find))]
+        if words:
+            keep: list[str] = []
+            for i, line in enumerate(lines):
+                if any(w in _fold(line) for w in words):
+                    keep += lines[i:i + 2]
+            lines = list(dict.fromkeys(keep))
+        return "\n".join(lines)[:FETCH_CHARS]
+
+    async def _go_look(self, it: dict, reason: str, missing: list[dict[str, Any]]) -> bool:
+        """Look for what a nearly-there item lacks, as a person would: a few steps, each
+        one page to read, one search, or one of the owner's files, chosen by the model
+        from what it has seen so far. What it reads joins the item's evidence, so every
+        value is still checked against what was read. True when it read something new
+        (the item is judged again). Once per item, while its group is short, within the
+        step's number of looks; never for a run with nothing to look in."""
+        if not self.look or it.get("looked") or self.full() or self.stopped or self.looks >= self.look_max:
+            return False
+        web = bool(self.recipe.get("gather")) or any(s["kind"] in ("search", "page", "links") for s in self.recipe["sources"])
+        files = self._look_files()
+        if not web and not files:
+            return False
+        it["looked"] = True
+        self.looks += 1
+        evidence = it.setdefault("evidence", [])
+        read = {e["source"] for e in evidence}
+        name = self._name_of(it)
+        log_lines: list[str] = []
+        new = 0
+        for _ in range(self.look_steps):
+            seen = [u for e in evidence for u in fx.links(e.get("text", ""))][:40]
+            user = (f"# The list\n{self.recipe['decide'] or self.recipe['item']}\n\n"
+                    f"# The item\n{name}\nfields: {json.dumps(it['fields'], ensure_ascii=False)[:800]}\n\n"
+                    "# What it still lacks\n" + ("\n".join(f"- {r['rule']}" for r in missing) or "- (see the reason)")
+                    + f"\nreason: {reason}\n\n"
+                    "# Already read\n" + ("\n".join(f"- {x}" for x in sorted(read)) or "- nothing") + "\n\n"
+                    + ("# Links seen on what was read\n" + "\n".join(f"- {u}" for u in dict.fromkeys(seen)) + "\n\n"
+                       if seen and web else "")
+                    + ("# The owner's files\n" + "\n".join(f"- {f}" for f in files) + "\n\n" if files else "")
+                    + ("# What you did so far\n" + "\n".join(log_lines) + "\n\n" if log_lines else "")
+                    + "You may: " + ", ".join((["fetch a page", "search the web"] if web else [])
+                                              + (["read one of the owner's files"] if files else [])) + ", or stop.")
+            try:
+                got = await self._ask("look", LOOK_SYSTEM, user)
+            except Exception as e:  # noqa: BLE001 — the item stays as it was
+                log.warning("funnel look call failed", run_id=self.run["id"], error=str(e))
+                break
+            do = str((got or {}).get("do") or "").lower() if isinstance(got, dict) else ""
+            if do == "fetch" and web:
+                url = str(got.get("url") or "").strip()
+                if not url.startswith(("http://", "https://")) or url in read:
+                    log_lines.append(f"- fetch {url}: not a new page")
+                    continue
+                ok, text = await (await self._tools()).fetch(url)
+                await self._event("web_fetch", f"url={url} (looking into {name})")
+                read.add(url)
+                if ok and text.strip():
+                    evidence.append({"source": url, "text": text[:FETCH_CHARS]})
+                    new += 1
+                log_lines.append(f"- fetched {url}: " + (page_excerpt(text, 600) if ok and text.strip() else "nothing there"))
+            elif do == "search" and web:
+                q = " ".join(str(got.get("query") or "").split())[:200]
+                if not q or self.queries["searches"] >= self.budget:
+                    break
+                ok, text = await (await self._tools()).search(q, 5)
+                self.queries["searches"] += 1
+                self._save_queries()
+                await self._event("web_search", f"query={q} (looking into {name})")
+                words = name_words(name)
+                hits = [r for r in fx.search_results(text) if r["url"] not in read] if ok else []
+                for r in hits:
+                    evidence.append({"source": r["url"], "text": r["text"], "own": names_item(words, r["url"], r["title"])})
+                    read.add(r["url"])
+                new += len(hits)
+                log_lines.append(f"- searched \"{q}\": " + ("; ".join(f"{r['title'][:60]} ({r['url']})" for r in hits[:5])
+                                                             or "nothing new"))
+            elif do == "read" and files:
+                rel = str(got.get("path") or "").strip()
+                find = " ".join(str(got.get("find") or "").split())[:120]
+                key = f"{rel}#{find}" if find else rel
+                if rel not in files or key in read:
+                    log_lines.append(f"- read {rel}: not a file to read, or read already")
+                    continue
+                try:
+                    text = await asyncio.to_thread(self._file_text, rel, find)
+                except Exception as e:  # noqa: BLE001 — an unreadable file is nothing found
+                    text = ""
+                    log.debug("funnel look: couldn't read a file", path=rel, error=str(e))
+                read.add(key)
+                await self._event("read", f"path={rel}" + (f" find={find}" if find else "") + f" (looking into {name})")
+                if text.strip():
+                    evidence.append({"source": key, "text": text})
+                    new += 1
+                log_lines.append(f"- read {key}: " + (page_excerpt(text, 600) if text.strip() else "nothing there"))
+            else:
+                break
+        if new:
+            it["found"] = self.facts(it, evidence)
+        return bool(new)
 
     def _fill_from_facts(self, row: dict, item: dict) -> None:
         """Cells a judging call left empty that code found on the item's own pages: its
@@ -3397,6 +3555,12 @@ def write_counts(folder: Path, recipe: dict[str, Any]) -> dict[str, Any]:
 
 # ── finishing what's short (an agent step) ─────────────────────────────
 
+def look_on(run: dict) -> bool:
+    """Whether a nearly-there item is looked into as it comes up (``config.funnel_look``:
+    on by default, ``off`` for the old way: a finishing agent step at the end)."""
+    return str((run.get("config") or {}).get("funnel_look") or "on").lower() != "off"
+
+
 def leftovers_on(run: dict) -> bool:
     """Whether a group still short gets a finishing agent step (``config.funnel_leftovers``
     ``agent``, the default, or ``none``)."""
@@ -3425,6 +3589,8 @@ def prepare_finish(run: dict, step: dict) -> dict:
     recipe = load_recipe(folder)
     if recipe is None:
         return done("Nothing to finish: the funnel's recipe is missing.")
+    if look_on(run):
+        return done("Nothing to finish: each item that came close was looked into as it came up.")
     if not leftovers_on(run):
         return done("Nothing to finish: the run's settings leave a short group as it is.")
     short = shortfall(folder, recipe)

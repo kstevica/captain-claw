@@ -509,6 +509,45 @@ async def forget_factory_checked(factory_id: str, user: dict = Depends(allowed_u
     return first_mate_ledger.counts(factory_id)
 
 
+# ── its pinned recipe (first_mate_recipe) ──────────────────────────────
+
+def _recipe_version(factory_id: str) -> dict[str, Any] | None:
+    store = fms.get_store()
+    return store.live(factory_id) or (store.versions(factory_id) or [None])[0]
+
+
+@router.get("/fd/first-mate/factories/{factory_id}/recipe")
+async def factory_recipe(factory_id: str, user: dict = Depends(allowed_user)):
+    """The recipe a list factory's runs follow, as built or edited."""
+    from captain_claw.flight_deck import first_mate_recipe
+    _mine(factory_id, user)
+    return first_mate_recipe.view(factory_id, _recipe_version(factory_id))
+
+
+@router.put("/fd/first-mate/factories/{factory_id}/recipe")
+async def edit_factory_recipe(factory_id: str, body: dict, user: dict = Depends(allowed_user)):
+    """A hand edit: rules, the columns a row must fill, filters."""
+    from captain_claw.flight_deck import first_mate_recipe
+    _mine(factory_id, user)
+    version = _recipe_version(factory_id)
+    try:
+        first_mate_recipe.edit(factory_id, version, body if isinstance(body, dict) else {})
+    except fms.FirstMateError as e:
+        raise HTTPException(400, str(e)) from None
+    fms.get_store().note_event(factory_id, "owner", "recipe_edited", {})
+    return first_mate_recipe.view(factory_id, version)
+
+
+@router.delete("/fd/first-mate/factories/{factory_id}/recipe")
+async def forget_factory_recipe(factory_id: str, user: dict = Depends(allowed_user)):
+    """Forget the pinned recipe: the next run builds a new one."""
+    from captain_claw.flight_deck import first_mate_recipe
+    _mine(factory_id, user)
+    if first_mate_recipe.forget(factory_id):
+        fms.get_store().note_event(factory_id, "owner", "recipe_forgotten", {})
+    return first_mate_recipe.view(factory_id, _recipe_version(factory_id))
+
+
 def _own_run(run_id: str, user: dict) -> dict[str, Any]:
     run = fms.get_store().get_run(run_id)
     if run is None or run["owner_id"] != _uid(user):

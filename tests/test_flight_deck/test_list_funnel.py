@@ -160,6 +160,10 @@ async def deck(tmp_path, monkeypatch):
                 state["asked"].append(f"decide:{len(items)}")
                 state.setdefault("decide_prompts", []).append(user)
                 return _Reply(json.dumps(state["decide"](items)))
+            if system.startswith("An item nearly fits a list"):
+                state["asked"].append("look")
+                state.setdefault("look_prompts", []).append(user)
+                return _Reply(json.dumps(state.get("look", lambda u: {"do": "stop"})(user)))
             if system.startswith("Fill the owner's columns"):
                 state["asked"].append("owner")
                 return _Reply(json.dumps(state["owner"](user)))
@@ -197,7 +201,7 @@ async def deck(tmp_path, monkeypatch):
 
 async def _run(store, contract, cfg=None, rid="bat_funnel0001"):
     await store.create_run(run_id=rid, owner_id="u1", title="t", task="Build the list.", status="planning",
-                           config={"engine": "funnel", "contract": contract, **(cfg or {})})
+                           config={"engine": "funnel", "contract": contract, "funnel_look": "off", **(cfg or {})})
     run = await store.get_run(rid)
     folder = bat_routes._run_folder(run)
     (folder / "extra").mkdir(parents=True, exist_ok=True)
@@ -2736,3 +2740,82 @@ async def test_a_recorded_run_replays_as_a_test_set(deck, monkeypatch, tmp_path)
     (tmp_path / "strict.csv").write_text("name,verdict\nA,drop\nB,keep\nC,keep\n")
     bad = funnel_eval.score(folder2, tmp_path / "strict.csv")
     assert bad["wrong_keeps"] == ["A"] and bad["missed_keeps"] == ["B"] and bad["not_looked_at"] == ["C"]
+
+
+async def test_a_nearly_there_item_is_looked_into(deck):
+    """Most near misses lacked one fact a further page would show, and the judging call
+    could only say "maybe". Now the item is looked into, a few steps the model picks,
+    and judged again on what that found."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "r.csv",
+                                                     "columns": ["Name", "Web", "Phone"], "min_rows": 2}}]
+    run, folder = await _run(deck["store"], contract, {"funnel_look": "on", "funnel_loosen": "never"}, rid="bat_golook01")
+    phone = "a phone on its own site"
+    deck["recipe"] = {"item": "thing", "key": "Name", "site_column": "Web", "decide": "Things with a phone.",
+                      "sources": [{"kind": "search", "group": "", "queries": ["things"]}],
+                      "gather": [{"kind": "fetch", "url": "{Web}", "paths": [""]}],
+                      "rules": [{"rule": phone, "kind": "must", "fact": "contact", "columns": ["Phone"]}],
+                      "checks": [{"column": "Phone", "op": "in_evidence", "source_column": "Web"}]}
+    deck["extract"] = lambda user: {"items": [{"name": n, "url": f"https://{n.lower()}.example", "fields": {"Name": n}}
+                                              for n in ("Alpha", "Beta")]}
+    deck["tools"] = _Tools(pages={"https://alpha.example": "Alpha. Find us (https://alpha.example/find-us)",
+                                  "https://alpha.example/find-us": "Call 01 555 0707",
+                                  "https://beta.example": "Beta. Nothing more."},
+                           results={"things": "list results"})
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            shown = "01 555 0707" in deck["decide_prompts"][-1] and f["Name"] == "Alpha"
+            out.append({"id": i, "verdict": "keep" if shown else "maybe", "missing": [] if shown else [1],
+                        "reason": "" if shown else "No phone read.",
+                        "row": {"Name": f["Name"], "Web": f["Web"], "Phone": "01 555 0707" if shown else ""}})
+        return out
+
+    def look(user):
+        if "alpha.example/find-us" in user.split("# Already read")[1].split("#")[0]:
+            return {"do": "stop"}
+        if "https://alpha.example/find-us" in user:
+            return {"do": "fetch", "url": "https://alpha.example/find-us"}
+        return {"do": "stop"}
+
+    deck["decide"], deck["look"] = decide, look
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got == {"Alpha": "kept", "Beta": "maybe"}  # Alpha: found by looking; Beta: looked into, nothing there
+    assert funnel._read_csv(folder / funnel.ROWS)[0]["Phone"] == "01 555 0707"
+    assert "- a phone on its own site" in deck["look_prompts"][0] and "Links seen on what was read" in deck["look_prompts"][0]
+    assert deck["asked"].count("look") == 3  # Alpha: fetch, then stop; Beta: stop. Each item once.
+    # no finishing agent for a run that looks as it goes
+    fresh = await deck["store"].get_run(run["id"])
+    assert funnel.prepare_finish(fresh, steps[1])["result"]["output"].startswith("Nothing to finish: each item that came close")
+
+
+async def test_a_look_reads_the_owners_files_when_the_run_has_no_web(deck):
+    """The same loop for a list built from files: a fact missing from an item's row is
+    looked for in the other files the run was given, and no web agent is started."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "labs.csv",
+                                                     "columns": ["Lab", "Founded"], "min_rows": 2}}]
+    run, folder = await _run(deck["store"], contract, {"funnel_look": "on", "funnel_loosen": "never"}, rid="bat_golook02")
+    (folder / "extra" / "labs.csv").write_text("Lab\nBeta Lab\n")
+    (folder / "extra" / "founding.csv").write_text("Lab,Year\nAlpha Lab,2001\nBeta Lab,2019\n")
+    deck["recipe"] = {"item": "lab", "key": "Lab", "decide": "Labs with their founding year.",
+                      "sources": [{"kind": "file", "path": "extra/labs.csv"}],
+                      "rules": [{"rule": "its founding year is known", "kind": "must", "fact": "measured",
+                                 "columns": ["Founded"]}],
+                      "checks": [{"column": "Founded", "op": "in_evidence"}]}
+
+    def decide(items):
+        shown = "Year: 2019" in deck["decide_prompts"][-1]
+        return [{"id": i, "verdict": "keep" if shown else "maybe", "missing": [] if shown else [1],
+                 "reason": "" if shown else "No founding year.",
+                 "row": {"Lab": f["Lab"], "Founded": "2019" if shown else ""}} for i, f in items]
+
+    deck["decide"] = decide
+    deck["look"] = lambda user: ({"do": "stop"} if "founding.csv#" in user.split("# Already read")[1].split("# The owner")[0]
+                                 else {"do": "read", "path": "extra/founding.csv", "find": "Beta"})
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])  # deck["tools"] is None: a web agent would fail the test
+    assert funnel._read_csv(folder / funnel.ROWS)[0]["Founded"] == "2019"
+    assert "- extra/founding.csv" in deck["look_prompts"][0] and "search the web" not in deck["look_prompts"][0]
+    assert "Year: 2019" in deck["decide_prompts"][-1] and "2001" not in deck["decide_prompts"][-1]  # the lines asked for
