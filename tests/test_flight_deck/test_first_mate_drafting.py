@@ -97,10 +97,11 @@ class Model:
     """Stands in for the owner's model: answers in turn from ``answers``."""
 
     def __init__(self, monkeypatch, *answers):
-        self.answers, self.asked, self.budgets = list(answers), [], []
+        self.answers, self.asked, self.budgets, self.systems = list(answers), [], [], []
 
         async def ask(owner, system, user, max_tokens=drafting.DRAFT_TOKENS):
             self.asked.append(user)
+            self.systems.append(system)
             self.budgets.append(max_tokens)
             got = self.answers.pop(0) if self.answers else ""
             if isinstance(got, Exception):
@@ -139,7 +140,7 @@ async def test_a_draft_waits_with_its_card(store, db, monkeypatch):
     made = await drafting.draft(store, BOB, "Draft replies to clients asking about invoices, every weekday.")
     assert made["state"] == "awaiting_charter" and made["version"] == 0 and made["cases"] == 1
     d = made["draft"]
-    assert d["status"] == "awaiting" and d["created_by"] == "first_mate" and d["note"] == "Drafted from your words"
+    assert d["status"] == "awaiting" and d["created_by"] == "first_mate" and d["note"] == "Drafted from your words, rewritten as a charter"
     assert "invoices" in model.asked[0]
     [case] = cases.cases(store, made["id"])
     assert case["sealed"] and case["origin"] == "first_mate"
@@ -266,3 +267,26 @@ async def test_a_cut_off_answer_gets_more_room(store, db, monkeypatch):
     with pytest.raises(FirstMateError, match="came back empty"):
         await drafting.draft(store, BOB, "Reply to invoice questions from clients, as drafts for me to send.")
     assert drafting.DRAFT_TOKENS >= 12_000 and "Keep your thinking short" in drafting.SYSTEM
+
+
+async def test_a_task_is_rewritten_as_a_charter_unless_switched_off(store, db, monkeypatch):
+    """A task as its owner wrote it ("find about 500 leads in two countries") left the
+    runs to guess its groups, its columns and where a fact must come from. The draft
+    now rewrites it as a full charter; switched off, their words are the charter."""
+    words = "Find about 500 companies and people in two countries who would use my product. Name, email, reason."
+    full = "Find about 500 leads, in four groups of 125. Columns: Name, Email, Reason. An email comes from its own site."
+    model = Model(monkeypatch, {**ANSWER, "charter": full, "is_list": True})
+    made = await drafting.draft(store, BOB, words)
+    assert made["draft"]["charter"] == full and made["draft"]["runner"] == "funnel"  # a list runs as a list
+    asked = model.systems[0]
+    for said in ("groups with an amount for each", "The columns, named, in order", "where it must come from",
+                 "when a fact isn't found", "do not relax a rule to fill it", "keep the link"):
+        assert said in asked
+    assert "exactly as they wrote them" not in asked
+
+    model = Model(monkeypatch, {**ANSWER, "charter": "Something the model made up instead.", "is_list": False})
+    made = await drafting.draft(store, BOB, words, rephrase=False)
+    assert made["draft"]["charter"] == words and made["draft"]["runner"] == "bat"  # theirs, whatever came back
+    assert made["draft"]["note"] == "Drafted from your words, the charter as written"
+    assert "exactly as they wrote them" in model.systems[0] and "groups with an amount" not in model.systems[0]
+    assert made["draft"]["checks"]["contract"] == ANSWER["done_when"]  # the rest is still drafted

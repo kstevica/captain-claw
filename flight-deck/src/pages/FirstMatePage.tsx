@@ -153,10 +153,10 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
     || f.last_run?.waiting), [factories])
 
   const [draftError, setDraftError] = useState<string | null>(null)
-  const describe = async (words: string, goalId: string) => {
+  const describe = async (words: string, goalId: string, rephrase: boolean) => {
     setBusy('draft'); setDraftError(null)
     try {
-      const f = await draftFactory(goalId ? { words, goal_id: goalId } : { words })
+      const f = await draftFactory(goalId ? { words, goal_id: goalId, rephrase } : { words, rephrase })
       setPicking(false)
       setNotice(`Drafted “${f.title}”. Look it over and approve it.`)
       await load()
@@ -277,7 +277,7 @@ export function FirstMatePage({ onClose }: { onClose?: () => void }) {
                 ) : undefined}>
                 {picking && (
                   <NewFactory busy={busy === 'create'} drafting={busy === 'draft'} draftError={draftError}
-                    onCreate={(b) => void create(b)} onDescribe={(w, g) => void describe(w, g)}
+                    onCreate={(b) => void create(b)} onDescribe={(w, g, r) => void describe(w, g, r)}
                     onCancel={() => { setPicking(false); setDraftError(null) }} />
                 )}
                 {factories.length === 0 && !picking ? (
@@ -790,7 +790,7 @@ function NewFactory({ busy, drafting, draftError, onCreate, onDescribe, onCancel
   drafting: boolean
   draftError: string | null
   onCreate: (body: { template?: string; title?: string; charter?: string }) => void
-  onDescribe: (words: string, goalId: string) => void
+  onDescribe: (words: string, goalId: string, rephrase: boolean) => void
   onCancel: () => void
 }) {
   const [templates, setTemplates] = useState<Template[] | null>(null)
@@ -799,6 +799,14 @@ function NewFactory({ busy, drafting, draftError, onCreate, onDescribe, onCancel
   const [charter, setCharter] = useState('')
   const [words, setWords] = useState('')
   const [goalId, setGoalId] = useState('')
+  // rewritten as a full charter unless they turned it off (remembered in this browser)
+  const [rephrase, setRephrase] = useState(() => {
+    try { return localStorage.getItem('fm-rephrase') !== 'off' } catch { return true }
+  })
+  const pickRephrase = (on: boolean) => {
+    setRephrase(on)
+    try { localStorage.setItem('fm-rephrase', on ? 'on' : 'off') } catch { /* this visit only */ }
+  }
   const [goals, setGoals] = useState<{ id: string; title: string }[]>([])
   useEffect(() => { void getTemplates().then(setTemplates).catch(() => setTemplates([])) }, [])
   useEffect(() => {
@@ -826,7 +834,7 @@ function NewFactory({ busy, drafting, draftError, onCreate, onDescribe, onCancel
         </button>
       </div>
       <form className="space-y-2.5 rounded-xl border border-violet-500/30 bg-[var(--fd-accent-soft)] p-3.5"
-        onSubmit={(e) => { e.preventDefault(); if (words.trim().length >= 8 || goalId) onDescribe(words.trim(), goalId) }}>
+        onSubmit={(e) => { e.preventDefault(); if (words.trim().length >= 8 || goalId) onDescribe(words.trim(), goalId, rephrase) }}>
         <label htmlFor="fm-describe" className="block text-sm font-medium text-zinc-100">Describe it</label>
         <textarea id="fm-describe" className={`${input} resize-y leading-relaxed`} rows={3} value={words}
           onChange={(e) => setWords(e.target.value)} disabled={drafting}
@@ -848,9 +856,22 @@ function NewFactory({ busy, drafting, draftError, onCreate, onDescribe, onCancel
             {drafting ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Drafting…</> : 'Draft it'}
           </button>
         </div>
+        <div className="flex items-start gap-2.5">
+          <button type="button" role="switch" aria-checked={rephrase} aria-label="Rewrite it as a full charter"
+            onClick={() => pickRephrase(!rephrase)} disabled={drafting}
+            className={`mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${rephrase ? 'bg-violet-600' : 'bg-zinc-700'}`}>
+            <span className={`h-4 w-4 rounded-full bg-white transition-transform ${rephrase ? 'translate-x-4' : ''}`} />
+          </button>
+          <p className="text-[11px] leading-snug text-zinc-400">
+            <span className="font-medium text-zinc-200">Rewrite it as a full charter.</span>{' '}
+            {rephrase
+              ? 'First Mate adds what a run needs to be told: groups with an amount each, the columns, where each fact must come from, what to do when one isn’t found.'
+              : 'Your words become the charter as written. First Mate still drafts the name, the goals and when it starts.'}
+          </p>
+        </div>
         {draftError && <p role="alert" className="text-xs text-red-700 dark:text-red-300">{draftError}</p>}
         <p className="text-[11px] text-zinc-500">
-          First Mate writes the charter, when it starts, what a good run does and a few sealed test cases. You approve it before anything runs.
+          You read the charter and approve it before anything runs.
         </p>
       </form>
       <h4 className="text-xs font-semibold text-zinc-400">Or start from a template</h4>
