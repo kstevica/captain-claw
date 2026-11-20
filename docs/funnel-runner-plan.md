@@ -679,6 +679,15 @@ nearly there, for any rule but what the item is (its kind, an exclusion) and wha
 must never be done. An item shown to break a rule (a 4.3 rating, a hotel's
 restaurant, another town) is still dropped.
 
+The next run's setup did write the charter's alternative into the rule ("rating 4 or
+higher; if no rating, estimated quality judged good enough"), but the judging call
+never used it: 204 near misses cited a rating not found, and no restaurant was kept on
+the judgement the charter asked for. Every judging prompt now says a rule that itself
+says what to do when its fact isn't found is decided that way, keep or drop on that
+judgement with the reason saying so, never maybe for that fact. (The factory's own
+goal still asked for a rating with its source, which pulled the other way: the owner's
+goals and charter should agree.)
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left

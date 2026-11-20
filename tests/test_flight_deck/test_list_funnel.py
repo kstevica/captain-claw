@@ -2212,3 +2212,13 @@ async def test_a_strict_run_drops_only_what_is_shown_to_break_a_rule(deck):
     got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
     assert got == {"Konoba A": "dropped", "Konoba B": "maybe", "Bistro C": "dropped"}
     assert '"missing": ["<rule>"], "broken": ["<rule>"]' in funnel.DECIDE_STRICT and "loose" not in funnel.DECIDE_STRICT
+
+
+def test_a_rule_with_its_own_alternative_is_judged_not_left_nearly_there():
+    """The rule read "rating 4 or higher; if no rating, estimated quality judged good
+    enough", yet 204 restaurants came close for a rating not found and none was kept on
+    the judgement the charter asked for: every judging prompt says how to decide it."""
+    for prompt in (funnel.DECIDE_SYSTEM, funnel.DECIDE_LOOSE, funnel.DECIDE_STRICT):
+        assert "judge the item on what was read and keep or drop it on that" in prompt
+        assert "that fact being missing is never the reason for maybe" in prompt
+    assert '"missing": ["<rule>"]' in funnel.DECIDE_STRICT and '"loosened"' in funnel.DECIDE_LOOSE  # the variants still differ
