@@ -662,6 +662,23 @@ address, so the empty field failed it. Now a filter on a column the listing does
 give lets the item through (not known yet, as "in", "min" and "max" already did); the
 rules and checks see that column once the item is read.
 
+The owner then changed the charter: a rating of 4 or more, and "if there is no rating,
+judge how good it is". The setup made the rating a plain must and dropped that clause
+from its rules and from "decide"; with a short list accepted nothing is read loosely,
+so a restaurant with no rating still couldn't be listed. Now the setup is told that
+an alternative the charter itself gives is part of the rule, written into its words
+and into "decide", and holds even when nothing is loosened; and the judging call is
+told the owner's own words decide wherever a rule leaves out something they say.
+
+In the same strict run the judging call dropped about 8 items for "no rating, contact,
+or own website found". When rules may loosen, a drop names the rule and the words read
+that break it, and code makes a drop that shows nothing a maybe; a strict run used
+the plain answer, so the drop stood. Now a strict run's judging call answers the same
+way (missing, broken, shown; no loose verdict), and a drop that shows nothing is
+nearly there, for any rule but what the item is (its kind, an exclusion) and what
+must never be done. An item shown to break a rule (a 4.3 rating, a hotel's
+restaurant, another town) is still dropped.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
