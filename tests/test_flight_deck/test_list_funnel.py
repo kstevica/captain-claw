@@ -2661,3 +2661,20 @@ async def test_a_narrower_kind_of_a_group_is_that_group(deck, monkeypatch):
     assert got["Konoba D"][0] == "maybe" and "its kind is hrvatska kuhinja after all" in got["Konoba D"][1]  # Jev
     assert got["Konoba E"][0] == "maybe"  # Jev unsure: its own typed group says this group
     assert got["Tvornica F"][0] == "dropped"  # fits none
+
+
+async def test_a_value_that_follows_from_a_fact_may_be_filled_and_reasons_are_whole(deck):
+    """A restaurant came close with every fact read but its district, which its street
+    address gives; and its reason was cut at 200 characters ("... the missing")."""
+    for prompt in (funnel.DECIDE_SYSTEM, funnel.DECIDE_LOOSE, funnel.DECIDE_STRICT):
+        assert "the district a street address is in" in prompt and "nothing else is filled unless it is shown" in prompt
+    run, folder = await _run(deck["store"], PEOPLE, rid="bat_longwhy01")
+    (folder / "extra" / "contacts.csv").write_text("Name,Email,Team\nAna,ana@acme.example,a\n")
+    deck["recipe"] = {"item": "person", "sources": [{"kind": "file", "path": "extra/contacts.csv"}], "decide": "People."}
+    why = "Shown: the team, the email and the role; " + "every fact the rules need is there, " * 8 + "but the start date."
+    deck["decide"] = lambda items: [{"id": i, "verdict": "maybe", "reason": why, "row": {"Name": f["Name"]}}
+                                    for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert 200 < len(why) <= 400
+    assert funnel._read_csv(folder / funnel.ITEMS)[0]["reason"].endswith("but the start date.")

@@ -1498,7 +1498,9 @@ items>"]}}. Only what the text says; no item that is a directory, an article or 
 thinking short."""
 
 DECIDE_SYSTEM = """You judge items for a list, one by one, from what Captain read about each. Use only the facts
-shown; a value you can't support from them stays empty, and a source is a link shown with that fact.
+shown; a value you can't support from them stays empty, and a source is a link shown with that fact. A value that
+follows directly from a fact shown may be filled from it (the district a street address is in, the country of a
+city, the year of a full date); nothing else is filled unless it is shown.
 Reply ONLY with a JSON array, one object per item, in order:
 [{"id": <its id>, "verdict": "keep|maybe|drop", "reason": "<one short line>",
   "row": {"<column>": "<value>"}}]
@@ -2216,7 +2218,7 @@ class Work:
                 await self.record(it, "dropped", "the judging call gave no answer for it, twice")
                 continue
             verdict = str(v.get("verdict") or "").lower()
-            reason = " ".join(str(v.get("reason") or "").split())[:200]
+            reason = " ".join(str(v.get("reason") or "").split())[:400]  # whole: its last words say why
             if verdict == "loose" and not self.loosen:
                 verdict = "maybe"  # no looser reading in this run: it's nearly there
             if verdict == "drop" and self._unbacked_drop(v, it):
