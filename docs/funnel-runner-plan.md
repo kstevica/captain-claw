@@ -758,6 +758,16 @@ that host (a booking site, a guide), or when it points deep inside a host
 own (no phone or email taken from it); two links to one restaurant's own front page
 are still one own site.
 
+That run found its 22 rows in 16 minutes and then spent 3.6M tokens more, on its
+finishing step and a fix round, until its 5M cap stopped it. A done-check Captain runs
+itself wanted Kvart, Ocjena and IzvorOcjene filled in every row: the funnel didn't ask
+for Kvart, and the rows kept on the charter's own alternative (no rating, judged good)
+had no rating by design. Now the funnel takes the columns the run's done-checks want
+filled (`non_empty`) as required, so a row lacking one is nearly there, not on the
+list; but never a column a rule's own alternative lets be empty. And when Captain runs
+the done-checks on a funnel run's list, it doesn't ask those alternative-covered
+columns to be filled. Such a run ends at its merge with a list that passes them.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left

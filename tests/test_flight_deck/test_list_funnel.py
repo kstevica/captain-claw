@@ -2506,3 +2506,34 @@ async def test_a_directory_listing_is_read_alone_and_is_never_the_items_own(deck
     assert "https://konoba-d.example/kontakt" in fetched  # an own site: its pages
     emails = {r["Naziv"]: r["Email"] for r in funnel._read_csv(folder / funnel.ROWS)}
     assert emails["Konoba A"] == "" and emails["Konoba D"] == "stol@konoba-d.example"  # the guide's isn't its own
+
+
+FILLED = [{"id": "fm1", "text": "svaki red ima kvart i ocjenu", "severity": "major", "check": {
+    "type": "table", "path": "r.csv", "columns": ["Naziv", "Kvart", "Ocjena"], "non_empty": ["Naziv", "Kvart", "Ocjena"]}}]
+
+
+async def test_the_done_checks_and_the_charters_alternative_agree(deck):
+    """A done-check wanted Kvart and Ocjena filled in every row: the funnel didn't ask
+    for Kvart, so rows lacking it failed later; and the rows the charter's own
+    alternative kept (no rating, judged good) failed for an empty Ocjena. Agents were
+    sent to fix it, and the run hit its token cap."""
+    rule = {"rule": "ocjena 4 ili viša", "kind": "must", "fact": "measured", "columns": ["Ocjena"],
+            "if_not_shown": "procijenjeno da je dobar"}
+    r = funnel.normalize_recipe({"rules": [rule], "checks": [{"column": "Ocjena", "op": "required"}]},
+                                funnel.from_contract(FILLED))
+    req = {c["column"] for c in r["checks"] if c["op"] == "required"}
+    assert "Kvart" in req and "Ocjena" not in req  # the done-check's column, but not one the alternative frees
+    run, folder = await _run(deck["store"], FILLED, rid="bat_donechk1")
+    deck["recipe"] = {"item": "restoran", "key": "Naziv", "decide": "Restorani.", "rules": [rule],
+                      "sources": [{"kind": "file", "path": "extra/r.csv"}]}
+    (folder / "extra" / "r.csv").write_text("Naziv,Kvart,Ocjena\nKonoba A,Centar,\n")
+    await funnel.plan(run)
+    (folder / "r.csv").write_text("Naziv,Kvart,Ocjena\nKonoba A,Centar,\n")  # kept on "judged good": no rating
+    fresh = await deck["store"].get_run(run["id"])
+    checks, _, failed = await bat_routes._contract_checks(fresh, False)
+    assert not failed and all(c.passed for c in checks)
+    (folder / "r.csv").write_text("Naziv,Kvart,Ocjena\nKonoba A,,\n")  # an empty Kvart still fails it
+    _, _, failed = await bat_routes._contract_checks(fresh, False)
+    assert failed and "Kvart is empty in 1 rows" in failed[0].get("note", "")
+    # any other run's done-checks are as they were
+    assert funnel.contract_for_checks({"config": {}}, FILLED) == FILLED
