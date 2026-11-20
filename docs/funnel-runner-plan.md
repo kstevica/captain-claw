@@ -649,7 +649,7 @@ strictness. But two general faults showed too, fixed:
   site" search didn't run since a site was known. 13 of 25 near misses had a site and
   no page of it read. Now the site column is filled from wherever the item's own site
   is before anything is read.
-- **The same item judged several times.** "Vinodol" was kept, then "vinodol-zg.hr"
+- **The same item judged several times.** "Konoba X" was kept, then "konoba-x.hr"
   (the same restaurant, keyed by its domain) judged again. Now an item is checked
   against those already looked at, as their listings show them (the same rules as
   the duplicate check: the same site, no address or phone that differs), before it is

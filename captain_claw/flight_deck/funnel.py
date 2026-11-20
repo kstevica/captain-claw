@@ -1472,7 +1472,7 @@ class Work:
         self.queries = self._load_queries()
         self.stopped = ""
         # the items looked at, as their listings show them: one found again under another
-        # name ("Vinodol", then "vinodol-zg.hr") isn't judged twice
+        # name ("Konoba X", then "konoba-x.hr") isn't judged twice
         self.looked = SameItems(recipe, self.skip_sites)
         for r in _read_csv(folder / ROWS) + _read_csv(folder / LOOSE):
             self.looked.add(r)
