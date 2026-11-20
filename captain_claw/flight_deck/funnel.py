@@ -366,6 +366,9 @@ def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
         rule["columns"] = [c for c in rule["columns"] if c not in fixed]
         if looser:
             rule["looser"] = looser
+        alt = " ".join(str(r.get("if_not_shown") or "").split())[:300]
+        if alt:  # the charter's own words for when its fact isn't found: it holds always
+            rule["if_not_shown"] = alt
         out.append(rule)
         if len(out) >= RULES_MAX:
             break
@@ -701,12 +704,15 @@ def conventions(recipe: dict[str, Any]) -> str:
         if recipe.get("shortage_ok"):
             lines += ["The charter accepts a short list when the summary says why: every rule is kept as written, "
                       "never read loosely to fill a group.", ""]
+        alt = {r["rule"]: r["if_not_shown"] for r in recipe["rules"] if r.get("if_not_shown")}
         if fixed:
-            lines += ["Never loosened:"] + [f"- {r}" for r in fixed]
+            lines += ["Never loosened:"] + [f"- {r}" + (f" — if its fact isn't found: {alt[r]}" if r in alt else "")
+                                            for r in fixed]
         if soft:
             lines += ["", "May be met by a looser reading, only when a group runs short of rows that meet every "
                           "rule as written (unshown is not broken; an item shown to break a rule is still out):"]
-            lines += [f"- {r['rule']} — looser: {looser_of(r)}" for r in soft]
+            lines += [f"- {r['rule']} — looser: {looser_of(r)}" + (f"; if its fact isn't found: {r['if_not_shown']}"
+                                                                   if r.get("if_not_shown") else "") for r in soft]
     checks = [c for c in recipe["checks"] if c["op"] != "required"]
     if checks:
         lines += ["", "## What Captain checks in every row", ""]
@@ -776,6 +782,7 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
  "rules": [{"rule": "<one of the owner's rules for an item>", "kind": "must|prefer",
             "fact": "identity|place|measured|contact|safety|other",
             "looser": "<prefer only: the loosest reading that still serves the goal>",
+            "if_not_shown": "<only the charter's own words for when this rule's fact isn't found, if it says>",
             "columns": ["<the columns this rule is about>"]}],
  "skip_sites": ["<sites that list or mention items of this kind but are never one's own site>"],
  "shortage_ok": <true when the charter says a short list is fine if the summary says why, else false>,
@@ -826,7 +833,8 @@ Rules:
 - When the charter itself says what to do when a fact isn't found or doesn't apply ("if there is no rating, judge
   how good it is", "or a contact form if there's no email"), that alternative is part of the rule: write it into
   the rule's own words ("a rating of 4+ on Google or TripAdvisor; with no rating, judged good enough on what was
-  read") and into "decide". It holds as written, even when no rule may be read loosely; never drop such a clause.
+  read") and into "decide", and put the alternative alone in that rule's "if_not_shown". It holds as written, even
+  when no rule may be read loosely; never drop such a clause, and never invent one the charter doesn't give.
 - A rule that asks for a fact AND the page it must be shown on ("2-50 employees shown on LinkedIn or its team
   page", "revenue under $10M per its filings") is two rules: the exclusion is a must ("not shown to have more
   than 50 people"), the shown proof is a prefer, looser "stated on any page, or not shown". Rows on a looser
@@ -2076,10 +2084,23 @@ class Work:
                 # not finding a fact isn't breaking the rule
                 v = {**v, "missing": list(v.get("missing") or []) + list(v.get("broken") or [])}
                 verdict = "maybe"
+            loosened = []
+            if verdict == "maybe":
+                met, rest = self._alternatives(v)
+                if met and not rest and isinstance(v.get("row"), dict) and any(
+                        str(x).strip() for x in v["row"].values()):
+                    # what it lacked, the charter itself says how to take ("with no rating, judged good
+                    # enough"): met, not nearly there, whether or not rules may be read loosely
+                    verdict = "keep"
+                    note = "met by the charter's own words for a fact not found: " + "; ".join(
+                        f"{r['rule']} ({r['if_not_shown']})" for r in met)
+                    reason = f"{reason}; {note}" if reason else note
+                elif met:
+                    v = {**v, "missing": [r["rule"] for r in rest]}
             if verdict == "maybe" and self.loosen:
                 verdict, loosened = self._maybe_or_loose(v)
-            else:
-                loosened = self._loosened(v.get("loosened")) if verdict == "loose" else []
+            elif verdict == "loose":
+                loosened = self._loosened(v.get("loosened"))
             if verdict == "loose" and not loosened:
                 verdict = "maybe"  # it named only rules that never loosen: what it lacks must still be found
             if verdict in ("keep", "loose"):
@@ -2429,6 +2450,14 @@ class Work:
             return True
         read = "\n".join(e.get("text", "") for e in item.get("evidence") or [])
         return not fx.in_text(shown, read)
+
+    def _alternatives(self, v: dict) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """The rules a maybe names as missing, split: those the charter itself gives an
+        alternative for when their fact isn't found (``if_not_shown``), and the rest."""
+        missing = self._named(v.get("missing"))
+        met = [r for r in missing if r.get("if_not_shown")]
+        rest = [r for r in missing if not r.get("if_not_shown")]
+        return list({id(r): r for r in met}.values()), list({id(r): r for r in rest}.values())
 
     def _maybe_or_loose(self, v: dict) -> tuple[str, list[dict[str, Any]]]:
         """A maybe whose missing facts are all ones a looser reading lets go unshown is
