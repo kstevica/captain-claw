@@ -22,13 +22,17 @@ const PARTS: { key: keyof FunnelGroup; label: string; cls: string }[] = [
 
 function Row({ name, g }: { name: string; g: FunnelGroup }) {
   const total = Math.max(1, PARTS.reduce((n, p) => n + (Number(g[p.key]) || 0), 0))
-  const have = g.on_list
+  // Ready for the list: rows on it now, and rows on a looser reading that fill what's
+  // short at the merge (a group full of those is full, though the list gets them last).
+  const waiting = Number(g.loose_waiting) || 0
+  const have = g.quota > 0 ? Math.min(g.quota, g.on_list + waiting) : g.on_list + waiting
+  const loose = Math.max(0, have - g.on_list)
   const full = g.quota > 0 && have >= g.quota
   return (
     <li className="grid grid-cols-[minmax(0,9rem)_minmax(0,1fr)_auto] items-center gap-3 @2xl:grid-cols-[minmax(0,13rem)_minmax(0,1fr)_auto]">
       <span className="truncate text-xs text-zinc-300" title={name}>{name}</span>
       <span className="flex h-2 overflow-hidden rounded-full bg-zinc-500/15" role="img"
-        aria-label={`${name}: ${g.looked} looked at, ${have} on the list`}>
+        aria-label={`${name}: ${g.looked} looked at, ${have} ready for the list${loose ? `, ${loose} on a looser reading` : ''}`}>
         {PARTS.map((p) => {
           const n = Number(g[p.key]) || 0
           return n ? <span key={p.key} title={`${n} ${p.label}`} className={`h-full ${p.cls}`} style={{ width: `${(n / total) * 100}%` }} /> : null
@@ -36,7 +40,7 @@ function Row({ name, g }: { name: string; g: FunnelGroup }) {
       </span>
       <span className="whitespace-nowrap text-right text-[11px] tabular-nums text-zinc-500">
         <span className={full ? 'font-semibold text-emerald-600 dark:text-emerald-400' : 'font-semibold text-zinc-200'}>{have}</span>
-        {g.quota > 0 && <> of {g.quota}</>} on the list · {g.looked} looked at
+        {g.quota > 0 && <> of {g.quota}</>} ready{loose > 0 && <span title="rows that meet some rules only by their looser reading">{` (${loose} looser)`}</span>} · {g.looked} looked at
       </span>
     </li>
   )

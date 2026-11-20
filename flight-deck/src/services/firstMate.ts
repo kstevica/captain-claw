@@ -592,6 +592,8 @@ export interface FunnelGroup {
   'agent-check': number
   quota: number
   on_list: number
+  /** Rows on a looser reading waiting to fill what's short at the merge. */
+  loose_waiting?: number
 }
 export interface FunnelCounts { groups: Record<string, FunnelGroup>; target: number; searches: number; updated: string }
 export const getRunProgress = (runId: string, since = 0) =>

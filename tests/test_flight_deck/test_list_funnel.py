@@ -1053,6 +1053,9 @@ async def test_a_short_list_takes_rows_on_a_looser_reading_after_every_strict_on
     assert why["Delta"][0] == "dropped" and "made-up" in why["Delta"][1]  # a value given must still be in its source
     assert why["Beta"][0] == "dropped" and "Cites 3 is under 10" in why["Beta"][1]  # loosened only the code rule
     assert why["Gamma"][0] == why["Eps"][0] == "loose"
+    # the run panel counts them as ready: a group full of loose rows isn't "0 of N"
+    got = funnel.counts(folder, funnel.load_recipe(folder))["groups"][""]
+    assert (got["on_list"], got["loose_waiting"]) == (1, 2)
     # nothing for the finishing agent: the loose rows fill what's short
     fresh = await deck["store"].get_run(run["id"])
     assert funnel.prepare_finish(fresh, steps[1])["result"]["output"].startswith("Nothing to finish: rows on a looser")
