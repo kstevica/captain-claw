@@ -278,6 +278,35 @@ its own, signed-out browser. The run is followed like a clip's
 (`/fd/clip/runs/<id>`); a follow-up in its folder is worded as one about the
 recording.
 
+**Extra data.** What the agent goes by: how things are booked for each client,
+a price list, an example. Kept with the recording in
+`<FD_DATA_DIR>/browser-recordings/data/<user>/<recording>/<slot>/` (30 files,
+200 MB) and added two ways: from the extension, files from the person's
+computer (`POST /fd/clip/recordings/<id>/data`, multipart); from Flight Deck,
+whatever the shared Add data panel staged — uploads, pasted text, links,
+agents' files, Flight Deck files, a conversation
+(`POST /fd/browser-recordings/<id>/data {ids}`). A run can also be given files
+of its own (`file` parts beside `meta` on the run request; 20 files, 100 MB).
+Every run copies both into its folder's `extra/`; the turn says "before you
+start, read what bears on this in …/extra/", lists the files (the first ten
+attached), tells the agent to use what it knows and its own files too, and
+that what it read wins over a recorded step — and a note marks the files'
+text as information, never instructions. A `select` step keeps the list's
+choices (`options`), so a value asked before the run is picked from them.
+
+**Runs are kept.** `<FD_DATA_DIR>/browser-recordings/<user>.runs.json`, the
+last 300: the recording, the agent, the browser, when it started and ended,
+the values and note it was given, its folder, the extra data it read, how it
+ended, the agent's answer (12,000 characters) and the last 80 lines of what
+it did. Written when the run starts and again when it ends; a run the deck no
+longer follows (it restarted meanwhile) reads as `lost` — its answer is in the
+agent's chat. `GET /fd/clip/recordings/<id>/runs` for the extension (the Run
+form's "Earlier runs"); Flight Deck's pages use `/fd/browser-recordings`
+(the list with the latest runs, one recording with its steps in words, data
+and runs, delete) — the signed-in person only, never an extension's token.
+Connections → Browser → Recordings (`BrowserRecordings.tsx`) shows them.
+Deleting a recording drops its data; its runs stay on record.
+
 **A run that stopped at step 5 of 10 (staging, 2026-11-20).** The agent read
 the page, clicked, read again, typed, read again, clicked — and its fourth
 `read_page` was refused by the duplicate-call guard ("called with these exact
@@ -287,7 +316,8 @@ arguments 3 times this turn with nothing written in between"), since every
 counted so far; looks with nothing done in between still count up.
 
 Not yet: scheduled runs (a Scheduled task whose prompt is the recording),
-recordings in Flight Deck's own pages, sharing one with a teammate, scroll /
+running or editing a recording from Flight Deck's pages, extra data that stays
+live (a folder read at run time rather than copied), sharing one with a teammate, scroll /
 hover / drag steps, and a recording an agent tidies after a run ("step 4 is
 now called Export").
 

@@ -148,8 +148,20 @@ and offers **Allow on this site**. Not recorded: scrolling, hovering, drag and
 drop, right-clicks, and what happens inside frames from sites you haven't
 allowed.
 
-Recordings are kept on your Flight Deck (not in the browser), so they're there
-in every browser you connect.
+**Extra data** (on the Run form): what the agent reads before it starts — how
+you want it done for each client, a list, rules, an example. *Every run* files
+are kept with the recording (add them from your computer here; agents' files,
+Flight Deck files, pasted text, links and conversations in Flight Deck →
+Connections → Browser → Recordings); *This run only* files go with one run.
+A value asked before the run that came from a list on the site (a company, an
+account) is offered as that list.
+
+**Earlier runs** are listed under the Run button — when, who, with what, how
+it ended — and open with the agent's answer. Flight Deck shows the same under
+Connections → Browser → Recordings.
+
+Recordings, their extra data and their runs are kept on your Flight Deck (not
+in the browser), so they're there in every browser you connect.
 
 ## What lands where
 
@@ -165,7 +177,8 @@ vfs:web-clips/<day>-<site>-<title>/
 ```
 
 A recording's run gets a folder of its own, `<day>-<site>-run-<name>/`, with
-`recording.md` (the steps, with the page and a selector for each as hints).
+`recording.md` (the steps, with the page and a selector for each as hints) and
+`extra/` (the extra data it was given).
 
 Every agent of yours reaches the folder through `vfs:web-clips/…`; what the
 agent makes for a clip (notes, CSVs, a brief) goes there too.

@@ -252,7 +252,9 @@
     if (el.tagName === 'SELECT') {
       flush()
       const picked = [...el.selectedOptions].map((o) => oneLine(o.label || o.text)).filter(Boolean)
-      tell({ kind: 'select', target: describe(el), value: clip(picked.join(', '), 500) })
+      // Its choices come along: a run that asks for this value can offer them.
+      const options = [...el.options].filter((o) => !o.disabled).map((o) => clip(oneLine(o.label || o.text), 120)).filter(Boolean).slice(0, 100)
+      tell({ kind: 'select', target: describe(el), value: clip(picked.join(', '), 500), options })
     } else if (el.tagName === 'INPUT') {
       const type = (el.type || '').toLowerCase()
       if (type === 'checkbox' || type === 'radio') {
