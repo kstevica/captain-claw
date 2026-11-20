@@ -1764,7 +1764,9 @@ class Work:
                 continue  # field filters ran before gathering
             text = " ".join(f.values()) if col == "*" else f.get(col.lower(), "")
             try:
-                if op == "regex" and not re.search(str(val), text, re.I):
+                # a column the listing doesn't give ("Adresa" on a search hit) isn't known yet,
+                # not a mismatch: the rules and checks see it once the item is read
+                if op == "regex" and text and not re.search(str(val), text, re.I):
                     return f"{col} doesn't match"
                 if op == "not_regex" and re.search(str(val), text, re.I):
                     return f"{'it' if col == '*' else col} matches what's excluded"

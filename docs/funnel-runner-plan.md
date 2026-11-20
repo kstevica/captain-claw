@@ -656,6 +656,12 @@ strictness. But two general faults showed too, fixed:
   read or judged, and again once a search finds its site; a repeat is dropped as a
   duplicate, with the item it repeats named.
 
+The run after that dropped every item before reading it: the setup added a filter
+"Adresa matches Zagreb", and filters on the listing ran on search hits that give no
+address, so the empty field failed it. Now a filter on a column the listing doesn't
+give lets the item through (not known yet, as "in", "min" and "max" already did); the
+rules and checks see that column once the item is read.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
