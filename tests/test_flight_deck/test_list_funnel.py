@@ -2100,3 +2100,29 @@ def test_what_one_row_is_reads_as_a_noun():
     assert funnel._short_item("small US knowledge firm") == "small US knowledge firm"
     assert funnel._short_item("an open-source Python library for data validation and parsing") == "open-source Python library"
     assert funnel._short_item("") == "item"
+
+
+async def test_a_charter_that_accepts_a_short_list_keeps_its_rules_as_written(deck):
+    """"8 per group, or the summary explains the shortfall": 18 of 24 rows were on a
+    looser reading, and the reviewers said the charter would rather have the shortage."""
+    run, folder = await _run(deck["store"], PAPERS, rid="bat_shortok01")
+    _papers(deck, folder)
+    deck["recipe"] = {**deck["recipe"], "shortage_ok": True}
+    steps = await funnel.plan(run)
+    notes = [e["message"] for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note"]
+    assert any("since the charter accepts a short list with the reason given" in n for n in notes)
+    recipe = funnel.load_recipe(folder)
+    assert recipe["shortage_ok"] and not funnel.loosen_on(await deck["store"].get_run(run["id"]), recipe)
+    assert "every rule is kept as written" in (folder / "shared" / "conventions.md").read_text()
+    await _go(deck["store"], run, steps)
+    assert "# Rule tiers" not in deck["decide_prompts"][0]
+    assert [r["Title"] for r in funnel._read_csv(folder / "papers.csv")] == ["Alpha"]  # no row on a looser reading
+    assert {r["Title"] for r in funnel._read_csv(folder / "papers-came-close.csv")} >= {"Gamma", "Eps"}
+    summary = (folder / funnel.SUMMARY).read_text()
+    assert "## Short" in summary and "The charter accepts a short list with the reason given" in summary
+    # short, as the charter allows: the review's points don't send agents to fill it
+    settled = funnel.review_settled(await deck["store"].get_run(run["id"]), "- more rows wanted")
+    assert settled.startswith("The list is short (the list 2 more), which the charter accepts")
+    assert "## Open points from the review" in (folder / funnel.SUMMARY).read_text()
+    # a charter that wants it full: still short, fix rounds go on
+    assert funnel.normalize_recipe({}, funnel.from_contract(PAPERS))["shortage_ok"] is False
