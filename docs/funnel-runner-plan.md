@@ -611,6 +611,24 @@ the 11 that came back with a rating and review count were the ones dropped by th
 named-source check fixed above. The run's results also show the list itself first
 now: a file a table or document check reads is what the run was asked to deliver.
 
+The next run (record of earlier runs forgotten) built 24 different restaurants in 16
+minutes, 7 with a rating, under the charter's file names. Three general faults left:
+
+- **One unproven value dropped the whole item.** A phone cited from an Instagram or
+  Facebook page Captain can't read, a review count not in anything read. Now a value
+  what was read doesn't bear out is left out: a fact the item's own pages show takes
+  its place (their phone, not a wrong one); a soft rule left with nothing shown is
+  met by its looser reading; any other cell left empty makes the item nearly there.
+  Never a kept row with a value that wasn't read, nor with a cell the list needs
+  left empty.
+- **A place in an item's own name was taken for where it is.** "Royal India" was "not
+  in Croatia (its listing says India)". Places its name has in it don't count, on its
+  listing or on its own pages.
+- **What one row is read as a sentence.** "a restaurant in Zagreb suitable for a
+  business lunch", cut at 40 characters, made notes like "the same a restaurant in
+  Zagreb suitable for a bu as …". Now the leading article and everything from "in",
+  "for", "suitable", "with"… go ("restaurant"), and a long one is cut at a word.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
