@@ -65,7 +65,7 @@ CLOSE_SUFFIX = "-came-close"  # <the list>-came-close.csv: the items that nearly
 LEDGER_FILE = "already-checked.csv"  # in extra/: what the factory's earlier runs checked (first_mate_ledger)
 
 SEARCH_BUDGET = 1000
-FETCH_CHARS = 6000
+FETCH_CHARS = 40_000  # what code keeps of one page: the whole of it, its footer (contact, hours) too
 CONCURRENCY = 4
 MAX_QUERY_ROUNDS = 2
 ITEMS_MAX = 5000     # items looked at per step (config funnel_items_max)
@@ -736,6 +736,33 @@ def conventions(recipe: dict[str, Any]) -> str:
     lines += ["", "Work in progress is in `shared/funnel/`: `items.csv` has every item looked at and what became "
               "of it; `maybe.csv` the ones nearly there."]
     return "\n".join(lines) + "\n"
+
+
+def page_excerpt(text: str, share: int, marks: list[str] | None = None) -> str:
+    """What a judging call reads of one page, in ``share`` characters: all of it when it
+    fits; else its start, its end (a site's footer: its address, phone, opening hours,
+    rating) and short windows around the facts code found on it, in page order."""
+    t = " ".join(str(text or "").split())
+    if len(t) <= share:
+        return t
+    head, tail = int(share * 0.45), int(share * 0.3)
+    spans = [(0, head), (len(t) - tail, len(t))]
+    room = share - head - tail
+    for m in marks or []:
+        at = t.find(str(m).split(" (")[0][:60])
+        if at < 0 or any(a <= at < b for a, b in spans) or room <= 0:
+            continue
+        a, b = max(0, at - 100), min(len(t), at + 140)
+        spans.append((a, b))
+        room -= b - a
+    spans.sort()
+    merged: list[list[int]] = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return " … ".join(t[a:b] for a, b in merged)
 
 
 def _check_words(c: dict) -> str:
@@ -2086,7 +2113,9 @@ class Work:
             facts = [f"  {name}: " + "; ".join(f"{v} [{src}]" for v, src in vals[:8])
                      for name, vals in (it.get("found") or {}).items()]
             share = READ_CHARS // max(1, len(it.get("evidence") or []))
-            excerpt = "\n".join(f"  [{e['source']}]\n  " + " ".join(e["text"].split())[:share]
+            marks = {e["source"]: [v for vals in (it.get("found") or {}).values() for v, src in vals
+                                   if src == e["source"]] for e in it.get("evidence") or []}
+            excerpt = "\n".join(f"  [{e['source']}]\n  " + page_excerpt(e["text"], share, marks.get(e["source"]))
                                 for e in it.get("evidence") or [])
             lines.append(f"## id {i}\nfields: {json.dumps(it['fields'], ensure_ascii=False)[:1500]}\n"
                          + ("facts Captain found:\n" + "\n".join(facts) + "\n" if facts else "")
@@ -3319,7 +3348,7 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
                     if tools is None:
                         tools = make_tools(run, step)
                     ok, text = await tools.fetch(url)
-                    pages[url] = text[:FETCH_CHARS * 4] if ok else ""
+                    pages[url] = text[:FETCH_CHARS] if ok else ""
                 if pages[url]:
                     texts[url] = pages[url]
             said = [x.strip().lower() for x in str(raw.get(_LOOSE_COL) or "").split(";") if x.strip()]

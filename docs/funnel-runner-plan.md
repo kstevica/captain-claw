@@ -768,6 +768,16 @@ list; but never a column a rule's own alternative lets be empty. And when Captai
 the done-checks on a funnel run's list, it doesn't ask those alternative-covered
 columns to be filled. Such a run ends at its merge with a list that passes them.
 
+A restaurant came close for "no phone or e-mail on its own site, opening not
+confirmed", though its home page shows both: the page has 15,000 characters and its
+contact, opening hours and rating are in the footer. web_fetch returned the whole page,
+but the funnel kept only its first 6,000 characters (so code never found the phone
+either), and a judging call read about the first 1,500 of each page (12,000 shared out).
+Now code keeps a page whole (up to 40,000 characters), so its extractors and the
+facts filled from the item's own pages see the footer; and what a judging call reads
+of each page, in the same share, is its start, its end and short windows around the
+facts code found on it.
+
 Items that came close were only in the run's working files (`maybe.csv`). Now the
 merge writes `<list>-came-close.csv` next to the list: the list's columns as far as
 they were found (the judging call's partial row; a value not in what was read is left
