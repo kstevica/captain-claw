@@ -519,6 +519,27 @@ export function checkedFileUrl(id: string): string {
   const { token, authEnabled } = useAuthStore.getState()
   return `${f(id)}/checked/file${authEnabled && token ? `?fd_token=${encodeURIComponent(token)}` : ''}`
 }
+/** The recipe a list factory's runs follow: built once per charter, the owner's to edit. */
+export interface RecipeRule {
+  rule: string; kind: 'must' | 'prefer'; fact?: string; columns?: string[]
+  looser?: string; if_not_shown?: string; protected?: boolean; of_group?: boolean
+}
+export interface RecipeFilter { column: string; op: string; value?: unknown }
+export interface PinnedRecipe {
+  recipe: {
+    item: string; output: string; columns: string[]; groups: Record<string, number>; group_by: string
+    rules: RecipeRule[]; filters: RecipeFilter[]; required: string[]
+    checks: { column: string; op: string; value?: unknown }[]
+    gather: { kind: string; query?: string; url?: string; paths?: string[] }[]
+    sources: { kind: string; group?: string; path?: string; queries?: string[] }[]
+    shortage_ok: boolean
+  } | null
+  edited?: boolean; built_at?: string; edited_at?: string; stale: boolean
+}
+export const getRecipe = (id: string) => call<PinnedRecipe>(`${f(id)}/recipe`)
+export const saveRecipe = (id: string, patch: { rules?: RecipeRule[]; required?: string[]; filters?: RecipeFilter[]; shortage_ok?: boolean }) =>
+  call<PinnedRecipe>(`${f(id)}/recipe`, json('PUT', patch))
+export const forgetRecipe = (id: string) => call<PinnedRecipe>(`${f(id)}/recipe`, { method: 'DELETE' })
 export const getFactoryResults = (id: string) => call<{ runs: RunResults[] }>(`${f(id)}/results`).then((r) => r.runs)
 
 /** "23 h 4 min", "12 min", "45 s". */

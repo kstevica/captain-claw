@@ -46,6 +46,7 @@ import { RunProgress } from './RunProgress'
 import { CapPicker } from './CapPicker'
 import { FactoryData } from './FactoryData'
 import { FactoryResults, TimingChips } from './FactoryResults'
+import { FactoryRecipe } from './FactoryRecipe'
 import { AddDataPanel } from '../context/AddData'
 import { CharterText, GoalChecklist, GoalList, RunnerPicker, SchedulePicker } from './CharterEditor'
 import { checksOf, goalKind, goalsOf, type Goal } from '../../utils/charterGoals'
@@ -55,7 +56,7 @@ import { checksOf, goalKind, goalsOf, type Goal } from '../../utils/charterGoals
 // the owner's own act, against the version they see: the server refuses an
 // approval once the draft changed under it.
 
-export type Tab = 'charter' | 'results' | 'data' | 'runs' | 'record' | 'checks' | 'history'
+export type Tab = 'charter' | 'recipe' | 'results' | 'data' | 'runs' | 'record' | 'checks' | 'history'
 
 const FULL_KEY = 'fd:fm-drawer-full'
 
@@ -80,6 +81,8 @@ function eventText(e: FactoryEvent): string {
     case 'archived': return d.paused ? 'Archived, and paused' : 'Archived'
     case 'restored': return 'Restored to the list'
     case 'run_finished': return `Run ${RUN_LABELS[d.status as Run['status']]?.toLowerCase() ?? String(d.status ?? '')}`
+    case 'recipe_edited': return 'Edited the recipe by hand'
+    case 'recipe_forgotten': return 'Forgot the recipe: the next run builds a new one'
     case 'checked_forgotten': return `Forgot the ${String(d.items ?? '')} items its runs had checked`
     case 'case_added': return 'Test case added'
     case 'case_deleted': return 'Test case deleted'
@@ -300,6 +303,9 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
         {f && (
           <div role="tablist" className={`flex gap-1 overflow-x-auto px-5 pb-3 ${wrap}`}>
             <button role="tab" aria-selected={tab === 'charter'} className={tabCls('charter')} onClick={() => setTab('charter')}>Charter</button>
+            {f.live?.runner === 'funnel' && (
+              <button role="tab" aria-selected={tab === 'recipe'} className={tabCls('recipe')} onClick={() => setTab('recipe')}>Recipe</button>
+            )}
             <button role="tab" aria-selected={tab === 'results'} className={tabCls('results')} onClick={() => setTab('results')}>Results</button>
             <button role="tab" aria-selected={tab === 'data'} className={tabCls('data')} onClick={() => setTab('data')}>
               Data{f.data?.length ? ` · ${f.data.length}` : ''}
@@ -520,6 +526,12 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
           )}
 
           {f && tab === 'results' && <FactoryResults factoryId={factoryId} onNotice={onNotice} />}
+
+          {f && tab === 'recipe' && (
+            <div className={`px-5 pb-8 pt-4 ${wrap}`}>
+              <FactoryRecipe factoryId={factoryId} onNotice={onNotice} onChanged={() => void load()} />
+            </div>
+          )}
 
           {f && tab === 'data' && (
             <FactoryData factoryId={factoryId} title={f.title} items={f.data ?? []} onNotice={onNotice}
