@@ -1573,3 +1573,112 @@ async def test_columns_from_the_owners_material_are_filled_not_left_empty(deck):
     assert deck["asked"].count("owner") == 1
     rows = funnel._read_csv(folder / funnel.ROWS)
     assert rows[0]["CaptainReason"] == "their many guides"
+
+
+async def test_a_rule_that_never_loosens_needs_something_shown(deck):
+    """A run put 12 rows on its list with no State, under the never-loosened rule
+    "headquartered in the US": nothing shown for a strict rule leaves a row nearly there."""
+    run, folder = await _run(deck["store"], FIRM_LEADS, rid="bat_shown0001")
+    (folder / "extra" / "firms.csv").write_text("Firm,Website,State\nA,https://a.example,TX\nB,https://b.example,\n")
+    rules = [{"rule": "headquartered in the US", "kind": "must", "fact": "place", "columns": ["State"]},
+             {"rule": "a founder's email on its own site", "kind": "must", "fact": "contact", "columns": ["Email"]},
+             {"rule": "never guess an email", "kind": "must", "fact": "safety", "columns": ["Email"]}]
+    deck["recipe"] = {"item": "firm", "key": "Firm", "sources": [{"kind": "file", "path": "extra/firms.csv"}],
+                      "decide": "US firms.", "rules": rules}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "loose", "row": f, "loosened": ["a founder's email"]}
+                                    for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["A"][0] == "loose"  # its email may go unshown; the safety rule's column doesn't count
+    assert got["B"] == ("maybe", "shows nothing for: headquartered in the US (State empty)")
+    recipe = funnel.load_recipe(folder)
+    assert funnel.unshown_musts(recipe, {"State": "TX"}) == [] and funnel.unshown_musts(recipe, {}) != []
+
+
+# ── facts read, a stated size, a site abroad, today's date, names ──────
+
+SITES = [{"id": "fm1", "text": "firms.csv; at least 2", "check": {
+    "type": "table", "path": "firms.csv", "min_rows": 2, "unique": ["Firm"],
+    "columns": ["Firm", "Website", "State", "Email", "EmailType", "EmailSourceURL"],
+    "allowed": {"EmailType": ["personal", "shared"]}}}]
+
+
+def _sites_deck(deck, pages, decide=None):
+    deck["recipe"] = {"item": "firm", "key": "Firm", "site_column": "Website",
+                      "sources": [{"kind": "search", "group": "", "country": "US", "queries": ["x firms list"]}],
+                      "filters": [{"column": "size_band", "op": "size_max", "value": 50}],
+                      "gather": [{"kind": "fetch", "url": "{Website}", "paths": ["", "contact"]}],
+                      "extract": ["emails"], "decide": "US firms of 2-50 people."}
+    names = sorted({u.split("//")[1].split(".")[0] for u in pages})
+    deck["extract"] = lambda user: {"items": [{"name": n.title(), "url": f"https://{n}.example",
+                                               "fields": {"Firm": n.title(), "Website": f"https://{n}.example"}}
+                                              for n in names]}
+    deck["tools"] = _Tools(pages=pages, results={"x firms list": "list results"})
+    deck["decide"] = decide or (lambda items: [{"id": i, "verdict": "keep", "row": {**f}} for i, f in items])
+
+
+async def test_facts_read_on_its_own_pages_fill_the_cells_left_empty(deck):
+    """11 firms had an email printed on their own page and 9 a state, yet the judging
+    call left those cells empty: code fills what it read, from the item's own pages only."""
+    run, folder = await _run(deck["store"], SITES, rid="bat_facts0001")
+    run = {**run, "task": "Find US firms."}
+    _sites_deck(deck, {"https://alpha.example": "Alpha. 500 Main St, Austin, TX 78701",
+                       "https://alpha.example/contact": "Write to hello@alpha.example or ann@other.example",
+                       "https://beta.example": "Beta in Washington DC", "https://beta.example/contact": "ben@beta.example"})
+    steps = await funnel.plan(run)
+    await bat_routes._bat_attempt({**(await deck["store"].get_run(run["id"])), "task": run["task"]}, steps[0])
+    rows = {r["Firm"]: r for r in funnel._read_csv(folder / funnel.ROWS)}
+    a, b = rows["Alpha"], rows["Beta"]
+    assert (a["Email"], a["EmailSourceURL"], a["EmailType"], a["State"]) == (
+        "hello@alpha.example", "https://alpha.example/contact", "shared", "TX")
+    assert (b["Email"], b["EmailType"], b["State"]) == ("ben@beta.example", "personal", "")  # "Washington DC" is no address
+
+
+async def test_a_size_its_pages_state_drops_it_and_so_does_a_site_abroad(deck):
+    """Kleinberg Kaplan's own about page said "more than 100 lawyers and staff"; a South
+    African agency (+27, .co.za) was listed as Californian."""
+    run, folder = await _run(deck["store"], SITES, rid="bat_sizeabr01")
+    run = {**run, "task": "Find US firms of 2-50 people."}
+    _sites_deck(deck, {"https://big.example": "Big LLP has more than 100 lawyers and staff in New York.",
+                       "https://big.example/contact": "x",
+                       "https://far.example": "Far agency. Call +27 58 303 1234", "https://far.example/contact": "y",
+                       "https://good.example": "Good, a team of 12. 9 Elm St, Boise, ID 83702",
+                       "https://good.example/contact": "z"})
+    steps = await funnel.plan(run)
+    await bat_routes._bat_attempt({**(await deck["store"].get_run(run["id"])), "task": run["task"]}, steps[0])
+    why = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert why["Big"][0] == "dropped" and why["Big"][1].startswith("100 people, said on https://big.example")
+    assert why["Far"] == ("dropped", "its own site points to South Africa, not the United States")
+    assert why["Good"][0] == "kept"
+    assert deck["decide_prompts"][0].startswith("# Today\n2")  # the judge knows what day it is
+
+
+def test_the_charters_date_window_holds_its_date_column():
+    r = funnel.normalize_recipe({"checks": [{"column": "SignalDate", "op": "regex", "value": r"^\d{4}"}]},
+                                funnel.from_contract([{"id": "a", "text": "x", "check": {
+                                    "type": "table", "path": "x.csv", "columns": ["Firm", "SignalDate"]}}]))
+    funnel.tidy_recipe(r, "Firms that posted something in the last 2 years.")
+    assert {"column": "SignalDate", "op": "within_months", "value": 24} in r["checks"]
+
+
+def test_a_legal_form_never_makes_two_items_of_one_name():
+    """An earlier run dropped "Lux Insights Inc."; the next took "Lux Insights" as new."""
+    assert funnel.norm_key("Lux Insights Inc.") == funnel.norm_key("lux insights") == "lux insights"
+    assert funnel.norm_key("Acme, LLC") == "acme" and funnel.norm_key("Bistro d.o.o.") == "bistro"
+    assert funnel.norm_key("Inc") == "inc" and funnel.norm_key("https://www.acme.example/x") == "acme.example"
+
+
+async def test_the_owner_fill_reads_what_was_read_about_the_item(deck):
+    run, folder = await _run(deck["store"], PITCH, rid="bat_ownread01")
+    (folder / "extra" / "firms.csv").write_text("Firm,Website\nA,https://a.example\n")
+    (folder / "extra" / "Captain.md").write_text("# Captain\n\nOnboarding teaches agents your documents.")
+    deck["recipe"] = {"item": "firm", "key": "Firm", "sources": [{"kind": "file", "path": "extra/firms.csv"}],
+                      "reference": ["extra/Captain.md"], "decide": "Firms.",
+                      "checks": [{"column": "CaptainFeature", "op": "in", "value": ["Onboarding", "Flows"]}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {**f}} for i, f in items]
+    seen = []
+    deck["owner"] = lambda user: seen.append(user) or {"1": {"CaptainFeature": "Onboarding", "CaptainReason": "x"}}
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert seen and "read: Firm: A Website: https://a.example" in seen[0]

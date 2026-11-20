@@ -378,6 +378,24 @@ def judgement_columns(recipe: dict[str, Any], reference: str = "") -> list[str]:
             and (c in owner or any(st in c.lower() for st in stems))]
 
 
+def unshown_musts(recipe: dict[str, Any], row: dict[str, Any]) -> list[str]:
+    """The never-loosened place and identity rules a row shows nothing for: the rule
+    names columns and every one of them is empty ("headquartered in the US" with no
+    State). Such a row isn't kept or loose, only nearly there. Columns a loosened rule
+    also covers don't count (a safety rule's email columns stay empty on a row reached
+    by its contact page)."""
+    soft = loosenable(recipe)
+    soft_cols = {c for r in soft for c in r.get("columns") or []}
+    out = []
+    for r in recipe.get("rules") or []:
+        if r in soft or r.get("kind") != "must" or _fact_of(r) not in ("place", "identity"):
+            continue
+        cols = [c for c in r.get("columns") or [] if c not in soft_cols]
+        if cols and not any(str(row.get(c) or "").strip() for c in cols):
+            out.append(f"{r['rule']} ({', '.join(cols)} empty)")
+    return out
+
+
 def soft_rules(recipe: dict[str, Any]) -> list[dict[str, Any]]:
     return [r for r in recipe.get("rules") or [] if r.get("kind") == "prefer"]
 
@@ -608,6 +626,14 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
     for c in charter_checks(text, recipe["columns"]):
         if not any(x["column"] == c["column"] and x["op"] == "in" for x in recipe["checks"]):
             recipe["checks"].append(c)
+    # "in the last 24 months" holds the list's one date column to that window, whatever
+    # check the setup wrote for it (a format check let a two-year-old date through)
+    window = re.search(r"\b(?:last|past|within|previous)\s+(\d{1,3})\s+(months?|years?)\b", text, re.I)
+    dates = [c for c in recipe["columns"] if re.search(r"date", c, re.I)]
+    if window and len(dates) == 1 and not any(x["column"] == dates[0] and x["op"] == "within_months"
+                                              for x in recipe["checks"]):
+        n = int(window.group(1)) * (12 if window.group(2).lower().startswith("year") else 1)
+        recipe["checks"].append({"column": dates[0], "op": "within_months", "value": n})
     return recipe
 
 
@@ -1219,7 +1245,17 @@ def norm_key(v: str) -> str:
     s = str(v or "").strip()
     if re.match(r"^(https?://|www\.)", s, re.I) or re.fullmatch(r"[\w-]+(\.[\w-]+)+/?", s):
         return fx.domain_of(s)
-    return " ".join(s.lower().split())
+    words = s.lower().replace(",", " ").replace(".", "").split()  # "d.o.o." and "Inc." stay one word
+    while len(words) > 1 and words[-1] in _LEGAL_FORMS:  # "Lux Insights Inc." is "Lux Insights"
+        words.pop()
+    return " ".join(words)
+
+
+# Company legal forms, which never make two items of one name (any country's).
+_LEGAL_FORMS = frozenset({"inc", "incorporated", "llc", "l.l.c", "ltd", "limited", "plc", "gmbh", "ag", "sa", "srl",
+                          "sarl", "sas", "bv", "nv", "oy", "oyj", "ab", "as", "asa", "aps", "kft", "doo", "d.o.o",
+                          "dd", "zrt", "spa", "sl", "pty", "co", "corp", "corporation", "company", "lp", "llp",
+                          "pllc", "pc", "pa", "kg", "ohg", "ug", "sro", "s.r.o", "sp", "zoo", "kk", "bhd", "sdn"})
 
 
 # ── the run's tools (search and fetch) ─────────────────────────────────
@@ -1632,6 +1668,13 @@ class Work:
                 return f"not in {' or '.join(fx.place_phrase(c) for c in self.places)} (its listing says {where})"
         for flt in self.recipe["filters"]:
             col, op, val = flt["column"], flt["op"], flt.get("value")
+            if op == "size_max" and (found or {}).get("headcount"):
+                try:
+                    over = [(int(n), src) for n, src in found["headcount"] if int(n) > int(val)]
+                except (TypeError, ValueError):
+                    over = []
+                if over:  # its own pages say how many people it has
+                    return f"{over[0][0]} people, said on {over[0][1]}"
             if op in ("size_max", "size_min"):
                 band = (found or {}).get("size_band") or []
                 if not band:
@@ -1706,7 +1749,7 @@ class Work:
                 log.warning("funnel: reading an item failed", run_id=self.run["id"], error=str(err))
                 await self.record(it, "dropped", f"couldn't be read ({_plain_error(err)})", stage="read")
                 continue
-            why = self.passes(it, it.get("found") or {})
+            why = self.passes(it, it.get("found") or {}) or self._foreign_site(it)
             if why:
                 await self.record(it, "dropped", why, stage="read")
                 continue
@@ -1769,6 +1812,25 @@ class Work:
                         evidence.append({"source": u, "text": text[:FETCH_CHARS]})
             item["found"] = self.facts(item, evidence)
 
+    def _own_text(self, item: dict) -> tuple[str, str]:
+        """The item's own site and what was read on it (its pages, not results about it)."""
+        domain = fx.domain_of(self._site_of(item))
+        if not domain:
+            return "", ""
+        return domain, "\n".join(e.get("text", "") for e in item.get("evidence") or []
+                                 if fx.same_site(fx.domain_of(e.get("source", "")), domain))
+
+    def _foreign_site(self, item: dict) -> str:
+        """Why an item whose own pages point only to another country isn't on a list for
+        this place (a +27 phone, an address on .co.za, a country named), or ""."""
+        if not self.places:
+            return ""
+        domain, text = self._own_text(item)
+        if not text and not domain:
+            return ""
+        where = fx.foreign_on_own_pages(text, domain, self.places)
+        return f"its own site points to {where}, not {' or '.join(fx.place_phrase(c) for c in self.places)}" if where else ""
+
     def _site_of(self, item: dict) -> str:
         site = (self.recipe.get("site_column") or "").lower()
         f = {k.lower(): str(v or "").strip() for k, v in item["fields"].items()}
@@ -1815,12 +1877,12 @@ class Work:
         domain = fx.domain_of(next((v for k, v in item["fields"].items()
                                     if k.lower() in (site.lower(), "url", "website") and v), ""))
         names = list(self.recipe["extract"])
-        if any(f["op"] in ("size_max", "size_min") for f in self.recipe["filters"]) and "size_band" not in names:
-            names.append("size_band")
+        if any(f["op"] in ("size_max", "size_min") for f in self.recipe["filters"]):
+            names += [n for n in ("size_band", "headcount") if n not in names]
         found: dict[str, list[tuple[str, str]]] = {}
         for e in evidence:
             for name in names:
-                if name == "size_band" and not e.get("own", True):
+                if name in ("size_band", "headcount") and not e.get("own", True):
                     continue  # another company's size, read off a page that isn't about this one
                 for v in fx.extract(name, e["text"], domain=domain if name == "emails" else ""):
                     found.setdefault(name, [])
@@ -1849,6 +1911,8 @@ class Work:
                   + (f"\nThis step looks for: {self.group}" if self.group else "")) if self.recipe["groups"] else ""
         try:
             got = await self._ask("decide", DECIDE_LOOSE if self.loosen else DECIDE_SYSTEM,
+                                  f"# Today\n{time.strftime('%Y-%m-%d')} (a date up to today is in the past, never "
+                                  "\"in the future\")\n\n"
                                   f"# Rules\n{self.recipe['decide'] or '(take every item that fits the list)'}\n\n"
                                   + self._tiers_text()
                                   + (f"# The goal, in the owner's words (what each column takes)\n{self.charter}\n\n"
@@ -1860,7 +1924,10 @@ class Work:
             got = None
         verdicts = {int(v.get("id")): v for v in got if isinstance(v, dict) and str(v.get("id", "")).isdigit()} \
             if isinstance(got, list) else {}
-        await self._fill_owner_columns(verdicts)
+        for i, it in enumerate(batch, start=1):
+            if i in verdicts and isinstance(verdicts[i].get("row"), dict):
+                self._fill_from_facts(verdicts[i]["row"], it)
+        await self._fill_owner_columns(verdicts, batch)
         for i, it in enumerate(batch, start=1):
             v = verdicts.get(i)
             if v is None:
@@ -1884,8 +1951,11 @@ class Work:
             if verdict in ("keep", "loose"):
                 filled = v.get("row") if isinstance(v.get("row"), dict) else {}
                 empty = [c for c in judgement_columns(self.recipe, self.reference) if not str(filled.get(c) or "").strip()]
+                unshown = unshown_musts(self.recipe, filled)
                 if empty:  # it fits, but the row isn't finished: nearly there, never on the list half-filled
                     verdict, reason = "maybe", f"left {', '.join(empty)} empty" + (f" ({reason})" if reason else "")
+                elif unshown:  # a rule that never loosens, with nothing shown for it
+                    verdict, reason = "maybe", "shows nothing for: " + "; ".join(unshown)
             if verdict in ("keep", "loose"):
                 row = {c: " ".join(str((v.get("row") or {}).get(c) or "").split()) for c in self.recipe["columns"]}
                 relax = {c for r in loosened for c in r.get("columns") or []}
@@ -1928,7 +1998,46 @@ class Work:
             else:
                 await self.record(it, "dropped", reason or "breaks a rule")
 
-    async def _fill_owner_columns(self, verdicts: dict[int, dict]) -> None:
+    def _fill_from_facts(self, row: dict, item: dict) -> None:
+        """Cells a judging call left empty that code found on the item's own pages: its
+        email (on its own domain) with the page it's on and whether it's a shared inbox,
+        its phone, its US state from an address. A fact read is never left out."""
+        cols = self.recipe["columns"]
+        domain, _text = self._own_text(item)
+        if not domain:
+            return  # no site of its own: nothing of its own to take a fact from
+        own = [e for e in item.get("evidence") or [] if fx.same_site(fx.domain_of(e.get("source", "")), domain)]
+
+        def empty(c: str) -> bool:
+            return bool(c) and c in cols and not str(row.get(c) or "").strip()
+
+        mails = [(m, e["source"]) for e in own for m in fx.emails(e.get("text", ""), domain)]
+        mail_col = next((c for c in cols if re.search(r"e-?mail", c, re.I) and not re.search(r"source|url|type", c, re.I)), "")
+        if mails and empty(mail_col):
+            value, src = mails[0]
+            row[mail_col] = value
+            source = next((x.get("source_column") for x in self.recipe["checks"]
+                           if x["column"] == mail_col and x["op"] == "in_evidence" and x.get("source_column")), "") \
+                or next((c for c in cols if c != mail_col and re.search(r"e-?mail", c, re.I) and re.search(r"source|url", c, re.I)), "")
+            if empty(source) and re.match(r"https?://", src):
+                row[source] = src
+            kind = next((c for c in cols if re.search(r"e-?mail", c, re.I) and re.search(r"type|kind", c, re.I)), "")
+            values = [str(v) for x in self.recipe["checks"] if x["column"] == kind and x["op"] == "in" for v in x.get("value") or []]
+            shared = next((v for v in values if re.search(r"shared|role|generic|general", v, re.I)), "")
+            named = next((v for v in values if re.search(r"personal|direct|named|individual", v, re.I)), "")
+            if empty(kind) and shared and named:
+                row[kind] = shared if fx.SHARED_LOCAL.match(value.split("@", 1)[0]) else named
+        phones = [(n, e["source"]) for e in own for n in fx.phones(e.get("text", ""))]
+        phone_col = next((c for c in cols if re.search(r"phone|tel\b|telephone", c, re.I) and not re.search(r"source|url", c, re.I)), "")
+        if phones and empty(phone_col):
+            row[phone_col] = phones[0][0]
+        state_col = next((c for c in cols if re.fullmatch(r"(us\s*)?state", c.strip(), re.I)), "")
+        if "US" in self.places and empty(state_col):
+            state = fx.us_state("\n".join(e.get("text", "") for e in own), address_only=True)
+            if state:
+                row[state_col] = state
+
+    async def _fill_owner_columns(self, verdicts: dict[int, dict], batch: list[dict] | None = None) -> None:
         """The columns filled from the owner's own material (:func:`judgement_columns`),
         where a judging call left them empty: one short call for the batch, from that
         material and the row so far. A row they're still empty in is nearly there."""
@@ -1943,12 +2052,18 @@ class Work:
         values = {x["column"]: x.get("value") or [] for x in self.recipe["checks"] if x["op"] == "in"}
         spec = "\n".join(f"- {c}" + (f": {self.recipe['about'][c]}" if self.recipe["about"].get(c) else "")
                          + (f" (exactly one of: {', '.join(map(str, values[c]))})" if values.get(c) else "") for c in cols)
-        items = "\n\n".join(f"## id {i}\n{json.dumps(v['row'], ensure_ascii=False)[:1500]}" for i, v in todo.items())
+        def read(i: int) -> str:  # a little of what was read about it, so a reason can cite a fact
+            it = (batch or [])[i - 1] if batch and 0 < i <= len(batch) else {}
+            return " ".join(" ".join(e.get("text", "").split())[:600] for e in (it.get("evidence") or [])[:3])[:1500]
+
+        items = "\n\n".join(f"## id {i}\n{json.dumps(v['row'], ensure_ascii=False)[:1500]}\nread: {read(i)}"
+                             for i, v in todo.items())
         try:
             got = await self._ask("owner", "Fill the owner's columns for each item, from the owner's material and what is "
                                            "known about the item. Reply ONLY with JSON: {\"<id>\": {\"<column>\": "
                                            "\"<value>\"}}. A column with a fixed set of values takes one of them exactly. "
-                                           "When the fact a value would rest on isn't known, base it on what is known. "
+                                           "Tie each value to something read about this item (what it does, who it "
+                                           "serves), never a sentence that would fit any item. "
                                            "Keep your thinking short.",
                                   f"# The owner's material\n{self.reference or '(none)'}\n\n# Columns to fill\n{spec}"
                                   f"\n\n# Items\n{items}")
@@ -2493,6 +2608,9 @@ async def check_finish(run: dict, step: dict, folder: Path, recipe: dict[str, An
             empty = [c for c in judgement_columns(recipe, ref_text) if not row.get(c)]
             if not problem and empty:
                 problem = f"{', '.join(empty)} left empty"
+            unshown = unshown_musts(recipe, row)
+            if not problem and unshown:
+                problem = "it shows nothing for: " + "; ".join(unshown)
             if not problem and recipe["groups"] and recipe["groups"].get(group) and kept.get(group, 0) >= recipe["groups"][group]:
                 problem = f"{group} is already full"
             item = {"key": key, "name": str(name)[:120], "group": group, "source": "finishing step",
