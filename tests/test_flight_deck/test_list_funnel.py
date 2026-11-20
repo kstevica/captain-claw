@@ -3030,3 +3030,35 @@ def test_a_long_list_gets_the_searches_and_looks_its_length_needs(tmp_path):
     assert funnel.Work(run, step, long, tmp_path).look_max == 1000
     assert funnel.Work(run, step, grouped, tmp_path, "a").look_max == 400  # this step's group, not the whole list
     assert funnel.Work({"id": "bat_x", "config": {"funnel_look_max": 5}}, step, long, tmp_path).look_max == 5
+
+
+async def test_a_group_named_for_two_columns_isnt_written_over_one_of_them(deck):
+    """A list sorted into "US_company", "UK_company" and so on, with a Type column that
+    may only be company or individual: the group's name was written over Type, and the
+    list's own check then dropped every good row."""
+    cols = ["Name", "Type", "Country"]
+    recipe = {"group_by": "Type", "groups": {"US_company": 2, "UK_person": 2}, "columns": cols,
+              "checks": [{"column": "Type", "op": "in", "value": ["company", "individual", "person"]}]}
+    assert funnel.group_cell(recipe, "US_company", "US_company") == "company"  # the value its name carries
+    assert funnel.group_cell(recipe, "US_company", "Individual") == "individual"  # what was written, when allowed
+    assert funnel.group_cell(recipe, "UK_person") == "person"
+    assert funnel.group_cell({**recipe, "checks": []}, "US_company", "x") == "US_company"  # no allowed list: as before
+    plain = {"group_by": "Kind", "groups": {"red": 1}, "checks": [{"column": "Kind", "op": "in", "value": ["red", "blue"]}]}
+    assert funnel.group_cell(plain, "red", "Reddish") == "red"  # a group that is a value: written as the list names it
+
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "leads.csv", "columns": cols, "min_rows": 2}}]
+    run, folder = await _run(deck["store"], contract, {"funnel_loosen": "never"}, rid="bat_groupcell1")
+    (folder / "extra" / "us.csv").write_text("Name,Where\nAcme,US\nBeta,UK\n")
+    deck["recipe"] = {"item": "lead", "key": "Name", "group_by": "Type", "decide": "Leads.",
+                      "groups": {"US_company": 2, "UK_company": 2},
+                      "sources": [{"kind": "file", "path": "extra/us.csv", "group": "US_company"}],
+                      "checks": [{"column": "Type", "op": "in", "value": ["company", "individual"]}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "reason": "",
+                                     "group": "US_company" if f["Name"] == "Acme" else "UK_company",
+                                     "row": {"Name": f["Name"], "Type": "US_company" if f["Name"] == "Acme" else "company",
+                                             "Country": f["Where"]}} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    rows = {r["Name"]: r for r in funnel._read_csv(folder / funnel.ROWS)}
+    assert rows["Acme"]["Type"] == "company" and rows["Acme"][funnel._GROUP_COL] == "US_company"
+    assert rows["Beta"]["Type"] == "company" and rows["Beta"][funnel._GROUP_COL] == "UK_company"  # its own group kept

@@ -887,6 +887,14 @@ list wants when that is more than 1,000, and a step may look into 2 items for ea
 it wants when that is more than 60. The owner can set a run's searches in the
 factory's charter form ("Searches a run may make"); set, it is used as written.
 
+A leads list sorted into four groups named for two columns at once ("US_company",
+"UK_individual"), with a Type column that may only be company or individual, kept
+nothing: the group's name was written over Type, and the list's own check dropped
+every row the judging call had passed. Now the grouping column takes the group's name
+only when the name is a value that column may hold. Otherwise the cell keeps what was
+written when that is allowed, or takes the allowed value the group's name carries
+("company"); the row's group is kept beside it, as before.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
