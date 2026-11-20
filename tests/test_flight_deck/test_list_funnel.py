@@ -144,7 +144,7 @@ async def deck(tmp_path, monkeypatch):
     from captain_claw.flight_deck import auth, basna_routes, vfs_routes
     monkeypatch.setattr(vfs_routes, "_user_root", lambda owner: tmp_path / "vfs" / owner)
     state: dict = {"recipe": {}, "extract": lambda user: {"items": []}, "decide": lambda items: [],
-                   "queries": [], "asked": [], "tools": None}
+                   "queries": [], "asked": [], "tools": None, "owner": lambda user: {}}
 
     class Prov:
         async def complete(self, messages, **_kw):
@@ -160,6 +160,9 @@ async def deck(tmp_path, monkeypatch):
                 state["asked"].append(f"decide:{len(items)}")
                 state.setdefault("decide_prompts", []).append(user)
                 return _Reply(json.dumps(state["decide"](items)))
+            if system.startswith("Fill the owner's columns"):
+                state["asked"].append("owner")
+                return _Reply(json.dumps(state["owner"](user)))
             state["asked"].append("queries")
             return _Reply(json.dumps({"queries": state["queries"]}))
 
@@ -1195,16 +1198,23 @@ def test_a_slashed_group_is_searched_by_each_part():
     assert qs[:4] == ["list of research shops United States", "list of research firms United States",
                       "list of analysis shops United States", "list of analysis firms United States"]
     assert not any("/" in q for q in qs) and len(qs) == len(set(qs)) <= 24
-    # a model's own searches for a group count when they use a word for it ("law" for "legal")
-    r = funnel.normalize_recipe({"sources": [
-        {"kind": "search", "group": "x", "queries": ["boutique law firm directory", "CPA firms list"]},
-        {"kind": "search", "group": "y", "queries": ["boutique law firm directory", "CPA firms list"]}]},
-        {**funnel.from_contract(CONTRACT), "groups": {"x": 2, "y": 2}})
-    r["sources"][0]["group"] = "legal/accounting boutiques"
-    r["sources"][1]["group"] = "research/analysis shops"  # a copy of another group's: written for it
-    funnel.tidy_recipe(r, "Find firms.")
+    # a model's own searches for a group count when they use a word the setup gave for it
+    # ("law firm" for "legal", in any language); no word list of code's guesses for it
+    def tidied(words):
+        r = funnel.normalize_recipe({"sources": [
+            {"kind": "search", "group": "x", "queries": ["boutique law firm directory", "CPA firms list"]},
+            {"kind": "search", "group": "y", "queries": ["boutique law firm directory", "CPA firms list"]}]},
+            {**funnel.from_contract(CONTRACT), "groups": {"x": 2, "y": 2}})
+        r["sources"][0]["group"] = "legal/accounting boutiques"
+        r["sources"][1]["group"] = "research/analysis shops"  # a copy of another group's: written for it
+        r["group_words"] = words
+        return funnel.tidy_recipe(r, "Find firms.")
+
+    r = tidied({"legal/accounting boutiques": ["law firm", "CPA"]})
     assert r["sources"][0]["queries"] == ["boutique law firm directory", "CPA firms list"]
     assert r["sources"][1]["queries"][:2] == ["list of research shops", "list of analysis shops"]  # item: "item"
+    assert tidied({})["sources"][0]["queries"][0] == "list of legal boutiques"  # no word for it given
+    assert funnel._group_words("Odvjetnički uredi", ["odvjetnik", "pravni ured"]) == ["odvjet", "uredi", "pravni", "ured"]
 
 
 # ── unshown is not broken ──────────────────────────────────────────────
@@ -1504,3 +1514,59 @@ async def test_a_short_list_leaves_the_review_to_go_on(deck):
     steps = await funnel.plan(run)
     await _go(deck["store"], run, steps)
     assert funnel.review_settled(await deck["store"].get_run(run["id"]), "- short") == ""  # 1 of 3: fix rounds may add
+
+
+# ── what the setup tells code, in any language ─────────────────────────
+
+def test_the_setups_tags_tell_code_what_each_rule_is_about():
+    """The rule tiers relied on English words ("employees", "email") to tell a count
+    or a way to reach the item from what it is: the setup tags them now, any language."""
+    r = funnel.normalize_recipe({
+        "rules": [{"rule": "sjedište u Hrvatskoj", "kind": "must", "fact": "place"},
+                  {"rule": "odvjetnički ured", "kind": "must", "fact": "identity"},
+                  {"rule": "od 2 do 50 zaposlenika", "kind": "must", "fact": "measured"},
+                  {"rule": "e-pošta na vlastitoj stranici", "kind": "must", "fact": "contact"},
+                  {"rule": "nikad ne pogađaj adresu", "kind": "must", "fact": "safety"},
+                  {"rule": "2-50 employees", "kind": "must"}],  # no tag: read from its words
+        "columns": [{"name": "Firm"}, {"name": "CaptainReason", "from": "owner"}, {"name": "Pitch", "from": "owner"}],
+        "skip_sites": ["https://www.lawyer-directory.example/x", "not a site"]},
+        funnel.from_contract(FIRM_LEADS))
+    loose = [x["rule"] for x in funnel.loosenable(r)]
+    assert loose == ["od 2 do 50 zaposlenika", "e-pošta na vlastitoj stranici", "2-50 employees"]
+    assert funnel.looser_of(r["rules"][3]) == funnel.CONTACT_LOOSER
+    assert r["skip_sites"] == ["lawyer-directory.example"] and "lawyer-directory.example" in funnel.skip_sites(r)
+    assert r["owner_columns"] == []  # not columns of this list
+    assert funnel.judgement_columns(funnel.normalize_recipe(
+        {"columns": [{"name": "CaptainFeature", "from": "owner"}, {"name": "EmailType"}], "reference": ["extra/Captain.md"]},
+        funnel.from_contract(PITCH)), "personal shared Onboarding") == ["CaptainFeature", "CaptainReason"]
+
+
+def test_a_rule_names_its_columns_by_its_own_words_too():
+    """A run made FounderOrPartner required while the email rule named only Email and
+    EmailSourceURL: firms reached by their contact page were dropped for no founder."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "leads.csv", "columns": [
+        "Firm", "Website", "FounderOrPartner", "Email", "EmailSourceURL"]}}]
+    r = funnel.normalize_recipe({"site_column": "Website", "rules": [
+        {"rule": "its own website prints a founder's or partner's email", "kind": "must",
+         "columns": ["Email", "EmailSourceURL"]}]}, funnel.from_contract(contract))
+    assert r["rules"][0]["columns"] == ["Email", "EmailSourceURL", "FounderOrPartner"]  # never Website, its site
+
+
+async def test_columns_from_the_owners_material_are_filled_not_left_empty(deck):
+    run, folder = await _run(deck["store"], PITCH, rid="bat_ownerf001")
+    (folder / "extra" / "firms.csv").write_text("Firm,Website\nA,https://a.example\nB,https://b.example\n")
+    (folder / "extra" / "Captain.md").write_text("# Captain\n\nOnboarding teaches agents your documents.")
+    deck["recipe"] = {"item": "firm", "key": "Firm", "sources": [{"kind": "file", "path": "extra/firms.csv"}],
+                      "reference": ["extra/Captain.md"], "decide": "Firms.",
+                      "checks": [{"column": "CaptainFeature", "op": "in", "value": ["Onboarding", "Flows"]}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {**f, "CaptainFeature": "", "CaptainReason": ""}}
+                                    for i, f in items]
+    deck["owner"] = lambda user: {"1": {"CaptainFeature": "Onboarding", "CaptainReason": "their many guides"}}
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["A"][0] == "kept"  # filled by the one short call
+    assert got["B"] == ("maybe", "left CaptainFeature, CaptainReason empty")  # still empty: nearly there
+    assert deck["asked"].count("owner") == 1
+    rows = funnel._read_csv(folder / funnel.ROWS)
+    assert rows[0]["CaptainReason"] == "their many guides"

@@ -74,7 +74,7 @@ DECIDE_TOKENS = 8192
 # nothing more): with it on, Qwen thought 160k characters on the setup call, looped,
 # and never answered, twice. A small limit also keeps a loop from running for minutes
 # on the tier's whole output.
-OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500}
+OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500, "owner": 3000}
 DECIDE_PER_ITEM = 600       # more room for a judging call with several short rows
 THINKING_TOKENS = 16_000    # a judging call's room when the run turns thinking on
 LINKS_AS_ITEMS = 5          # a links file with fewer links is reference, not a list to go through
@@ -175,9 +175,12 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
     raw = raw if isinstance(raw, dict) else {}
     base = base or from_contract([])
     about = {}
+    owner_cols: list[str] = []
     for c in raw.get("columns") or []:
         if isinstance(c, dict) and str(c.get("name") or "").strip():
             about[str(c["name"]).strip()[:80]] = str(c.get("what") or c.get("about") or "").strip()[:300]
+            if str(c.get("from") or "").strip().lower() == "owner":
+                owner_cols.append(str(c["name"]).strip()[:80])
     columns = list(base["columns"]) or _names(raw.get("columns"))  # the checks' columns win
     group_by = base["group_by"] or (str(raw.get("group_by") or "").strip() if raw.get("group_by") in columns else "")
     groups = dict(base["groups"])
@@ -247,6 +250,12 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
             recipe["checks"].append({"column": col, "op": "required"})
     recipe["decide_batch"] = _int(raw.get("decide_batch"), 1, 25, 1 if recipe["gather"] else 10)
     recipe["reference"] = [r for r in (_rel(x) for x in raw.get("reference") or []) if r][:6]
+    recipe["owner_columns"] = [c for c in owner_cols if c in columns and c not in (key, group_by)]
+    words = raw.get("group_words") if isinstance(raw.get("group_words"), dict) else {}
+    recipe["group_words"] = {g: [w for w in (" ".join(str(x).split()).lower()[:40] for x in (words.get(g) or [])
+                                             if isinstance(x, str)) if len(w) >= 2][:12] for g in groups if words.get(g)}
+    recipe["skip_sites"] = [d for d in (fx.domain_of(str(x)) for x in raw.get("skip_sites") or [] if isinstance(x, str))
+                            if d and "." in d][:30]
     recipe["rules"] = _rules(raw.get("rules"), recipe)
     return recipe
 
@@ -282,24 +291,38 @@ CONTACT_LOOSER = ("a way to reach it on its own site: a contact page or form (it
 
 
 def _is_contact(rule: dict[str, Any]) -> bool:
-    return bool(_CONTACT.search(rule["rule"]) or any(_CONTACT.search(c) for c in rule.get("columns") or []))
+    return _fact_of(rule) == "contact"
+
+
+FACTS = ("identity", "place", "measured", "contact", "safety", "other")
+
+
+def _fact_of(rule: dict[str, Any]) -> str:
+    """What a rule is about: the setup's own word for it (any language), else read
+    from its words (English): a place named, a way to reach it, something measured."""
+    if rule.get("fact") in FACTS:
+        return rule["fact"]
+    text = rule["rule"]
+    if fx.places_named(text):
+        return "place"
+    if _CONTACT.search(text) or any(_CONTACT.search(c) for c in rule.get("columns") or []):
+        return "contact"
+    return "measured" if _MEASURED.search(text) else "other"
 
 
 def _protected(rule: dict[str, Any], recipe: dict[str, Any]) -> bool:
     """A must that is never loosened: every must, but one about how to reach the item
     (met loosely by a contact page on its own site, ``CONTACT_LOOSER``) or about
     something measured (a count, an amount, a date, a rating) that many items never
-    publish. Even then it stays when it's about where the item is (a place), or about
-    the list's key, group or site column. Unshown, a protected must leaves the item
-    nearly there, never loose."""
-    text = rule["rule"]
-    if fx.places_named(text):
-        return True
-    if _is_contact(rule):
+    publish (:func:`_fact_of`). A measured one stays when it's about the list's key,
+    group or site column. Unshown, a protected must leaves the item nearly there,
+    never loose."""
+    fact = _fact_of(rule)
+    if fact == "contact":
         return False
-    fixed = {recipe["key"], recipe["group_by"], recipe.get("site_column") or ""} - {""}
-    if not _MEASURED.search(text):
+    if fact != "measured":
         return True
+    fixed = {recipe["key"], recipe["group_by"], recipe.get("site_column") or ""} - {""}
     return bool(set(rule.get("columns") or []) & fixed)
 
 
@@ -312,7 +335,7 @@ def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
     the item is, where it is, or how to reach it; any other must, unshown, may be met
     by "not shown" when rows run short, as a prefer rule by its looser reading."""
     out: list[dict[str, Any]] = []
-    fixed = {recipe["key"], recipe["group_by"]}
+    fixed = {recipe["key"], recipe["group_by"], recipe.get("site_column") or ""}
     for r in raw if isinstance(raw, list) else []:
         if not isinstance(r, dict) or not str(r.get("rule") or "").strip():
             continue
@@ -320,7 +343,13 @@ def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
         looser = " ".join(str(r.get("looser") or "").split())[:300]
         kind = "prefer" if str(r.get("kind") or "").lower() == "prefer" and looser else "must"
         given = [c for c in _names(r.get("columns")) if c in recipe["columns"]]
-        rule: dict[str, Any] = {"rule": text, "kind": kind, "columns": given or _rule_columns(text, recipe)}
+        # what the setup named, and what the rule's own words name ("a founder's or partner's
+        # email" → FounderOrPartner too): a column it left out stays required on a loose row
+        cols = list(dict.fromkeys(given + _rule_columns(text, recipe)))
+        rule: dict[str, Any] = {"rule": text, "kind": kind, "columns": cols}
+        fact = str(r.get("fact") or "").strip().lower()
+        if fact in FACTS:
+            rule["fact"] = fact
         if kind == "must":
             rule["protected"] = _protected(rule, recipe)
             if not rule["protected"] and _is_contact(rule) and not looser:
@@ -336,25 +365,17 @@ def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
 
 def judgement_columns(recipe: dict[str, Any], reference: str = "") -> list[str]:
     """Columns a judging call fills from the owner's own material, not from what an
-    item publishes: one named after a reference file (CaptainReason beside Captain.md),
-    and one whose fixed values come from the reference (a product feature to pitch).
-    Always filled, a row on a looser reading too. A column a rule is about never is."""
+    item publishes: the ones the setup marked ``"from": "owner"``, and one named after
+    a reference file (CaptainReason beside Captain.md). Always filled, a row on a looser
+    reading too. A column a rule is about never is. (``reference`` is kept for callers;
+    a value's words in the reference are no sign: "personal" is in any text.)"""
     ruled = {c for r in recipe.get("rules") or [] for c in r.get("columns") or []}
     fixed = {recipe.get("group_by") or "", recipe.get("key") or ""}
     stems = {re.sub(r"[^a-z]", "", Path(str(ref)).stem.lower()) for ref in recipe.get("reference") or []}
     stems = {st for st in stems if len(st) >= 4}
-    ref = (reference or "").lower()
-    out = []
-    for c in recipe["columns"]:
-        if c in fixed or c in ruled:
-            continue
-        values = [str(v) for x in recipe.get("checks") or [] if x["column"] == c and x["op"] == "in"
-                  for v in x.get("value") or []]
-        from_ref = bool(ref) and any(re.search(r"(?<![a-z])" + re.escape(v.lower()) + r"(?![a-z])", ref)
-                                     for v in values if len(v) >= 3)
-        if from_ref or any(st in c.lower() for st in stems):
-            out.append(c)
-    return out
+    owner = set(recipe.get("owner_columns") or [])
+    return [c for c in recipe["columns"] if c not in fixed and c not in ruled
+            and (c in owner or any(st in c.lower() for st in stems))]
 
 
 def soft_rules(recipe: dict[str, Any]) -> list[dict[str, Any]]:
@@ -490,24 +511,20 @@ def fix_output(recipe: dict[str, Any], task: str) -> bool:
     return True
 
 
-# Words a search may use for a group's word instead (by stem): "law firm" names a
-# "legal boutiques" group, "CPA" an "accounting" one.
-_GROUP_SYNONYMS = {"legal": ("law", "lawyer", "attorn", "counsel"), "accoun": ("cpa", "bookke", "audit", "tax"),
-                   "market": ("advert", "brand", "growth"), "consul": ("advis", "strateg"),
-                   "resear": ("insigh", "survey", "analyt"), "analys": ("analyt", "insigh", "resear"),
-                   "conten": ("copywr", "editor", "writin"), "restau": ("dining", "eatery", "bistro", "cafe"),
-                   "dental": ("dentis",), "medica": ("clinic", "health", "doctor"),
-                   "softwa": ("saas", "app", "tech"), "design": ("creati", "studio")}
 # Group nouns too vague to search by alone: "research shops" is also looked for as
 # "research firms" when the run's item is a firm.
 _VAGUE_NOUNS = {"shops", "shop", "boutiques", "boutique", "outfits", "outfit", "houses", "players", "providers"}
 
 
-def _group_words(group: str) -> list[str]:
+def _group_words(group: str, said: list[str] | None = None) -> list[str]:
     """The stems a search for a group should carry, any one of them: the group's own
-    words (shops, firms and such aside) and the words searches use for them."""
-    stems = [w[:6] for w in re.findall(r"[a-z]+", group.lower()) if len(w) >= 4 and w not in _GROUP_STOP]
-    return list(dict.fromkeys(stems + [x for st in stems for x in _GROUP_SYNONYMS.get(st, ())]))
+    words (shops, firms and such aside) and the words the setup gave for it
+    (``group_words``: "law firm" for "legal", in any language)."""
+    words = re.findall(r"[a-z]+", _fold(group))
+    stems = [w[:6] for w in words if len(w) >= 4 and w not in _GROUP_STOP]
+    stems += [w[:6] for phrase in said or [] for w in re.findall(r"[a-z0-9]+", _fold(phrase))
+              if len(w) >= 3 and w not in _GROUP_STOP]
+    return list(dict.fromkeys(stems))
 
 
 def _plural(noun: str) -> str:
@@ -564,7 +581,7 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
     for s in recipe["sources"]:
         if s["kind"] != "search" or not s.get("group"):
             continue
-        words = _group_words(s["group"])
+        words = _group_words(s["group"], (recipe.get("group_words") or {}).get(s["group"]))
         joined = " ".join(s["queries"]).lower()
         if (words and not any(w in joined for w in words)) or s["queries"] in seen_lists:
             s["queries"] = _group_queries(s["group"], place, size, recipe.get("item", ""))
@@ -674,10 +691,12 @@ SETUP_SYSTEM = """You set up a list-building run. Code will do the searching, fe
 will judge each item once, in a short call. Write the recipe it follows, as ONLY a JSON object:
 
 {"item": "<what one row is, e.g. firm, person, product, invoice>",
- "columns": [{"name": "<column>", "what": "<what it holds, where it comes from>"}],
+ "columns": [{"name": "<column>", "what": "<what it holds, where it comes from>",
+              "from": "item|owner (owner: filled from the owner's own material, e.g. which of their products fits)"}],
  "key": "<the column no two rows share (a website, an email, an id)>",
  "site_column": "<the column holding the item's own website, if it has one>",
  "group_by": "<column the list is split by, or empty>", "groups": {"<group>": <how many>},
+ "group_words": {"<group>": ["<words a page or search may use for it, any language>"]},
  "target": <rows wanted, 0 = every item that passes>,
  "sources": [
    {"kind": "file", "path": "<table in the folder>", "group": ""},
@@ -688,13 +707,15 @@ will judge each item once, in a short call. Write the recipe it follows, as ONLY
     "about": "<what these searches look for>"}],
  "filters": [{"column": "<column, or size_band>", "op": "regex|not_regex|in|not_in|min|max|size_max|size_min",
               "value": ...}],
- "gather": [{"kind": "search", "query": "\\"{Firm}\\" site:linkedin.com/company", "count": 5},
-            {"kind": "fetch", "url": "{Website}", "paths": ["", "about", "team", "contact", "news"]}],
+ "gather": [{"kind": "search", "query": "\\"{Name}\\" <where the facts the rules need are listed>", "count": 5},
+            {"kind": "fetch", "url": "{Website}", "paths": ["", "<the item's pages that hold those facts>"]}],
  "extract": ["emails", "phones", "dates", "size_band", "us_state", "links"],
  "decide": "<the owner's rules for an item, short, in their words>",
  "rules": [{"rule": "<one of the owner's rules for an item>", "kind": "must|prefer",
+            "fact": "identity|place|measured|contact|safety|other",
             "looser": "<prefer only: the loosest reading that still serves the goal>",
             "columns": ["<the columns this rule is about>"]}],
+ "skip_sites": ["<sites that list or mention items of this kind but are never one's own site>"],
  "checks": [{"column": "<column>", "op": "required|in|regex|in_evidence|within_months|min|max",
              "value": ..., "source_column": "<column with the link it came from>"}],
  "decide_batch": <items per judging call: 1 when each item has pages to read, up to 20 for short rows>,
@@ -704,8 +725,16 @@ Rules:
 - Use the owner's own files and links first; they cost nothing to read. Search only when the list has to be
   found on the web, and then write 10-25 searches per group that find pages listing many of the right items
   (directories, catalogues, databases, rankings, "best of" and category pages), not one item each.
-- Gather only what the checks and the rules need, and put the cheapest test first: a size band from a search
-  snippet ("size_max" filter) before reading pages.
+- Gather only what the checks and the rules need, from the pages this kind of item keeps them on (a firm's about,
+  team and contact pages; a restaurant's menu and contact pages; a product's spec page; a person's profile), and
+  put the cheapest test first: a company's size band from a search snippet ("size_max" filter) before reading.
+- fact, for each rule: identity (what the item is: its kind, category, segment), place (where it is), measured (a
+  count, amount, date or rating), contact (how to reach it), safety (what must never be done), other. Code reads
+  these in any language: a measured or contact rule may be met loosely when rows run short; identity, place,
+  safety and other never are.
+- group_words: for each group, the words pages and searches use for it ("legal" → law firm, attorney, advokat).
+- columns "from": "owner" for a column filled from the owner's own material (a reference file), never from the
+  item's pages; every row fills it.
 - Templates name columns in braces ({Firm}, {Website}) or {domain}.
 - checks: "in_evidence" for every value copied from a source (an email, a date, a quote) with the column that
   holds its link; "within_months" for a date window; "in" for fixed values.
@@ -872,8 +901,9 @@ def web_recipe(base: dict[str, Any], task: str) -> dict[str, Any] | None:
     if size and name:
         gather.append({"kind": "search", "query": f'"{{{name}}}" site:linkedin.com/company', "count": 5})
         filters.append({"column": "size_band", "op": "size_max", "value": int(size.group(2))})
-    if site:
-        gather.append({"kind": "fetch", "url": f"{{{site}}}", "paths": ["", "about", "team", "contact", "news"]})
+    if site:  # an item's own pages; a company's team page only when its size is asked for
+        gather.append({"kind": "fetch", "url": f"{{{site}}}",
+                       "paths": ["", "about", "contact", "news"] + (["team"] if size else [])})
     checks: list[dict[str, Any]] = []
     for c in cols:
         src = next((x for x in cols if x.lower().replace(" ", "") in (f"{c}sourceurl".lower(), f"{c}source".lower())), "")
@@ -1075,7 +1105,8 @@ def skip_sites(recipe: dict[str, Any]) -> tuple[str, ...]:
     site = (recipe.get("site_column") or "").lower()
     about = (recipe.get("about") or {}).get(recipe.get("site_column") or "", "").lower()
     words = f"{site} {about}"
-    return tuple(s for s in _SKIP_SITES if not re.search(r"(?<![a-z])" + re.escape(s.split(".")[0]) + r"(?![a-z])", words))
+    base = tuple(s for s in _SKIP_SITES if not re.search(r"(?<![a-z])" + re.escape(s.split(".")[0]) + r"(?![a-z])", words))
+    return base + tuple(d for d in recipe.get("skip_sites") or [] if d not in base)
 
 
 _NAME_STOP = frozenset({"the", "and", "inc", "llc", "ltd", "group", "partners", "company", "consulting", "co",
@@ -1829,6 +1860,7 @@ class Work:
             got = None
         verdicts = {int(v.get("id")): v for v in got if isinstance(v, dict) and str(v.get("id", "")).isdigit()} \
             if isinstance(got, list) else {}
+        await self._fill_owner_columns(verdicts)
         for i, it in enumerate(batch, start=1):
             v = verdicts.get(i)
             if v is None:
@@ -1895,6 +1927,41 @@ class Work:
                              "why": reason, "sources": " ".join(e["source"] for e in it.get("evidence") or [])})
             else:
                 await self.record(it, "dropped", reason or "breaks a rule")
+
+    async def _fill_owner_columns(self, verdicts: dict[int, dict]) -> None:
+        """The columns filled from the owner's own material (:func:`judgement_columns`),
+        where a judging call left them empty: one short call for the batch, from that
+        material and the row so far. A row they're still empty in is nearly there."""
+        cols = judgement_columns(self.recipe, self.reference)
+        if not cols:
+            return
+        todo = {i: v for i, v in verdicts.items()
+                if str(v.get("verdict") or "").lower() in ("keep", "loose", "maybe") and isinstance(v.get("row"), dict)
+                and any(not str(v["row"].get(c) or "").strip() for c in cols)}
+        if not todo:
+            return
+        values = {x["column"]: x.get("value") or [] for x in self.recipe["checks"] if x["op"] == "in"}
+        spec = "\n".join(f"- {c}" + (f": {self.recipe['about'][c]}" if self.recipe["about"].get(c) else "")
+                         + (f" (exactly one of: {', '.join(map(str, values[c]))})" if values.get(c) else "") for c in cols)
+        items = "\n\n".join(f"## id {i}\n{json.dumps(v['row'], ensure_ascii=False)[:1500]}" for i, v in todo.items())
+        try:
+            got = await self._ask("owner", "Fill the owner's columns for each item, from the owner's material and what is "
+                                           "known about the item. Reply ONLY with JSON: {\"<id>\": {\"<column>\": "
+                                           "\"<value>\"}}. A column with a fixed set of values takes one of them exactly. "
+                                           "When the fact a value would rest on isn't known, base it on what is known. "
+                                           "Keep your thinking short.",
+                                  f"# The owner's material\n{self.reference or '(none)'}\n\n# Columns to fill\n{spec}"
+                                  f"\n\n# Items\n{items}")
+        except Exception as e:  # noqa: BLE001 — the rows stay as they are: nearly there
+            log.warning("funnel owner-columns call failed", run_id=self.run["id"], error=str(e))
+            return
+        if not isinstance(got, dict):
+            return
+        for i, v in todo.items():
+            fill = got.get(str(i)) if isinstance(got.get(str(i)), dict) else {}
+            for c in cols:
+                if not str(v["row"].get(c) or "").strip() and str(fill.get(c) or "").strip():
+                    v["row"][c] = " ".join(str(fill[c]).split())[:500]
 
     def _tiers_text(self) -> str:
         """The rule tiers for a judging call, when rows may be on a looser reading."""

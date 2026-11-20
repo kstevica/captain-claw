@@ -483,6 +483,22 @@ about the owner's own offer (named after a reference file, or with fixed values 
 come from it) are always filled now; a row that leaves one empty is nearly there, not
 on the list, and the judging prompt says to tie it to what was read.
 
+Made generic (2026-11-20). The rule tiers and their safety nets had leaned on English
+word lists and on company lists. The setup model now tags what code needs, in any
+language: each rule's `fact` (identity, place, measured, contact, safety, other: only a
+measured or contact rule may be met loosely), `group_words` for each group (the words
+pages and searches use for it; the hand-made synonym list is gone), columns filled
+`"from": "owner"` (from the owner's own material), and `skip_sites` for its kind of
+list. The English word lists stay only as a fallback when a tag is missing. A rule's
+columns are the ones the setup named plus the ones its own words name (never the key,
+group or site column), so a column it left out isn't required on a loose row. The
+setup's example recipe is neutral (no LinkedIn search; pages chosen for the kind of
+item), and the fallback reads a team page only when a company's size is asked for.
+Columns from the owner's material are filled by one short extra call where a judging
+call left them empty; a row is nearly there only when that call leaves them empty too.
+Matching a fixed value's words in the reference no longer marks a column as the owner's
+("personal" and "shared" are in any text).
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
