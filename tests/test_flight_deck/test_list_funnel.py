@@ -2871,3 +2871,29 @@ async def test_a_kind_said_to_fit_no_group_is_asked_about_alone(deck):
     assert got["Tvornica F"][0] == "dropped"  # asked alone too: still none
     assert got["Konoba G"][0] == "maybe" and deck["asked"].count("group") == 2  # it named its group: not asked
     assert "- hrvatska kuhinja" in deck["group_prompts"][0] and "narrower or regional kind" in funnel.GROUP_SYSTEM
+
+
+async def test_a_folder_of_many_files_is_one_pattern_and_every_file_is_seen(deck):
+    """A list built from a folder of documents: the setup was shown only the first 60
+    lines of the folder, had to name a source per file, and a look was offered only the
+    first 30 files, so the tables a fact is looked up in (late in the alphabet) never
+    came up. Now every file is listed, one pattern stands for many files alike, and a
+    look is told of them all."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "labs.csv",
+                                                     "columns": ["Lab", "Founded"], "min_rows": 2}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_manyfiles1")
+    extra = folder / "extra"
+    for n in range(70):
+        (extra / f"report_{n:03d}.md").write_text(f"# Lab {n}\n\nLab {n} works on things.\n")
+    (extra / "zz_founding.csv").write_text("Lab,Year\nLab 1,2001\n")
+    listing = funnel._folder_listing(folder)
+    assert "- extra/report_069.md" in listing and "- extra/zz_founding.csv" in listing  # past the detailed lines: by name
+    recipe = funnel.tidy_recipe(funnel.normalize_recipe(
+        {"item": "lab", "key": "Lab", "sources": [{"kind": "document", "path": "extra/report_*"}]},
+        funnel.from_contract(contract)), "Labs.", folder)
+    paths = [s["path"] for s in recipe["sources"]]
+    assert len(paths) == 70 and paths[0] == "extra/report_000.md" and all(s["kind"] == "document" for s in recipe["sources"])
+    assert "extra/zz_founding.csv" not in paths  # the pattern's files only
+    work = funnel.Work(run, {"step_key": "step-1"}, recipe, folder, "")
+    assert "extra/zz_founding.csv" in work._look_files() and len(work._look_files()) == 71
+    assert 'one source with a pattern' in funnel.SETUP_SYSTEM
