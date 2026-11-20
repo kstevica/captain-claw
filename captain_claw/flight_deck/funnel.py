@@ -79,7 +79,7 @@ DECIDE_TOKENS = 8192
 # nothing more): with it on, Qwen thought 160k characters on the setup call, looped,
 # and never answered, twice. A small limit also keeps a loop from running for minutes
 # on the tier's whole output.
-OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500, "owner": 3000, "look": 300}
+OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500, "owner": 3000, "look": 300, "group": 200}
 LOOK_STEPS = 4              # what one look into a nearly-there item may do (config funnel_look_steps)
 LOOK_MAX = 60               # items looked into per step (config funnel_look_max)
 DECIDE_PER_ITEM = 600       # more room for a judging call with several short rows
@@ -92,7 +92,8 @@ AGENT_CONTEXT = 64_000   # a funnel run's agent steps work in this much context 
 SOURCE_KINDS = ("search", "page", "links", "file", "document")
 FILTER_OPS = ("regex", "not_regex", "in", "not_in", "min", "max", "size_max", "size_min")
 CHECK_OPS = ("required", "in", "regex", "in_evidence", "within_months", "min", "max")
-_ITEM_COLS = ["key", "name", "group", "status", "stage", "reason", "source", "step", "at"]
+# "looked": how many more pages, results or file parts a look into the item read ("0": it looked and found none)
+_ITEM_COLS = ["key", "name", "group", "status", "stage", "reason", "source", "step", "at", "looked"]
 _MAYBE_COLS = ["key", "name", "group", "fields", "why", "sources", "row", "missing"]  # row: the cells the judging
 # call filled; missing: the rules it named as not shown (to trace why an item came close)
 _HANDOVER_COLS = ["key", "name", "group", "fields", "origin", "why", "from"]
@@ -1664,7 +1665,13 @@ the item breaks the rule, is met by "not shown"); name those rules in "loosened"
 rule that never loosens needs wasn't in what was read, or nothing read came from the item's own website; name in
 "missing" every rule whose fact wasn't shown, and fill the row with what was. drop: what was read shows it breaks
 a rule; name it in "broken" and copy into "shown" the words read that break it (a number, a date, a place), and
-fill the row with what was shown. Not finding a fact is never "shown".''')
+fill the row with what was shown. Not finding a fact is never "shown". The verdict and the reason agree: when you
+find no rule it breaks, the verdict is not drop.''')
+
+GROUP_SYSTEM = """A list sorts its items into groups. Say which group one item is, by what it is.
+A narrower or regional kind of a group is that group (a region's own style of a country's kind, a specialty within a
+field, one member of a family the group names). Answer "none" only when it is a kind none of the groups covers.
+Reply ONLY with JSON: {"group": "<one of the groups, written exactly as given, or none>"}"""
 
 LOOK_SYSTEM = """An item nearly fits a list, but something the list needs wasn't in what was read about it.
 Find it. Choose ONE next step and reply ONLY with JSON:
@@ -1691,7 +1698,8 @@ keep: it meets every rule as written and the row is filled from the facts. maybe
 needs wasn't in what was read, or nothing read came from the item's own website; name in "missing" every rule
 whose fact wasn't shown, and fill the row with what was. drop: what was read shows it breaks a rule; name it in
 "broken" and copy into "shown" the words read that break it (a number, a date, a place, what it is), and fill the
-row with what was shown. Not finding a fact is never "shown": an item a fact wasn't found for is maybe.''')
+row with what was shown. Not finding a fact is never "shown": an item a fact wasn't found for is maybe. The
+verdict and the reason agree: when you find no rule it breaks, the verdict is not drop.''')
 assert DECIDE_STRICT != DECIDE_SYSTEM
 
 
@@ -2135,7 +2143,7 @@ class Work:
             if self.passes(item, item["found"]):
                 return  # it already fails a test: nothing more to read
             if g["kind"] == "search":
-                q = render(g["query"], item["fields"], site)
+                q = render(g["query"], self._template_fields(item), site)
                 if not q or self.queries["searches"] >= self.budget:
                     continue
                 ok, text = await (await self._tools()).search(q, g.get("count", 5))
@@ -2151,7 +2159,7 @@ class Work:
                             own_site and fx.same_site(fx.domain_of(r["url"]), own_site))
                         evidence.append({"source": r["url"], "text": r["text"], "own": own})
             elif g["kind"] == "fetch":
-                base = render(g["url"], item["fields"], site)
+                base = render(g["url"], self._template_fields(item), site)
                 if not base:
                     continue
                 if not base.startswith(("http://", "https://")):
@@ -2251,6 +2259,18 @@ class Work:
         if self.recipe["key"] and not row.get(self.recipe["key"]):
             row[self.recipe["key"]] = self._name_of(item)
         return row
+
+    def _template_fields(self, item: dict) -> dict[str, str]:
+        """An item's fields as a gather template reads them. An item found by a search
+        carries its name as ``name``; a template names the list's own key column, and
+        found nothing to fill it with, so that item's search was never made."""
+        f, key = item["fields"], self.recipe["key"]
+        if not key or key.lower() == str(self.recipe.get("site_column") or "").lower():
+            return f  # keyed by its site: a name is no address to read
+        if any(k.lower() == key.lower() and str(v or "").strip() for k, v in f.items()):
+            return f
+        name = self._name_of(item)
+        return {**{k: v for k, v in f.items() if k.lower() != key.lower()}, key: name} if name else f
 
     def _name_of(self, item: dict) -> str:
         f = item["fields"]
@@ -2654,6 +2674,7 @@ class Work:
                 log_lines.append(f"- read {key}: " + (page_excerpt(text, 600) if text.strip() else "nothing there"))
             else:
                 break
+        it["look_read"] = new
         if new:
             it["found"] = self.facts(it, evidence)
         return bool(new)
@@ -2822,6 +2843,9 @@ class Work:
                 self._is_group_rule(r) for r in self._named(v.get("broken"))):
             return ""  # nothing says it's about its kind
         picked = await self._jev_group(item)
+        if picked is None and not typed and not by_words:
+            # "its kind is none of the groups" in a long judging answer: asked again, alone
+            picked = await self._asked_group(item)
         target = picked if picked is not None else (typed or by_words)
         return target if target in self.recipe["groups"] else ""
 
@@ -2860,6 +2884,29 @@ class Work:
         if choice == "none":
             return ""
         return choice if choice in self.recipe["groups"] else None
+
+    async def _asked_group(self, item: dict) -> str | None:
+        """Which of the list's groups an item is, asked of the run's model as one short
+        question of its own: a judging call that weighs every rule at once reads "one of
+        these groups" literally and drops a narrower kind of one. "" when it says none;
+        None when it can't be asked or names nothing usable (the judging answer decides)."""
+        words = self.recipe.get("group_words") or {}
+        groups = "\n".join(f"- {g}" + (f" (such as: {', '.join((words.get(g) or [])[:8])})" if words.get(g) else "")
+                           for g in self.recipe["groups"])
+        read = "\n\n".join(e.get("text", "")[:1200] for e in (item.get("evidence") or [])[:4])
+        try:
+            got = await self._ask("group", GROUP_SYSTEM,
+                                  f"# The list\n{(self.recipe.get('decide') or '')[:600]}\n\n# Its groups\n{groups}\n\n"
+                                  f"# The item\n{self._name_of(item)}\n\n# What was read about it\n{read}")
+        except Exception as e:  # noqa: BLE001 — the judging answer decides
+            log.warning("funnel group call failed", run_id=self.run["id"], error=str(e))
+            return None
+        g = " ".join(str((got or {}).get("group") or "").split()) if isinstance(got, dict) else ""
+        if not g:
+            return None
+        if g.lower() == "none":
+            return ""
+        return next((x for x in self.recipe["groups"] if x.lower() == g.lower()), None)
 
     def _is_group_rule(self, rule: dict[str, Any]) -> bool:
         """The rule that says which groups an item may be in ("cuisine is one of: ...")."""
@@ -3074,7 +3121,8 @@ class Work:
                     {"key": item.get("key", ""), "name": str(name)[:120], "group": group or self.group,
                      "status": status, "stage": stage or (status if status in ("kept", "maybe") else "judge"),
                      "reason": reason, "source": item.get("origin", ""), "step": self.key,
-                     "at": time.strftime("%Y-%m-%d %H:%M")})
+                     "at": time.strftime("%Y-%m-%d %H:%M"),
+                     "looked": str(item["look_read"]) if item.get("looked") and "look_read" in item else ""})
         line = f"{status} {str(name)[:60]}" + (f" ({group})" if group and not self.group else "") + f": {reason}"
         self.recent = (self.recent + [line])[-8:]
         await self._event("decide", line)
@@ -3914,6 +3962,13 @@ def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
     for g, c in groups.items():
         lines.append(f"| {_md(g) or '-'} | {c['looked']} | " + " | ".join(str(c.get(st, 0)) for st in _STAGE_WORDS)
                      + f" | {c.get('maybe', 0)} | {c.get('loose', 0)} | {c.get('kept', 0)} | {c.get('agent', 0)} |")
+    looked = [r for r in _read_csv(folder / ITEMS) if str(r.get("looked") or "").strip()]
+    if looked:
+        ended = {st: sum(1 for r in looked if r.get("status") == st) for st in ("kept", "loose", "maybe", "dropped")}
+        lines += ["", f"Looked into, for a fact that wasn't in what was first read: {len(looked)} "
+                  f"{item}{'' if len(looked) == 1 else 's'}. After it: {ended['kept'] + ended['loose']} on the list, "
+                  f"{ended['maybe']} still close, {ended['dropped']} dropped. "
+                  f"{sum(1 for r in looked if str(r.get('looked')).strip() == '0')} looks found nothing new to read."]
     checks = [c for c in recipe["checks"] if c["op"] != "required"]
     lines += ["", "## Checked in every row, by code", ""]
     lines += [f"- {c['column']} {_check_words(c)}" for c in checks] or ["- (no checks beyond the required columns)"]

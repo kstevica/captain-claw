@@ -819,6 +819,29 @@ wasn't found for. Nothing on the list and nothing later dropped is in it; with
 nothing that came close there is no file. The run's results show it as a group of
 its own ("Came close"), and the reviewers are told it isn't part of the list.
 
+A recorded run (the first, made into a test set) showed four more faults.
+
+A per-item search written with the list's key column ("{Name} reviews") was never made
+for an item a search found: such an item carries its name as `name`, the template
+found nothing for the key column, and the search was skipped without a word. The fact
+it would have shown was then missing and had to be looked for, at many times the
+cost. Now the key column in a template is filled from the item's name when it came
+under another key (never on a list keyed by its site).
+
+Several items of one group were dropped as "fits none of the groups" though each was a
+narrower kind of one, with no Jev to say otherwise: a judging call that weighs every
+rule at once reads "one of these groups" literally. Now an item dropped for its kind,
+whose answer names no group, is asked about alone (one short call: the groups, their
+words, what was read), and that answer decides: its own group (nearly there), another
+(handed over) or none (dropped).
+
+One item was dropped with a reason that argued for keeping it. The judging prompts now
+say the verdict and the reason agree: no rule broken, no drop.
+
+A run couldn't say what its looks had earned. The items file now has a `looked` column
+(how many more pages, results or file parts the look read; 0 when it found none), and
+the summary says how many items were looked into and how they ended.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
