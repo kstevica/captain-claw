@@ -314,6 +314,10 @@ class WebSearchToolConfig(BaseModel):
     # per request; many chunks per page, not just the 5 extra excerpts). Off,
     # or on failure, the pages are read here instead.
     brave_llm_context: bool = True
+    # Under Flight Deck: search in the owner's own Chrome (Captain for Chrome)
+    # when they turned that on in Flight Deck (Profile → Web searches) and it's
+    # open — the engine above is the fallback. False = never for this agent.
+    via_chrome: bool = True
 
 
 class PocketTTSToolConfig(BaseModel):

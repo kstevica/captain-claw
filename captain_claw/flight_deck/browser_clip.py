@@ -929,10 +929,11 @@ async def pair_approve(body: PairDecision, user: dict = Depends(get_current_user
 async def list_browsers(user: dict = Depends(get_current_user)):
     """The person's connected browsers and Macs (their personal access tokens
     named so), and whether this deck has Captain for Mac to hand out."""
-    from captain_claw.flight_deck.browser_hands import connected_token_ids
+    from captain_claw.flight_deck.browser_hands import connected_token_ids, live_connections
 
     rows = await get_db().list_pats(str(user["id"]))
     lent = connected_token_ids(str(user["id"]))   # open for the agents' browser tool now
+    searching = {c.token_id: list(c.search_engines) for c in live_connections(str(user["id"]))}
     served, seen = extension_version(), seen_versions()
     out = []
     for r in rows:
@@ -942,7 +943,7 @@ async def list_browsers(user: dict = Depends(get_current_user)):
         name = str(r.get("name") or "")[len(TOKEN_PREFIXES[kind]):]
         row = {"id": r["id"], "kind": kind, "name": name or ("Mac" if kind == "desktop" else "Browser"),
                "created_at": r.get("created_at"), "last_used_at": r.get("last_used_at"),
-               "agents_can_use": r["id"] in lent}
+               "agents_can_use": r["id"] in lent, "searches": searching.get(r["id"], [])}
         if kind == "browser":
             row["version"] = str((seen.get(str(r["id"])) or {}).get("version") or "")
             row["version_state"] = version_state(row["version"], served)
@@ -1035,6 +1036,7 @@ async def clip_me(request: Request, v: str = "", user: dict = Depends(get_clip_u
     """Who the browser is connected as, their agents, and what it can ask.
     ``v`` is the extension's own version: kept, and answered with this deck's."""
     from captain_claw.flight_deck import server as srv
+    from captain_claw.flight_deck.browser_search import clip_note as search_note
 
     if v:
         try:   # which browser said so; never a reason for this call to fail
@@ -1055,6 +1057,9 @@ async def clip_me(request: Request, v: str = "", user: dict = Depends(get_clip_u
         "folder": CLIP_PROJECT,
         "limits": {"file_bytes": MAX_FILE_BYTES, "clip_bytes": MAX_CLIP_BYTES, "files": MAX_FILES},
         "extension": extension_note(v),
+        # Searches through this browser: the engine the person picked in Flight
+        # Deck (None = off), so the panel can ask Chrome for that site once.
+        "search": await search_note(str(user["id"])),
         **catalog(),
     }
 

@@ -11,8 +11,14 @@
 // (hands-page.js) run in an isolated world the page can't see. Flight Deck's
 // own pages and anything that isn't a web page are off-limits, and the
 // person can stop any agent from the panel.
+//
+// The same socket carries the agents' web searches (search.js) when the person
+// turned those on here — then it's open even with "Agents can use this
+// browser" off, and Flight Deck sends no acts (the hello says what's lent).
 
 import { browserLabel, loadConn } from './lib/api.js'
+import { servedEngines } from './lib/engines.js'
+import { runSearch } from './search.js'
 
 const VERSION = chrome.runtime.getManifest().version
 const PING_MS = 20000
@@ -35,6 +41,7 @@ class Refusal extends Error {}
 
 let ws = null
 let wsConn = null       // the deck connection the socket belongs to
+let lent = { hands: false, search: [] }   // what the socket told Flight Deck this browser lends
 let retry = 0
 let retryTimer = 0
 let pingTimer = 0
@@ -103,13 +110,22 @@ async function ensureConnected() {
   const got = await chrome.storage.local.get(['hands', 'handsStopped']).catch(() => ({}))
   prefs = { on: false, front: false, ...(got.hands || {}) }
   stopped = new Set(Array.isArray(got.handsStopped) ? got.handsStopped : [])
-  if (!prefs.on) { disconnect('off'); return }
-  if (!permitted()) { disconnect('permission'); return }
+  const want = { hands: prefs.on && permitted(), search: await servedEngines() }
+  if (!want.hands && attached.size) detachAll()
+  if (!want.hands && !want.search.length) { disconnect(prefs.on ? 'permission' : 'off'); return }
   const conn = await loadConn()
   if (!conn) { disconnect('off'); return }
   if (ws && wsConn && wsConn.url === conn.url && wsConn.token === conn.token &&
-      (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+      (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    if (want.hands !== lent.hands || want.search.join() !== lent.search.join()) {
+      lent = want
+      send({ type: 'prefs', ...lent })
+      setStatus(ws.readyState === WebSocket.OPEN ? (lent.hands ? 'on' : 'search') : 'connecting')
+    }
+    return
+  }
   disconnect(null)
+  lent = want
   connect(conn)
 }
 
@@ -143,16 +159,17 @@ function connect(conn) {
   sock.onopen = () => {
     // An agent's own (headless) browser is named after the agent by Flight Deck.
     sock.send(JSON.stringify({ type: 'hello', token: conn.token, browser: conn.agent ? `Headless · ${conn.agent}` : browserLabel(),
-                               version: VERSION, stopped: [...stopped] }))
+                               version: VERSION, stopped: [...stopped], hands: lent.hands, search: lent.search }))
     clearInterval(pingTimer)
     pingTimer = setInterval(() => send({ type: 'ping' }), PING_MS)
   }
   sock.onmessage = (ev) => {
     let msg
     try { msg = JSON.parse(ev.data) } catch { return }
-    if (msg.type === 'welcome') { retry = 0; setStatus('on') }
+    if (msg.type === 'welcome') { retry = 0; setStatus(lent.hands ? 'on' : 'search') }
     else if (msg.type === 'denied') setStatus('denied', msg.error || '')
     else if (msg.type === 'act') runAct(msg)
+    else if (msg.type === 'search') searchFor(msg)
     else if (msg.type === 'cancel') cancelled.add(String(msg.id || ''))
     else if (msg.type === 'turn_over') turnOver(String(msg.agent?.slug || ''))
   }
@@ -176,6 +193,7 @@ function send(msg) {
 
 chrome.alarms?.onAlarm.addListener((a) => { if (a.name === 'captain-hands') ensureConnected() })
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.search) ensureConnected()
   if (area === 'local' && changes.hands) {
     prefs = { on: false, front: false, ...(changes.hands.newValue || {}) }
     ensureConnected()
@@ -242,6 +260,7 @@ async function runAct(msg) {
   const before = await activeTabs()
   actsRunning++
   try {
+    if (!prefs.on) throw new Refusal("This browser isn't lent to agents (“Agents can use this browser” is off in Captain's settings).")
     if (stopped.has(agent.slug)) throw new Refusal("The person stopped you using their browser (Stop in the Captain panel). They let you go on with “Let it again” there — ask them to, and don't try again until they say so.")
     const fn = ACTIONS[action]
     if (!fn) throw new Refusal(`“${action}” isn't something this browser does (Captain for Chrome ${VERSION}).`)
@@ -258,6 +277,15 @@ async function runAct(msg) {
   try { await noteFront(agent, before) } catch { /* a tab went away meanwhile */ }
   actsRunning--
   if (!quiet) saveLog()
+  send({ type: 'result', id, ...result })
+}
+
+// ── a web search (search.js) ──
+
+async function searchFor(msg) {
+  const id = String(msg.id || '')
+  const result = await runSearch(msg, (x) => cancelled.has(x))
+  cancelled.delete(id)
   send({ type: 'result', id, ...result })
 }
 
