@@ -935,6 +935,12 @@ built from a two-letter group name. Three faults:
   name says no kind of thing, they are built from what its source looks for.
 - *New searches were written for a step's first source only.* Each of its sources in turn.
 
+**One item's answer, however it is wrapped (2026-11-21).** With one item per judging call, a
+small model's answers were lost as "no answer, twice" for about one item in six. `answers_by_id`
+reads the array asked for, an object holding it, or the bare object; one item's answer is that
+item's whatever id it carries; a second ask says so in other words. `group_cell` matches a
+group named in the plural to its cell ("US companies" carries "company").
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

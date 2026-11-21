@@ -3377,3 +3377,36 @@ async def test_new_searches_are_written_for_each_of_a_steps_sources_in_turn(deck
     await _go(deck["store"], run, steps[:1])
     looked_for = [p.split("\n")[1] for p in deck["query_prompts"]]
     assert looked_for == ["leads: small firms", "leads: people who write"]  # two dry rounds, one for each source
+
+
+# ── one item's answer, however it is wrapped ──────────────────────────────
+
+def test_a_judging_answer_is_read_however_it_is_wrapped():
+    v = {"id": 1, "verdict": "keep", "row": {"Name": "A"}}
+    assert funnel.answers_by_id([v], 1) == {1: v}
+    assert funnel.answers_by_id(v, 1) == {1: v}                      # the bare object, for one item
+    assert funnel.answers_by_id({"items": [v]}, 1) == {1: v}         # an object holding the array
+    assert funnel.answers_by_id({"verdict": "drop", "reason": "x"}, 1) == {1: {"verdict": "drop", "reason": "x"}}
+    assert funnel.answers_by_id([{**v, "id": 7}], 1) == {1: {**v, "id": 7}}  # one asked: it is that one's
+    assert funnel.answers_by_id({"verdict": "keep"}, 3) == {}        # several asked: an id is needed
+    assert funnel.answers_by_id([{**v, "id": 9}], 3) == {} and funnel.answers_by_id(None, 1) == {}
+
+
+async def test_one_items_bare_answer_is_not_left_unanswered(deck, monkeypatch):
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "p.csv", "columns": ["Name"]}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_bare01")
+    (folder / "extra" / "people.csv").write_text("Name\nAna\n")
+    deck["recipe"] = {"item": "person", "key": "Name", "decide": "Everyone.", "decide_batch": 1,
+                      "sources": [{"kind": "file", "path": "extra/people.csv"}]}
+    deck["decide"] = lambda items: {"verdict": "keep", "row": {"Name": items[0][1]["Name"]}}
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert [r["Name"] for r in funnel._read_csv(folder / funnel.ROWS)] == ["Ana"]
+    assert [a for a in deck["asked"] if a.startswith("decide")] == ["decide:1"]
+
+
+def test_a_group_named_in_the_plural_carries_its_cell():
+    recipe = {"group_by": "Type", "checks": [{"column": "Type", "op": "in", "value": ["company", "individual"]}]}
+    assert funnel.group_cell(recipe, "US companies") == "company"
+    assert funnel.group_cell(recipe, "UK individuals") == "individual"
+    assert funnel.group_cell(recipe, "US_company") == "company" and funnel.group_cell(recipe, "others", "x") == "x"
