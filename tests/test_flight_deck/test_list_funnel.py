@@ -151,6 +151,7 @@ async def deck(tmp_path, monkeypatch):
             system, user = messages[0].content, messages[-1].content
             if system.startswith(funnel.SETUP_SYSTEM[:40]):
                 state["asked"].append("setup")
+                state.setdefault("setup_prompts", []).append(user)
                 return _Reply(json.dumps(state["recipe"]))
             if system.startswith("Pull the items out"):
                 state["asked"].append("extract")
@@ -171,11 +172,17 @@ async def deck(tmp_path, monkeypatch):
                 state["asked"].append("group")
                 state.setdefault("group_prompts", []).append(user)
                 return _Reply(json.dumps({"group": state.get("group", lambda u: "none")(user)}))
+            if system.startswith("Before a list is built"):
+                state["asked"].append("brief")
+                state.setdefault("brief_prompts", []).append(user)
+                return _Reply(state.get("brief", ""))
             if system.startswith("Fill the owner's columns"):
                 state["asked"].append("owner")
                 return _Reply(json.dumps(state["owner"](user)))
             state["asked"].append("queries")
-            return _Reply(json.dumps({"queries": state["queries"]}))
+            state.setdefault("query_prompts", []).append(user)
+            q = state["queries"]
+            return _Reply(json.dumps({"queries": q() if callable(q) else q}))
 
     class Db:
         async def get_user_by_id(self, _id):
@@ -297,7 +304,9 @@ async def test_a_document_is_read_for_its_items(deck):
     steps = await funnel.plan(run)
     await _go(deck["store"], run, steps)
     assert (folder / "vendors.csv").read_text().splitlines() == ["Vendor,Amount", 'Acme Bolts,"1,200 EUR"']
-    assert deck["asked"] == ["setup", "extract", "decide:2"]  # no web, one call to read it, one to judge
+    # no web: the owner's document read once before the run, one call to read its items, one to judge
+    assert deck["asked"] == ["brief", "setup", "extract", "decide:2"]
+    assert funnel.brief_text(folder) == ""  # a brief of the list's own source is not kept beside every item
     why = {r["key"]: r["reason"] for r in funnel._read_csv(folder / funnel.ITEMS)}
     assert "999 EUR" in why["beta nuts"]  # not in the invoice
 
@@ -3084,3 +3093,221 @@ def test_place_line_leaves_out_a_label_and_a_heading_mark():
     assert funnel.place_line("## Ilica 12, 10000 Zagreb", "in Zagreb", ["HR"]) == "Ilica 12, 10000 Zagreb"
     # a place before the colon is part of the address, not a label
     assert funnel.place_line("Zagreb: Ilica 12", "in Zagreb", ["HR"]) == "Zagreb: Ilica 12"
+
+
+# ── read first, reach by a contact page, search while short, ask again alone ──
+
+REACH = [{"id": "fm1", "text": "leads.csv", "check": {"type": "table", "path": "leads.csv",
+                                                      "columns": ["Name", "Web", "Email"], "min_rows": 9}}]
+
+
+async def _run_with(store, task, contract, cfg=None, rid="bat_brief01"):
+    await store.create_run(run_id=rid, owner_id="u1", title="t", task=task, status="planning",
+                           config={"engine": "funnel", "contract": contract, "funnel_look": "off", **(cfg or {})})
+    run = await store.get_run(rid)
+    folder = bat_routes._run_folder(run)
+    (folder / "extra").mkdir(parents=True, exist_ok=True)
+    return run, folder
+
+
+def test_the_links_a_text_names():
+    text = "Use counter.example/docs and https://x.example/a. Save leads.csv, write to ana@lab.example, v1.2."
+    assert funnel.text_links(text) == ["https://x.example/a", "https://counter.example/docs"]
+
+
+async def test_what_the_owner_gave_is_read_before_the_run(deck):
+    """The owner's documents and the pages their charter links to are read once, before
+    anything is searched: the setup, the new searches and every judging call work from
+    what they say, not from a link nobody opened."""
+    run, folder = await _run_with(deck["store"], "Find labs that would use Counter (counter.example/about). "
+                                  "Save leads.csv.", REACH)
+    (folder / "extra" / "notes.md").write_text("We sell to labs with fewer than ten people.")
+    deck["brief"] = "Counter counts colonies on a plate photo. It is for labs with fewer than ten people."
+    deck["tools"] = _Tools(pages={"https://counter.example/about": "Counter counts colonies on a plate photo."},
+                           results={"labs": "list results"})
+    deck["recipe"] = {"item": "lab", "key": "Name", "decide": "Labs that count colonies.",
+                      "sources": [{"kind": "search", "group": "", "queries": ["labs"]}]}
+    deck["extract"] = lambda user: {"items": [{"name": "Alpha", "fields": {"Name": "Alpha"}}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"]}} for i, f in items]
+    deck["queries"] = ["more labs"]
+    steps = await funnel.plan(run)
+    assert deck["asked"][:2] == ["brief", "setup"]
+    assert "plate photo" in deck["brief_prompts"][0] and "fewer than ten" in deck["brief_prompts"][0]
+    assert ("fetch", "https://counter.example/about") in deck["tools"].calls
+    assert "It is for labs with fewer than ten people" in deck["setup_prompts"][0]
+    assert funnel.brief_text(folder).startswith("Read before the run: extra/notes.md, https://counter.example/about.")
+    await _go(deck["store"], run, steps[:1])
+    assert "in brief]\nRead before the run" in deck["decide_prompts"][0] and "plate photo" in deck["decide_prompts"][0]
+    assert "plate photo" in deck["query_prompts"][0]
+    assert deck["asked"].count("brief") == 1 and [c for c in deck["tools"].calls if c[0] == "fetch"] == [
+        ("fetch", "https://counter.example/about")]  # read once, not per step
+
+
+async def test_no_address_but_a_contact_page_is_a_way_to_reach_it(deck):
+    """A charter that accepts a short list reads no rule loosely, and every item with no
+    published address came close for it. A contact page on the item's own site is a way
+    to reach it in every run: its link stands where the address would; with no such
+    page the item comes close, never dropped."""
+    run, folder = await _run(deck["store"], REACH, rid="bat_reach01")
+    rule = "an email published on its own site"
+    deck["recipe"] = {"item": "lead", "key": "Email", "site_column": "Web", "decide": "Leads with an email.",
+                      "shortage_ok": True, "sources": [{"kind": "search", "group": "", "queries": ["leads"]}],
+                      "gather": [{"kind": "fetch", "url": "{Web}", "paths": ["", "contact"]}], "extract": ["emails"],
+                      "filters": [{"column": "Email", "op": "regex", "value": ".+@.+"}],
+                      "rules": [{"rule": rule, "kind": "must", "fact": "contact", "columns": ["Email"]}],
+                      "checks": [{"column": "Email", "op": "required"},
+                                 {"column": "Email", "op": "in_evidence", "source_column": "Web"}]}
+    deck["extract"] = lambda user: {"items": [
+        {"name": n, "url": f"https://{n.lower()}.example", "fields": {"Name": n, "Web": f"https://{n.lower()}.example",
+                                                                       "Email": "form only" if n == "Beta" else ""}}
+        for n in ("Alpha", "Beta", "Gamma")]}
+    deck["tools"] = _Tools(pages={"https://alpha.example": "Alpha. Write to hello@alpha.example",
+                                  "https://beta.example": "Beta. Get in touch (https://beta.example/contact)",
+                                  "https://beta.example/contact": "Use the form below.",
+                                  "https://gamma.example": "Gamma. Nothing more."}, results={"leads": "list results"})
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            got = f["Name"] == "Alpha"
+            out.append({"id": i, "verdict": "keep" if got else "maybe", "missing": [] if got else [1],
+                        "reason": "" if got else "No email on its site.",
+                        "row": {"Name": f["Name"], "Web": f["Web"], "Email": "hello@alpha.example" if got else ""}})
+        return out
+
+    deck["decide"] = decide
+    steps = await funnel.plan(run)
+    recipe = funnel.load_recipe(folder)
+    assert recipe["rules"][0]["reach"] == ["Email"] and recipe["rules"][0]["if_not_shown"] == funnel.CONTACT_ALT
+    assert not funnel.loosen_on(run, recipe)
+    await _go(deck["store"], run, steps)
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["Alpha"][0] == "kept" and got["Gamma"][0] == "maybe"
+    assert got["Beta"][0] == "kept" and "reached by its contact page" in got["Beta"][1]  # not ruled out by its listing
+    rows = {r["Name"]: r["Email"] for r in funnel._read_csv(folder / "leads.csv")}
+    assert rows == {"Alpha": "hello@alpha.example", "Beta": "https://beta.example/contact"}
+    assert "a contact page or form on its own site" in deck["decide_prompts"][0]
+    assert funnel._read_csv(folder / funnel.MAYBE)[0]["missing"] == rule
+
+
+async def test_a_short_group_keeps_searching_while_searches_find_rows(deck):
+    """A step wrote new searches twice and stopped, with most of the run's searches
+    unused. Now it writes more while its group is short and the rounds put rows on the
+    list, and gives up after two rounds in a row that add none."""
+    run, folder = await _run(deck["store"], REACH, rid="bat_rounds01")
+    deck["recipe"] = {"item": "lead", "key": "Name", "decide": "Leads.",
+                      "sources": [{"kind": "search", "group": "", "queries": ["q0"]}]}
+    deck["tools"] = _Tools(pages={}, results={f"q{n}": f"found N{n}" for n in range(4)})
+    deck["extract"] = lambda user: {"items": [{"name": m, "fields": {"Name": m}}
+                                              for m in re.findall(r"found (N\d)", user)]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"]}} for i, f in items]
+    asked = []
+
+    def queries():
+        asked.append(1)
+        return ["q0", f"q{len(asked)}"]  # one already used, one new
+
+    deck["queries"] = queries
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert [r["Name"] for r in funnel._read_csv(folder / funnel.ROWS)] == ["N0", "N1", "N2", "N3"]
+    state = json.loads((folder / funnel.QUERIES).read_text())
+    assert state["rounds"][""] == 5 and state["used"] == ["q0", "q1", "q2", "q3", "q4", "q5"]  # two dry rounds, then stop
+    assert "- q3" in deck["query_prompts"][-1]  # the searches it wrote itself are shown as used
+
+
+async def test_an_empty_answer_for_new_searches_is_asked_for_once_more(deck):
+    run, folder = await _run(deck["store"], REACH, rid="bat_rounds02")
+    deck["recipe"] = {"item": "lead", "key": "Name", "decide": "Leads.",
+                      "sources": [{"kind": "search", "group": "", "queries": ["q0"]}]}
+    deck["tools"] = _Tools(pages={}, results={"q0": "found N0", "q1": "found N1"})
+    deck["extract"] = lambda user: {"items": [{"name": m, "fields": {"Name": m}}
+                                              for m in re.findall(r"found (N\d)", user)]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"]}} for i, f in items]
+    calls = []
+
+    def queries():
+        calls.append(1)
+        return [] if len(calls) == 1 else ["q1"] if len(calls) == 2 else []
+
+    deck["queries"] = queries
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert [r["Name"] for r in funnel._read_csv(folder / funnel.ROWS)] == ["N0", "N1"]
+
+
+async def test_an_item_left_out_of_an_answer_is_asked_about_alone(deck):
+    """A small model drops items from a batch's answer. Each one left out is asked about
+    in a call of its own, not together with the others left out, before it is given up."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "p.csv", "columns": ["Name"]}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_alone01")
+    (folder / "extra" / "people.csv").write_text("Name\nAna\nBo\nCy\nDi\n")
+    deck["recipe"] = {"item": "person", "key": "Name", "decide": "Everyone.", "decide_batch": 4,
+                      "sources": [{"kind": "file", "path": "extra/people.csv"}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"]}} for i, f in items
+                                    if len(items) == 1 or f["Name"] in ("Ana", "Bo")]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    assert sorted(r["Name"] for r in funnel._read_csv(folder / funnel.ROWS)) == ["Ana", "Bo", "Cy", "Di"]
+    assert [a for a in deck["asked"] if a.startswith("decide")] == ["decide:4", "decide:1", "decide:1"]
+
+
+def test_a_headcount_is_people_who_work_there():
+    assert fx.headcount("more than 100 lawyers and staff") == 100 and fx.headcount("We are a team of 12.") == 12
+    assert fx.headcount("Founded in 2019. In 2026 people expect more from a firm.") is None  # a year, not a count
+    assert fx.headcount("Our firm has 2,026 employees.") == 2026
+    assert fx.headcount("Join 200,000 people who read it every week.") is None  # its readers
+    assert fx.headcount("Trusted by 5,000 developers. 40 employees.") == 40
+
+
+async def test_a_limit_for_one_group_leaves_the_others_alone(deck):
+    """A size limit meant for a list's companies ruled out its people too."""
+    base = funnel.from_contract(CONTRACT)
+    one = {"column": "size_band", "op": "size_max", "value": 50, "groups": ["x"]}
+    recipe = funnel.normalize_recipe({"item": "lead", "sources": [{"kind": "search", "queries": ["q"], "group": "x"}],
+                                      "filters": [one, {"column": "size_band", "op": "size_min", "value": 2,
+                                                        "groups": ["x", "y", "nope"]}]}, base)
+    assert recipe["filters"] == [one, {"column": "size_band", "op": "size_min", "value": 2}]  # every group: no scope
+    run, folder = await _run(deck["store"], CONTRACT, rid="bat_scope01")
+    item, found = {"fields": {"Firm": "Alpha"}}, {"size_band": [("51-200", "a page")]}
+    assert funnel.Work(run, {"step_key": "step-1"}, recipe, folder, group="x").passes(item, found).startswith("51-200")
+    assert funnel.Work(run, {"step_key": "step-2"}, recipe, folder, group="y").passes(item, found) == ""
+
+
+async def test_the_runs_search_agent_is_started_once(monkeypatch):
+    """Four items read at once each made the first call, and each started the agent: all
+    but one failed with "already running" and their items were lost."""
+    import asyncio
+    tools, started = funnel.Tools({"id": "bat_x", "owner_id": "u1"}, {"step_key": "step-1"}), []
+
+    async def start():
+        started.append(1)
+        await asyncio.sleep(0.01)
+        tools.port = 1
+
+    monkeypatch.setattr(tools, "_start", start)
+    await asyncio.gather(*(tools._ensure() for _ in range(4)))
+    assert started == [1]
+
+
+async def test_a_size_is_taken_only_from_a_page_that_is_the_items_own(deck):
+    """An item whose only link was an article that mentions it took the article's
+    numbers as its size. A page on a site many share counts as the item's own only
+    when it names the item."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "l.csv", "columns": ["Name", "Web"]}}]
+    run, folder = await _run(deck["store"], contract, rid="bat_ownpage01")
+    deck["recipe"] = {"item": "lab", "key": "Name", "site_column": "Web", "decide": "Small labs.",
+                      "sources": [{"kind": "search", "group": "", "queries": ["labs"]}],
+                      "filters": [{"column": "size_band", "op": "size_max", "value": 50}],
+                      "gather": [{"kind": "fetch", "url": "{Web}", "paths": [""]}]}
+    article, profile = "https://news.example/2026/ten-labs-to-watch", "https://hub.example/labs/beta-lab"
+    deck["extract"] = lambda user: {"items": [{"name": "Alpha Lab", "url": article, "fields": {"Name": "Alpha Lab", "Web": article}},
+                                              {"name": "Beta Lab", "url": profile, "fields": {"Name": "Beta Lab", "Web": profile}}]}
+    deck["tools"] = _Tools(pages={article: "Ten labs to watch\n\nOur newsroom has 300 employees. Alpha Lab is one.",
+                                  profile: "Beta Lab\n\nBeta Lab has 300 employees."}, results={"labs": "list results"})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"], "Web": f["Web"]}} for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["Alpha Lab"][0] == "kept"  # the newsroom's size isn't its size
+    assert got["Beta Lab"] == ("dropped", f"300 people, said on {profile}")

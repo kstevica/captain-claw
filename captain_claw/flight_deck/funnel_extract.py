@@ -552,6 +552,14 @@ _HEADCOUNT = re.compile(
     r"|\bteam of\s+(\d{1,3}(?:,\d{3})*|\d+)\b", re.I)
 
 
+# People counted beside these words are an audience, not the organization's own.
+_AUDIENCE = re.compile(r"subscrib|readers?\b|\bread by\b|follow|members?\b|attend|\bjoin|customers?\b|clients?\b|"
+                       r"users?\b|visitors?\b|listeners?\b|viewers?\b|audience|communit|served|serving|trusted by|"
+                       r"\breach(?:es|ed|ing)?\b|train(?:ed|ing)\b|helped|students?\b|learners?\b|registered|"
+                       r"downloads?\b|participants?\b|per (?:day|week|month|year)|every (?:day|week|month|year)",
+                       re.I)
+
+
 def headcount(text: str) -> int | None:
     """The largest number of people a text says the organization has; None when it
     says none."""
@@ -561,7 +569,15 @@ def headcount(text: str) -> int | None:
         at = m.start(1) if m.group(1) else m.start(2)
         if re.search(r"\d\s*(?:-|–|—|to)\s*$", text[max(0, at - 8):at], re.I):
             continue  # the top of a range ("51-200 employees") is a size band, not a count
-        found.append(int((m.group(1) or m.group(2)).replace(",", "")))
+        raw = m.group(1) or m.group(2)
+        if re.fullmatch(r"(?:19|20)\d{2}", raw):
+            continue  # a year beside the word ("in 2026 people…"), not a count; a count that size has a comma
+        # the words of its own sentence, either side
+        before = re.split(r"[.!?;|\n]", text[max(0, m.start() - 60):m.start()])[-1]
+        after = re.split(r"[.!?;|\n]", text[m.end():m.end() + 40])[0]
+        if _AUDIENCE.search(before) or _AUDIENCE.search(after):
+            continue  # those it reaches or serves (readers, members, attendees), not those who work there
+        found.append(int(raw.replace(",", "")))
     return max(found) if found else None
 
 

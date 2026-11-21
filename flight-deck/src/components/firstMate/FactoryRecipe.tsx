@@ -16,7 +16,8 @@ function filterText(f: RecipeFilter): string {
     regex: 'must match', not_regex: 'must not match', in: 'is one of', not_in: 'is none of',
     min: 'is at least', max: 'is at most', size_max: 'has at most (people)', size_min: 'has at least (people)',
   }
-  return `${col} ${words[f.op] ?? f.op} ${v}`
+  const only = f.groups?.length ? ` (${f.groups.join(', ')} only)` : ''
+  return `${col} ${words[f.op] ?? f.op} ${v}${only}`
 }
 
 export function FactoryRecipe({ factoryId, onNotice, onChanged }: { factoryId: string; onNotice: (text: string) => void; onChanged: () => void }) {

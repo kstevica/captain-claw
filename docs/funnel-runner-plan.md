@@ -895,6 +895,34 @@ only when the name is a value that column may hold. Otherwise the cell keeps wha
 written when that is allowed, or takes the allowed value the group's name carries
 ("company"); the row's group is kept beside it, as before.
 
+**Read first, reach by a contact page, search while short (2026-11-21).** From an overnight
+run of a 500-row list on a local model that ended at 353 rows with most of its searches unused.
+Each fault in words that fit any list:
+
+- *What the owner gave was never opened.* A link in the charter reached the judging calls as a
+  link. Now `build_brief` runs before the recipe: the charter's links, a short links file's and
+  the documents' own (8 at most) are fetched, the owner's documents read (6 at most; a larger
+  pile is the list's material), and one call sums them up in `shared/funnel/brief.md`. The setup
+  writes its searches with it, new searches are written with it, every judging call reads it. A
+  brief that read only the list's own source files is dropped once the recipe says so.
+- *An item with no published address came close for it, whenever the charter accepted a short
+  list.* A contact rule now always carries its alternative (`CONTACT_ALT`): a contact page or
+  form on the item's own site. Code finds that page in what was read (`_contact_link`) and
+  writes its link where the address would be; with no such page the item comes close. A filter
+  on the address column no longer rules an item out by its listing.
+- *A step stopped writing searches after two rounds.* It now writes more while its group is
+  short and the run has searches left, and gives up after two rounds in a row that put no row
+  on the list (`QUERY_ROUNDS_DRY`; `funnel_query_rounds` caps the rounds, 40). An empty answer
+  for new searches is asked for once more.
+- *Items a batch's answer left out were asked about together again.* Each is now asked about in
+  a call of its own before it is given up.
+- *A count of people was read from the wrong words or the wrong page.* A year is not a count; a
+  number beside audience words (readers, members, attendees) is not a headcount; a page on a
+  site many share counts as the item's own only when its address or title names it. A filter
+  may name the groups it holds for (`"groups"`), so a limit on one kind of item leaves the
+  others alone.
+- *Items read at once each started the run's search agent.* One start, behind a lock.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
