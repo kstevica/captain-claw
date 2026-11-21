@@ -949,6 +949,19 @@ setup marks it `"from": "owner"`; a column so marked stays the owner's when a ru
 it, and every judging call is told it is written from the owner's material together with what
 was read about the item (`OWNER_COLUMN_NOTE`).
 
+**A model that fails is not a model that found nothing (2026-11-21).** A local model dropped
+during a step. The step read each search's results as "no items", dropped what it couldn't judge
+as unanswered, used up its searches in four minutes and moved on. Now:
+
+- A model call that fails for an outage (a connection, a timeout, a server error) is tried again
+  twice, after 5 and 20 seconds (`MODEL_WAITS`). A request the model refused (too long,
+  malformed) isn't: trying again changes nothing, and it says nothing about the next call.
+- Three calls in a row that still fail stop the step (`ModelDownError`). Nothing is dropped for
+  a call that failed; the searches whose results couldn't be read, and those of items not yet
+  judged, are not counted as used, so the step's next try makes them again.
+- The step ends as failed, saying the model stopped answering, and Bat tries it again as it
+  does any failed step.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
