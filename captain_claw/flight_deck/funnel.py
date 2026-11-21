@@ -434,6 +434,12 @@ def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+# What a judging call is told about a column that joins the item to what the owner offers.
+OWNER_COLUMN_NOTE = (" — written from the owner's material under Reference together with what was read about this "
+                     "item: it names what of the owner's fits (by its name there) and the fact about this item "
+                     "that shows it. Never a line about the item alone, never one that would fit any item.")
+
+
 def judgement_columns(recipe: dict[str, Any], reference: str = "") -> list[str]:
     """Columns a judging call fills from the owner's own material, not from what an
     item publishes: the ones the setup marked ``"from": "owner"``, and one named after
@@ -445,8 +451,10 @@ def judgement_columns(recipe: dict[str, Any], reference: str = "") -> list[str]:
     stems = {re.sub(r"[^a-z]", "", Path(str(ref)).stem.lower()) for ref in recipe.get("reference") or []}
     stems = {st for st in stems if len(st) >= 4}
     owner = set(recipe.get("owner_columns") or [])
-    return [c for c in recipe["columns"] if c not in fixed and c not in ruled
-            and (c in owner or any(st in c.lower() for st in stems))]
+    # one the setup itself marked stays the owner's when a rule also names it (a rule on its
+    # form: "one specific sentence")
+    return [c for c in recipe["columns"] if c not in fixed
+            and (c in owner or (c not in ruled and any(st in c.lower() for st in stems)))]
 
 
 def unshown_musts(recipe: dict[str, Any], row: dict[str, Any]) -> list[str]:
@@ -1230,8 +1238,11 @@ Rules:
 - files: when the charter names the file for the run's summary or for the items left out ("sazetak.md",
   "excluded.md"), give those names: code writes its summary and its list of dropped items under them.
 - group_words: for each group, the words pages and searches use for it ("legal" → law firm, attorney, advokat).
-- columns "from": "owner" for a column filled from the owner's own material (a reference file), never from the
-  item's pages; every row fills it.
+- columns "from": "owner" for a column filled from the owner's own material (a reference file, what their
+  documents and links say), never from the item's pages alone; every row fills it. A column that says why or how
+  an item fits what the owner offers (a reason to use it, a feature to pitch, an angle) is one of these: it joins
+  what the owner's material says to a fact read about the item. Never write a rule or a column meaning that takes
+  such a column from the item's pages only.
 - Templates name columns in braces ({Firm}, {Website}) or {domain}.
 - checks: "in_evidence" for every value copied from a source (an email, a date, a quote) with the column that
   holds its link; "within_months" for a date window; "in" for fixed values.
@@ -2894,8 +2905,9 @@ class Work:
             lines.append(f"## id {i}\nfields: {json.dumps(it['fields'], ensure_ascii=False)[:1500]}\n"
                          + ("facts Captain found:\n" + "\n".join(facts) + "\n" if facts else "")
                          + f"what was read:\n{excerpt}")
+        ours = set(judgement_columns(self.recipe, self.reference)) if self.reference else set()
         cols = "\n".join(f"- {c}" + (f": {self.recipe['about'][c]}" if self.recipe["about"].get(c) else "")
-                         for c in self.recipe["columns"])
+                         + (OWNER_COLUMN_NOTE if c in ours else "") for c in self.recipe["columns"])
         groups = (f"\n# {self.recipe['group_by']}\n" + ", ".join(self.recipe["groups"])
                   + "\nEvery answer, a drop too, also carries \"group\": the one of these the item is (by what it "
                   "is, whatever this step looks for), written exactly as here, or \"none\"."
@@ -3347,8 +3359,9 @@ class Work:
             got = await self._ask("owner", "Fill the owner's columns for each item, from the owner's material and what is "
                                            "known about the item. Reply ONLY with JSON: {\"<id>\": {\"<column>\": "
                                            "\"<value>\"}}. A column with a fixed set of values takes one of them exactly. "
-                                           "Tie each value to something read about this item (what it does, who it "
-                                           "serves), never a sentence that would fit any item. "
+                                           "Each value joins the two: it names what of the owner's fits (by its "
+                                           "name in their material) and ties it to something read about this item "
+                                           "(what it does, who it serves), never a sentence that would fit any item. "
                                            "Keep your thinking short.",
                                   f"# The owner's material\n{self.reference or '(none)'}\n\n# Columns to fill\n{spec}"
                                   f"\n\n# Items\n{items}")

@@ -3410,3 +3410,31 @@ def test_a_group_named_in_the_plural_carries_its_cell():
     assert funnel.group_cell(recipe, "US companies") == "company"
     assert funnel.group_cell(recipe, "UK individuals") == "individual"
     assert funnel.group_cell(recipe, "US_company") == "company" and funnel.group_cell(recipe, "others", "x") == "x"
+
+
+# ── a column that joins the item to what the owner offers ──────────────────
+
+async def test_a_why_it_fits_column_is_written_from_the_owners_material(deck):
+    """A reason column described the item and never the owner's product: the judging call
+    was told nothing about where it comes from, and a rule on its form took it out of
+    the owner's columns."""
+    run, folder = await _run_with(deck["store"], "Find labs that would use Counter (counter.example). Save leads.csv.",
+                                  [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "leads.csv",
+                                                                         "columns": ["Name", "Reason"]}}], rid="bat_fit01")
+    deck["brief"] = "Counter counts colonies on a plate photo."
+    deck["tools"] = _Tools(pages={"https://counter.example": "Counter counts colonies."}, results={"labs": "r"})
+    deck["recipe"] = {"item": "lab", "key": "Name", "decide": "Labs.",
+                      "columns": [{"name": "Name"}, {"name": "Reason", "what": "why it would use Counter", "from": "owner"}],
+                      "rules": [{"rule": "Reason is one specific sentence", "kind": "must", "columns": ["Reason"]}],
+                      "sources": [{"kind": "search", "group": "", "queries": ["labs"]}]}
+    deck["extract"] = lambda user: {"items": [{"name": "Alpha", "fields": {"Name": "Alpha"}}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"], "Reason": ""}} for i, f in items]
+    deck["owner"] = lambda user: {"1": {"Reason": "Alpha plates by hand; Counter counts colonies from a photo."}}
+    steps = await funnel.plan(run)
+    recipe = funnel.load_recipe(folder)
+    assert funnel.judgement_columns(recipe) == ["Reason"]  # the setup marked it: a rule on its form doesn't undo that
+    await _go(deck["store"], run, steps[:1])
+    line = next(ln for ln in deck["decide_prompts"][0].splitlines() if ln.startswith("- Reason"))
+    assert "why it would use Counter" in line and "names what of the owner's fits" in line
+    assert not next(ln for ln in deck["decide_prompts"][0].splitlines() if ln.startswith("- Name")).endswith("any item.")
+    assert funnel._read_csv(folder / funnel.ROWS)[0]["Reason"].endswith("Counter counts colonies from a photo.")
