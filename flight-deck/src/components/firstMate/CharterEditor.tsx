@@ -229,7 +229,7 @@ const HOW: { value: HowItRuns; label: string; icon: typeof Bot; hint: string }[]
 /** How a factory's runs do the work: Bat's agents, or the list funnel (with or without
  *  an agent to finish what's short, and with or without rows on a looser reading of
  *  the soft rules when a group runs short). */
-export function RunnerPicker({ value, leftovers, loosen, onChange, listy, searches, onSearches }: {
+export function RunnerPicker({ value, leftovers, loosen, onChange, listy, searches, onSearches, expert, agents, onExpert }: {
   value: HowItRuns
   leftovers: boolean
   loosen: boolean
@@ -237,6 +237,11 @@ export function RunnerPicker({ value, leftovers, loosen, onChange, listy, search
   /** The searches a run may make, as typed ("" for the usual amount); with its setter, the field shows. */
   searches?: string
   onSearches?: (value: string) => void
+  /** The agent that works beside its runs as their expert ("" for none), the owner's agents to
+   *  pick from, and its setter; with the setter, the field shows. */
+  expert?: string
+  agents?: { slug: string; name: string }[]
+  onExpert?: (slug: string) => void
   /** Its goals ask for an amount: it reads as a list. */
   listy: boolean
 }) {
@@ -284,6 +289,18 @@ export function RunnerPicker({ value, leftovers, loosen, onChange, listy, search
                 onChange={(e) => onSearches(e.target.value.replace(/\D/g, '').slice(0, 6))}
                 className="h-7 w-24 rounded-lg border border-[var(--fd-line)] bg-zinc-950 px-2 text-xs text-zinc-100 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none" />
               <span className="basis-full text-zinc-500">Left empty: 1,000, or 12 for each row the list asks for when that is more. A run stops searching when they are used.</span>
+            </label>
+          )}
+          {onExpert && (
+            <label className="mt-2.5 flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
+              <span>Expert agent</span>
+              <select value={expert ?? ''} aria-label="Expert agent" onChange={(e) => onExpert(e.target.value)}
+                className="h-7 min-w-0 max-w-full rounded-lg border border-[var(--fd-line)] bg-zinc-950 px-2 text-xs text-zinc-100 focus:border-violet-500/50 focus:outline-none">
+                <option value="">None</option>
+                {expert && !(agents ?? []).some((a) => a.slug === expert) && <option value={expert}>{expert} (not found)</option>}
+                {(agents ?? []).map((a) => <option key={a.slug} value={a.slug}>{a.name}</option>)}
+              </select>
+              <span className="basis-full text-zinc-500">One of your agents works beside each run, in a new session of its own: it adds what it knows before the run starts, settles what the charter leaves open as you would, and writes the new searches. A run wakes it when it sleeps. What it decided for you is listed in the run’s summary.</span>
             </label>
           )}
         </>

@@ -647,7 +647,7 @@ def _brief_without_sources(folder: Path, recipe: dict[str, Any]) -> None:
     """Once the recipe says what the list is built from: a brief that read only those
     files is dropped. They are gone through item by item; summed up beside every item
     they would say other items' facts."""
-    text = brief_text(folder)
+    text = _own_brief(folder)
     head = text.split("\n", 1)[0]
     if not head.startswith("Read before the run: "):
         return
@@ -658,11 +658,18 @@ def _brief_without_sources(folder: Path, recipe: dict[str, Any]) -> None:
         (folder / BRIEF).write_text("", encoding="utf-8")
 
 
-def brief_text(folder: Path) -> str:
+def _own_brief(folder: Path) -> str:
     try:
         return (folder / BRIEF).read_text(encoding="utf-8").strip()[:BRIEF_CHARS + 400]
     except OSError:
         return ""
+
+
+def brief_text(folder: Path) -> str:
+    """What a run reads before it starts: the brief of the owner's documents and links,
+    and what its expert added (``funnel_expert.notes``), when the factory has one."""
+    from captain_claw.flight_deck import funnel_expert
+    return "\n\n".join(x for x in (_own_brief(folder), funnel_expert.notes_text(folder)) if x)
 
 
 async def build_brief(run: dict, folder: Path, creds: dict | None) -> str:
@@ -671,7 +678,7 @@ async def build_brief(run: dict, folder: Path, creds: dict | None) -> str:
     The setup writes its searches with it, new searches are written with it, and every
     judging call reads it. "" when the owner gave nothing to read, or it couldn't be
     read; a run that already has one keeps it."""
-    have = brief_text(folder)
+    have = _own_brief(folder)
     if have or (folder / BRIEF).exists() or (folder / TAPE_IN).is_dir():
         return have
     links, docs = await asyncio.to_thread(brief_inputs, str(run.get("task") or ""), folder)
@@ -1479,6 +1486,13 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
     except Exception as e:  # noqa: BLE001 — a run without a brief is the run as it was
         log.warning("funnel brief failed", run_id=run.get("id"), error=str(e))
         brief = ""
+    if not (folder / TAPE_IN).is_dir():
+        try:  # the factory's expert: what it knows, and what it decides as the owner would
+            from captain_claw.flight_deck import funnel_expert
+            said = await funnel_expert.notes(run, folder, brief)
+            brief = "\n\n".join(x for x in (brief, said) if x)
+        except Exception as e:  # noqa: BLE001 — the run goes on without its expert
+            log.warning("funnel expert notes failed", run_id=run.get("id"), error=str(e))
     from captain_claw.flight_deck import first_mate_recipe
     kept, how = await asyncio.to_thread(first_mate_recipe.for_run, run, folder)
     if kept and kept.get("sources") and kept.get("columns"):  # one recipe per charter, not per run
@@ -3776,13 +3790,33 @@ class Work:
         return out[:15]
 
     async def _new_queries_call(self, src: dict, worked: dict[str, int], used: list[str]) -> Any:
+        user = self._new_queries_words(src, worked, used)
+        from captain_claw.flight_deck import funnel_expert
+        if funnel_expert.slug_for(self.run):
+            # the factory's expert writes them, shown also what was dropped and why
+            why: dict[str, int] = {}
+            for r in _read_csv(self.folder / ITEMS):
+                if r.get("status") == "dropped" and (r.get("group") or "") == self.group:
+                    key = re.sub(r"\d[\d,.]*", "N", r.get("reason") or "")[:70]
+                    why[key] = why.get(key, 0) + 1
+            drops = "\n".join(f"- {k} ({n})" for k, n in sorted(why.items(), key=lambda x: -x[1])[:8])
+            got = await funnel_expert.searches(self.run, self.folder,
+                                               user + (f"\n\n# Why items were dropped\n{drops}" if drops else ""))
+            said = got.get("queries") if isinstance(got, dict) else got if isinstance(got, list) else None
+            fresh = [str(q).strip()[:300] for q in said or [] if str(q).strip()]
+            if fresh:
+                mine = self.queries.setdefault("by_expert", [])
+                mine += [q for q in fresh if q not in mine]
+                return {"queries": fresh}
         return await self._ask("queries", "Write new web searches for a list that is still short. Reply ONLY with "
                                          'JSON: {"queries": ["...", ...]} (10-15 new ones, none already used). '
-                                         "Keep your thinking short.",
-                              f"# Looking for\n{self.recipe['item']}s" + (f" ({self.group})" if self.group else "")
+                                         "Keep your thinking short.", user)
+
+    def _new_queries_words(self, src: dict, worked: dict[str, int], used: list[str]) -> str:
+        return (f"# Looking for\n{self.recipe['item']}s" + (f" ({self.group})" if self.group else "")
                               + (f": {src.get('about')}" if src.get("about") else "")
                               + f"\n\n# Rules\n{self.recipe['decide'][:1500]}\n\n"
-                              + (f"# What the owner's documents and links say\n{self.brief[:1500]}\n\n"
+                              + (f"# What the owner's documents and links say\n{self.brief[:4000]}\n\n"
                                  if self.brief else "")
                               + "# Searches that found kept items\n"
                               + ("\n".join(f"- {q} ({n})" for q, n in sorted(worked.items(), key=lambda x: -x[1])[:15])
@@ -4642,6 +4676,15 @@ def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
               "## Files", "", f"- `{recipe['output']}`: the list"]
     if close:
         lines.append(f"- `{came_close_name(recipe)}`: the {close} that came close, with why (not on the list)")
+    from captain_claw.flight_deck import funnel_expert
+    try:
+        written = json.loads((folder / QUERIES).read_text(encoding="utf-8")).get("by_expert") or []
+    except (OSError, ValueError):
+        written = []
+    said = funnel_expert.summary_lines(folder, _read_csv(folder / ITEMS), written)
+    if said:  # the expert's part, before the list of files
+        at = lines.index("## Files")
+        lines[at:at] = said[1:] + [""]
     lines += [f"- `{exclusions_name(recipe)}`: every {item} dropped, where and why ({dropped})",
               f"- `{ITEMS}`: everything looked at", f"- `{RECIPE}`: the recipe the run followed"]
     text = "\n".join(lines) + "\n"
@@ -4662,6 +4705,8 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
     budget = search_budget(run, recipe)
     await asyncio.to_thread(write_summary, folder, recipe, len(out), dropped, finished, budget)
     await asyncio.to_thread(_test_report, folder)
+    from captain_claw.flight_deck import funnel_expert
+    await funnel_expert.release(run)  # an agent started only for this run goes off again
     per = ""
     if recipe["groups"]:
         kept = kept_per_group(folder)
@@ -4726,6 +4771,8 @@ async def write_on_stop(run: dict, why: str) -> str:
     budget = search_budget(run, recipe)
     await asyncio.to_thread(write_summary, folder, recipe, len(out), dropped, (0, 0, 0), budget, why)
     await asyncio.to_thread(_test_report, folder)
+    from captain_claw.flight_deck import funnel_expert
+    await funnel_expert.release(run)
     return (f"Stopped ({why}): what it found so far is written: `{recipe['output']}` {len(out)} rows"
             + (f", `{came_close_name(recipe)}` {len(close)}" if close else "")
             + f", `{exclusions_name(recipe)}` {dropped} dropped, `{summary_name(recipe)}`.")

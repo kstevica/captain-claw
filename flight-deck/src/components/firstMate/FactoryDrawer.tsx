@@ -26,6 +26,7 @@ import {
   HEALTH_LABELS,
   RUN_LABELS,
   SIGNAL_LABELS,
+  getMyAgent,
   RUNNER_LABELS,
   STATE_LABELS,
   TRUST_HINTS,
@@ -95,7 +96,7 @@ function eventText(e: FactoryEvent): string {
 }
 
 /** The editable part of a draft, as the form holds it: its goals each on or off. */
-interface Form { charter: string; goals: Goal[]; schedule: string; runner: Version['runner']; leftovers: boolean; loosen: boolean; searches: string }
+interface Form { charter: string; goals: Goal[]; schedule: string; runner: Version['runner']; leftovers: boolean; loosen: boolean; searches: string; expert: string }
 
 function formOf(v: Version): Form {
   const sched = v.triggers.find((t): t is Extract<Trigger, { kind: 'schedule' }> => t.kind === 'schedule')
@@ -107,16 +108,18 @@ function formOf(v: Version): Form {
     leftovers: (v.runner_config?.leftovers ?? 'agent') !== 'none',
     loosen: (v.runner_config?.loosen ?? 'short') !== 'never',
     searches: v.runner_config?.search_budget == null ? '' : String(v.runner_config.search_budget),
+    expert: typeof v.runner_config?.expert === 'string' ? v.runner_config.expert : '',
   }
 }
 
 /** The runner settings a form asks for: the version's own while its runner stays. */
 function runnerConfigOf(form: Form, v: Version): Record<string, unknown> {
   if (form.runner === 'funnel') {
-    const { search_budget: _was, ...rest } = (v.runner === 'funnel' ? v.runner_config : {}) as Record<string, unknown>
-    void _was
+    const { search_budget: _was, expert: _who, ...rest } = (v.runner === 'funnel' ? v.runner_config : {}) as Record<string, unknown>
+    void _was; void _who
     return { ...rest, leftovers: form.leftovers ? 'agent' : 'none', loosen: form.loosen ? 'short' : 'never',
-      ...(form.searches.trim() ? { search_budget: Math.min(100000, Number(form.searches)) } : {}) }
+      ...(form.searches.trim() ? { search_budget: Math.min(100000, Number(form.searches)) } : {}),
+      ...(form.expert ? { expert: form.expert } : {}) }
   }
   return form.runner === v.runner ? v.runner_config : {}
 }
@@ -147,6 +150,13 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
 }) {
   const [data, setData] = useState<FactoryDetail | null>(null)
   const [tab, setTab] = useState<Tab>(initialTab)
+  // The owner's agents, for picking the one that works beside a list factory's runs.
+  const [agents, setAgents] = useState<{ slug: string; name: string }[]>([])
+  useEffect(() => {
+    let stop = false
+    getMyAgent().then((a) => { if (!stop) setAgents(a.agents) }).catch(() => {})
+    return () => { stop = true }
+  }, [])
   // Full screen, remembered in this browser for the next factory opened.
   const [full, setFull] = useState(() => { try { return localStorage.getItem(FULL_KEY) === '1' } catch { return false } })
   const toggleFull = () => setFull((v) => {
@@ -353,6 +363,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                           <RunnerPicker value={form.runner} leftovers={form.leftovers} loosen={form.loosen}
                             listy={form.goals.some((g) => g.on && goalKind(g.text) === 'countable')}
                             searches={form.searches} onSearches={(searches) => setForm({ ...form, searches })}
+                            expert={form.expert} agents={agents} onExpert={(expert) => setForm({ ...form, expert })}
                             onChange={(runner, leftovers, loosen) => setForm({ ...form, runner, leftovers, loosen })} />
                         )}
                       </div>
