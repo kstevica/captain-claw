@@ -62,6 +62,11 @@ COUNTS = f"{STATE}/counts.json"    # per group: how items went, stage by stage (
 TAPE_IN = "extra/tape"             # a recording to replay instead of the web (and its recipe, its answers)
 TAPE_OUT = f"{STATE}/tape"         # what a recorded run searched and read
 TAPE_MISSES = f"{STATE}/tape-misses.json"
+BRIEF = f"{STATE}/brief.md"        # what the owner's documents and links say, read before the run
+BRIEF_LINKS = 8          # pages read for it: the charter's links, a short links file's, the documents' own
+BRIEF_DOCS = 6           # documents read for it; a larger pile is the list's material, not reading matter
+BRIEF_PAGE_CHARS = 6000  # what the brief's call reads of each page or document
+BRIEF_CHARS = 3000       # what a brief may be
 SUMMARY = "summary.md"
 EXCLUSIONS = "exclusions.md"
 CLOSE_SUFFIX = "-came-close"  # <the list>-came-close.csv: the items that nearly made it, a result of its own
@@ -72,7 +77,8 @@ SEARCHES_PER_ROW = 12       # and this many for each row the list asks for, when
 LOOKS_PER_ROW = 2           # items looked into per step, for each row it wants, when more than LOOK_MAX
 FETCH_CHARS = 40_000  # what code keeps of one page: the whole of it, its footer (contact, hours) too
 CONCURRENCY = 4
-MAX_QUERY_ROUNDS = 2
+MAX_QUERY_ROUNDS = 40   # rounds of new searches a step may write (config funnel_query_rounds)
+QUERY_ROUNDS_DRY = 2    # such rounds in a row that put no row on the list, before the step gives up
 ITEMS_MAX = 5000     # items looked at per step (config funnel_items_max)
 READ_CHARS = 12_000  # what one item's judging call reads of its pages, in all
 MORE_PAGES = 10      # list pages found in search results, followed per step
@@ -81,7 +87,7 @@ DECIDE_TOKENS = 8192
 # nothing more): with it on, Qwen thought 160k characters on the setup call, looped,
 # and never answered, twice. A small limit also keeps a loop from running for minutes
 # on the tier's whole output.
-OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500, "owner": 3000, "look": 300, "group": 200, "columns": 600}
+OUT_TOKENS = {"setup": 6000, "extract": 6000, "queries": 2000, "decide": 2500, "owner": 3000, "look": 300, "group": 200, "columns": 600, "brief": 1200}
 LOOK_STEPS = 4              # what one look into a nearly-there item may do (config funnel_look_steps)
 LOOK_MAX = 60               # items looked into per step (config funnel_look_max)
 LOOK_FILES = 400            # the owner's files a look is told of, by name
@@ -240,7 +246,11 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
                 # a list column's fixed values are the judging call's to set: what a listing says ("Boutique
                 # consulting firm") is free text, never one of them exactly. Its check holds them on the row.
                 continue
-            recipe["filters"].append({"column": str(f["column"]).strip()[:80], "op": f["op"], "value": f.get("value")})
+            flt = {"column": str(f["column"]).strip()[:80], "op": f["op"], "value": f.get("value")}
+            only = [g for g in _names(f.get("groups")) if g in groups]
+            if only and len(only) < len(groups):  # it holds for some of the list's groups, not all
+                flt["groups"] = only
+            recipe["filters"].append(flt)
     if base["exclude"] and sane_exclude(base["exclude"], keep):
         recipe["filters"].append({"column": "*", "op": "not_regex", "value": base["exclude"]})
     for g in raw.get("gather") or []:
@@ -327,6 +337,17 @@ CONTACT_LOOSER = ("a way to reach it on its own site: a contact page or form (it
                   "column left empty); never an address guessed or taken from a contact-list site")
 
 
+# What holds for a way to reach an item when it publishes no address, in every run (a
+# short list accepted or not): its own site's contact page or form. Code finds that
+# page among what was read and writes its link where the address would be; with no
+# such page the item comes close, never dropped for it.
+CONTACT_ALT = ("no address published: a contact page or form on its own site, its link given in the "
+               "address's place")
+_CONTACT_PAGE = re.compile(r"contact|kontakt|contatt|get[-_ ]?in[-_ ]?touch|reach[-_ ]?(?:us|me|out)|enquir|"
+                           r"inquir|write[-_ ]to[-_ ](?:us|me)|impressum", re.I)
+_CONTACT_COL = re.compile(r"e-?mail|phone|contact|kontakt|telef|\btel\b", re.I)
+
+
 def _is_contact(rule: dict[str, Any]) -> bool:
     return _fact_of(rule) == "contact"
 
@@ -393,10 +414,18 @@ def _rules(raw: Any, recipe: dict[str, Any]) -> list[dict[str, Any]]:
                 looser = CONTACT_LOOSER
         if recipe["group_by"] and recipe["group_by"] in rule["columns"]:
             rule["of_group"] = True  # which group an item is in: the rule about the list's groups
+        alt = " ".join(str(r.get("if_not_shown") or "").split())[:300]
+        if kind == "must" and _is_contact(rule) and alt in ("", CONTACT_ALT):
+            # the cells that say how to reach it (the list's key too, when that is its address)
+            apart = {recipe["group_by"], recipe.get("site_column") or ""}
+            reach = [c for c in rule["columns"] if c not in apart and _CONTACT_COL.search(c)] \
+                or [c for c in rule["columns"] if c not in apart] \
+                or [c for c in recipe["columns"] if c not in apart and _CONTACT_COL.search(c)]
+            if reach:
+                rule["reach"], alt = reach, CONTACT_ALT
         rule["columns"] = [c for c in rule["columns"] if c not in fixed]
         if looser:
             rule["looser"] = looser
-        alt = " ".join(str(r.get("if_not_shown") or "").split())[:300]
         if alt:  # the charter's own words for when its fact isn't found: it holds always
             rule["if_not_shown"] = alt
         out.append(rule)
@@ -541,6 +570,152 @@ def reference_text(folder: Path, recipe: dict[str, Any]) -> str:
         out.append(f"[{rel}] {text[:room]}")
         room -= len(out[-1])
     return "\n".join(out)
+
+
+_BARE_LINK = re.compile(r"(?<![\w@/.-])((?:[a-z0-9-]+\.)+[a-z]{2,10})(/[^\s)\]>\"']*)?", re.I)
+_NOT_SITES = {e.lstrip(".") for e in fx.TABLE_EXTS + fx.DOC_EXTS} | {
+    "json", "yaml", "yml", "xml", "py", "js", "ts", "zip", "png", "jpg", "jpeg", "gif", "svg", "doc", "xls", "ppt",
+    "log", "sql", "sh", "exe", "eg", "ie", "etc"}
+
+BRIEF_SYSTEM = """Before a list is built, you read what its owner gave: their documents and the pages their goal
+links to. Write the brief the run works from: plain notes, at most 350 words, only what the texts say.
+- What each thing is, what it does and who it is for.
+- The facts, names, terms and numbers that help find the right items and tell one that fits from one that doesn't.
+- Anything the texts say about how the list is to be made.
+No advice of your own, nothing the texts don't say, no headings. A text that says nothing useful gets no line.
+Reply with the notes only."""
+
+
+def text_links(text: str) -> list[str]:
+    """The links a text names: full ones, and a bare site ("acme-tools.com/pricing") that
+    isn't a file's name ("leads.csv") or an email's host."""
+    out = list(fx.links(text or ""))
+    for m in _BARE_LINK.finditer(text or ""):
+        host = m.group(1).lower()
+        if host.rsplit(".", 1)[-1] in _NOT_SITES or re.fullmatch(r"[\d.]+", host):
+            continue
+        if text[max(0, m.start() - 3):m.start()].endswith("://"):
+            continue  # already taken, whole
+        url = "https://" + host + (m.group(2) or "").rstrip(".,;:")
+        if not any(fx.domain_of(u) == fx.domain_of(url) and urlsplit(u).path.rstrip("/") == urlsplit(url).path.rstrip("/")
+                   for u in out):
+            out.append(url)
+    return out
+
+
+def brief_inputs(task: str, folder: Path) -> tuple[list[str], list[str]]:
+    """What a run reads before it starts: ``(links, documents)``. The links its charter
+    names, those of a short links file the owner added (a long one is a list to go
+    through), and those in the documents; the documents the owner gave, when they are
+    a few (a pile of them is what the list is built from, read item by item)."""
+    links: list[str] = text_links(task)
+    docs: list[str] = []
+    extra = folder / "extra"
+    files = sorted(p for p in extra.iterdir() if p.is_file() and not p.name.startswith(".")
+                   and p.name != LEDGER_FILE and p.suffix.lower() in fx.DOC_EXTS) if extra.is_dir() else []
+    plain = []
+    for p in files:
+        n = _links_count(p)
+        if 0 < n < LINKS_AS_ITEMS:
+            try:
+                links += [x["url"] for x in fx.read_links(p.read_text(encoding="utf-8", errors="replace"))]
+            except OSError:
+                pass
+        elif not n:
+            plain.append(p)
+    if len(plain) <= BRIEF_DOCS:
+        docs = [f"extra/{p.name}" for p in plain]
+    else:  # a pile: only the ones the charter names
+        docs = [f"extra/{p.name}" for p in plain if p.name.lower() in task.lower()][:BRIEF_DOCS]
+    for rel in docs:
+        try:
+            links += fx.links(fx.read_document(folder / rel)[:50_000])
+        except (OSError, ValueError):
+            continue
+    return list(dict.fromkeys(u.rstrip(".,;") for u in links))[:BRIEF_LINKS], docs
+
+
+def _brief_without_sources(folder: Path, recipe: dict[str, Any]) -> None:
+    """Once the recipe says what the list is built from: a brief that read only those
+    files is dropped. They are gone through item by item; summed up beside every item
+    they would say other items' facts."""
+    text = brief_text(folder)
+    head = text.split("\n", 1)[0]
+    if not head.startswith("Read before the run: "):
+        return
+    read = [x.strip() for x in head[len("Read before the run: "):].rstrip(".").split(", ") if x.strip()]
+    paths = [str(s.get("path") or "") for s in recipe.get("sources") or [] if s.get("kind") in ("file", "document")]
+    from fnmatch import fnmatch
+    if read and all(any(fnmatch(r, pat) for pat in paths) for r in read):
+        (folder / BRIEF).write_text("", encoding="utf-8")
+
+
+def brief_text(folder: Path) -> str:
+    try:
+        return (folder / BRIEF).read_text(encoding="utf-8").strip()[:BRIEF_CHARS + 400]
+    except OSError:
+        return ""
+
+
+async def build_brief(run: dict, folder: Path, creds: dict | None) -> str:
+    """Read what the owner gave before anything is searched or judged: their documents
+    and the pages their links lead to, summed up once (``shared/funnel/brief.md``).
+    The setup writes its searches with it, new searches are written with it, and every
+    judging call reads it. "" when the owner gave nothing to read, or it couldn't be
+    read; a run that already has one keeps it."""
+    have = brief_text(folder)
+    if have or (folder / BRIEF).exists() or (folder / TAPE_IN).is_dir():
+        return have
+    links, docs = await asyncio.to_thread(brief_inputs, str(run.get("task") or ""), folder)
+    if not creds or not (links or docs):
+        return ""
+    from captain_claw.flight_deck import bat_loop, bat_routes
+    from captain_claw.llm import Message
+    parts: list[tuple[str, str]] = []
+    for rel in docs:
+        try:
+            text = " ".join((await asyncio.to_thread(fx.read_document, folder / rel)).split())
+        except (OSError, ValueError):
+            continue
+        if text:
+            parts.append((rel, text[:BRIEF_PAGE_CHARS]))
+    unread: list[str] = []
+    if links:
+        tools = make_tools(run, {"step_key": "brief"})
+        try:
+            got = await asyncio.gather(*(tools.fetch(u) for u in links), return_exceptions=True)
+        finally:
+            await tools.close()
+        for u, g in zip(links, got):
+            ok, text = g if isinstance(g, tuple) else (False, "")
+            if ok and str(text).strip():
+                parts.append((u, " ".join(str(text).split())[:BRIEF_PAGE_CHARS]))
+            else:
+                unread.append(u)
+    text = ""
+    if parts:
+        try:
+            async with bat_routes._metered(run["id"], "funnel-brief"):
+                prov, mt = bat_routes.think_call(creds, temperature=0.2)
+                with reasoning.call_effort("off"):
+                    resp = await prov.complete(messages=[
+                        Message(role="system", content=BRIEF_SYSTEM),
+                        Message(role="user", content=f"# The goal\n{str(run.get('task') or '')[:3000]}\n\n"
+                                + "\n\n".join(f"# {name}\n{body}" for name, body in parts)),
+                    ], temperature=0.2, max_tokens=min(mt, OUT_TOKENS["brief"]))
+            text = re.sub(r"<think>.*?</think>", "", resp.content or "", flags=re.S).strip()[:BRIEF_CHARS]
+        except Exception as e:  # noqa: BLE001 — the run goes on with the documents as they are
+            log.warning("funnel brief call failed", run_id=run.get("id"), error=str(e))
+    (folder / STATE).mkdir(parents=True, exist_ok=True)
+    body = (f"Read before the run: {', '.join(name for name, _ in parts)}.\n\n{text}\n" if text else "")
+    (folder / BRIEF).write_text(body, encoding="utf-8")  # empty: tried, nothing to say; not tried again
+    store = bat_loop.get_store()
+    if store is not None and (text or unread):
+        await store.append_event(run["id"], "note", (
+            f"Read before starting: {', '.join(name for name, _ in parts)}. The searches and every judging call "
+            "work from what they say." if text else "Nothing could be read before starting.")
+            + (f" Couldn't read: {', '.join(unread)}." if unread else ""))
+    return body.strip()
 
 
 def charter_checks(task: str, columns: list[str]) -> list[dict[str, Any]]:
@@ -1008,6 +1183,8 @@ Rules:
   put the cheapest test first: a company's size band from a search snippet ("size_max" filter) before reading.
   size_max and size_min count people (staff, employees) only, never anything else: a limit on locations,
   branches, seats, products or years is a rule, not a size filter.
+- A filter that holds for only some of the list's groups (a size limit on its companies, when it lists people
+  too) names them: "groups": ["<group>", ...]. Without it a filter rules items out in every group.
 - fact, for each rule: identity (what the item is: its kind, category, segment, and a state that rules it out:
   withdrawn, closed, discontinued, contaminated, banned), place (where it is), measured (a
   count, amount, date or rating), contact (how to reach it), safety (what must never be done), other. Code reads
@@ -1247,12 +1424,19 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
             (folder / RECIPE).write_text(json.dumps(recipe, indent=1, ensure_ascii=False), encoding="utf-8")
             (folder / "shared" / "conventions.md").write_text(conventions(recipe), encoding="utf-8")
             return recipe, f"replayed from a recording (`{TAPE_IN}`): its recipe, searches and pages, not the web"
+    try:
+        tiers, _ = await _load_owner_tiers(get_db(), run["owner_id"])
+        brief = await build_brief(run, folder, bat_routes._creds_for(tiers))
+    except Exception as e:  # noqa: BLE001 — a run without a brief is the run as it was
+        log.warning("funnel brief failed", run_id=run.get("id"), error=str(e))
+        brief = ""
     from captain_claw.flight_deck import first_mate_recipe
     kept, how = await asyncio.to_thread(first_mate_recipe.for_run, run, folder)
     if kept and kept.get("sources") and kept.get("columns"):  # one recipe per charter, not per run
         (folder / STATE).mkdir(parents=True, exist_ok=True)
         (folder / RECIPE).write_text(json.dumps(kept, indent=1, ensure_ascii=False), encoding="utf-8")
         (folder / "shared" / "conventions.md").write_text(conventions(kept), encoding="utf-8")
+        await asyncio.to_thread(_brief_without_sources, folder, kept)
         return kept, how
     recipe: dict[str, Any] | None = None
     why = ""
@@ -1269,6 +1453,8 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
                   + (f"# Its checks\n{rules}\n\n" if rules else "")
                   + (f"# Already fixed by its checks (keep these)\n{json.dumps(known, ensure_ascii=False)}\n\n"
                      if known else "")
+                  + (f"# What the owner's documents and links say (read already; write the searches, the "
+                     f"rules and each column's meaning with it)\n{brief}\n\n" if brief else "")
                   + f"# The run's folder\n{await asyncio.to_thread(_folder_listing, folder)}")
         for attempt in range(2):
             try:
@@ -1312,6 +1498,7 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
     (folder / STATE).mkdir(parents=True, exist_ok=True)
     (folder / RECIPE).write_text(json.dumps(recipe, indent=1, ensure_ascii=False), encoding="utf-8")
     (folder / "shared" / "conventions.md").write_text(conventions(recipe), encoding="utf-8")
+    await asyncio.to_thread(_brief_without_sources, folder, recipe)
     if built and recipe["sources"] and await asyncio.to_thread(first_mate_recipe.pin_for_run, run, recipe):
         why = (why + "; " if why else "") + "pinned as the factory's recipe: its later runs follow it"
     return recipe, why
@@ -1583,6 +1770,7 @@ class Tools:
         self.run, self.step = run, step
         self.port, self.auth, self.slug = 0, "", ""
         self.tape: Path | None = None  # where a recorded run keeps its searches and pages
+        self._starting = asyncio.Lock()  # several first calls at once start one agent, not one each
 
     def _record(self, name: str, row: dict) -> None:
         if self.tape is None:
@@ -1597,6 +1785,11 @@ class Tools:
     async def _ensure(self) -> None:
         if self.port:
             return
+        async with self._starting:
+            if not self.port:
+                await self._start()
+
+    async def _start(self) -> None:
         from captain_claw.flight_deck import bat_routes
         from captain_claw.flight_deck.auth import get_db
         from captain_claw.flight_deck.basna_routes import _load_owner_tiers
@@ -1864,7 +2057,12 @@ class Work:
         self.charter = " ".join(str(run.get("task") or "").split())[:CHARTER_CHARS]
         self.places = list(recipe.get("places") or sorted({s["country"] for s in recipe["sources"] if s.get("country")}))
         self.skip_sites = skip_sites(recipe)
-        self.reference = reference_text(folder, recipe)
+        self.brief = brief_text(folder)
+        self.reference = "\n\n".join(x for x in (
+            f"[the owner's documents and links, in brief]\n{self.brief}" if self.brief else "",
+            reference_text(folder, recipe)) if x)
+        self.reach = {c for r in recipe["rules"] for c in r.get("reach") or []}  # cells a contact page may fill
+        self.query_rounds = _int(self.cfg.get("funnel_query_rounds"), 0, 1000, MAX_QUERY_ROUNDS)
         self.more_pages: list[str] = []
         self.tools: Tools | None = None
         self.creds: dict | None = None
@@ -2017,22 +2215,32 @@ class Work:
                     if self.full() or self.stopped:
                         break
             searches = [s for s in sources if s["kind"] == "search"]
-            rounds = int(self.queries["rounds"].get(self.group, 0))
-            while searches and not self.full() and not self.stopped and rounds < MAX_QUERY_ROUNDS:
+            # While its group is short and the run has searches left, new searches are written
+            # from what worked. It gives up after rounds in a row that put nothing on the list.
+            rounds, dry = int(self.queries["rounds"].get(self.group, 0)), 0
+            while (searches and not self.full() and not self.stopped and rounds < self.query_rounds
+                   and dry < QUERY_ROUNDS_DRY and self.queries["searches"] < self.budget):
                 rounds += 1
                 self.queries["rounds"][self.group] = rounds
                 self._save_queries()
                 fresh = await self.new_queries(searches[0])
                 if not fresh:
                     break
+                before = self._rows_now()
                 async for batch in self.candidates({**searches[0], "queries": fresh}):
                     await self.handle(batch)
                     if self.full() or self.stopped:
                         break
+                await self.flush()
+                dry = 0 if self._rows_now() > before else dry + 1
             await self.flush()
         finally:
             await asyncio.to_thread(self.note, True)
         return self.result()
+
+    def _rows_now(self) -> int:
+        groups = [self.group] if self.group else list(set(self.kept) | set(self.loose))
+        return sum(self.kept.get(g, 0) + self.loose.get(g, 0) for g in groups)
 
     async def candidates(self, src: dict):
         """A source's items, a batch at a time (one search's, one part of a document's,
@@ -2266,6 +2474,10 @@ class Work:
                 return f"not in {' or '.join(fx.place_phrase(c) for c in self.places)} (its listing says {where})"
         for flt in self.recipe["filters"]:
             col, op, val = flt["column"], flt["op"], flt.get("value")
+            if flt.get("groups") and self.group and self.group not in flt["groups"]:
+                continue  # a limit on another group's kind of item (a firm's size, on a list with people too)
+            if op == "regex" and found is None and col in self.reach:
+                continue  # how to reach it is settled once it's read: a listing rarely shows the address
             if op == "size_max" and (found or {}).get("headcount"):
                 try:
                     over = [(int(n), src) for n, src in found["headcount"] if int(n) > int(val)]
@@ -2450,8 +2662,35 @@ class Work:
                 for u, (ok, text) in zip(urls, got):
                     await self._event("web_fetch", f"url={u}")
                     if ok and text.strip():
-                        evidence.append({"source": u, "text": text[:FETCH_CHARS]})
+                        e = {"source": u, "text": text[:FETCH_CHARS]}
+                        if self._shared_site(base):
+                            # a page on a site many share is the item's own only when it names it: an
+                            # article or a video page that mentions it says other things' sizes
+                            head = next((ln for ln in text.splitlines() if ln.strip()), "")[:200]  # its title
+                            e["own"] = names_item(name_words(self._name_of(item)), u, head)
+                        evidence.append(e)
             item["found"] = self.facts(item, evidence)
+
+    def _contact_link(self, item: dict) -> str:
+        """The contact page of an item's own site, from what was read: a page read there
+        whose address says so, else a link on one of its pages that does (by its words or
+        its address). "" when it has no site of its own or none was found: a directory's
+        or a social site's contact page is never the item's."""
+        site = self._site_of(item)
+        if not site or self._shared_site(site):
+            return ""
+        own = fx.domain_of(site)
+        pages = [e for e in item.get("evidence") or [] if str(e.get("source") or "").startswith(("http://", "https://"))
+                 and fx.same_site(fx.domain_of(e["source"]), own)]
+        for e in pages:
+            if _CONTACT_PAGE.search(urlsplit(e["source"]).path):
+                return e["source"]
+        for e in pages:
+            for label, url in _LABELLED_LINK.findall(e.get("text") or ""):
+                if (fx.same_site(fx.domain_of(url), own)
+                        and (_CONTACT_PAGE.search(label) or _CONTACT_PAGE.search(urlsplit(url).path))):
+                    return url
+        return ""
 
     def _shared_site(self, url: str) -> bool:
         """Whether a site link is an item's page on a site many share, not its own site:
@@ -2584,6 +2823,16 @@ class Work:
         if not self.pending:
             return
         batch, self.pending = self.pending, []
+        alone = [it for it in batch if it.get("asked_again")]
+        if alone and len(batch) > 1:
+            # left out of an answer once: each is asked about in a call of its own, where a
+            # small model that lost it among the others has only it to answer for
+            for it in alone:
+                self.pending = [it]
+                await self.flush()
+            batch = [it for it in batch if not it.get("asked_again")]
+            if not batch:
+                return
         lines = []
         for i, it in enumerate(batch, start=1):
             facts = [f"  {name}: " + "; ".join(f"{v} [{src}]" for v, src in vals[:8])
@@ -2659,6 +2908,9 @@ class Work:
                     continue
             if verdict == "maybe":
                 met, rest = self._alternatives(v)
+                far = [r for r in met if r.get("reach") and not self._contact_link(it)]
+                if far:  # no contact page read on its own site: that alternative isn't met
+                    met, rest = [r for r in met if r not in far], rest + far
                 has_row = isinstance(v.get("row"), dict) and any(str(x).strip() for x in v["row"].values())
                 if met and not rest and has_row:
                     doubt = await self._alternative_doubt(v, it, met, reason)
@@ -2699,6 +2951,7 @@ class Work:
                     row[self.recipe["group_by"]] = group_cell(self.recipe, self.group)  # no group said: this step's
                 relax = {c for r in loosened for c in r.get("columns") or []}
                 read = {e["source"]: e["text"] for e in it.get("evidence") or []}
+                reach = self.reach
                 unproven = {c["column"]: row[c["column"]] for c in self.recipe["checks"]
                             if c["op"] == "in_evidence" and row.get(c["column"])
                             and check_row({**self.recipe, "checks": [c]}, row, read)}
@@ -2713,7 +2966,7 @@ class Work:
                     reason = f"{reason}; {note}" if reason else note
                     soft = loosenable(self.recipe) if self.loosen else []
                     covered = {c for r in soft for c in r.get("columns") or []}
-                    if any(c not in covered for c in unproven):  # a cell the list needs: nearly there
+                    if any(c not in covered and c not in reach for c in unproven):  # a cell the list needs: nearly there
                         await self._nearly(it, row, named or self.group, reason)
                         continue
                     eased = [r for r in soft if set(r.get("columns") or []) & set(unproven) and r not in loosened
@@ -2721,6 +2974,34 @@ class Work:
                     if eased:  # a soft rule now shown by nothing: met by its looser reading
                         loosened, verdict = loosened + eased, "loose"
                         relax |= {c for r in eased for c in r.get("columns") or []}
+                unreached = ""
+                for r in self.recipe["rules"]:
+                    cols = r.get("reach") or []
+                    if not cols or any(row.get(c) for c in cols):
+                        continue
+                    link = self._contact_link(it)
+                    if not link:
+                        lacked = self._named(v.get("missing")) + self._named(v.get("_lacked"))
+                        if r in loosened or (r not in lacked and not any(
+                                c["op"] == "required" and c["column"] in cols for c in self.recipe["checks"])):
+                            continue  # met loosely, or an address the list doesn't require and the
+                            # judging call didn't miss: empty, as before
+                        unreached, lacks = "no address published, and no contact page found on its own site", r
+                        break
+                    # no address published, but its own site has a contact page: that is how it's
+                    # reached, in every run. Code found the page; its link stands where the address would.
+                    row[cols[0]] = link
+                    read.setdefault(link, "")
+                    relax |= set(cols)
+                    loosened = [x for x in loosened if x is not r]
+                    note = f"no address published; reached by its contact page ({cols[0]})"
+                    reason = f"{reason}; {note}" if reason else note
+                if unreached:
+                    await self._nearly(it, row, named or self.group, f"{reason}; {unreached}" if reason else unreached,
+                                       [lacks])
+                    continue
+                if verdict == "loose" and not loosened:
+                    verdict = "keep"  # what it met loosely, it now meets by the contact page code found
                 gaps = [c["column"] for c in self.recipe["checks"]
                         if c["op"] == "required" and not row.get(c["column"]) and c["column"] not in relax]
                 if gaps:  # a cell it left empty isn't a rule broken: a soft rule's looser reading, or nearly there
@@ -2734,8 +3015,7 @@ class Work:
                     loosened = loosened + [r for r in soft if r not in loosened]
                     verdict = "loose"
                     relax |= {c for r in soft for c in r.get("columns") or []}
-                problem = check_row(self.recipe, row, {e["source"]: e["text"] for e in it.get("evidence") or []},
-                                    relax=relax)
+                problem = check_row(self.recipe, row, read, relax=relax)
                 if problem:
                     await self.record(it, "dropped", f"check: {problem}", stage="check")
                     continue
@@ -3299,7 +3579,8 @@ class Work:
         said it seemed to fit."""
         if self.recipe["groups"] and " ".join(str(v.get("group") or "").split()).lower() == "none":
             return "its kind fits none of the list's groups, so the charter's alternative doesn't make it one"
-        if self.jev_off:
+        met = [r for r in met if not r.get("reach")]  # a contact page is found by code, not judged
+        if self.jev_off or not met:
             return ""
         from captain_claw import jev_client
         from captain_claw.flight_deck import jev_routes
@@ -3398,14 +3679,21 @@ class Work:
             if r.get("status") == "kept" and r.get("source", "").startswith("search: "):
                 q = r["source"][8:]
                 worked[q] = worked.get(q, 0) + 1
-        used = [q for q in self.queries["used"] if q in src.get("queries", []) or q in worked]
-        try:
-            got = await self._new_queries_call(src, worked, used)
-        except Exception as e:  # noqa: BLE001 — no new searches this round
-            log.warning("funnel queries call failed", run_id=self.run["id"], error=str(e))
-            return []
-        fresh = got.get("queries") if isinstance(got, dict) else got if isinstance(got, list) else []
-        out = [str(q).strip()[:300] for q in fresh or [] if str(q).strip() and str(q).strip() not in self.queries["used"]]
+        mine = set(src.get("queries", [])) | set(worked) | set(self.queries.get("written", {}).get(self.group, []))
+        used = [q for q in self.queries["used"] if q in mine]
+        out: list[str] = []
+        for _try in range(2):  # an empty or unreadable answer is asked for once more, not taken as "no more"
+            try:
+                got = await self._new_queries_call(src, worked, used)
+            except Exception as e:  # noqa: BLE001 — no new searches this round
+                log.warning("funnel queries call failed", run_id=self.run["id"], error=str(e))
+                continue
+            fresh = got.get("queries") if isinstance(got, dict) else got if isinstance(got, list) else []
+            out = list(dict.fromkeys(str(q).strip()[:300] for q in fresh or []
+                                     if str(q).strip() and str(q).strip() not in self.queries["used"]))
+            if out:
+                break
+        self.queries.setdefault("written", {}).setdefault(self.group, []).extend(out[:15])
         if out:
             await self._event("funnel", f"{len(out)} new searches for {self.group or 'the list'}")
         return out[:15]
@@ -3416,10 +3704,14 @@ class Work:
                                          "Keep your thinking short.",
                               f"# Looking for\n{self.recipe['item']}s" + (f" ({self.group})" if self.group else "")
                               + (f": {src.get('about')}" if src.get("about") else "")
-                              + f"\n\n# Rules\n{self.recipe['decide'][:1500]}\n\n# Searches that found kept items\n"
+                              + f"\n\n# Rules\n{self.recipe['decide'][:1500]}\n\n"
+                              + (f"# What the owner's documents and links say\n{self.brief[:1500]}\n\n"
+                                 if self.brief else "")
+                              + "# Searches that found kept items\n"
                               + ("\n".join(f"- {q} ({n})" for q, n in sorted(worked.items(), key=lambda x: -x[1])[:15])
                                  or "(none yet)")
-                              + "\n\n# Already used\n" + "\n".join(f"- {q}" for q in used[-40:]))
+                              + "\n\n# Already used (write different ones: other words, other kinds of page, "
+                              "other places within the list's own)\n" + "\n".join(f"- {q}" for q in used[-60:]))
 
     def note(self, final: bool = False) -> None:
         """The step's progress note, as Bat's workers keep one."""

@@ -525,7 +525,7 @@ export interface RecipeRule {
   rule: string; kind: 'must' | 'prefer'; fact?: string; columns?: string[]
   looser?: string; if_not_shown?: string; protected?: boolean; of_group?: boolean
 }
-export interface RecipeFilter { column: string; op: string; value?: unknown }
+export interface RecipeFilter { column: string; op: string; value?: unknown; groups?: string[] }
 export interface PinnedRecipe {
   recipe: {
     item: string; output: string; columns: string[]; groups: Record<string, number>; group_by: string
