@@ -3509,8 +3509,10 @@ def expert(monkeypatch):
 
     async def complete(reader, system, user, owner, max_tokens, **_k):
         state["asks"].append({"reader": reader, "system": system, "user": user})
-        if system.rstrip().endswith(funnel_expert.COLUMNS_SYSTEM[-60:].rstrip()):
+        if "You write your columns" in system:
             return Reply(json.dumps(state.get("columns", lambda u: {})(user)))
+        if "An item came close to a list" in system:
+            return Reply(json.dumps(state.get("second", lambda u: {"verdict": "stay"})(user)))
         return Reply(json.dumps({"queries": state["queries"]()}))
 
     async def instructions(owner, slug):
@@ -3672,3 +3674,101 @@ async def test_the_judging_calls_columns_stand_when_the_expert_gives_none(deck, 
     steps = await funnel.plan(run)
     await _go(deck["store"], run, steps)
     assert funnel._read_csv(folder / "leads.csv")[0]["Reason"] == "Its own."
+
+
+# ── phase 3: the expert on items that come close ──────────────────────────
+
+def _close_list(deck, expert, rules, decide, cfg=None):
+    deck["recipe"] = {"item": "lab", "key": "Name", "site_column": "Web", "decide": "Teaching labs.", "decide_batch": 1,
+                      "shortage_ok": True, "rules": rules,
+                      "sources": [{"kind": "search", "group": "", "queries": ["labs"]}]}
+    deck["tools"] = _Tools(pages={}, results={"labs": "r"})
+    deck["extract"] = lambda user: {"items": [{"name": n, "fields": {"Name": n, "Web": f"https://{n.lower()}.example"}}
+                                              for n in ("Alpha", "Beta", "Gamma")]}
+    deck["decide"] = decide
+    expert["queries"] = lambda: []
+
+
+CLOSE = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "leads.csv", "columns": ["Name", "Web", "City"]}}]
+
+
+async def test_the_expert_settles_a_near_miss_of_judgement_never_of_fact(deck, expert):
+    run, folder = await _run(deck["store"], CLOSE, {"funnel_expert": "petri"}, rid="bat_expert07")
+    rules = [{"rule": "it is a teaching lab", "kind": "must", "fact": "identity"},
+             {"rule": "its city is shown", "kind": "must", "fact": "place", "columns": ["City"]}]
+
+    def decide(items):
+        out = []
+        for i, f in items:
+            lacks = [2] if f["Name"] == "Gamma" else [1]  # Gamma lacks a fact; the others a judgement
+            out.append({"id": i, "verdict": "maybe", "missing": lacks, "reason": "Not sure.",
+                        "row": {"Name": f["Name"], "Web": f["Web"], "City": "" if f["Name"] == "Gamma" else "Split"}})
+        return out
+
+    _close_list(deck, expert, rules, decide)
+    expert["second"] = lambda user: ({"verdict": "keep", "reason": "A university's practical course lab."}
+                                     if '"Name": "Alpha"' in user else {"verdict": "drop", "reason": "A contract lab."})
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got["Alpha"][0] == "kept" and "settled by the run's expert: A university's practical course lab." in got["Alpha"][1]
+    assert got["Beta"] == ("dropped", "the run's expert: A contract lab. (Not sure.)")
+    assert got["Gamma"][0] == "maybe"  # a missing fact is never the expert's to settle: it wasn't asked
+    asked = [a["user"] for a in expert["asks"] if "# What is open" in a["user"]]
+    assert len(asked) == 2 and not any("Gamma" in a for a in asked)
+    assert "- it is a teaching lab" in asked[0] and "The judging call said: Not sure." in asked[0]
+    summary = (folder / "summary.md").read_text()
+    assert "asked about 2 items that came close on a question of judgement: 1 it kept, 1 it dropped, 0 it left" in summary
+
+
+async def test_a_row_the_expert_keeps_still_passes_the_lists_checks(deck, expert):
+    run, folder = await _run(deck["store"], CLOSE, {"funnel_expert": "petri"}, rid="bat_expert08")
+    rules = [{"rule": "it is a teaching lab", "kind": "must", "fact": "identity"}]
+    _close_list(deck, expert, rules, lambda items: [
+        {"id": i, "verdict": "maybe", "missing": [1], "reason": "Not sure.",
+         "row": {"Name": f["Name"], "Web": f["Web"], "City": "Atlantis" if f["Name"] == "Alpha" else ""}} for i, f in items])
+    deck["recipe"]["checks"] = [{"column": "City", "op": "required"}, {"column": "City", "op": "in_evidence"}]
+    expert["second"] = lambda user: {"verdict": "keep", "reason": "It is one."}
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got == {"Alpha": "maybe", "Beta": "maybe", "Gamma": "maybe"}  # a city nobody read, or none: not on the list
+    assert not funnel._read_csv(folder / "leads.csv")
+
+
+async def test_the_expert_turns_a_kept_row_down_only_when_switched_on(deck, expert):
+    assert fms.check_runner_config("funnel", {"expert": "petri", "expert_veto": True})["expert_veto"] is True
+    assert "expert_veto" not in fms.check_runner_config("funnel", {"expert_veto": True})  # no expert: nothing to switch
+    assert first_mate_runs.funnel_config({"runner_config": {"expert": "petri", "expert_veto": True}})["funnel_expert_veto"]
+    keep = lambda items: [{"id": i, "verdict": "keep", "reason": "Fits.",  # noqa: E731
+                           "row": {"Name": f["Name"], "Web": f["Web"], "City": "Split"}} for i, f in items]
+    expert["columns"] = lambda user: {"1": {"drop": "A reseller, not a lab."}} if '"Name": "Beta"' in user else {}
+    for rid, cfg, kept in (("bat_von00001", {"funnel_expert": "petri", "funnel_expert_veto": True}, ["Alpha", "Gamma"]),
+                           ("bat_voff0001", {"funnel_expert": "petri"}, ["Alpha", "Beta", "Gamma"])):
+        run, folder = await _run(deck["store"], CLOSE, cfg, rid=rid)  # a run's folder is named by its id's start
+        _close_list(deck, expert, [], keep)
+        expert["asks"].clear()
+        steps = await funnel.plan(run)
+        await _go(deck["store"], run, steps)
+        assert [r["Name"] for r in funnel._read_csv(folder / "leads.csv")] == kept, [(r["name"], r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)]
+        told = any("you turn down instead" in a["system"] for a in expert["asks"])
+        assert told == bool(cfg.get("funnel_expert_veto"))
+    got = {r["name"]: r["reason"] for r in funnel._read_csv(
+        bat_routes._run_folder(await deck["store"].get_run("bat_von00001")) / funnel.ITEMS)}
+    assert got["Beta"] == "turned down by the run's expert: A reseller, not a lab. (Fits.)"
+
+
+async def test_the_experts_calls_are_capped(deck, expert):
+    run, folder = await _run(deck["store"], CLOSE, {"funnel_expert": "petri", "funnel_expert_calls": 1}, rid="bat_expert11")
+    rules = [{"rule": "it is a teaching lab", "kind": "must", "fact": "identity"}]
+    _close_list(deck, expert, rules, lambda items: [
+        {"id": i, "verdict": "maybe", "missing": [1], "reason": "Not sure.",
+         "row": {"Name": f["Name"], "Web": f["Web"], "City": "Split"}} for i, f in items])
+    expert["second"] = lambda user: {"verdict": "keep", "reason": "It is one."}
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    assert len(expert["asks"]) == 1  # one call, then the run goes on without asking
+    got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert sorted(got.values()) == ["kept", "maybe", "maybe"]
+    notes = [e["message"] for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note"]
+    assert sum("its 1 calls for this run are used" in n for n in notes) == 1
