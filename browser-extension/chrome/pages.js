@@ -4,8 +4,8 @@
 // keeps. The page opens in a background tab — never in front, in a collapsed
 // "Captain · reading" group — signed in as the person, so sites that turn
 // Flight Deck away (a sign-in wall, a bot check) open as they do for them.
-// Once the page has settled (its text stops growing; a few scrolls for what
-// loads lazily), its HTML goes back without scripts, styles or form fields,
+// Once the page has settled (no change to its DOM for a moment; scrolled
+// through a screen at a time for what's drawn only when scrolled to), its HTML goes back without scripts, styles or form fields,
 // with every link and picture address made absolute, and the tab closes. The
 // agent's web_fetch reads it like any other page.
 //
@@ -15,17 +15,17 @@
 // addresses on a private network or this computer, or anything but http(s).
 
 import { loadConn } from './lib/api.js'
+import { scrollThrough, settleInPage } from './lib/settle.js'
 import { inBackgroundTab } from './search.js'
 
 const GROUP_TITLE = 'Captain · reading'
 const PICK_KEY = 'fetchMode'       // Flight Deck's mode ('' = off), as it last said
 const PREFS_KEY = 'fetchPrefs'     // { declined: true } = turned off in this browser
 const ALL = ['<all_urls>']
-const WAIT_MAX_MS = 26000
-const POLL_MS = 700
-const SETTLE_MS = 9000             // after load: longest wait for the text to stop growing
-const MIN_TEXT = 200
-const SCROLLS = 3
+const WAIT_MAX_MS = 36000
+const POLL_MS = 400
+const SETTLE_MS = 10000            // after load: longest wait for the page to stop changing
+const SCROLLS = 8                  // screens scrolled down for what's drawn only when scrolled to
 const HTML_MAX = 2900000
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -98,36 +98,26 @@ export async function runFetch(msg, isCancelled) {
 async function settleAndRead(tabId, msg, isCancelled) {
   const id = String(msg.id || '')
   const limit = Date.now() + Math.min(Math.max(Number(msg.wait) || 20, 5) * 1000, WAIT_MAX_MS)
-  let loadedAt = 0
-  let last = -1
-  let steady = 0
+  const left = () => limit - Date.now()
+  // Loaded first …
   while (Date.now() < limit) {
     if (isCancelled(id)) return { ok: false, error: 'Cancelled.' }
-    await sleep(POLL_MS)
     const tab = await chrome.tabs.get(tabId).catch(() => null)
     if (!tab) return { ok: false, error: 'The tab was closed.' }
-    if (tab.status === 'complete' && !loadedAt) loadedAt = Date.now()
-    const probe = await run(tabId, () => ({ len: (document.body?.innerText || '').length, type: document.contentType || '' }))
-    if (probe && probe.type && !/html|xml/i.test(probe.type)) {
-      return { ok: false, error: `Not a web page (${probe.type}) — fetched the usual way instead.` }
-    }
-    if (!loadedAt || !probe) continue
-    steady = probe.len === last ? steady + 1 : 0
-    last = probe.len
-    if (probe.len >= MIN_TEXT && steady >= 1) break
-    if (Date.now() - loadedAt > SETTLE_MS) break
+    if (tab.status === 'complete') break
+    await sleep(POLL_MS)
   }
-  // What loads as the page is scrolled (feeds, comments), a little of it.
-  for (let i = 0; i < SCROLLS && Date.now() < limit; i++) {
-    const grew = await run(tabId, () => {
-      const h = document.documentElement.scrollHeight
-      window.scrollTo(0, h)
-      return h
-    })
-    if (grew == null) break
-    await sleep(900)
-    const after = await run(tabId, () => document.documentElement.scrollHeight)
-    if (!after || after <= grew) break
+  const type = await run(tabId, () => document.contentType || '')
+  if (type && !/html|xml/i.test(type)) return { ok: false, error: `Not a web page (${type}) — fetched the usual way instead.` }
+  // … then drawn: "loaded" isn't "there" on pages that draw their sections as
+  // their data arrives (lib/settle.js) …
+  await run(tabId, settleInPage, [{ maxMs: Math.max(1000, Math.min(SETTLE_MS, left() - 6000)), quietMs: 900, minMs: 1500 }])
+  if (isCancelled(id)) return { ok: false, error: 'Cancelled.' }
+  // … and scrolled through, for what's drawn only when scrolled to (feeds,
+  // comments, profile sections), then drawn again.
+  if (left() > 4000) {
+    const went = await run(tabId, scrollThrough, [{ steps: SCROLLS, quietMs: 600, stepMaxMs: 2000, totalMs: Math.min(10000, left() - 3000) }])
+    if (went?.steps) await run(tabId, settleInPage, [{ maxMs: Math.max(500, Math.min(2500, left() - 1500)), quietMs: 500 }])
   }
   const tab = await chrome.tabs.get(tabId).catch(() => null)
   const where = await refusal(tab?.url || '')
@@ -137,9 +127,9 @@ async function settleAndRead(tabId, msg, isCancelled) {
   return { ok: true, content: page.html.slice(0, HTML_MAX), data: { url: page.url, title: page.title, type: page.type } }
 }
 
-async function run(tabId, func) {
+async function run(tabId, func, args = []) {
   try {
-    const [res] = await chrome.scripting.executeScript({ target: { tabId }, func })
+    const [res] = await chrome.scripting.executeScript({ target: { tabId }, func, args })
     return res?.result ?? null
   } catch {
     return null

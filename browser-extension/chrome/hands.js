@@ -19,6 +19,7 @@
 
 import { browserLabel, loadConn } from './lib/api.js'
 import { saveSearchPick, servedEngines } from './lib/engines.js'
+import { scrollThrough, settleInPage } from './lib/settle.js'
 import { readsPages, runFetch, saveFetchMode } from './pages.js'
 import { runSearch } from './search.js'
 
@@ -633,12 +634,12 @@ chrome.debugger?.onEvent.addListener((src, method, p) => {
     }
     case 'Network.loadingFinished': {
       const r = t.net.get(p.requestId)
-      if (r) r.size = p.encodedDataLength || 0
+      if (r) { r.size = p.encodedDataLength || 0; r.done = true }
       break
     }
     case 'Network.loadingFailed': {
       const r = t.net.get(p.requestId)
-      if (r) r.failed = p.canceled ? 'canceled' : (p.errorText || 'failed')
+      if (r) { r.failed = p.canceled ? 'canceled' : (p.errorText || 'failed'); r.done = true }
       break
     }
     case 'Page.loadEventFired': {
@@ -822,6 +823,48 @@ function withTimeout(p, ms, why) {
 
 // ── waiting for pages ──
 
+// "Loaded" isn't "drawn": pages like LinkedIn draw their sections after the
+// load, as their data arrives. Reads wait until the page stops changing
+// (lib/settle.js) and no data request of the tab's is still on its way (the
+// debugger sees those); never longer than *maxMs*, and never an error.
+const DATA_TYPES = new Set(['XHR', 'Fetch', 'Script', 'Document'])
+const LONG_POLL_MS = 15000    // a request open longer is a live connection, not data on its way
+
+function dataPending(tabId) {
+  const t = attached.get(tabId)
+  if (!t) return 0
+  const now = Date.now()
+  let n = 0
+  for (const r of t.net.values()) if (!r.done && DATA_TYPES.has(r.type) && now - r.at < LONG_POLL_MS) n++
+  return n
+}
+
+async function waitDrawn(tabId, opts) {
+  const end = Date.now() + (opts.maxMs || 8000)
+  let r = null
+  for (let round = 0; round < 8; round++) {
+    const left = end - Date.now()
+    if (left <= 0) break
+    try {
+      const res = await evaluate(tabId, `(${settleInPage})(${JSON.stringify({ ...opts, maxMs: left })})`, { timeout: left + 4000 })
+      r = res.value || null
+    } catch { return r }
+    if (!dataPending(tabId)) return r
+    // Data still on its way: wait for it, then for what it draws.
+    while (dataPending(tabId) && Date.now() < end) await sleep(100)
+    opts = { ...opts, minMs: 0 }
+  }
+  return r ? { ...r, quiet: false } : null
+}
+
+// Sections drawn only when scrolled to: a screen at a time down, then back.
+async function scrollToLoad(tabId, opts) {
+  try {
+    const r = await evaluate(tabId, `(${scrollThrough})(${JSON.stringify(opts)})`, { timeout: (opts.totalMs || 15000) + 5000 })
+    return r.value || null
+  } catch { return null }
+}
+
 async function navigateTab(tabId, url) {
   const t = attached.get(tabId) || (await attach(tabId))
   const loaded = new Promise((resolve) => t.loads.push(resolve))
@@ -874,6 +917,7 @@ async function settle(ctx, tab, beforeUrl, before = null) {
       saveGroups()
       await attach(nt.id).catch(() => {})
       await waitComplete(nt.id, SETTLE_WAIT_MS)
+      await waitDrawn(nt.id, { maxMs: 8000, quietMs: 700 })
       const fresh = await chrome.tabs.get(nt.id)
       return `It opened a new tab ${fresh.id} — now your current tab: ${clip(fresh.title || '', 120)} — ${fresh.url || fresh.pendingUrl}`
     }
@@ -881,6 +925,9 @@ async function settle(ctx, tab, beforeUrl, before = null) {
   const now = await chrome.tabs.get(tab.id).catch(() => null)
   if (!now) return 'The tab closed.'
   if (now.status === 'loading') await waitComplete(tab.id, SETTLE_WAIT_MS)
+  // What the click started (a new route in an app, a panel opening) draws first.
+  const moved = (await chrome.tabs.get(tab.id).catch(() => null))?.url !== beforeUrl
+  await waitDrawn(tab.id, moved ? { maxMs: 8000, quietMs: 700 } : { maxMs: 3000, quietMs: 400 })
   const after = await chrome.tabs.get(tab.id).catch(() => null)
   if (after && after.url !== beforeUrl) return `Now at: ${clip(after.title || '', 120)} — ${after.url}`
   return ''
@@ -1242,6 +1289,7 @@ const ACTIONS = {
       })
       await sleep(300)
       await waitComplete(tab.id, 15000)
+      await waitDrawn(tab.id, { maxMs: 8000, quietMs: 700 })
       const t = await chrome.tabs.get(tab.id)
       guardTab(t, ctx.conn)
       return { content: `Went ${where}: ${clip(t.title || '', 120)} — ${t.url}` }
@@ -1249,8 +1297,11 @@ const ACTIONS = {
     const url = checkUrl(where, ctx.conn)
     const tab = await useTab(ctx, args, { create: true })
     const done = await navigateTab(tab.id, url)
+    const drawn = done ? await waitDrawn(tab.id, { maxMs: 10000, quietMs: 800, minMs: 1500 }) : null
     const t = await chrome.tabs.get(tab.id)
-    return { content: `Opened in tab ${t.id}: ${clip(t.title || '', 120)} — ${t.url}${done ? '' : '\n(It was still loading after 30 s — take a screenshot or read the page to see.)'}` }
+    const note = !done ? '\n(It was still loading after 30 s — take a screenshot or read the page to see.)'
+      : drawn && !drawn.quiet ? '\n(It was still drawing after 10 s — read it again in a moment if something is missing.)' : ''
+    return { content: `Opened in tab ${t.id}: ${clip(t.title || '', 120)} — ${t.url}${note}` }
   },
 
   async back(ctx) { return ACTIONS.navigate({ ...ctx, args: { ...ctx.args, url: 'back' } }) },
@@ -1261,6 +1312,7 @@ const ACTIONS = {
     const filter = args.filter === 'all' ? 'all' : 'interactive'
     const maxChars = Math.min(Math.max(Number(args.max_chars) || 40000, 2000), 200000)
     const inside = args.ref || args.ref_id || ''
+    await waitDrawn(tab.id, { maxMs: 4000, quietMs: 500 })
     if (inside) return { content: await refHelper(tab.id, 'tree', { filter, refId: inside, maxChars, ref: inside }) }
     const text = await helper(tab.id, 'tree', { filter, refId: '', maxChars })
     const frames = await inAllFrames(tab.id, 'tree', { filter, refId: '', maxChars: Math.min(maxChars, 12000) }, 'Inside a frame from')
@@ -1270,6 +1322,7 @@ const ACTIONS = {
   async find(ctx, args = ctx.args) {
     const tab = await useTab(ctx, args)
     const query = args.query || args.text || ''
+    await waitDrawn(tab.id, { maxMs: 4000, quietMs: 500 })
     const here = await helper(tab.id, 'find', { query })
     const frames = await inAllFrames(tab.id, 'find', { query }, 'In a frame from')
     if (frames && /^Nothing on the page matches/.test(here)) return { content: `Nothing in the page itself matches ${JSON.stringify(query)}.${frames}` }
@@ -1278,12 +1331,19 @@ const ACTIONS = {
 
   async page_text(ctx, args = ctx.args) {
     const tab = await useTab(ctx, args)
+    const offset = Math.max(0, Number(args.offset) || 0)
+    await waitDrawn(tab.id, { maxMs: 6000, quietMs: 700 })
+    // The first read goes through the whole page, so sections drawn only when
+    // scrolled to are there too (the next parts, with offset, read it as is).
+    if (!offset && args.scroll !== false) {
+      const went = await scrollToLoad(tab.id, { steps: 10, quietMs: 600, stepMaxMs: 2500, totalMs: 12000 })
+      if (went?.steps) await waitDrawn(tab.id, { maxMs: 3000, quietMs: 500 })
+    }
     const cap = await capturePage(tab.id)
     const facts = [cap.tables?.length ? `${cap.tables.length} tables` : '', cap.files?.length ? `${cap.files.length} files (page_files lists them)` : '',
       cap.selection ? 'a selection' : ''].filter(Boolean)
     const head = `# ${cap.meta?.title || tab.title || ''}\n${cap.meta?.url || tab.url}${facts.length ? `\nThe page has ${facts.join(', ')}.` : ''}\n\n`
     const body = (cap.selection ? `Selected on the page:\n> ${cap.selection.replace(/\n/g, '\n> ')}\n\n` : '') + (cap.markdown || '(no text found)')
-    const offset = Math.max(0, Number(args.offset) || 0)
     const max = Math.min(Math.max(Number(args.max_chars) || TEXT_DEFAULT, 1000), 200000)
     const part = body.slice(offset, offset + max)
     const rest = body.length - offset - part.length
@@ -1454,6 +1514,7 @@ const ACTIONS = {
 
   async screenshot(ctx, args = ctx.args) {
     const tab = await useTab(ctx, args)
+    await waitDrawn(tab.id, { maxMs: 3000, quietMs: 400 })
     const s = await shoot(tab.id)
     const t = await chrome.tabs.get(tab.id)
     return { image: s.image, image_type: 'image/jpeg',
@@ -1473,6 +1534,7 @@ const ACTIONS = {
     const code = String(args.code || '').trim()
     if (!code) throw new Refusal('javascript needs code (its last expression is the answer; await works).')
     const tab = await useTab(ctx, args)
+    await waitDrawn(tab.id, { maxMs: 3000, quietMs: 500 })
     let res
     try {
       res = await evaluate(tab.id, code, { main: true, repl: true, timeout: 30000 })
