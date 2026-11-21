@@ -41,6 +41,8 @@ WRITTEN_SHORT = {
     "security-reviewer", "architect", "brand-design-reviewer", "ui-reviewer", "visual-extractor",
     "deal-screener", "ic-prep", "portfolio-watch",
 }
+# Generalists added since, written in the detailed form.
+LATER_GENERALISTS = {"computer-user"}
 DETAILED = [a for a in ARCHETYPES if a["id"] not in WRITTEN_SHORT]
 
 
@@ -56,15 +58,15 @@ def test_the_catalog_has_all_three_shelves():
     counts = {c: sum(a.get("category") == c for a in ARCHETYPES) for c in CATEGORIES}
     assert sum(counts.values()) == len(ARCHETYPES), "an archetype has no valid category"
     assert counts["specialist"] >= 70 and counts["personal"] >= 20
-    assert len(DETAILED) == 100
+    assert len(DETAILED) == 100 + len(LATER_GENERALISTS)
 
 
 def test_the_first_31_are_the_generalists_and_the_100_after_them_specialists():
     # The gallery's first split: Generalists and Specialists, which a person may want
     # for work or for their own life. Company archetypes are an admin's, never built in.
-    assert {a["id"] for a in ARCHETYPES if a["category"] == "generalist"} == WRITTEN_SHORT
+    assert {a["id"] for a in ARCHETYPES if a["category"] == "generalist"} == WRITTEN_SHORT | LATER_GENERALISTS
     assert len(WRITTEN_SHORT) == 31
-    assert all(a["category"] in ("specialist", "personal") for a in DETAILED)
+    assert all(a["category"] in ("specialist", "personal") for a in DETAILED if a["id"] not in LATER_GENERALISTS)
     assert not any(a["category"].startswith("group-") for a in ARCHETYPES)
     # The current families stay: a shelf is above a family, never instead of one.
     assert all(a.get("family") for a in ARCHETYPES)

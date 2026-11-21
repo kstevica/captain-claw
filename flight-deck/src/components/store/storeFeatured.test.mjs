@@ -4,23 +4,28 @@ import assert from 'node:assert/strict'
 import { FEATURED_IDS, featured } from './storeFeatured.ts'
 
 const agent = (id) => ({ id, role: id })
-const catalog = ['market-scanner', 'editor-writer', 'fact-checker', 'data-analyst', 'inbox-manager', 'deep-researcher', 'debugger']
+const catalog = ['market-scanner', 'editor-writer', 'fact-checker', 'data-analyst', 'inbox-manager', 'deep-researcher', 'debugger', 'computer-user']
   .map(agent)
 
-test('the four picks lead, in their own order, wherever the catalog has them', () => {
+test('the five picks lead, in their own order, wherever the catalog has them', () => {
   assert.deepEqual(featured(catalog).map((a) => a.id), [...FEATURED_IDS])
 })
 
 test('a pick the catalog does not offer is skipped and the row fills up in catalog order', () => {
   const without = catalog.filter((a) => a.id !== 'inbox-manager')
-  assert.deepEqual(featured(without).map((a) => a.id), ['deep-researcher', 'data-analyst', 'editor-writer', 'market-scanner'])
+  assert.deepEqual(featured(without).map((a) => a.id), ['deep-researcher', 'data-analyst', 'editor-writer', 'computer-user', 'market-scanner'])
 })
 
-test('a catalog with none of them shows its first four, and a short one all it has', () => {
-  const other = ['a', 'b', 'c', 'd', 'e'].map(agent)
-  assert.deepEqual(featured(other).map((a) => a.id), ['a', 'b', 'c', 'd'])
+test('a catalog with none of them shows its first five, and a short one all it has', () => {
+  const other = ['a', 'b', 'c', 'd', 'e', 'f'].map(agent)
+  assert.deepEqual(featured(other).map((a) => a.id), ['a', 'b', 'c', 'd', 'e'])
   assert.deepEqual(featured(other.slice(0, 2)).map((a) => a.id), ['a', 'b'])
   assert.deepEqual(featured([]), [])
+})
+
+test('the Computer User is the fifth pick', () => {
+  assert.equal(FEATURED_IDS[4], 'computer-user')
+  assert.equal(FEATURED_IDS.length, 5)
 })
 
 test('every pick exists in the built-in registry', async () => {
