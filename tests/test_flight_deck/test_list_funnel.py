@@ -152,7 +152,8 @@ async def deck(tmp_path, monkeypatch):
             if system.startswith(funnel.SETUP_SYSTEM[:40]):
                 state["asked"].append("setup")
                 state.setdefault("setup_prompts", []).append(user)
-                return _Reply(json.dumps(state["recipe"]))
+                r = state["recipe"]
+                return _Reply(json.dumps(r() if callable(r) else r))
             if system.startswith("Pull the items out"):
                 state["asked"].append("extract")
                 return _Reply(json.dumps(state["extract"](user)))
@@ -3311,3 +3312,68 @@ async def test_a_size_is_taken_only_from_a_page_that_is_the_items_own(deck):
     got = {r["name"]: (r["status"], r["reason"]) for r in funnel._read_csv(folder / funnel.ITEMS)}
     assert got["Alpha Lab"][0] == "kept"  # the newsroom's size isn't its size
     assert got["Beta Lab"] == ("dropped", f"300 people, said on {profile}")
+
+
+# ── the charter's own groups, searches that name them ─────────────────────
+
+def test_a_short_group_name_is_named_as_a_whole_word():
+    """A group named "US" had its searches thrown away as not naming it, and rewritten
+    from its name alone: "list of US", "best US"."""
+    assert funnel.names_group(["small US consultancies directory"], "US", ["United States", "American"])
+    assert funnel.names_group(["business consultancies directory"], "US") is False  # "us" inside a word isn't it
+    assert funnel.names_group(["anything"], "") is None
+    base = funnel.from_contract([{"id": "fm1", "text": "x", "check": {"type": "table", "path": "l.csv", "columns": ["Name"]}}])
+    recipe = funnel.normalize_recipe({"item": "lead", "group_by": "Name", "groups": {"US": 5},
+                                      "group_words": {"US": ["United States"]}, "sources": [
+        {"kind": "search", "group": "US", "queries": ["US research shops directory"], "about": "small US research shops"},
+        {"kind": "search", "group": "US", "queries": ["plate readers"], "about": "US writers on lab tools: blogs"}]}, base)
+    tidy = funnel.tidy_recipe(recipe, "Find 5 leads.")
+    assert tidy["sources"][0]["queries"] == ["US research shops directory"]  # it names its group: left as written
+    assert tidy["sources"][1]["queries"][:2] == ["list of US writers on lab tools", "best US writers on lab tools"]
+
+
+def test_groups_with_amounts_the_charter_never_states():
+    task = "Find 200 US firms, 150 UK firms, 75 US people and 75 UK people."
+    assert funnel.groups_not_the_charters({"groups": {"US firms": 200, "UK firms": 150, "US people": 75, "UK people": 75}}, task) == ""
+    assert "US 275, UK 225" in funnel.groups_not_the_charters({"groups": {"US": 275, "UK": 225}}, task)
+    assert funnel.groups_not_the_charters({"groups": {"a": 0, "b": 0}}, task) == ""  # no amounts: nothing to compare
+
+
+async def test_the_setup_is_asked_again_when_it_merged_the_charters_groups(deck):
+    run, folder = await _run_with(deck["store"], "Find 20 US firms and 5 US people, 10 UK firms and 5 UK people. "
+                                  "Save leads.csv.", [{"id": "fm1", "text": "x", "check": {
+                                      "type": "table", "path": "leads.csv", "columns": ["Name", "Kind"]}}], rid="bat_groups01")
+    merged = {"item": "lead", "key": "Name", "group_by": "Kind", "groups": {"US": 25, "UK": 15},
+              "sources": [{"kind": "search", "group": "US", "queries": ["US firms list"]},
+                          {"kind": "search", "group": "UK", "queries": ["UK firms list"]}]}
+    right = {**merged, "groups": {"US firms": 20, "US people": 5, "UK firms": 10, "UK people": 5},
+             "sources": [{"kind": "search", "group": g, "queries": [f"{g} list"]}
+                         for g in ("US firms", "US people", "UK firms", "UK people")]}
+
+    answers = [merged, right]  # the first answer merged, the second as the charter has it
+    deck["recipe"] = lambda: answers.pop(0)
+    steps = await funnel.plan(run)
+    assert deck["asked"].count("setup") == 2 and "US 25, UK 15" in deck["setup_prompts"][1]
+    assert funnel.load_recipe(folder)["groups"] == {"US firms": 20, "US people": 5, "UK firms": 10, "UK people": 5}
+    assert [s["title"] for s in steps][:2] == ["Find and check 20 US firms", "Find and check 5 US people"]
+
+
+async def test_new_searches_are_written_for_each_of_a_steps_sources_in_turn(deck):
+    """A step with two sources wrote its new searches for the first only."""
+    run, folder = await _run(deck["store"], REACH, rid="bat_turns01")
+    deck["recipe"] = {"item": "lead", "key": "Name", "decide": "Leads.", "sources": [
+        {"kind": "search", "group": "", "queries": ["firms"], "about": "small firms"},
+        {"kind": "search", "group": "", "queries": ["writers"], "about": "people who write"}]}
+    deck["tools"] = _Tools(pages={}, results={})
+    deck["extract"] = lambda user: {"items": []}
+    n = []
+
+    def queries():
+        n.append(1)
+        return [f"new {len(n)}"]
+
+    deck["queries"] = queries
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    looked_for = [p.split("\n")[1] for p in deck["query_prompts"]]
+    assert looked_for == ["leads: small firms", "leads: people who write"]  # two dry rounds, one for each source
