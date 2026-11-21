@@ -12,6 +12,7 @@ import { icon } from './lib/icons.js'
 import { renderMarkdown, escapeHtml as esc } from './lib/md.js'
 import { AuthError, api, browserLabel, clearConn, loadConn, normalizeDeckUrl, publicCall, saveConn, upload } from './lib/api.js'
 import { SEARCH_ENGINES, loadSearchPick, loadSearchPrefs, saveSearchPick, saveSearchPrefs, servedEngines } from './lib/engines.js'
+import { loadFetchMode, readsPages, saveFetchMode, setFetchDeclined } from './pages.js'
 
 const VERSION = chrome.runtime.getManifest().version
 const HISTORY_MAX = 30
@@ -72,6 +73,8 @@ const S = {
   search: { on: false, engines: [], declined: '' },   // agents' web searches here (lib/engines.js)
   searchServed: [],    // engines this browser runs searches on now (allowed + Chrome's permission)
   searchPickId: '',    // the engine picked in Flight Deck, as last heard (Flight Deck or the socket)
+  fetch: { mode: '', declined: false },   // pages read here for agents' web_fetch (pages.js)
+  fetchServed: false,  // this browser reads them now
   anon: null,          // the page or selection anonymized (/fd/clip/anonymize)
   rec: null,           // the recording going on (the worker's, session storage "rec")
   recNotes: {},        // the person's instructions on its steps, by step id
@@ -228,7 +231,7 @@ function renderView() {
   keepFocus(() => {
     if (S.view === 'agent') $view.innerHTML = viewAgentOwned()
     else if (S.view === 'connect') $view.innerHTML = viewConnect()
-    else if (S.view === 'main') $view.innerHTML = viewVersion() + viewRecBanner() + viewHands() + viewSearchAsk() + viewMain()
+    else if (S.view === 'main') $view.innerHTML = viewVersion() + viewRecBanner() + viewHands() + viewSearchAsk() + viewFetchAsk() + viewMain()
     else if (S.view === 'rec') $view.innerHTML = viewRec()
     else if (S.view === 'rec-edit') $view.innerHTML = viewRecEdit()
     else if (S.view === 'recs') $view.innerHTML = viewRecs()
@@ -336,6 +339,10 @@ async function loadMe() {
     if ('search' in S.me) {   // a deck from before web searches says nothing
       await saveSearchPick(S.me.search?.engine || '')
       await refreshSearch()
+    }
+    if ('fetch' in S.me) {
+      await saveFetchMode(S.me.fetch?.mode || '')
+      await refreshFetch()
     }
     if (!agentDef(S.agent)) {
       const firstUp = S.me.agents.find((a) => a.status === 'running') || S.me.agents.find((a) => a.status === 'asleep')
@@ -1103,10 +1110,70 @@ async function stopSearch(id) {
   render()
 }
 
+// ── pages read here for the agents' web_fetch (pages.js) ──
+//
+// Flight Deck says whether the person turned it on (/fd/clip/me → fetch); this
+// browser reads pages while Chrome lets Captain read every site.
+
+async function refreshFetch() {
+  S.fetch = await loadFetchMode()
+  S.fetchServed = await readsPages()
+}
+
+const FETCH_WHAT = "Your agents' web_fetch opens pages here, signed in as you, in a background tab that closes once the page is read — " +
+  'so sites that turn Flight Deck away (LinkedIn, Facebook, sign-in walls, bot checks) open for them. ' +
+  "Never Flight Deck itself or addresses on your own network. When Chrome is closed, they fetch as before."
+
+function viewFetchAsk() {
+  const f = S.fetch
+  if (!f.mode || S.fetchServed || f.declined) return ''
+  return `
+    <div class="card">
+      <div class="row">${icon('globe', 'sm')}<div class="grow"><b>Let your agents read web pages here?</b>
+        <div class="dim">${esc(FETCH_WHAT)} It needs Captain to work on every site — Chrome asks you once.</div></div></div>
+      <div class="row" style="margin-top:8px;gap:8px">
+        <button class="btn primary" data-act="fetch-allow">Allow</button>
+        <button class="btn" data-act="fetch-decline">Not in this browser</button>
+      </div>
+    </div>`
+}
+
+function viewFetchSettings() {
+  const f = S.fetch
+  if (!f.mode) {
+    return `<div class="card"><div class="label">Web pages</div>
+      <div class="dim">Your agents can read pages here, signed in as you — for sites that turn Flight Deck away. Turn it on in Flight Deck → Profile → Web pages.</div></div>`
+  }
+  const when = f.mode === 'always' ? 'every page they read' : 'pages that turn Flight Deck away'
+  return `<div class="card"><div class="label">Web pages</div>
+    <label class="switch"><input type="checkbox" id="fetchOn" ${S.fetchServed ? 'checked' : ''}><div>Read web pages for my agents here — ${esc(when)}<div class="dim">${esc(FETCH_WHAT)}${S.allSites ? '' : ' Turning it on lets Captain work on every site.'}</div></div></label>
+  </div>`
+}
+
+// Chrome's prompt needs the click itself: nothing is awaited before it.
+function allowFetch() {
+  chrome.permissions.request({ origins: ['<all_urls>'] }).catch(() => false).then(async (ok) => {
+    if (!ok) { toast('Not allowed — your agents fetch pages as before.'); render(); return }
+    await setFetchDeclined(false)
+    await refreshAllSites()
+    await refreshFetch()
+    toast('Your agents can read pages here now')
+    render()
+  })
+}
+
+async function stopFetch() {
+  await setFetchDeclined(true)
+  await refreshFetch()
+  render()
+}
+
 // A new agent at work here becomes the panel's agent: talk to it, follow it.
 function followHands() {
   const last = S.handsLog[S.handsLog.length - 1]
   if (!last || last.at <= S.handsSeen) return
+  // A page read in the background for web_fetch isn't an agent at work here.
+  if (last.action === 'fetch') { S.handsSeen = last.at; return }
   // Only the first step of a stretch of work: picking another agent meanwhile sticks.
   const fresh = !S.handsLog.some((e) => e !== last && e.slug === last.slug && last.at - e.at < HANDS_RECENT_MS)
   S.handsSeen = last.at
@@ -2345,6 +2412,7 @@ function viewSettings() {
       ${S.hands.on && handsStatusText() ? `<div class="dim" style="margin-top:4px">${esc(handsStatusText())}</div>` : ''}
     </div>
     ${viewSearchSettings()}
+    ${viewFetchSettings()}
     <div class="card">
       <div class="label">Every time</div>
       <label class="switch"><input type="checkbox" id="prefAll" ${S.allSites ? 'checked' : ''}><div>Work on every site without asking<div class="dim">Reads pages and fetches their files anywhere; also lets screenshots work.</div></div></label>
@@ -2474,6 +2542,8 @@ $view.addEventListener('click', (ev) => {
   else if (act === 'hands-extensions') chrome.tabs.create({ url: 'chrome://extensions/?id=' + chrome.runtime.id })
   else if (act === 'search-allow') allowSearch(el.dataset.engine)
   else if (act === 'search-decline') stopSearch(el.dataset.engine)
+  else if (act === 'fetch-allow') allowFetch()
+  else if (act === 'fetch-decline') stopFetch()
   else if (act === 'clear-history') { S.history = []; setStore({ history: [] }); render() }
   else if (act === 'disconnect') {
     if (!confirm('Disconnect this browser from Flight Deck?')) return
@@ -2504,6 +2574,9 @@ $view.addEventListener('change', (ev) => {
     applyDefaults()
   } else if (el.id === 'handsOn') {
     turnHandsOn(el.checked)
+  } else if (el.id === 'fetchOn') {
+    if (el.checked) allowFetch()
+    else stopFetch().then(() => toast("Your agents don't read pages in this browser now"))
   } else if (el.id === 'searchOn') {
     if (el.checked) allowSearch(el.dataset.engine)
     else stopSearch(el.dataset.engine).then(() => toast("Your agents' searches don't run in this browser now"))
@@ -2559,8 +2632,11 @@ chrome.tabs.onUpdated.addListener((id, info, tab) => {
   if (PINNED_TAB ? id !== PINNED_TAB : (!tab.active || tab.windowId !== S.windowId)) return
   if (info.status === 'complete' || info.url) scheduleScan(info.status === 'complete' ? 200 : 600)
 })
-chrome.permissions.onAdded.addListener(() => { refreshAllSites(); refreshSearch(); scheduleScan(0) })
-chrome.permissions.onRemoved.addListener(() => { refreshAllSites(); refreshSearch().then(() => { if (S.view === 'main' || S.view === 'settings') render() }) })
+chrome.permissions.onAdded.addListener(() => { refreshAllSites(); refreshSearch(); refreshFetch(); scheduleScan(0) })
+chrome.permissions.onRemoved.addListener(() => {
+  refreshAllSites()
+  Promise.all([refreshSearch(), refreshFetch()]).then(() => { if (S.view === 'main' || S.view === 'settings') render() })
+})
 
 // A right-click on a selection, a link or an image.
 async function takeFocus() {
@@ -2624,6 +2700,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
     followHands()
     if (S.view === 'main' || S.view === 'settings') render()
   }
+  if (area === 'local' && (changes.fetchMode || changes.fetchPrefs)) {
+    refreshFetch().then(() => { if (S.view === 'main' || S.view === 'settings') render() })
+  }
   if (area === 'local' && (changes.search || changes.searchPick)) {
     refreshSearch().then(() => { if (S.view === 'main' || S.view === 'settings') render() })
   }
@@ -2676,6 +2755,7 @@ async function start() {
   } catch { /* no session storage */ }
   await refreshAllSites()
   await refreshSearch()
+  await refreshFetch()
   S.conn = await loadConn()
   if (!S.conn) {
     S.view = 'connect'

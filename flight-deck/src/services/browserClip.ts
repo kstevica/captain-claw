@@ -192,3 +192,20 @@ export interface ChromeSearchStatus {
 export const getChromeSearch = () => fdFetch<ChromeSearchStatus>('/fd/web-search/chrome')
 export const setChromeSearch = (engine: string) =>
   fdFetch<ChromeSearchStatus>('/fd/web-search/chrome', { method: 'PUT', body: JSON.stringify({ engine }) })
+
+// ── Pages read in the person's Chrome for their agents' web_fetch (browser_fetch.py) ──
+
+export type ChromeFetchMode = '' | 'blocked' | 'always'
+
+export interface ChromeFetchStatus {
+  /** '' = off; 'blocked' = only pages that turn Flight Deck away; 'always' = every page. */
+  mode: ChromeFetchMode
+  /** Only these sites ([] = any site). */
+  sites: string[]
+  browsers: { browser: string; version: string; ready: boolean }[]
+  extension_set_up: boolean
+}
+
+export const getChromeFetch = () => fdFetch<ChromeFetchStatus>('/fd/web-fetch/chrome')
+export const setChromeFetch = (mode: ChromeFetchMode, sites: string[]) =>
+  fdFetch<ChromeFetchStatus>('/fd/web-fetch/chrome', { method: 'PUT', body: JSON.stringify({ mode, sites }) })

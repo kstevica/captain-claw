@@ -12,12 +12,14 @@
 // own pages and anything that isn't a web page are off-limits, and the
 // person can stop any agent from the panel.
 //
-// The same socket carries the agents' web searches (search.js) when the person
-// turned those on here — then it's open even with "Agents can use this
-// browser" off, and Flight Deck sends no acts (the hello says what's lent).
+// The same socket carries the agents' web searches (search.js) and the pages
+// read here for their web_fetch (pages.js) when the person turned those on —
+// then it's open even with "Agents can use this browser" off, and Flight Deck
+// sends no acts (the hello says what's lent).
 
 import { browserLabel, loadConn } from './lib/api.js'
 import { saveSearchPick, servedEngines } from './lib/engines.js'
+import { readsPages, runFetch, saveFetchMode } from './pages.js'
 import { runSearch } from './search.js'
 
 const VERSION = chrome.runtime.getManifest().version
@@ -41,7 +43,7 @@ class Refusal extends Error {}
 
 let ws = null
 let wsConn = null       // the deck connection the socket belongs to
-let lent = { hands: false, search: [] }   // what the socket told Flight Deck this browser lends
+let lent = { hands: false, search: [], fetch: false }   // what the socket told Flight Deck this browser lends
 let retry = 0
 let retryTimer = 0
 let pingTimer = 0
@@ -110,14 +112,14 @@ async function ensureConnected() {
   const got = await chrome.storage.local.get(['hands', 'handsStopped']).catch(() => ({}))
   prefs = { on: false, front: false, ...(got.hands || {}) }
   stopped = new Set(Array.isArray(got.handsStopped) ? got.handsStopped : [])
-  const want = { hands: prefs.on && permitted(), search: await servedEngines() }
+  const want = { hands: prefs.on && permitted(), search: await servedEngines(), fetch: await readsPages() }
   if (!want.hands && attached.size) detachAll()
-  if (!want.hands && !want.search.length) { disconnect(prefs.on ? 'permission' : 'off'); return }
+  if (!want.hands && !want.search.length && !want.fetch) { disconnect(prefs.on ? 'permission' : 'off'); return }
   const conn = await loadConn()
   if (!conn) { disconnect('off'); return }
   if (ws && wsConn && wsConn.url === conn.url && wsConn.token === conn.token &&
       (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-    if (want.hands !== lent.hands || want.search.join() !== lent.search.join()) {
+    if (want.hands !== lent.hands || want.search.join() !== lent.search.join() || want.fetch !== lent.fetch) {
       lent = want
       send({ type: 'prefs', ...lent })
       setStatus(ws.readyState === WebSocket.OPEN ? (lent.hands ? 'on' : 'search') : 'connecting')
@@ -159,7 +161,8 @@ function connect(conn) {
   sock.onopen = () => {
     // An agent's own (headless) browser is named after the agent by Flight Deck.
     sock.send(JSON.stringify({ type: 'hello', token: conn.token, browser: conn.agent ? `Headless · ${conn.agent}` : browserLabel(),
-                               version: VERSION, stopped: [...stopped], hands: lent.hands, search: lent.search }))
+                               version: VERSION, stopped: [...stopped], hands: lent.hands, search: lent.search,
+                               fetch: lent.fetch }))
     clearInterval(pingTimer)
     pingTimer = setInterval(() => send({ type: 'ping' }), PING_MS)
   }
@@ -170,8 +173,11 @@ function connect(conn) {
       retry = 0
       setStatus(lent.hands ? 'on' : 'search')
       if ('search_pick' in msg) saveSearchPick(String(msg.search_pick || ''))
+      if ('fetch_mode' in msg) saveFetchMode(String(msg.fetch_mode || ''))
     }
     else if (msg.type === 'search_pick') saveSearchPick(String(msg.engine || ''))
+    else if (msg.type === 'fetch_mode') saveFetchMode(String(msg.mode || ''))
+    else if (msg.type === 'fetch') fetchFor(msg)
     else if (msg.type === 'denied') setStatus('denied', msg.error || '')
     else if (msg.type === 'act') runAct(msg)
     else if (msg.type === 'search') searchFor(msg)
@@ -198,7 +204,7 @@ function send(msg) {
 
 chrome.alarms?.onAlarm.addListener((a) => { if (a.name === 'captain-hands') ensureConnected() })
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && (changes.search || changes.searchPick)) ensureConnected()
+  if (area === 'local' && (changes.search || changes.searchPick || changes.fetchMode || changes.fetchPrefs)) ensureConnected()
   if (area === 'local' && changes.hands) {
     prefs = { on: false, front: false, ...(changes.hands.newValue || {}) }
     ensureConnected()
@@ -291,6 +297,22 @@ async function searchFor(msg) {
   const id = String(msg.id || '')
   const result = await runSearch(msg, (x) => cancelled.has(x))
   cancelled.delete(id)
+  send({ type: 'result', id, ...result })
+}
+
+// ── a page read for an agent's web_fetch (pages.js) ──
+
+async function fetchFor(msg) {
+  const id = String(msg.id || '')
+  const agent = { slug: String(msg.agent?.slug || ''), name: oneLine(msg.agent?.name || msg.agent?.slug || 'Agent').slice(0, 40) }
+  const entry = { id, at: Date.now(), slug: agent.slug, name: agent.name, action: 'fetch',
+                  text: `Read ${hostOf(String(msg.url || '')) || 'a page'} in the background`, state: 'working' }
+  log.push(entry); if (log.length > LOG_MAX) log = log.slice(-LOG_MAX); saveLog()
+  const result = await runFetch(msg, (x) => cancelled.has(x))
+  cancelled.delete(id)
+  entry.state = result.ok ? 'done' : 'failed'
+  if (!result.ok) entry.error = clip(String(result.error || ''), 160)
+  saveLog()
   send({ type: 'result', id, ...result })
 }
 
