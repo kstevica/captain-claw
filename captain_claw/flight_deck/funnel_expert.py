@@ -32,6 +32,8 @@ log = structlog.get_logger(__name__)
 STATE = "shared/funnel/expert.json"     # who it is, its session for this run, whether it could be reached
 LOG = "shared/funnel/expert.jsonl"      # every time it was asked: what for, what it said
 NOTES = "shared/funnel/expert-notes.md"  # what it added before the run, read wherever the brief is
+CHECK = "shared/funnel/expert-check.md"  # what it found wrong on a sample, at the end
+CHECK_SAMPLE = {"kept": 12, "maybe": 8, "dropped": 8}  # rows of each kind it is shown
 NOTES_CHARS = 2500
 KNOWS_CHARS = 4000        # of its instructions and lessons, in a short call's prompt
 TURN_TIMEOUT_S = 1200.0   # a full turn: it may read and think as itself
@@ -55,6 +57,27 @@ decision, made as the owner would. Never change what the goal itself says. Nothi
 # The goal
 {goal}
 {brief}"""
+
+CHECK_PROMPT = """The run you worked beside has finished its list. As the expert on this and as its owner,
+look at this sample of what it kept, what came close and what it dropped, and say what looks wrong. Do not
+search, write files or send anything; answer from the sample and what you know, in plain text, at most 250 words:
+- rows on the list that shouldn't be, by name, and why;
+- items that came close or were dropped that belong on it, by name, and why;
+- anything that goes wrong more than once: a rule read wrongly, a column that says too little, a kind of item
+  the searches keep finding.
+Nothing wrong: write "Nothing wrong found in the sample." Your findings go in the run's summary; no row changes.
+
+# The goal
+{goal}
+
+# On the list ({kept_n} shown of {kept_all})
+{kept}
+
+# Came close ({maybe_n} shown of {maybe_all})
+{maybe}
+
+# Dropped ({dropped_n} shown of {dropped_all})
+{dropped}"""
 
 SEARCH_SYSTEM = """You write web searches for a list that is still short, as someone who knows the field.
 Reply ONLY with JSON: {"queries": ["...", ...]} (10-15 new ones, none already used). Write searches that find
@@ -121,6 +144,20 @@ async def _note(run: dict, text: str) -> None:
     store = bat_loop.get_store()
     if store is not None:
         await store.append_event(run["id"], "note", text[:600])
+
+
+async def _count(run: dict, tokens: int) -> None:
+    """The expert's tokens count toward the run's (its short calls say how many; a
+    full turn doesn't). Its model's price isn't the run's to know: no dollars."""
+    if tokens <= 0:
+        return
+    try:
+        from captain_claw.flight_deck import bat_loop
+        store = bat_loop.get_store()
+        if store is not None:
+            await store.bump_cost(run["id"], 0.0, tokens)
+    except Exception:  # noqa: BLE001 — a count, never a reason to stop
+        log.debug("funnel expert: couldn't count its tokens", exc_info=True)
 
 
 def _mine(owner: str, slug: str) -> str:
@@ -251,6 +288,7 @@ async def ask(run: dict, folder: Path, state: dict[str, Any], system: str, user:
         try:
             reply = await agent_preset._agent_complete(reader, full, user, owner, max_tokens)
             await asyncio.to_thread(_record, folder, what, reply.text or "", tokens=reply.tokens)
+            await _count(run, int(reply.tokens or 0))
             return reply.text or ""
         except agent_preset._AgentGoneError:
             if again or not await agent_idle.ready_for_task(slug):
@@ -344,6 +382,51 @@ async def columns(run: dict, folder: Path, user: str, veto: bool = False) -> Any
     return fx.parse_json(said) if said else None
 
 
+def check_text(folder: Path) -> str:
+    try:
+        return (folder / CHECK).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _sample(rows: list[str], n: int, seed: str) -> list[str]:
+    import random
+    return rows if len(rows) <= n else random.Random(seed).sample(rows, n)
+
+
+async def check(run: dict, folder: Path, kept: list[dict[str, str]], items: list[dict[str, str]]) -> str:
+    """At the end of a run: the expert reads a sample of what was kept, what came close
+    and what was dropped, and says what looks wrong. One turn, in the run's session on
+    it. Its findings are for the summary; it changes no row. Asked once per run."""
+    if not available(run, folder) or (folder / CHECK).exists() or not items:
+        return check_text(folder)
+    state = _read(folder)
+
+    def line(r: dict[str, str]) -> str:
+        return "- " + " | ".join(f"{k}: {str(v)[:160]}" for k, v in r.items() if str(v).strip() and not k.startswith("_"))
+
+    def why(r: dict[str, str]) -> str:
+        return f"- {r.get('name') or r.get('key')}: {str(r.get('reason') or '')[:200]}"
+
+    seed = str(run.get("id") or "")
+    close = [why(r) for r in items if r.get("status") == "maybe"]
+    gone = [why(r) for r in items if r.get("status") == "dropped" and r.get("stage") not in ("duplicate", "full")]
+    shown = {"kept": _sample([line(r) for r in kept], CHECK_SAMPLE["kept"], seed),
+             "maybe": _sample(close, CHECK_SAMPLE["maybe"], seed), "dropped": _sample(gone, CHECK_SAMPLE["dropped"], seed)}
+    said = await turn(run, folder, state, CHECK_PROMPT.format(
+        goal=str(run.get("task") or "")[:3000],
+        kept="\n".join(shown["kept"]) or "(none)", kept_n=len(shown["kept"]), kept_all=len(kept),
+        maybe="\n".join(shown["maybe"]) or "(none)", maybe_n=len(shown["maybe"]), maybe_all=len(close),
+        dropped="\n".join(shown["dropped"]) or "(none)", dropped_n=len(shown["dropped"]), dropped_all=len(gone)), "check")
+    said = re.sub(r"<think>.*?</think>", "", said, flags=re.S).strip()[:NOTES_CHARS]
+    (folder / CHECK).parent.mkdir(parents=True, exist_ok=True)
+    (folder / CHECK).write_text(said + "\n" if said else "", encoding="utf-8")  # empty: asked, no answer
+    if said:
+        await _note(run, f"Expert: {state.get('name') or state['slug']} checked a sample of the result. What it found "
+                    "is in the summary.")
+    return said
+
+
 async def release(run: dict) -> None:
     """The run is over: an agent that was started only for it goes off again."""
     slug = slug_for(run)
@@ -399,5 +482,10 @@ def summary_lines(folder: Path, items: list[dict[str, str]], written: list[str],
     if ruled.get("veto"):
         lines += ["", f"It turned down {ruled['veto']} row{'' if ruled['veto'] == 1 else 's'} the run would have kept "
                   "(you switched that on); they are among the dropped, with its reason."]
+    found = check_text(folder)
+    if found:
+        lines += ["", "What it found on a sample of the result (it changed no row):", ""] + [
+            f"> {ln}" if ln.strip() else ">" for ln in found.splitlines()]
+        lines.append("")
     lines.append(f"Everything it was asked and said: `{LOG}`.")
     return lines
