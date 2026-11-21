@@ -45,17 +45,31 @@ export function firstLine(text: string, max = 60): string {
 
 // ── Attachment refs ──
 //
-// A queued task carries its files as ref lines (appendAttachmentRefs). They
-// are shown as chips and stripped from the text on screen only: what is sent
-// to the agent stays byte-identical.
+// A queued task, or a message sent from the chat, carries its files as ref
+// lines (appendAttachmentRefs). They are shown as chips and stripped from the
+// text on screen only: what is sent to the agent stays byte-identical.
 const IMAGE_REF = /^\[Attached image:\s*(.+?)\s*\]$/
-const FILE_REF = /^\[Attached file: (.+?) → (.+)\]$/
+// "[Attached file: name → path]"; the agent's own history writes it without
+// the name ("[Attached file: path]").
+const FILE_REF = /^\[Attached file: (?:(.+?) → )?(.+?)\]$/
 // The hint earlier builds appended after image refs: kept, never shown.
 const LEGACY_HINT = /^\(To view\/understand the image\(s\), call image_vision.*\)$/
 
 export interface AttachedFile { kind: 'image' | 'file'; name: string; path: string; ref: string }
 
 const baseName = (p: string) => p.split(/[\\/]/).filter(Boolean).pop() || p
+
+// An upload is stored as "<name>-<YYYYMMDD-HHMMSS>-<6 hex><ext>" (the agent's
+// rest_file_upload.open_unique_upload), so a pasted screenshot comes back as
+// "image-20261121-205158-690185.png".
+const UPLOAD_STAMP = /^(.+)-\d{8}-\d{6}-[0-9a-f]{6}(\.[^.]+)?$/i
+
+/** The name a person gave a file, without the stamp an upload adds. */
+export function uploadName(path: string): string {
+  const name = baseName(path)
+  const m = name.match(UPLOAD_STAMP)
+  return m ? m[1] + (m[2] || '') : name
+}
 
 export function parseAttachmentRefs(content: string): { text: string; refs: string[]; files: AttachedFile[] } {
   const refs: string[] = []
@@ -64,9 +78,9 @@ export function parseAttachmentRefs(content: string): { text: string; refs: stri
   for (const line of (content || '').split('\n')) {
     const t = line.trim()
     const img = t.match(IMAGE_REF)
-    if (img) { refs.push(t); files.push({ kind: 'image', name: baseName(img[1]), path: img[1], ref: t }); continue }
+    if (img) { refs.push(t); files.push({ kind: 'image', name: uploadName(img[1]), path: img[1], ref: t }); continue }
     const file = t.match(FILE_REF)
-    if (file) { refs.push(t); files.push({ kind: 'file', name: file[1], path: file[2], ref: t }); continue }
+    if (file) { refs.push(t); files.push({ kind: 'file', name: file[1] || uploadName(file[2]), path: file[2], ref: t }); continue }
     if (LEGACY_HINT.test(t)) { refs.push(t); continue }
     kept.push(line)
   }

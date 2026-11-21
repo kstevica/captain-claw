@@ -60,7 +60,7 @@ import { useLessonMarks } from '../../stores/lessonMarksStore'
 import { useLessonInbox } from '../../stores/lessonInboxStore'
 import { isManagedAgent } from '../../utils/managedAgents'
 import { AttachmentChip } from './AttachmentChip'
-import { appendAttachmentRefs, useFileAttachments } from '../../hooks/useFileAttachments'
+import { appendAttachmentRefs, useFileAttachments, type AgentConn } from '../../hooks/useFileAttachments'
 import { useAgentSkills } from '../../hooks/useAgentSkills'
 import { asksForInput, type AgentSkill } from '../../services/agentSkills'
 import { fetchTopics, type TopicInfo } from '../../stores/chatStore'
@@ -99,7 +99,7 @@ import { AgentFilesPanel } from './AgentFilesPanel'
 import { AgentDatastorePanel } from './AgentDatastorePanel'
 import { QueuePanel, type QueueVariant } from './queue/QueuePanel'
 import { useQueueProgress, useQueueSignal } from './queue/queueHooks'
-import type { AttachedFile, SignalTone } from './queue/queueModel'
+import { parseAttachmentRefs, type AttachedFile, type SignalTone } from './queue/queueModel'
 import { FileChips } from './queue/QueueHero'
 import { FOCUS } from './queue/QueueButton'
 import { usePersistedSize } from '../../hooks/usePersistedSize'
@@ -1107,6 +1107,8 @@ function ChatContent({
             next={i === 0}
             agentName={session.containerName}
             large={simple}
+            conn={conn}
+            sharedRef={sharedRef ?? ''}
             canInsert={session.busy && !session.stopping && session.connected}
             onInsert={() => sendHeldInTurn(sessionKey, h.id)}
             onCancel={() => cancelHeld(sessionKey, h.id)}
@@ -2072,23 +2074,32 @@ function replyBefore(messageId: string): string {
  *  one next, the rest one turn each after it. "Send at next step" hands it to
  *  the running turn instead (the agent reads it at its next step); "Don't
  *  send" withdraws it. */
-function HeldBubble({ held, next, agentName, large, canInsert, onInsert, onCancel }: {
+function HeldBubble({ held, next, agentName, large, conn, sharedRef, canInsert, onInsert, onCancel }: {
   held: HeldMessage
   next: boolean
   agentName: string
   large: boolean
+  conn: AgentConn | null
+  sharedRef: string
   /** A turn is on that can take it now. */
   canInsert: boolean
   onInsert: () => void
   onCancel: () => void
 }) {
   const action = 'rounded px-1.5 py-0.5 text-[11px] transition-colors pointer-coarse:px-2.5 pointer-coarse:py-1.5'
+  const sent = splitSentFiles(held.content)
   return (
     <div className="mb-3 flex flex-col items-end gap-0.5" data-fd-held>
       <div className={`max-w-[85%] rounded-br-sm border border-dashed border-violet-500/40 bg-violet-600/10 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'}`}>
-        <div className={`fd-markdown ${large ? 'text-base leading-relaxed' : 'text-sm'} text-zinc-300`}>
-          <MarkdownMessage content={held.content} />
-        </div>
+        {sent.text && (
+          <div className={`fd-markdown ${large ? 'text-base leading-relaxed' : 'text-sm'} text-zinc-300`}>
+            <MarkdownMessage content={sent.text} />
+          </div>
+        )}
+        {sent.files.length > 0 && (
+          <FileChips files={sent.files} conn={conn} viewUrl={(f) => sentPictureUrl(f, conn, sharedRef)}
+            className={sent.text ? 'mt-2' : ''} />
+        )}
         <span className="mt-1 flex items-center justify-end gap-1 text-[10px] text-zinc-500">
           <Clock className="h-3 w-3" />
           {next ? `Sends when ${agentName} is free` : 'Waiting its turn'}
@@ -2117,21 +2128,24 @@ function HeldBubble({ held, next, agentName, large, canInsert, onInsert, onCance
   )
 }
 
-// A message you sent with files carries them as ref lines for the agent
-// ("[Attached file: name → path]"). On screen they are chips with the name only:
-// the path is the server's (its folders, an upload id), never something to read.
-// Pictures keep their own rendering (processImagePaths); what was sent is unchanged.
-// The agent's own history writes the same ref without the name ("[Attached file: /path]").
-const SENT_FILE_REF = /^\s*\[Attached file: (?:(.+?) → )?(.+?)\]\s*$/
+// A message you sent with files or pictures carries them as ref lines for the
+// agent ("[Attached file: name → path]", "[Attached image: path]"). On screen
+// they are pills with the name only (parseAttachmentRefs): the path is the
+// server's (its folders, an upload stamp), never something to read. What was
+// sent is unchanged.
 function splitSentFiles(content: string): { text: string; files: AttachedFile[] } {
-  const files: AttachedFile[] = []
-  const kept: string[] = []
-  for (const line of (content || '').split('\n')) {
-    const m = line.match(SENT_FILE_REF)
-    if (m) files.push({ kind: 'file', name: m[1] || m[2].split(/[\\/]/).filter(Boolean).pop() || m[2], path: m[2], ref: line.trim() })
-    else kept.push(line)
+  const p = parseAttachmentRefs(content || '')
+  return { text: p.refs.length ? p.text : content, files: p.files }
+}
+
+/** Where a picture you sent is seen full size: through the deck's proxy to
+ *  the agent, or a shared agent's files when it is someone else's. */
+function sentPictureUrl(f: AttachedFile, conn: AgentConn | null, sharedRef: string): string | null {
+  if (sharedRef) {
+    const rel = belowSaved(f.path)
+    return rel ? sharedFileUrl(sharedRef, rel, 'view') : null
   }
-  return { text: files.length ? kept.join('\n').trim() : content, files }
+  return conn?.port ? agentFileViewUrl(f.path, conn.host, conn.port, conn.auth) : null
 }
 
 // A message's small actions appear on hover. Where there is no hover (a phone, a tablet), they stay shown,
@@ -2336,7 +2350,10 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
               <MarkdownMessage content={processImagePaths(sent.text, agentConn?.host, agentConn?.port, agentConn?.auth)} />
             </div>
           )}
-          {sent.files.length > 0 && <FileChips files={sent.files} conn={agentConn} className={sent.text ? 'mt-2' : ''} />}
+          {sent.files.length > 0 && (
+            <FileChips files={sent.files} conn={agentConn} viewUrl={(f) => sentPictureUrl(f, agentConn, sharedRef)}
+              className={sent.text ? 'mt-2' : ''} />
+          )}
           <span className="mt-1 block text-right text-[10px] text-zinc-500">
             {message.via && <span className="mr-1.5 text-zinc-400">via {message.sourceLabel || viaLabel(message.via)}</span>}
             {formatTime(message.timestamp)}
