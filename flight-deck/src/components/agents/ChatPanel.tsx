@@ -2405,7 +2405,7 @@ function HeldBubble({ held, next, agentName, large, conn, sharedRef, canInsert, 
           </div>
         )}
         {sent.files.length > 0 && (
-          <FileChips files={sent.files} conn={conn} viewUrl={(f) => sentPictureUrl(f, conn, sharedRef)}
+          <FileChips files={sent.files} conn={conn} pictures="tile" viewUrl={(f) => sentPictureUrl(f, conn, sharedRef)}
             className={sent.text ? 'mt-2' : ''} />
         )}
         <span className="mt-1 flex items-center justify-end gap-1 text-[10px] text-zinc-500">
@@ -2438,9 +2438,9 @@ function HeldBubble({ held, next, agentName, large, conn, sharedRef, canInsert, 
 
 // A message you sent with files or pictures carries them as ref lines for the
 // agent ("[Attached file: name → path]", "[Attached image: path]"). On screen
-// they are pills with the name only (parseAttachmentRefs): the path is the
-// server's (its folders, an upload stamp), never something to read. What was
-// sent is unchanged.
+// (parseAttachmentRefs) a picture is a small preview that opens the viewer,
+// a file a pill with its name only: the path is the server's (its folders,
+// an upload stamp), never something to read. What was sent is unchanged.
 function splitSentFiles(content: string): { text: string; files: AttachedFile[] } {
   const p = parseAttachmentRefs(content || '')
   return { text: p.refs.length ? p.text : content, files: p.files }
@@ -2659,7 +2659,7 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
             </div>
           )}
           {sent.files.length > 0 && (
-            <FileChips files={sent.files} conn={agentConn} viewUrl={(f) => sentPictureUrl(f, agentConn, sharedRef)}
+            <FileChips files={sent.files} conn={agentConn} pictures="tile" viewUrl={(f) => sentPictureUrl(f, agentConn, sharedRef)}
               className={sent.text ? 'mt-2' : ''} />
           )}
           <span className="mt-1 block text-right text-[10px] text-zinc-500">

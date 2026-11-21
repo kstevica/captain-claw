@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import type { AgentConn } from '../../../hooks/useFileAttachments'
 import { kindOf } from '../fileKind'
+import { ImageLightbox } from '../ImageLightbox'
 import { touchKeyboard } from '../../../hooks/useMediaQuery'
 import { agentFileViewUrl } from '../../../utils/agentFileUrl'
 import { fmtTokens } from '../../../utils/format'
@@ -345,63 +346,116 @@ export function ClampText({ text, lines, open, onToggle, clickToggle = false, cl
 }
 
 const PILL = 'inline-flex h-7 max-w-[220px] items-center gap-1.5 rounded-full border border-zinc-700/60 bg-zinc-950/50 pl-0.5 text-xs text-zinc-300'
+const PILL_OPEN = `transition-colors hover:border-zinc-600 hover:bg-zinc-900 hover:text-zinc-100 ${FOCUS}`
 
-/** Files as pills — a task's, or a message's you sent: a picture with its
- *  thumbnail once the agent is known, a file with its kind's icon, and the
- *  name a person gave it (never the server's path). With `viewUrl` a picture
- *  opens full size in a new tab. */
-export function FileChips({ files, conn, viewUrl, onRemove, className = '' }: {
+/** Files a task or a message carries — a picture, once the agent is known,
+ *  with its picture; a file as a pill with its kind's icon; always the name a
+ *  person gave it, never the server's path. A picture opens in the viewer
+ *  (ImageLightbox), stepping through the others here.
+ *  `pictures`: 'pill' (the queue's compact rows) or 'tile' — small rounded
+ *  previews above the file pills, as a message bubble shows them ('tile-sm'
+ *  for the small chats). */
+export function FileChips({ files, conn, viewUrl, onRemove, pictures = 'pill', className = '' }: {
   files: AttachedFile[]
   conn: AgentConn | null
-  /** Where a picture is seen in the browser (a shared agent's files go
-   *  another way than `conn`); a picture with one is a link. */
+  /** Where a picture is seen in the browser, when not through `conn` (a
+   *  shared agent's files). */
   viewUrl?: (f: AttachedFile) => string | null
   onRemove?: (ref: string) => void
+  pictures?: 'pill' | 'tile' | 'tile-sm'
   className?: string
 }) {
+  const [viewing, setViewing] = useState<number | null>(null)
+  const srcOf = (f: AttachedFile) => f.kind !== 'image' ? null
+    : viewUrl ? viewUrl(f)
+    : conn ? agentFileViewUrl(f.path, conn.host, conn.port, conn.auth) : null
+  const shown = files.map((f) => ({ f, src: srcOf(f) }))
+  const gallery = shown.filter((x) => x.src).map((x) => ({ src: x.src as string, name: x.f.name, ref: x.f.ref }))
+  const open = (ref: string) => {
+    const i = gallery.findIndex((g) => g.ref === ref)
+    if (i >= 0) setViewing(i)
+  }
+  const tiles = pictures === 'pill' ? [] : shown.filter((x) => x.src)
+  const pills = pictures === 'pill' ? shown : shown.filter((x) => !x.src)
+  const remove = (f: AttachedFile) => onRemove && (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onRemove(f.ref) }}
+      aria-label={`Remove ${f.name}`}
+      className={`shrink-0 rounded-full p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ${FOCUS}`}
+    >
+      <X className="h-3 w-3" />
+    </button>
+  )
   return (
-    <div className={`flex flex-wrap gap-1.5 ${className}`}>
-      {files.map((f) => {
-        const src = f.kind !== 'image' ? null
-          : viewUrl ? viewUrl(f)
-          : conn ? agentFileViewUrl(f.path, conn.host, conn.port, conn.auth) : null
-        const body = (
-          <>
-            {f.kind === 'image' ? <Thumb key={src ?? ''} src={src} /> : <KindDot name={f.name} />}
-            <span className="min-w-0 truncate">{f.name}</span>
-          </>
-        )
-        if (viewUrl && src && !onRemove) {
-          return (
-            <a
-              key={f.ref}
-              href={src}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={`Open ${f.name}`}
-              className={`${PILL} pr-2.5 transition-colors hover:border-zinc-600 hover:bg-zinc-900 hover:text-zinc-100 ${FOCUS}`}
-            >
-              {body}
-            </a>
-          )
-        }
-        return (
-          <span key={f.ref} title={f.name} className={`${PILL} ${onRemove ? 'pr-1' : 'pr-2.5'}`}>
-            {body}
-            {onRemove && (
-              <button
-                type="button"
-                onClick={() => onRemove(f.ref)}
-                aria-label={`Remove ${f.name}`}
-                className={`shrink-0 rounded-full p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ${FOCUS}`}
-              >
-                <X className="h-3 w-3" />
-              </button>
-            )}
-          </span>
-        )
-      })}
+    <div className={`flex flex-col gap-1.5 ${className}`}>
+      {tiles.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {tiles.map(({ f, src }) => (
+            <PictureTile key={f.ref} name={f.name} src={src as string} small={pictures === 'tile-sm'} onOpen={() => open(f.ref)} />
+          ))}
+        </div>
+      )}
+      {pills.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {pills.map(({ f, src }) => (
+            <span key={f.ref} className={`${PILL} ${onRemove ? 'pr-1' : src ? 'pr-0' : 'pr-2.5'}`}>
+              {src ? (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); open(f.ref) }}
+                  title={`View ${f.name}`}
+                  className={`-my-px -ml-0.5 flex h-7 min-w-0 items-center gap-1.5 rounded-full pl-0.5 ${onRemove ? 'pr-1' : 'pr-2.5'} ${PILL_OPEN}`}
+                >
+                  <Thumb key={src} src={src} />
+                  <span className="min-w-0 truncate">{f.name}</span>
+                </button>
+              ) : (
+                <>
+                  {f.kind === 'image' ? <KindDot name="picture.png" /> : <KindDot name={f.name} />}
+                  <span className="min-w-0 truncate" title={f.name}>{f.name}</span>
+                </>
+              )}
+              {remove(f)}
+            </span>
+          ))}
+        </div>
+      )}
+      {viewing !== null && <ImageLightbox items={gallery} index={viewing} onClose={() => setViewing(null)} />}
     </div>
+  )
+}
+
+/** A picture in a message bubble: a small rounded preview at its own shape
+ *  (a screenshot stays wide), the viewer on a click. One that won't load
+ *  falls back to a pill with its name. */
+function PictureTile({ name, src, small, onOpen }: { name: string; src: string; small: boolean; onOpen: () => void }) {
+  const [broken, setBroken] = useState(false)
+  if (broken) {
+    return (
+      <span className={`${PILL} pr-2.5`} title={name}>
+        <KindDot name="picture.png" />
+        <span className="min-w-0 truncate">{name}</span>
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onOpen() }}
+      title={`View ${name}`}
+      aria-label={`View ${name}`}
+      className={`group relative shrink-0 overflow-hidden rounded-xl border border-zinc-700/60 bg-zinc-900 transition hover:border-zinc-500 ${FOCUS} ${small ? 'h-14' : 'h-20'}`}
+    >
+      <img
+        src={src}
+        alt=""
+        loading="lazy"
+        draggable={false}
+        onError={() => setBroken(true)}
+        className={`h-full w-auto object-cover transition group-hover:opacity-90 ${small ? 'min-w-[3.5rem] max-w-[10rem]' : 'min-w-[5rem] max-w-[14rem]'}`}
+      />
+    </button>
   )
 }
 
@@ -415,9 +469,9 @@ function KindDot({ name }: { name: string }) {
   )
 }
 
-function Thumb({ src }: { src: string | null }) {
+function Thumb({ src }: { src: string }) {
   const [broken, setBroken] = useState(false)
-  if (!src || broken) return <KindDot name="picture.png" />
+  if (broken) return <KindDot name="picture.png" />
   return (
     <img
       src={src}

@@ -22,6 +22,8 @@ import { useChatStore, type HeldMessage } from '../../stores/chatStore'
 import { uploadFileToAgent } from '../../services/fileTransfer'
 import { imageRef, type ChatMessage } from '../../services/agentChat'
 import { injectedAs, noteSummary, tidyServerPaths } from '../../utils/chatOrigin'
+import { FileChips } from './queue/QueueHero'
+import { parseAttachmentRefs } from './queue/queueModel'
 
 interface Attachment {
   id: string
@@ -279,8 +281,8 @@ function EmbeddedChatBody({
         {/* Written while the agent was busy: each goes once it is free. */}
         {session?.held?.map((h) => (
           <div key={h.id} className="mb-2 flex flex-col items-end gap-0.5">
-            <div className="max-w-[85%] whitespace-pre-wrap rounded-lg border border-dashed border-violet-500/40 bg-violet-600/10 px-2.5 py-1.5 text-xs text-zinc-300">
-              {h.content}
+            <div className="max-w-[85%] rounded-lg border border-dashed border-violet-500/40 bg-violet-600/10 px-2.5 py-1.5 text-xs text-zinc-300">
+              <SentBody content={h.content} conn={{ host, port, auth }} plain />
             </div>
             <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
               Sends when free
@@ -394,6 +396,32 @@ function EmbeddedChatBody({
   )
 }
 
+/** What you sent: your words, then the pictures as small previews (the
+ *  viewer on a click) and the files as pills, never their ref lines.
+ *  `plain`: a waiting message, its text as typed. */
+function SentBody({ content, conn, plain = false }: {
+  content: string
+  conn: { host: string; port: number; auth: string } | null
+  plain?: boolean
+}) {
+  const p = parseAttachmentRefs(content)
+  const text = p.refs.length ? p.text : content
+  return (
+    <>
+      {text && (plain
+        ? <div className="whitespace-pre-wrap">{text}</div>
+        : (
+          <div className="fd-markdown text-xs text-zinc-200">
+            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+              {processImagePaths(text, conn?.host, conn?.port, conn?.auth)}
+            </Markdown>
+          </div>
+        ))}
+      {p.files.length > 0 && <FileChips files={p.files} conn={conn} pictures="tile-sm" className={text ? 'mt-1.5' : ''} />}
+    </>
+  )
+}
+
 function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message: ChatMessage; agentHost?: string; agentPort?: number; agentAuth?: string }) {
   const [toolExpanded, setToolExpanded] = useState(false)
 
@@ -401,9 +429,10 @@ function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message
     return (
       <div className="mb-2 flex justify-end">
         <div className="max-w-[90%] rounded-lg rounded-br-sm bg-violet-600/20 px-2.5 py-1.5">
-          <div className="fd-markdown text-xs text-zinc-200">
-            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{processImagePaths(message.content, agentHost, agentPort, agentAuth)}</Markdown>
-          </div>
+          <SentBody
+            content={message.content}
+            conn={agentPort ? { host: agentHost || 'localhost', port: agentPort, auth: agentAuth || '' } : null}
+          />
           <span className="mt-0.5 block text-right text-[9px] text-zinc-600">{formatTime(message.timestamp)}</span>
         </div>
       </div>
