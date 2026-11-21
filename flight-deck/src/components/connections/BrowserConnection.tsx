@@ -150,8 +150,9 @@ export default function BrowserConnection({ active = true, onStatus }: { active?
 
         <p className="text-xs text-zinc-500">
           Your agents' web searches can run in this browser too, on Google, Bing, DuckDuckGo, Yahoo or Qwant, instead of
-          Flight Deck's search service: pick one in <b className="text-zinc-300">Profile → Web searches</b>, then press
-          Allow in the extension.
+          Flight Deck's search service — pick one in <b className="text-zinc-300">Profile → Web searches</b> — and they can
+          read pages here signed in as you, for LinkedIn, Facebook and other sites that turn Flight Deck away
+          (<b className="text-zinc-300">Profile → Web pages</b>).
         </p>
 
         <BrowserRecordings active={active} />

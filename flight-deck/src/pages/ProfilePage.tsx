@@ -36,6 +36,7 @@ import { PersonalDetails } from '../components/profile/PersonalDetails'
 import { ProfileResearch } from '../components/profile/ProfileResearch'
 import { ProfileTabs, type ProfileTab, type ProfileTabSpec } from '../components/profile/ProfileTabs'
 import { WebSearchSettings } from '../components/profile/WebSearchSettings'
+import { WebPagesSettings } from '../components/profile/WebPagesSettings'
 import { useSharedAgentStore } from '../stores/sharedAgentStore'
 import type { MyPackRow } from '../services/contextPacks'
 import { MY_PACKS_HEADING, MY_PACKS_ID, profilePackAgents, profileSharedNote } from '../utils/contextPacks'
@@ -488,6 +489,9 @@ export function ProfilePage({ kiosk = false, onDirtyChange, initialTab = 'person
 
             {/* Their web searches in your own Chrome, on the engine you pick (off by default). */}
             <WebSearchSettings />
+
+            {/* …and the pages they read, in your own Chrome signed in as you (off by default). */}
+            <WebPagesSettings />
           </div>
         )}
 

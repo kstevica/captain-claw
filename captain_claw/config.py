@@ -270,6 +270,10 @@ class WebFetchToolConfig(BaseModel):
     """Web fetch tool configuration."""
 
     max_chars: int = 200000  # a floor for model-passed max_chars, see tools/web_fetch.py
+    # Under Flight Deck: read pages in the owner's own Chrome (Captain for
+    # Chrome, signed in as them) when they turned that on in Flight Deck
+    # (Profile → Web pages). False = never for this agent.
+    via_chrome: bool = True
 
     # ── web_fetch_batch (parallel multi-URL fetch with fast→deep self-correction) ──
     batch_max_urls: int = 10          # URLs processed per call; extras returned to the agent

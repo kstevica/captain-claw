@@ -142,6 +142,23 @@ once and searches go on. Turn it off in Settings → Web searches. It works with
 **Agents can use this browser** on or off; the agents' browser tool never gets
 the search tabs.
 
+## Your agents' web pages, read in this browser
+
+Your agents' `web_fetch` can read pages here, signed in as you — so LinkedIn,
+Facebook and other sites that turn Flight Deck away (a sign-in wall, a bot
+check, LinkedIn's 999) open for them. Turn it on in Flight Deck → **Profile →
+Web pages**: *only pages that turn Flight Deck away*, or *every page*, and
+optionally only for the sites you list (`linkedin.com` covers its
+subdomains). It needs **Work on every site**; without it, the panel offers
+**Allow**.
+
+Each page opens in a background tab — never in front, in a collapsed
+**Captain · reading** group — and once it has settled (and scrolled a little
+for what loads lazily), it goes back to the agent without scripts and styles,
+and the tab closes. Never Flight Deck's own pages, addresses on your own
+network or this computer, or anything but http(s). An agent you stopped in
+the panel reads nothing here. Turn it off in Settings → Web pages.
+
 ## Record a process — an agent does it after that
 
 **Record what I do** (under Send) starts a recording in the tab in front. Do
@@ -225,6 +242,8 @@ agent makes for a clip (notes, CSVs, a brief) goes there too.
 - **alarms** — keeps the agents' connection to Flight Deck alive.
 - **The search engine's site** (one, when you press Allow for web searches) —
   to read its result pages in the background tab.
+- **Every site** ("Work on every site") — also what lets it read pages for
+  your agents' `web_fetch`, when you turn that on in Flight Deck.
 
 The page's text is marked for the agent as web content: instructions written
 in a page are never treated as yours.

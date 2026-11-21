@@ -81,6 +81,7 @@ from captain_claw.flight_deck.browser_clip import (
     token_kind,
     unique_name,
 )
+from captain_claw.flight_deck.browser_fetch import FetchBody, fetch_in_browser, fetch_mode
 from captain_claw.flight_deck.browser_search import SearchBody, search_in_browser, search_pick
 
 log = logging.getLogger(__name__)
@@ -135,6 +136,7 @@ class _Conn:
     agent_slug: str = ""        # an agent's own (headless) browser: only that agent uses it
     hands: bool = True          # lent to the agents' browser tool (older extensions connect only then)
     search_engines: tuple[str, ...] = ()   # engines it runs web searches on (browser_search.py)
+    reads_pages: bool = False   # it reads pages for web_fetch (browser_fetch.py)
     closed: bool = False
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -161,6 +163,7 @@ class _Act:
     folder: str = ""            # the Web clips folder its files went to
     files: list[dict] = field(default_factory=list)
     file_bytes: int = 0
+    content_limit: int = MAX_CONTENT_CHARS   # a page read for web_fetch is allowed more
 
 
 _CONNS: dict[str, list[_Conn]] = {}
@@ -333,11 +336,11 @@ def _clip_text(value: Any, limit: int) -> str:
     return s if len(s) <= limit else s[: limit - 40] + f"\n… (cut at {limit:,} characters)"
 
 
-def _clean_result(msg: dict) -> dict:
+def _clean_result(msg: dict, content_limit: int = MAX_CONTENT_CHARS) -> dict:
     """What the agent gets from the browser's answer — bounded, known keys only."""
     out: dict[str, Any] = {"ok": bool(msg.get("ok"))}
     if msg.get("content") is not None:
-        out["content"] = _clip_text(msg.get("content"), MAX_CONTENT_CHARS)
+        out["content"] = _clip_text(msg.get("content"), content_limit)
     if msg.get("error"):
         out["error"] = _clip_text(msg.get("error"), 4000)
     image = msg.get("image")
@@ -399,7 +402,9 @@ async def hands_ws(ws: WebSocket) -> None:
         # The engine the person picked for searches here (browser_search.py): with
         # Chrome already letting Captain read that site, the browser serves it.
         pick = "" if conn.agent_slug else await search_pick(conn.user_id)
-        await conn.send({"type": "welcome", "protocol": PROTOCOL, "search_pick": pick,
+        # … and whether it reads pages for their agents' web_fetch (browser_fetch.py).
+        reading = "" if conn.agent_slug else await fetch_mode(conn.user_id)
+        await conn.send({"type": "welcome", "protocol": PROTOCOL, "search_pick": pick, "fetch_mode": reading,
                          "user": str(user.get("display_name") or user.get("email") or "")})
         while True:
             raw = await ws.receive_text()
@@ -422,7 +427,7 @@ async def hands_ws(ws: WebSocket) -> None:
             elif kind == "result":
                 act = _ACTS.get(str(msg.get("id") or ""))
                 if act is not None and act.conn is conn and not act.future.done():
-                    act.future.set_result(_clean_result(msg))
+                    act.future.set_result(_clean_result(msg, act.content_limit))
     except (WebSocketDisconnect, RuntimeError):
         pass
     except Exception:
@@ -440,6 +445,8 @@ def _apply_prefs(conn: _Conn, msg: dict) -> None:
 
     if "hands" in msg:
         conn.hands = bool(msg.get("hands"))
+    if "fetch" in msg:
+        conn.reads_pages = bool(msg.get("fetch")) and not conn.agent_slug
     raw = msg.get("search")
     if isinstance(raw, list) and not conn.agent_slug:
         conn.search_engines = tuple(e for e in dict.fromkeys(str(x) for x in raw[:20]) if e in ENGINES)
@@ -668,6 +675,15 @@ async def agent_search(body: SearchBody, request: Request) -> dict:
     search API instead."""
     owner, slug = _owner_of(request, "web searches through the person's browser")
     return await search_in_browser(owner, slug, body)
+
+
+@agent_router.post("/fetch")
+async def agent_fetch(body: FetchBody, request: Request) -> dict:
+    """A web page read in the person's own Chrome, signed in as them, for the
+    agent's web_fetch (browser_fetch.py). ``ok: false`` with ``why`` sends the
+    agent to its own fetch."""
+    owner, slug = _owner_of(request, "reading pages in the person's browser")
+    return await fetch_in_browser(owner, slug, body)
 
 
 @agent_router.post("/turn-over")

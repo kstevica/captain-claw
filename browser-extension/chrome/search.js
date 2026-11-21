@@ -44,13 +44,7 @@ export async function runSearch(msg, isCancelled) {
     if (!(await chrome.permissions.contains({ origins: engine.origins }).catch(() => false))) {
       throw new Refusal(`Captain may no longer read ${engine.name} in this browser — turn searches on again in its settings.`)
     }
-    await slot()
-    try {
-      return await loadResults(url.href, engine, msg, isCancelled)
-    } finally {
-      running--
-      waiting.shift()?.()
-    }
+    return await inBackgroundTab(url.href, GROUP_TITLE, (tabId) => loadResults(tabId, msg, isCancelled))
   } catch (e) {
     return { ok: false, error: String(e?.message || e).slice(0, 400) }
   }
@@ -61,45 +55,55 @@ function slot() {
   return new Promise((resolve) => waiting.push(() => { running++; resolve() }))
 }
 
-async function loadResults(href, engine, msg, isCancelled) {
-  const { tabId, windowId, ownWindow } = await openBackground(href)
+async function loadResults(tabId, msg, isCancelled) {
   const id = String(msg.id || '')
+  const limit = Date.now() + Math.min(Math.max(Number(msg.wait) || 20, 5) * 1000, WAIT_MAX_MS)
+  let loadedAt = 0
+  let probe = null
+  while (Date.now() < limit) {
+    if (isCancelled(id)) return { ok: false, error: 'Cancelled.' }
+    await sleep(POLL_MS)
+    const tab = await chrome.tabs.get(tabId).catch(() => null)
+    if (!tab) return { ok: false, error: 'The search tab was closed.' }
+    if (tab.status === 'complete' && !loadedAt) loadedAt = Date.now()
+    probe = await look(tabId, msg.wait_for, msg.block_for)
+    if (!probe) {
+      // Off the engine's site (a cookie question on consent.google.com …):
+      // nothing to read there. Flight Deck tells the person from the address.
+      if (loadedAt) return { ok: true, content: '', data: { url: tab.url || '', title: tab.title || '', ready: false, blocked: false } }
+      continue
+    }
+    if (probe.ready || probe.blocked) break
+    if (loadedAt && Date.now() - loadedAt > LOAD_GRACE_MS) break
+  }
+  const page = await snapshot(tabId)
+  if (!page) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null)
+    return { ok: true, content: '', data: { url: tab?.url || '', title: tab?.title || '', ready: false, blocked: false } }
+  }
+  return { ok: true, content: page.html.slice(0, HTML_MAX),
+           data: { url: page.url, title: page.title, ready: !!probe?.ready, blocked: !!probe?.blocked } }
+}
+
+// ── the background tab (searches here, pages read for web_fetch in pages.js) ──
+
+/** Run *work(tabId)* on *href* opened in a background tab, then close it —
+ * at most AT_ONCE at a time across searches and pages. */
+export async function inBackgroundTab(href, groupTitle, work) {
+  await slot()
+  let opened = null
   try {
-    const limit = Date.now() + Math.min(Math.max(Number(msg.wait) || 20, 5) * 1000, WAIT_MAX_MS)
-    let loadedAt = 0
-    let probe = null
-    while (Date.now() < limit) {
-      if (isCancelled(id)) return { ok: false, error: 'Cancelled.' }
-      await sleep(POLL_MS)
-      const tab = await chrome.tabs.get(tabId).catch(() => null)
-      if (!tab) return { ok: false, error: 'The search tab was closed.' }
-      if (tab.status === 'complete' && !loadedAt) loadedAt = Date.now()
-      probe = await look(tabId, msg.wait_for, msg.block_for)
-      if (!probe) {
-        // Off the engine's site (a cookie question on consent.google.com …):
-        // nothing to read there. Flight Deck tells the person from the address.
-        if (loadedAt) return { ok: true, content: '', data: { url: tab.url || '', title: tab.title || '', ready: false, blocked: false } }
-        continue
-      }
-      if (probe.ready || probe.blocked) break
-      if (loadedAt && Date.now() - loadedAt > LOAD_GRACE_MS) break
-    }
-    const page = await snapshot(tabId)
-    if (!page) {
-      const tab = await chrome.tabs.get(tabId).catch(() => null)
-      return { ok: true, content: '', data: { url: tab?.url || '', title: tab?.title || '', ready: false, blocked: false } }
-    }
-    return { ok: true, content: page.html.slice(0, HTML_MAX),
-             data: { url: page.url, title: page.title, ready: !!probe?.ready, blocked: !!probe?.blocked } }
+    opened = await openBackground(href, groupTitle)
+    return await work(opened.tabId)
   } finally {
-    if (ownWindow) chrome.windows.remove(windowId).catch(() => {})
-    else chrome.tabs.remove(tabId).catch(() => {})
+    if (opened?.ownWindow) chrome.windows.remove(opened.windowId).catch(() => {})
+    else if (opened) chrome.tabs.remove(opened.tabId).catch(() => {})
+    running--
+    waiting.shift()?.()
   }
 }
 
-// ── the background tab ──
-
-async function openBackground(href) {
+async function openBackground(href, groupTitle) {
   let win = null
   try { win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] }) } catch { /* none open */ }
   if (!win || win.incognito) {
@@ -117,17 +121,17 @@ async function openBackground(href) {
   }
   const tab = await chrome.tabs.create({ windowId: win.id, url: href, active: false })
   chrome.tabs.update(tab.id, { muted: true }).catch(() => {})
-  await tuck(tab.id, win.id)
+  await tuck(tab.id, win.id, groupTitle)
   return { tabId: tab.id, windowId: win.id, ownWindow: false }
 }
 
-// Into the window's collapsed "Captain · search" group, out of the person's way.
-async function tuck(tabId, windowId) {
+// Into the window's collapsed group ("Captain · search" …), out of the person's way.
+async function tuck(tabId, windowId, title) {
   if (!chrome.tabGroups?.query || !chrome.tabs.group) return
   try {
-    const found = await chrome.tabGroups.query({ windowId, title: GROUP_TITLE })
+    const found = await chrome.tabGroups.query({ windowId, title })
     const groupId = await chrome.tabs.group(found[0] ? { tabIds: [tabId], groupId: found[0].id } : { tabIds: [tabId], createProperties: { windowId } })
-    await chrome.tabGroups.update(groupId, { title: GROUP_TITLE, color: 'grey', collapsed: true })
+    await chrome.tabGroups.update(groupId, { title, color: 'grey', collapsed: true })
   } catch { /* a window that takes no groups: the tab stays where it is, in the background */ }
 }
 

@@ -824,6 +824,10 @@ class WebFetchTool(Tool):
                     view = _with_block(view, _earlier_images_block(url, kwargs))
                 return ToolResult(success=True, content=view)
         images: list | None = [] if want_images else None
+        from captain_claw.tools import web_blocked, web_chrome
+
+        # The owner's own Chrome first, when they set it to read every page.
+        chrome = None if member else await web_chrome.page_from_chrome(url, "first")
         try:
             cfg = get_config()
             configured_max = int(getattr(cfg.tools.web_fetch, "max_chars", 200000))
@@ -832,53 +836,43 @@ class WebFetchTool(Tool):
                 effective_max_chars = _spill.SPILL_SOURCE_MAX
 
             browser_note = ""
-            if deep_fetch:
-                log.info("Fetching URL (deep_fetch mode)", url=url)
-                try:
-                    raw_html = await _deep_fetch(url)
-                    status_code = 200  # Playwright doesn't expose status easily
-                    mode = "deep"
-                except BrowserUnavailable:
-                    # Fall back to the plain fetch below, and say so once.
-                    log.warning("deep_fetch: browser unavailable on this host, using plain HTTP", url=url)
-                    browser_note = _BROWSER_DOWN_NOTE
-                    deep_fetch = False
-            if deep_fetch:
-                pass  # rendered above
-            elif member:
-                log.info("Fetching URL (member text mode)", url=url)
-                try:
-                    raw_html, status_code, body_truncated = await asyncio.wait_for(
-                        _member_fetch(url), timeout=MEMBER_FETCH_DEADLINE_S,
-                    )
-                except TimeoutError:
-                    return ToolResult(
-                        success=False,
-                        error=(
-                            f"The page took longer than {int(MEMBER_FETCH_DEADLINE_S)} s "
-                            "to load and was abandoned."
-                        ),
-                    )
-                mode = "text"
+            final_url = ""
+            if chrome is not None:
+                raw_html, status_code, mode = chrome["html"], 200, "chrome"
             else:
-                log.info("Fetching URL (text mode)", url=url)
-                response = await self.client.get(url)
-                response.raise_for_status()
-                ctype = str(getattr(response, "headers", {}).get("content-type") or "").lower()
-                if want_images and ctype.startswith("image/"):
-                    entry = await _save_image_bytes(response.content, url, kwargs)
-                    if entry is not None:
-                        return ToolResult(success=True,
-                                          content=research_images.format_direct(entry))
-                    return ToolResult(success=False, error=(
-                        f"{url} is a picture ({ctype}) that could not be read or saved."))
-                raw_html = response.text
-                status_code = response.status_code
-                mode = "text"
+                try:
+                    got = await self._fetch_here(url, deep_fetch, member, want_images, kwargs)
+                except Exception as e:   # turned away? the owner's Chrome may get it
+                    why, _strong = web_blocked.fetch_error_reason(e)
+                    chrome = None if member or not why else await web_chrome.page_from_chrome(url, "blocked", why)
+                    if chrome is None:
+                        raise
+                    got = (chrome["html"], 200, "chrome", "", "", False)
+                if isinstance(got, ToolResult):
+                    return got
+                raw_html, status_code, mode, final_url, browser_note, body_truncated = got
 
             content = _extract_readable_text(raw_html, base_url=url, images=images)
-            wall_note = await _wall_note(kwargs, url, None if mode == "deep" else status_code,
-                                         content, raw_html)
+            if mode != "chrome" and not member:
+                # A bot check or a sign-in wall instead of the page: the owner's
+                # Chrome (signed in as them) reads it, when they turned that on.
+                why = (web_blocked.block_reason(status=None if mode == "deep" else status_code,
+                                                text=content, html=raw_html)
+                       or web_blocked.login_wall(text=content, url=final_url, html=raw_html))
+                chrome = await web_chrome.page_from_chrome(url, "blocked", why) if why else None
+                if chrome is not None:
+                    raw_html, status_code, mode = chrome["html"], 200, "chrome"
+                    images = [] if want_images else None
+                    content = _extract_readable_text(raw_html, base_url=url, images=images)
+            if mode == "chrome":
+                web_blocked.forget(kwargs, url, web_blocked.FETCH)
+                wall_note = ""
+                browser_note = f"[Read in the person's own Chrome ({chrome['browser']}), signed in as them]\n"
+                if chrome["url"] and chrome["url"] != url:
+                    browser_note += f"[Page: {chrome['url']}]\n"
+            else:
+                wall_note = await _wall_note(kwargs, url, None if mode == "deep" else status_code,
+                                             content, raw_html)
             block = await _page_images_block(
                 url, images or [], kwargs, limit=_images_per_page(),
                 budget_s=_IMAGE_BUDGET_S, member=member)
@@ -929,6 +923,60 @@ class WebFetchTool(Tool):
                 success=False,
                 error=str(e) + await _fetch_error_note(kwargs, url, e),
             )
+
+    async def _fetch_here(self, url: str, deep_fetch: bool, member: bool, want_images: bool,
+                          kwargs: dict[str, Any]) -> ToolResult | tuple[str, int, str, str, str, bool]:
+        """The page fetched by this machine (the headless browser, or plain
+        HTTP): ``(html, status, mode, final url, note, body truncated)`` — or
+        the ToolResult that already answers (a picture, a member's slow page)."""
+        browser_note = ""
+        final_url = ""
+        body_truncated = False
+        if deep_fetch:
+            log.info("Fetching URL (deep_fetch mode)", url=url)
+            try:
+                raw_html = await _deep_fetch(url)
+                status_code = 200  # Playwright doesn't expose status easily
+                mode = "deep"
+            except BrowserUnavailable:
+                # Fall back to the plain fetch below, and say so once.
+                log.warning("deep_fetch: browser unavailable on this host, using plain HTTP", url=url)
+                browser_note = _BROWSER_DOWN_NOTE
+                deep_fetch = False
+        if deep_fetch:
+            pass  # rendered above
+        elif member:
+            log.info("Fetching URL (member text mode)", url=url)
+            try:
+                raw_html, status_code, body_truncated = await asyncio.wait_for(
+                    _member_fetch(url), timeout=MEMBER_FETCH_DEADLINE_S,
+                )
+            except TimeoutError:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"The page took longer than {int(MEMBER_FETCH_DEADLINE_S)} s "
+                        "to load and was abandoned."
+                    ),
+                )
+            mode = "text"
+        else:
+            log.info("Fetching URL (text mode)", url=url)
+            response = await self.client.get(url)
+            response.raise_for_status()
+            ctype = str(getattr(response, "headers", {}).get("content-type") or "").lower()
+            if want_images and ctype.startswith("image/"):
+                entry = await _save_image_bytes(response.content, url, kwargs)
+                if entry is not None:
+                    return ToolResult(success=True,
+                                      content=research_images.format_direct(entry))
+                return ToolResult(success=False, error=(
+                    f"{url} is a picture ({ctype}) that could not be read or saved."))
+            raw_html = response.text
+            status_code = response.status_code
+            final_url = str(getattr(response, "url", "") or "")
+            mode = "text"
+        return raw_html, status_code, mode, final_url, browser_note, body_truncated
 
     async def _fetch_image(self, url: str, kwargs: dict[str, Any]) -> ToolResult:
         """Save the picture at *url* for a report (public addresses only)."""

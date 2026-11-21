@@ -162,6 +162,41 @@ def block_reason(status: int | None = None, title: str = "", text: str = "", htm
     return ""
 
 
+# A sign-in wall: what LinkedIn, Facebook, Instagram, X … show a visitor who
+# isn't signed in. Not a bot check (the person's own Chrome is signed in), so
+# it only matters where their Chrome can read the page instead (web_fetch).
+_LOGIN_PATHS = ("/authwall", "/login", "/signin", "/sign-in", "/sign_in", "/checkpoint", "/uas/login",
+                "/accounts/login", "/i/flow/login", "/auth/login", "/session/new")
+# Whole words: "Sign in | Example", "Log into Facebook" — not "Signing in with SSO".
+_LOGIN_TITLE_RE = re.compile(
+    r"^(log ?in|sign ?in|sign up|log into)\b|\b(log in or sign up|sign up \| linkedin|linkedin login|join linkedin)\b")
+_LOGIN_TEXT = ("sign in to see", "sign in to view", "log in to see", "log in to view", "log in to continue",
+               "sign in to continue", "you must log in", "you must be logged in", "please log in", "please sign in",
+               "join now to see", "join to view", "create an account or log in", "log in or sign up to view",
+               "see more on facebook", "sign in to linkedin")
+LOGIN_PAGE_CHARS = 4000       # a sign-in wall is short; a long page that mentions signing in is a page
+
+
+def login_wall(title: str = "", text: str = "", url: str = "", html: str = "") -> str:
+    """Why this answer looks like a sign-in wall instead of the page — ``""``
+    when it doesn't."""
+    try:
+        path = urlparse(str(url or "")).path.lower()
+    except ValueError:
+        path = ""
+    if any(path.startswith(p) or f"{p}/" in path or path.endswith(p) for p in _LOGIN_PATHS):
+        return "it shows a sign-in page"
+    body = re.sub(r"\s+", " ", str(text or "")).strip().lower()
+    if len(body) >= LOGIN_PAGE_CHARS:
+        return ""
+    t = re.sub(r"\s+", " ", str(title or "") or title_of(html)).strip().lower()
+    if t and _LOGIN_TITLE_RE.search(t):
+        return f"it shows a sign-in page (“{t[:60]}”)"
+    if any(m in body for m in _LOGIN_TEXT):
+        return "it asks to sign in to see the page"
+    return ""
+
+
 def net_reason(message: str) -> str:
     """A browser or HTTP error that's how walls answer — ``""`` for one that
     isn't (no such site, no network, a bad certificate)."""
