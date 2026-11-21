@@ -290,3 +290,11 @@ async def test_a_task_is_rewritten_as_a_charter_unless_switched_off(store, db, m
     assert made["draft"]["note"] == "Drafted from your words, the charter as written"
     assert "exactly as they wrote them" in model.systems[0] and "groups with an amount" not in model.systems[0]
     assert made["draft"]["checks"]["contract"] == ANSWER["done_when"]  # the rest is still drafted
+
+
+def test_the_rewrite_keeps_what_a_why_it_fits_column_is_for():
+    """A rewritten charter turned "a reason why they would use our product" into "a
+    sentence from the lead's own content", and every reason left the product out."""
+    from captain_claw.flight_deck import first_mate_drafting as d
+    assert "keeps that purpose in their words" in d.system_for(True)
+    assert "keeps that purpose" not in d.system_for(False)

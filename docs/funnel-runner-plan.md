@@ -941,6 +941,14 @@ reads the array asked for, an object holding it, or the bare object; one item's 
 item's whatever id it carries; a second ask says so in other words. `group_cell` matches a
 group named in the plural to its cell ("US companies" carries "company").
 
+**A column that joins the item to what the owner offers (2026-11-21).** A "reason" column
+described each item and never the owner's product. Two faults: the charter rewrite turned the
+column's purpose into "a sentence from the item's own content"; and the setup took the column as
+a fact about the item. The rewrite now keeps such a column's purpose in the owner's words. The
+setup marks it `"from": "owner"`; a column so marked stays the owner's when a rule also names
+it, and every judging call is told it is written from the owner's material together with what
+was read about the item (`OWNER_COLUMN_NOTE`).
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before
