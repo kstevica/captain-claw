@@ -207,7 +207,7 @@ def normalize_recipe(raw: Any, base: dict[str, Any] | None = None) -> dict[str, 
     for c in raw.get("columns") or []:
         if isinstance(c, dict) and str(c.get("name") or "").strip():
             about[str(c["name"]).strip()[:80]] = str(c.get("what") or c.get("about") or "").strip()[:300]
-            if str(c.get("from") or "").strip().lower() == "owner":
+            if str(c.get("from") or "").strip().lower() in ("owner", "expert"):
                 owner_cols.append(str(c["name"]).strip()[:80])
     columns = list(base["columns"]) or _names(raw.get("columns"))  # the checks' columns win
     group_by = base["group_by"] or (str(raw.get("group_by") or "").strip() if raw.get("group_by") in columns else "")
@@ -2134,6 +2134,7 @@ class Work:
         self.reference = "\n\n".join(x for x in (
             f"[the owner's documents and links, in brief]\n{self.brief}" if self.brief else "",
             reference_text(folder, recipe)) if x)
+        self.expert_wrote: dict[str, list[str]] = {}  # what the run's expert wrote lately, per column
         self.reach = {c for r in recipe["rules"] for c in r.get("reach") or []}  # cells a contact page may fill
         self.query_rounds = _int(self.cfg.get("funnel_query_rounds"), 0, 1000, MAX_QUERY_ROUNDS)
         self.more_pages: list[str] = []
@@ -2968,6 +2969,7 @@ class Work:
             if i in verdicts and isinstance(verdicts[i].get("row"), dict):
                 self._fill_from_facts(verdicts[i]["row"], it)
         await self._fill_owner_columns(verdicts, batch)
+        await self._expert_columns(verdicts, batch)
         again = self.again
         for i, it in enumerate(batch, start=1):
             v = verdicts.get(i)
@@ -3402,6 +3404,53 @@ class Work:
             for c in cols:
                 if not str(v["row"].get(c) or "").strip() and str(fill.get(c) or "").strip():
                     v["row"][c] = " ".join(str(fill[c]).split())[:500]
+
+    async def _expert_columns(self, verdicts: dict[int, dict], batch: list[dict]) -> None:
+        """With an expert beside the run, the owner's columns of a row that is being
+        kept are the expert's to write: it knows the owner's offer and the field, and
+        answers on its own model. One short call for the batch. A value outside a
+        column's fixed set, or no answer, leaves what the judging call wrote."""
+        from captain_claw.flight_deck import funnel_expert
+        cols = judgement_columns(self.recipe, self.reference)
+        if not cols or not funnel_expert.available(self.run, self.folder):
+            return
+        todo = {i: v for i, v in verdicts.items()
+                if str(v.get("verdict") or "").lower() in ("keep", "loose") and isinstance(v.get("row"), dict)}
+        if not todo:
+            return
+        values = {x["column"]: [str(a) for a in x.get("value") or []] for x in self.recipe["checks"] if x["op"] == "in"}
+        spec = "\n".join(f"- {c}" + (f": {self.recipe['about'][c]}" if self.recipe["about"].get(c) else "")
+                         + (f" (exactly one of: {', '.join(values[c])})" if values.get(c) else "") for c in cols)
+
+        def read(i: int) -> str:
+            it = batch[i - 1] if 0 < i <= len(batch) else {}
+            return " ".join(" ".join(e.get("text", "").split())[:800] for e in (it.get("evidence") or [])[:4])[:2400]
+
+        items = "\n\n".join(f"## id {i}\n{json.dumps(v['row'], ensure_ascii=False)[:1500]}\nread: {read(i)}"
+                             for i, v in todo.items())
+        lately = "\n".join(f"- {c}: {x}" for c in cols for x in self.expert_wrote.get(c, [])[-6:])
+        got = await funnel_expert.columns(
+            self.run, self.folder,
+            f"# The owner's material\n{self.reference or '(none)'}\n\n# Columns to write\n{spec}"
+            + (f"\n\n# Written for other items lately (say what fits THIS item best; the same point again only "
+               f"when it truly is the best one here)\n{lately}" if lately else "")
+            + f"\n\n# Items\n{items}")
+        if not isinstance(got, dict):
+            return
+        if len(todo) == 1 and not any(str(k) in got for k in todo):  # one item: its columns, bare
+            got = {str(next(iter(todo))): got}
+        for i, v in todo.items():
+            fill = got.get(str(i)) if isinstance(got.get(str(i)), dict) else {}
+            for c in cols:
+                said = " ".join(str(fill.get(c) or "").split())[:500]
+                if not said:
+                    continue
+                if values.get(c):
+                    said = next((a for a in values[c] if a.lower() == said.lower()), "")
+                    if not said:
+                        continue
+                v["row"][c] = said
+                self.expert_wrote.setdefault(c, []).append(said[:200])
 
     def _group_named(self, value: str) -> str:
         """The list's group a value names: exactly, else by its words and the words the

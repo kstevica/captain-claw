@@ -62,6 +62,14 @@ pages listing many of the right items and few of the wrong ones: use the field's
 away from what was dropped. Keep your thinking short."""
 
 
+COLUMNS_SYSTEM = """You write your columns for items a list is keeping, as the expert who knows the owner's
+offer and the field. Reply ONLY with JSON: {"<id>": {"<column>": "<value>"}}. Each value names what of the
+owner's fits this item, by its name in their material, and the fact read about this item that shows it. Choose
+what fits this item best, from everything the material offers, not what was said for the others. One sentence
+unless the column says otherwise; a column with a fixed set of values takes one of them exactly. Use only facts
+shown under the item; never invent one. Keep your thinking short."""
+
+
 def slug_for(run: dict) -> str:
     return str((run.get("config") or {}).get("funnel_expert") or "").strip()
 
@@ -268,6 +276,21 @@ async def searches(run: dict, folder: Path, user: str) -> Any:
     return fx.parse_json(said) if said else None
 
 
+def available(run: dict, folder: Path) -> bool:
+    """Whether this run has an expert it could reach when it started."""
+    return bool(slug_for(run)) and bool(_read(folder).get("ok"))
+
+
+async def columns(run: dict, folder: Path, user: str) -> Any:
+    """The expert's own columns for the rows a judging call keeps; None when it can't
+    be asked or gave nothing readable (the judging call's values stand)."""
+    if not available(run, folder):
+        return None
+    from captain_claw.flight_deck import funnel_extract as fx
+    said = await ask(run, folder, _read(folder), COLUMNS_SYSTEM, user, "columns")
+    return fx.parse_json(said) if said else None
+
+
 async def release(run: dict) -> None:
     """The run is over: an agent that was started only for it goes off again."""
     slug = slug_for(run)
@@ -302,5 +325,15 @@ def summary_lines(folder: Path, items: list[dict[str, str]], written: list[str])
         kept = sum(1 for r in found if r.get("status") in ("kept", "loose"))
         lines += ["", f"It wrote {len(written)} of the run's new searches. They found {len(found)} items, "
                   f"{kept} of them on the list."]
+    wrote = 0
+    try:
+        for ln in (folder / LOG).read_text(encoding="utf-8").splitlines():
+            x = json.loads(ln)
+            wrote += 1 if x.get("what") == "columns" and not x.get("failed") else 0
+    except (OSError, ValueError):
+        pass
+    if wrote:
+        lines += ["", f"It wrote the owner's columns (why an item fits, what to offer it) for the rows being kept: "
+                  f"asked {wrote} time{'' if wrote == 1 else 's'}."]
     lines.append(f"Everything it was asked and said: `{LOG}`.")
     return lines
