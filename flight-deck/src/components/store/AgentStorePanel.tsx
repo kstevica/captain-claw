@@ -205,8 +205,8 @@ export function AgentStorePanel({ inWindow }: { inWindow?: StoreWindow } = {}) {
 
           {!loadErr && catalog === null && (
             <div role="status" aria-label="Loading agents" className="space-y-10">
-              <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-                {Array.from({ length: 4 }, (_, i) => <div key={i} className="fd-shimmer h-56 rounded-3xl" />)}
+              <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-5">
+                {Array.from({ length: 5 }, (_, i) => <div key={i} className="fd-shimmer h-56 rounded-3xl" />)}
               </div>
               <div className="grid gap-3 md:grid-cols-2">
                 {Array.from({ length: 6 }, (_, i) => <div key={i} className="fd-shimmer h-20 rounded-2xl" />)}
@@ -231,7 +231,7 @@ export function AgentStorePanel({ inWindow }: { inWindow?: StoreWindow } = {}) {
           {picks.length > 0 && (
             <section aria-labelledby="store-featured">
               <h2 id="store-featured" className="mb-4 text-xl font-bold tracking-tight text-zinc-100">Featured</h2>
-              <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
                 {picks.map((a) => (
                   <li key={a.id}><FeaturedCard a={a} added={added.has(a.id)} onAdd={() => setAdding(a)} /></li>
                 ))}
