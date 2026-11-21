@@ -943,8 +943,10 @@ def group_cell(recipe: dict[str, Any], group: str, current: str = "") -> str:
     kept = next((a for a in allowed if a.lower() == " ".join(str(current or "").split()).lower()), "")
     if kept:
         return kept
-    words = set(re.findall(r"[a-z0-9]+", _fold(group)))
-    carried = [a for a in allowed if set(re.findall(r"[a-z0-9]+", _fold(a))) <= words]
+    # by its words, one or many of a thing alike ("US companies" carries "company")
+    forms = lambda text: {_singular(w) for w in re.findall(r"[a-z0-9]+", _fold(text))}  # noqa: E731
+    words = forms(group)
+    carried = [a for a in allowed if forms(a) and forms(a) <= words]
     return carried[0] if len(carried) == 1 else str(current or "")
 
 
@@ -2916,12 +2918,14 @@ class Work:
                                      "such as what to do when a fact isn't found, follows them.)\n\n"
                                      if self.charter else "")
                                   + (f"# Reference\n{self.reference}\n\n" if self.reference else "")
-                                  + f"# Columns\n{cols}{groups}\n\n# Items\n" + "\n\n".join(lines), items=len(batch))
+                                  + f"# Columns\n{cols}{groups}\n\n# Items\n" + "\n\n".join(lines)
+                                  + ("\n\n(Asked a second time: the first answer couldn't be read. A JSON array "
+                                     "with one object for each id above, nothing else.)"
+                                     if any(it.get("asked_again") for it in batch) else ""), items=len(batch))
         except Exception as e:  # noqa: BLE001 — these go back for the next call
             log.warning("funnel decide call failed", run_id=self.run["id"], error=str(e))
             got = None
-        verdicts = {int(v.get("id")): v for v in got if isinstance(v, dict) and str(v.get("id", "")).isdigit()} \
-            if isinstance(got, list) else {}
+        verdicts = answers_by_id(got, len(batch))
         for i, it in enumerate(batch, start=1):
             if i in verdicts and isinstance(verdicts[i].get("row"), dict):
                 self._fill_from_facts(verdicts[i]["row"], it)
@@ -3825,6 +3829,27 @@ class Work:
 
 
 # ── checks ─────────────────────────────────────────────────────────────
+
+def answers_by_id(got: Any, asked: int) -> dict[int, dict]:
+    """A judging call's answers, by item id, however the model wrapped them: the array
+    asked for, an object holding it ({"items": [...]}), or, for one item, the bare
+    object itself. One item's answer is that item's whatever id it carries: a small
+    model asked about one thing often answers with one object, and asking again in the
+    same words got the same answer and the item dropped as unanswered."""
+    if isinstance(got, dict):
+        inner = next((v for v in got.values() if isinstance(v, list) and v and all(isinstance(x, dict) for x in v)
+                      and any("verdict" in x for x in v)), None)
+        got = inner if inner is not None else [got] if "verdict" in got else []
+    if not isinstance(got, list):
+        return {}
+    said = [v for v in got if isinstance(v, dict)]
+    out = {int(v["id"]): v for v in said if str(v.get("id", "")).strip().isdigit() and 1 <= int(v["id"]) <= asked}
+    if asked == 1 and not out:
+        one = next((v for v in said if "verdict" in v), None)
+        if one is not None:
+            out = {1: one}
+    return out
+
 
 def check_row(recipe: dict[str, Any], row: dict[str, str], texts: dict[str, str], *,
               unsourced_ok: bool = False, relax: set[str] | frozenset[str] = frozenset()) -> str:
