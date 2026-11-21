@@ -205,7 +205,8 @@ class SearchBrowser:
         hello = {"type": "hello", "token": self.token, "browser": "Chrome on macOS", "version": "0.6.0",
                  "stopped": [], "hands": self.hands, "search": self.engines}
         await self.ws.send(json.dumps(hello))
-        assert json.loads(await self.ws.recv())["type"] == "welcome"
+        self.welcome = json.loads(await self.ws.recv())
+        assert self.welcome["type"] == "welcome"
         self.task = asyncio.create_task(self._serve())
         return self
 
@@ -350,3 +351,19 @@ async def test_an_extension_from_before_this_still_lends_its_hands(deck):
         await ws.send(json.dumps({"type": "prefs", "hands": False, "search": ["google", "nope", "google"]}))
         await asyncio.sleep(0.1)
         assert bh.connections("alice") == [] and bh.live_connections("alice")[0].search_engines == ("google",)
+
+
+async def test_the_browser_hears_which_engine_the_person_picked(deck):
+    """So one that may already read the site ("Work on every site") serves it
+    without the panel's Allow; the extension still refuses engines it can't read."""
+    await _pick("google")
+    pat = await deck["pat"]()
+    async with SearchBrowser(deck["ws"], pat, engines=[], hands=True) as chrome:
+        assert chrome.welcome["search_pick"] == "google"
+        await _pick("bing")
+        await _pick("")
+        await asyncio.sleep(0.1)
+        assert [m for m in chrome.got if m["type"] == "search_pick"] == [
+            {"type": "search_pick", "engine": "bing"}, {"type": "search_pick", "engine": ""}]
+    async with SearchBrowser(deck["ws"], pat, engines=[]) as chrome:
+        assert chrome.welcome["search_pick"] == ""

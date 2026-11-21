@@ -10,10 +10,10 @@
 // update, not a new extension.
 //
 // Only the engines in lib/engines.js, only on the engine's own host, only
-// after the person turned searches on in the panel — which is when Chrome
-// asked them to let Captain read that site.
+// one the person picked in Flight Deck or allowed in the panel, and only while
+// Chrome lets Captain read that site.
 
-import { SEARCH_ENGINES, loadSearchPrefs } from './lib/engines.js'
+import { SEARCH_ENGINES, servedEngines } from './lib/engines.js'
 
 const AT_ONCE = 3
 const WAIT_MAX_MS = 25000
@@ -33,9 +33,8 @@ export async function runSearch(msg, isCancelled) {
   const engine = SEARCH_ENGINES[String(msg.engine || '')]
   try {
     if (!engine) throw new Refusal(`“${msg.engine}” isn't a search engine this browser runs.`)
-    const prefs = await loadSearchPrefs()
-    if (!prefs.on || !prefs.engines.includes(msg.engine)) {
-      throw new Refusal(`Searches on ${engine.name} aren't turned on in this browser (Captain → Settings).`)
+    if (!(await servedEngines()).includes(msg.engine)) {
+      throw new Refusal(`Searches on ${engine.name} aren't on in this browser (Captain → Settings → Web searches).`)
     }
     let url
     try { url = new URL(String(msg.url || '')) } catch { throw new Refusal('That search address is broken.') }

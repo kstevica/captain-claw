@@ -128,7 +128,9 @@ turn the switch on.
 Instead of a paid search API, your agents' `web_search` can run here, on the
 engine you pick in Flight Deck → **Profile → Web searches** (Google, Bing,
 DuckDuckGo, Yahoo or Qwant; off until you pick one). The panel then asks once
-— **Allow** — and Chrome asks you to let Captain read that engine's site.
+— **Allow** — and Chrome asks you to let Captain read that engine's site. With
+**Work on every site** already on, Captain may read it anyway, so searches
+start without asking; Settings → Web searches turns them off in this browser.
 
 Each search opens the result page in a background tab — never in front, in a
 collapsed **Captain · search** group — and closes it once the results are in.

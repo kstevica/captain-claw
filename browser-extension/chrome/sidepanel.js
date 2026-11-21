@@ -11,7 +11,7 @@
 import { icon } from './lib/icons.js'
 import { renderMarkdown, escapeHtml as esc } from './lib/md.js'
 import { AuthError, api, browserLabel, clearConn, loadConn, normalizeDeckUrl, publicCall, saveConn, upload } from './lib/api.js'
-import { SEARCH_ENGINES, loadSearchPrefs, saveSearchPrefs, servedEngines } from './lib/engines.js'
+import { SEARCH_ENGINES, loadSearchPick, loadSearchPrefs, saveSearchPick, saveSearchPrefs, servedEngines } from './lib/engines.js'
 
 const VERSION = chrome.runtime.getManifest().version
 const HISTORY_MAX = 30
@@ -71,6 +71,7 @@ const S = {
   handsSeen: 0,        // the newest act the panel has followed
   search: { on: false, engines: [], declined: '' },   // agents' web searches here (lib/engines.js)
   searchServed: [],    // engines this browser runs searches on now (allowed + Chrome's permission)
+  searchPickId: '',    // the engine picked in Flight Deck, as last heard (Flight Deck or the socket)
   anon: null,          // the page or selection anonymized (/fd/clip/anonymize)
   rec: null,           // the recording going on (the worker's, session storage "rec")
   recNotes: {},        // the person's instructions on its steps, by step id
@@ -332,6 +333,10 @@ async function loadMe() {
     S.meAt = Date.now()
     S.meError = ''
     await setStore({ me: S.me })
+    if ('search' in S.me) {   // a deck from before web searches says nothing
+      await saveSearchPick(S.me.search?.engine || '')
+      await refreshSearch()
+    }
     if (!agentDef(S.agent)) {
       const firstUp = S.me.agents.find((a) => a.status === 'running') || S.me.agents.find((a) => a.status === 'asleep')
       S.agent = firstUp ? firstUp.slug : ''
@@ -1027,12 +1032,13 @@ async function turnHandsOn(want) {
 // panel asks Chrome, once, to let Captain read that engine's result pages.
 
 function searchPick() {
-  const id = S.me?.search?.engine || ''
+  const id = S.me && 'search' in S.me ? (S.me.search?.engine || '') : S.searchPickId
   return SEARCH_ENGINES[id] ? { id, ...SEARCH_ENGINES[id] } : null
 }
 
 async function refreshSearch() {
   S.search = await loadSearchPrefs()
+  S.searchPickId = await loadSearchPick()
   S.searchServed = await servedEngines()
 }
 
@@ -1087,10 +1093,12 @@ function allowSearch(id) {
   })
 }
 
-async function stopSearch(id, decline = false) {
+// Off here (the card's "Not in this browser" or the switch): declined in this
+// browser — even with Chrome letting Captain read the site anyway.
+async function stopSearch(id) {
   const p = await loadSearchPrefs()
   const engines = p.engines.filter((e) => e !== id)
-  await saveSearchPrefs({ on: engines.length > 0, engines, declined: decline ? id : p.declined })
+  await saveSearchPrefs({ on: engines.length > 0, engines, declined: id })
   await refreshSearch()
   render()
 }
@@ -2465,7 +2473,7 @@ $view.addEventListener('click', (ev) => {
   else if (act === 'hands-let') setHandsStopped(S.handsStopped.filter((s) => s !== el.dataset.slug))
   else if (act === 'hands-extensions') chrome.tabs.create({ url: 'chrome://extensions/?id=' + chrome.runtime.id })
   else if (act === 'search-allow') allowSearch(el.dataset.engine)
-  else if (act === 'search-decline') stopSearch(el.dataset.engine, true)
+  else if (act === 'search-decline') stopSearch(el.dataset.engine)
   else if (act === 'clear-history') { S.history = []; setStore({ history: [] }); render() }
   else if (act === 'disconnect') {
     if (!confirm('Disconnect this browser from Flight Deck?')) return
@@ -2498,7 +2506,7 @@ $view.addEventListener('change', (ev) => {
     turnHandsOn(el.checked)
   } else if (el.id === 'searchOn') {
     if (el.checked) allowSearch(el.dataset.engine)
-    else stopSearch(el.dataset.engine)
+    else stopSearch(el.dataset.engine).then(() => toast("Your agents' searches don't run in this browser now"))
   } else if (el.id === 'handsFront') {
     S.hands = { ...S.hands, front: el.checked }
     setStore({ hands: S.hands })
@@ -2542,6 +2550,8 @@ $btnSettings.addEventListener('click', async () => {
   await refreshAllSites()
   S.view = 'settings'
   render()
+  // What was set in Flight Deck since (the search engine picked …) shows here.
+  if (S.conn && !S.conn.agent && Date.now() - (S.meAt || 0) > 10000) loadMe().then(render)
 })
 
 chrome.tabs.onActivated.addListener((info) => { if (!PINNED_TAB && info.windowId === S.windowId) scheduleScan() })
@@ -2614,7 +2624,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     followHands()
     if (S.view === 'main' || S.view === 'settings') render()
   }
-  if (area === 'local' && changes.search) {
+  if (area === 'local' && (changes.search || changes.searchPick)) {
     refreshSearch().then(() => { if (S.view === 'main' || S.view === 'settings') render() })
   }
   if (area === 'local' && (changes.hands || changes.handsStopped)) {
@@ -2630,9 +2640,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 })
 
-// A panel left open for hours: when it's looked at again, ask Flight Deck
-// anew — that's also when a newer version shows up.
-const ME_STALE_MS = 30 * 60 * 1000
+// A panel left open: when it's looked at again (and a couple of minutes went
+// by), ask Flight Deck anew — a newer version, or a choice made there (the
+// search engine picked) shows up then.
+const ME_STALE_MS = 2 * 60 * 1000
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || !S.conn || S.conn.agent || !S.meAt) return
   if (Date.now() - S.meAt < ME_STALE_MS) return
