@@ -5,9 +5,10 @@ Opt-in on both ends, off until the person turns it on:
 * **Flight Deck** — Profile → *Web searches*: the person picks a search engine
   (Google, Bing, DuckDuckGo, Yahoo, Qwant) for their agents' ``web_search``.
   Kept per person in their settings (``web-search:chrome``).
-* **Captain for Chrome** — its panel asks once to read that engine's result
-  pages (Chrome's own permission prompt for that one site). Until then this
-  browser serves no searches.
+* **Captain for Chrome** — serves that engine once Chrome lets it read the
+  engine's result pages: its panel asks once (Chrome's own prompt for that one
+  site), or it already may ("Work on every site" in its settings). Turning
+  searches off there declines them in that browser.
 
 Then an agent's ``web_search`` asks here first (``POST
 /fd/browser-hands/agent/search``). Flight Deck builds the engine's result-page
@@ -424,6 +425,26 @@ async def chosen_engine(user_id: str) -> Engine | None:
     return ENGINES.get(eid)
 
 
+async def search_pick(user_id: str) -> str:
+    """The picked engine's id for the extension ('' = off)."""
+    engine = await chosen_engine(user_id)
+    return engine.id if engine else ""
+
+
+async def tell_browsers(user_id: str, engine_id: str) -> None:
+    """The person changed their pick: their browsers hear it now (an open
+    socket), so one that may already read that site starts serving it."""
+    from captain_claw.flight_deck.browser_hands import live_connections
+
+    for conn in live_connections(user_id):
+        if conn.agent_slug:
+            continue
+        try:
+            await conn.send({"type": "search_pick", "engine": engine_id})
+        except Exception:
+            pass
+
+
 def _browser_rows(user_id: str, engine: Engine | None) -> list[dict]:
     from captain_claw.flight_deck.browser_hands import live_connections
 
@@ -467,7 +488,18 @@ async def put_chrome_search(body: ChromeSearchBody, user: dict = Depends(get_cur
         await db.set_settings(str(user["id"]), {SETTING_KEY: json.dumps({"engine": engine})})
     else:
         await db.delete_setting(str(user["id"]), SETTING_KEY)
-    return await get_chrome_search(user)
+    await tell_browsers(str(user["id"]), engine)
+    st = await get_chrome_search(user)
+    if engine and not st["browsers"]:
+        return st
+    # A browser that may already read the site starts at once: give it a moment
+    # to say so, so the answer shows it ready.
+    for _ in range(10):
+        if any(b["ready"] for b in st["browsers"]) or not engine:
+            break
+        await asyncio.sleep(0.1)
+        st = await get_chrome_search(user)
+    return st
 
 
 async def clip_note(user_id: str) -> dict | None:

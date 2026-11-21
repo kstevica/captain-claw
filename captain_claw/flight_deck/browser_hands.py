@@ -81,7 +81,7 @@ from captain_claw.flight_deck.browser_clip import (
     token_kind,
     unique_name,
 )
-from captain_claw.flight_deck.browser_search import SearchBody, search_in_browser
+from captain_claw.flight_deck.browser_search import SearchBody, search_in_browser, search_pick
 
 log = logging.getLogger(__name__)
 
@@ -396,7 +396,10 @@ async def hands_ws(ws: WebSocket) -> None:
         note_version(conn.token_id, conn.version)
     log.info("Browser hands connected: user=%s browser=%s", conn.user_id, conn.browser)
     try:
-        await conn.send({"type": "welcome", "protocol": PROTOCOL,
+        # The engine the person picked for searches here (browser_search.py): with
+        # Chrome already letting Captain read that site, the browser serves it.
+        pick = "" if conn.agent_slug else await search_pick(conn.user_id)
+        await conn.send({"type": "welcome", "protocol": PROTOCOL, "search_pick": pick,
                          "user": str(user.get("display_name") or user.get("email") or "")})
         while True:
             raw = await ws.receive_text()

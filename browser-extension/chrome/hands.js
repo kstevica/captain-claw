@@ -17,7 +17,7 @@
 // browser" off, and Flight Deck sends no acts (the hello says what's lent).
 
 import { browserLabel, loadConn } from './lib/api.js'
-import { servedEngines } from './lib/engines.js'
+import { saveSearchPick, servedEngines } from './lib/engines.js'
 import { runSearch } from './search.js'
 
 const VERSION = chrome.runtime.getManifest().version
@@ -166,7 +166,12 @@ function connect(conn) {
   sock.onmessage = (ev) => {
     let msg
     try { msg = JSON.parse(ev.data) } catch { return }
-    if (msg.type === 'welcome') { retry = 0; setStatus(lent.hands ? 'on' : 'search') }
+    if (msg.type === 'welcome') {
+      retry = 0
+      setStatus(lent.hands ? 'on' : 'search')
+      if ('search_pick' in msg) saveSearchPick(String(msg.search_pick || ''))
+    }
+    else if (msg.type === 'search_pick') saveSearchPick(String(msg.engine || ''))
     else if (msg.type === 'denied') setStatus('denied', msg.error || '')
     else if (msg.type === 'act') runAct(msg)
     else if (msg.type === 'search') searchFor(msg)
@@ -193,7 +198,7 @@ function send(msg) {
 
 chrome.alarms?.onAlarm.addListener((a) => { if (a.name === 'captain-hands') ensureConnected() })
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes.search) ensureConnected()
+  if (area === 'local' && (changes.search || changes.searchPick)) ensureConnected()
   if (area === 'local' && changes.hands) {
     prefs = { on: false, front: false, ...(changes.hands.newValue || {}) }
     ensureConnected()
