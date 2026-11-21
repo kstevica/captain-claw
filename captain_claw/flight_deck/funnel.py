@@ -4808,9 +4808,13 @@ async def merge(run: dict, step: dict, folder: Path, recipe: dict[str, Any]) -> 
     close = await asyncio.to_thread(write_came_close, folder, recipe)
     dropped = await asyncio.to_thread(write_exclusions, folder, recipe)
     budget = search_budget(run, recipe)
+    from captain_claw.flight_deck import funnel_expert
+    try:  # the expert reads a sample of the result; what it finds goes in the summary
+        await funnel_expert.check(run, folder, out, await asyncio.to_thread(_read_csv, folder / ITEMS))
+    except Exception as e:  # noqa: BLE001 — the list is written; the summary goes without its findings
+        log.warning("funnel expert check failed", run_id=run.get("id"), error=str(e))
     await asyncio.to_thread(write_summary, folder, recipe, len(out), dropped, finished, budget)
     await asyncio.to_thread(_test_report, folder)
-    from captain_claw.flight_deck import funnel_expert
     await funnel_expert.release(run)  # an agent started only for this run goes off again
     per = ""
     if recipe["groups"]:

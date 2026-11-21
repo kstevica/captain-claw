@@ -3501,7 +3501,8 @@ def expert(monkeypatch):
         state["turns"].append({"prompt": prompt, "automation": automation})
         if meta is not None:
             meta["task_session"] = {"id": "sess-1", "name": "x"}
-        return state["says"]
+        says = state["says"]
+        return (says.pop(0) if says else "") if isinstance(says, list) else says
 
     class Reply:
         def __init__(self, text):
@@ -3576,7 +3577,7 @@ async def test_the_expert_works_beside_the_run(deck, expert):
     assert "- Does a two-person lab count? Yes, any lab with a bench." in summary and "- Hospital labs? No." in summary
     assert "It wrote 1 of the run's new searches. They found 1 items, 1 of them on the list." in summary
     assert summary.index("## The expert") < summary.index("## Files")
-    assert expert["released"] == 1 and len(expert["turns"]) == 1  # asked for its notes once, let go at the end
+    assert expert["released"] == 1 and len(expert["turns"]) == 2  # its notes, its check at the end; then let go
     said = [json.loads(ln) for ln in (folder / funnel_expert.LOG).read_text().splitlines()]
     assert [x["what"] for x in said][:2] == ["notes", "searches"]
 
@@ -3772,3 +3773,36 @@ async def test_the_experts_calls_are_capped(deck, expert):
     assert sorted(got.values()) == ["kept", "maybe", "maybe"]
     notes = [e["message"] for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note"]
     assert sum("its 1 calls for this run are used" in n for n in notes) == 1
+
+
+# ── phase 4: the expert's check at the end, and its tokens ────────────────
+
+async def test_the_expert_checks_a_sample_at_the_end_and_changes_no_row(deck, expert):
+    run, folder = await _run(deck["store"], CLOSE, {"funnel_expert": "petri"}, rid="bat_xcheck01")
+    _close_list(deck, expert, [], lambda items: [
+        {"id": i, "verdict": "drop" if f["Name"] == "Gamma" else "keep", "reason": "Fits." if f["Name"] != "Gamma" else "A shop.",
+         "row": {"Name": f["Name"], "Web": f["Web"], "City": "Split"}} for i, f in items])
+    found = "Beta is a reseller and shouldn't be on the list.\n\nThe searches keep finding shops."
+    expert["says"] = [SAID, found]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    assert len(expert["turns"]) == 2  # its notes before, its check after
+    check = expert["turns"][1]
+    assert check["automation"]["task"]["session_id"] == "sess-1"  # the same session of this run
+    assert "- Name: Alpha | Web: https://alpha.example | City: Split" in check["prompt"]
+    assert "- Gamma: A shop." in check["prompt"] and "(2 shown of 2)" in check["prompt"]
+    assert [r["Name"] for r in funnel._read_csv(folder / "leads.csv")] == ["Alpha", "Beta"]  # Beta stays: it changes no row
+    summary = (folder / "summary.md").read_text()
+    assert "What it found on a sample of the result (it changed no row):" in summary
+    assert "> Beta is a reseller and shouldn't be on the list." in summary and "> The searches keep finding shops." in summary
+    assert (folder / funnel_expert.CHECK).read_text().startswith("Beta is a reseller")
+
+
+async def test_the_experts_short_calls_count_toward_the_runs_tokens(deck, expert):
+    run, folder = await _run(deck["store"], EXPERT_LIST, {"funnel_expert": "petri"}, rid="bat_xcount01")
+    _list(deck)
+    steps = await funnel.plan(run)
+    before = int((await deck["store"].get_run(run["id"])).get("cumulative_tokens") or 0)
+    await _go(deck["store"], run, steps)
+    after = int((await deck["store"].get_run(run["id"])).get("cumulative_tokens") or 0)
+    assert after - before == 7 * len(expert["asks"]) and expert["asks"]  # the stand-in says 7 tokens a call
