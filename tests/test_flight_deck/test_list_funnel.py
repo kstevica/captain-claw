@@ -3509,6 +3509,8 @@ def expert(monkeypatch):
 
     async def complete(reader, system, user, owner, max_tokens, **_k):
         state["asks"].append({"reader": reader, "system": system, "user": user})
+        if system.rstrip().endswith(funnel_expert.COLUMNS_SYSTEM[-60:].rstrip()):
+            return Reply(json.dumps(state.get("columns", lambda u: {})(user)))
         return Reply(json.dumps({"queries": state["queries"]()}))
 
     async def instructions(owner, slug):
@@ -3616,3 +3618,57 @@ def test_decisions_are_read_from_the_notes(tmp_path):
     assert funnel_expert.decisions(tmp_path) == ["A? Yes.", "B? No."]
     (tmp_path / funnel_expert.NOTES).write_text("NOTES\nSomething.\n\nDECISIONS\nNone.\n")
     assert funnel_expert.decisions(tmp_path) == []
+
+
+async def test_the_expert_writes_the_owners_columns_of_kept_rows(deck, expert):
+    """Phase 2. A why-it-fits column was written by the run's small model from one or two
+    ideas. With an expert beside the run it is the expert's to write, for rows that are
+    being kept only, told what it wrote for the others."""
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "leads.csv",
+                                                     "columns": ["Name", "Reason", "Tier"], "min_rows": 9,
+                                                     "allowed": {"Tier": ["a", "b"]}}}]
+    run, folder = await _run(deck["store"], contract, {"funnel_expert": "petri"}, rid="bat_expert05")
+    deck["recipe"] = {"item": "lab", "key": "Name", "decide": "Labs.", "decide_batch": 1,
+                      "columns": [{"name": "Name"}, {"name": "Reason", "what": "why it would use it", "from": "expert"},
+                                  {"name": "Tier", "from": "owner"}],
+                      "sources": [{"kind": "search", "group": "", "queries": ["labs"]}]}
+    deck["tools"] = _Tools(pages={}, results={"labs": "r"})
+    deck["extract"] = lambda user: {"items": [{"name": n, "fields": {"Name": n}} for n in ("Alpha", "Beta", "Gamma")]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "drop" if f["Name"] == "Gamma" else "keep", "reason": "x",
+                                     "row": {"Name": f["Name"], "Reason": "A lab.", "Tier": "a"}} for i, f in items]
+    expert["queries"] = lambda: []
+
+    def columns(user):
+        name = "Alpha" if '"Name": "Alpha"' in user else "Beta"
+        return {"1": {"Reason": f"{name} plates by hand; the counter reads a photo.", "Tier": "z" if name == "Alpha" else "B"}}
+
+    expert["columns"] = columns
+    steps = await funnel.plan(run)
+    assert funnel.load_recipe(folder)["owner_columns"] == ["Reason", "Tier"]
+    await _go(deck["store"], run, steps)
+    rows = {r["Name"]: r for r in funnel._read_csv(folder / "leads.csv")}
+    assert rows["Alpha"]["Reason"] == "Alpha plates by hand; the counter reads a photo."
+    assert rows["Alpha"]["Tier"] == "a"   # "z" isn't one of its values: the judging call's stands
+    assert rows["Beta"]["Tier"] == "b"    # written as the list writes it
+    asked = [a for a in expert["asks"] if "# Columns to write" in a["user"]]
+    assert len(asked) == 2 and not any("Gamma" in a["user"] for a in asked)  # only rows being kept
+    assert "Written for other items lately" not in asked[0]["user"]
+    assert "- Reason: Alpha plates by hand" in asked[1]["user"]  # told what it wrote before
+    assert "core-facility pages" in asked[0]["user"] and "Answer as a microbiologist." in asked[0]["system"]
+    assert "It wrote the owner's columns" in (folder / "summary.md").read_text() and "asked 2 times" in (folder / "summary.md").read_text()
+
+
+async def test_the_judging_calls_columns_stand_when_the_expert_gives_none(deck, expert):
+    contract = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "leads.csv", "columns": ["Name", "Reason"]}}]
+    run, folder = await _run(deck["store"], contract, {"funnel_expert": "petri"}, rid="bat_expert06")
+    deck["recipe"] = {"item": "lab", "key": "Name", "decide": "Labs.",
+                      "columns": [{"name": "Name"}, {"name": "Reason", "from": "owner"}],
+                      "sources": [{"kind": "search", "group": "", "queries": ["labs"]}]}
+    deck["tools"] = _Tools(pages={}, results={"labs": "r"})
+    deck["extract"] = lambda user: {"items": [{"name": "Alpha", "fields": {"Name": "Alpha"}}]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"], "Reason": "Its own."}}
+                                    for i, f in items]
+    expert["queries"] = lambda: []
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    assert funnel._read_csv(folder / "leads.csv")[0]["Reason"] == "Its own."
