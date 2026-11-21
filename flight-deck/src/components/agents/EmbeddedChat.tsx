@@ -22,6 +22,10 @@ import { useChatStore, type HeldMessage } from '../../stores/chatStore'
 import { uploadFileToAgent } from '../../services/fileTransfer'
 import { imageRef, type ChatMessage } from '../../services/agentChat'
 import { injectedAs, noteSummary, tidyServerPaths } from '../../utils/chatOrigin'
+import { FileChips } from './queue/QueueHero'
+import { MarkdownImage } from './ImageLightbox'
+import { agentFileViewUrl } from '../../utils/agentFileUrl'
+import { parseAttachmentRefs } from './queue/queueModel'
 
 interface Attachment {
   id: string
@@ -35,16 +39,23 @@ interface Attachment {
   error?: string
 }
 
-/** Convert bare image file paths in message content to markdown images proxied through Flight Deck. */
+// A picture in a reply opens in the viewer (MarkdownImage).
+const MD_COMPONENTS = { img: MarkdownImage }
+
+/** Agent-local pictures in message content, proxied through Flight Deck:
+ *  those in markdown image syntax (file:///, saved/, output/, an absolute
+ *  path — as the full chat's processImagePaths), and bare paths on a line
+ *  of their own. */
 function processImagePaths(content: string, agentHost?: string, agentPort?: number, agentAuth?: string): string {
   if (!agentPort) return content
-  const imagePathRe = /^([`*]*)(\/?(?:\/[\w.@: -]+)+\.(?:png|jpg|jpeg|gif|webp|bmp|svg))([`*]*)$/gm
-  return content.replace(imagePathRe, (_match, _pre, filePath, _post) => {
-    const params = new URLSearchParams({ path: filePath })
-    if (agentAuth) params.set('token', agentAuth)
-    const url = `/fd/agent-file-view/${encodeURIComponent(agentHost || 'localhost')}/${agentPort}?${params}`
-    return `![](${url})`
+  const proxy = (filePath: string) => agentFileViewUrl(filePath, agentHost, agentPort, agentAuth)
+  const out = content.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (match, alt, src) => {
+    if (/^(https?:|data:|blob:)/i.test(src) || src.startsWith('/fd/')) return match
+    if (/^file:\/\/\//i.test(src)) return `![${alt}](${proxy('/' + src.replace(/^file:\/\/\//i, ''))})`
+    return /^(saved\/|output\/|\/)/.test(src) ? `![${alt}](${proxy(src)})` : match
   })
+  const imagePathRe = /^([`*]*)(\/?(?:\/[\w.@: -]+)+\.(?:png|jpg|jpeg|gif|webp|bmp|svg))([`*]*)$/gm
+  return out.replace(imagePathRe, (_match, _pre, filePath) => `![](${proxy(filePath)})`)
 }
 
 let attachId = 0
@@ -279,8 +290,8 @@ function EmbeddedChatBody({
         {/* Written while the agent was busy: each goes once it is free. */}
         {session?.held?.map((h) => (
           <div key={h.id} className="mb-2 flex flex-col items-end gap-0.5">
-            <div className="max-w-[85%] whitespace-pre-wrap rounded-lg border border-dashed border-violet-500/40 bg-violet-600/10 px-2.5 py-1.5 text-xs text-zinc-300">
-              {h.content}
+            <div className="max-w-[85%] rounded-lg border border-dashed border-violet-500/40 bg-violet-600/10 px-2.5 py-1.5 text-xs text-zinc-300">
+              <SentBody content={h.content} conn={{ host, port, auth }} plain />
             </div>
             <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
               Sends when free
@@ -394,6 +405,32 @@ function EmbeddedChatBody({
   )
 }
 
+/** What you sent: your words, then the pictures as small previews (the
+ *  viewer on a click) and the files as pills, never their ref lines.
+ *  `plain`: a waiting message, its text as typed. */
+function SentBody({ content, conn, plain = false }: {
+  content: string
+  conn: { host: string; port: number; auth: string } | null
+  plain?: boolean
+}) {
+  const p = parseAttachmentRefs(content)
+  const text = p.refs.length ? p.text : content
+  return (
+    <>
+      {text && (plain
+        ? <div className="whitespace-pre-wrap">{text}</div>
+        : (
+          <div className="fd-markdown text-xs text-zinc-200">
+            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
+              {processImagePaths(text, conn?.host, conn?.port, conn?.auth)}
+            </Markdown>
+          </div>
+        ))}
+      {p.files.length > 0 && <FileChips files={p.files} conn={conn} pictures="tile-sm" className={text ? 'mt-1.5' : ''} />}
+    </>
+  )
+}
+
 function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message: ChatMessage; agentHost?: string; agentPort?: number; agentAuth?: string }) {
   const [toolExpanded, setToolExpanded] = useState(false)
 
@@ -401,9 +438,10 @@ function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message
     return (
       <div className="mb-2 flex justify-end">
         <div className="max-w-[90%] rounded-lg rounded-br-sm bg-violet-600/20 px-2.5 py-1.5">
-          <div className="fd-markdown text-xs text-zinc-200">
-            <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{processImagePaths(message.content, agentHost, agentPort, agentAuth)}</Markdown>
-          </div>
+          <SentBody
+            content={message.content}
+            conn={agentPort ? { host: agentHost || 'localhost', port: agentPort, auth: agentAuth || '' } : null}
+          />
           <span className="mt-0.5 block text-right text-[9px] text-zinc-600">{formatTime(message.timestamp)}</span>
         </div>
       </div>
@@ -443,6 +481,20 @@ function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message
     )
   }
 
+  // A picture the turn made: a small preview that opens in the viewer.
+  if (message.role === 'image' && agentPort) {
+    const path = message.content.trim()
+    const name = path.split(/[\\/]/).pop() || path
+    return (
+      <FileChips
+        files={[{ kind: 'image', name, path, ref: message.id }]}
+        conn={{ host: agentHost || 'localhost', port: agentPort, auth: agentAuth || '' }}
+        pictures="tile-sm"
+        className="mb-2"
+      />
+    )
+  }
+
   // A file the turn made: its name (the full chat opens it).
   if (message.role === 'image' || message.role === 'html_file' || message.role === 'file') {
     const name = message.content.trim().split(/[\\/]/).pop() || message.content
@@ -460,7 +512,7 @@ function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message
     <div className="mb-2">
       <div className={`max-w-[90%] rounded-lg rounded-bl-sm bg-zinc-800/60 px-2.5 py-1.5 ${message.replay ? 'opacity-60' : ''}`}>
         <div className="fd-markdown text-xs text-zinc-300">
-          <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{tidyServerPaths(processImagePaths(cleanContent, agentHost, agentPort, agentAuth))}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={MD_COMPONENTS}>{tidyServerPaths(processImagePaths(cleanContent, agentHost, agentPort, agentAuth))}</Markdown>
         </div>
         <div className="mt-0.5 flex items-center gap-1.5 text-[9px] text-zinc-600">
           <span>{formatTime(message.timestamp)}</span>

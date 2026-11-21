@@ -4,6 +4,8 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { AgentChatWS, imageRef, splitImageRefs } from '../../services/agentChat'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
+import { FileChips } from './queue/QueueHero'
+import { parseAttachmentRefs } from './queue/queueModel'
 
 // A live chat scoped to one topic. Reuses AgentChatWS for streaming (narration,
 // tools, busy) but renders ONLY the turns the user initiates here (ignoring the
@@ -163,11 +165,15 @@ export function TopicChat({ host, port, auth, topicId, onPersisted }: {
                 <div className="text-[10px] italic text-zinc-500">{m.text}</div>
               ) : m.kind === 'tool' ? (
                 <div className="flex items-center gap-1 text-[10px] text-zinc-500"><Wrench className="h-3 w-3" /> {m.tool}{m.detail ? ` · ${m.detail}` : ''}</div>
-              ) : (
-                <div className={m.kind === 'user' ? 'flex justify-end' : ''}>
-                  <div className={`fd-markdown text-xs ${m.kind === 'user' ? 'rounded-lg bg-violet-600/20 px-2 py-1 text-zinc-200' : 'text-zinc-300'}`}>
-                    <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown>
+              ) : m.kind === 'user' ? (
+                <div className="flex justify-end">
+                  <div className="max-w-[90%] rounded-lg bg-violet-600/20 px-2 py-1">
+                    <SentText text={m.text} conn={{ host, port, auth: auth || '' }} />
                   </div>
+                </div>
+              ) : (
+                <div className="fd-markdown text-xs text-zinc-300">
+                  <Markdown remarkPlugins={[remarkGfm]}>{m.text}</Markdown>
                 </div>
               )}
             </div>
@@ -207,6 +213,24 @@ export function TopicChat({ host, port, auth, topicId, onPersisted }: {
         )}
       </div>
     </div>
+  )
+}
+
+/** A message you sent in a topic: your words, then its pictures as small
+ *  previews (the viewer on a click) and its files as pills, not the ref
+ *  lines the agent reads. The Topics panel's saved messages show the same. */
+export function SentText({ text, conn }: { text: string; conn: { host: string; port: number; auth: string } }) {
+  const p = parseAttachmentRefs(text)
+  const words = p.refs.length ? p.text : text
+  return (
+    <>
+      {words && (
+        <div className="fd-markdown text-xs text-zinc-200">
+          <Markdown remarkPlugins={[remarkGfm]}>{words}</Markdown>
+        </div>
+      )}
+      {p.files.length > 0 && <FileChips files={p.files} conn={conn} pictures="tile-sm" className={words ? 'mt-1.5' : ''} />}
+    </>
   )
 }
 

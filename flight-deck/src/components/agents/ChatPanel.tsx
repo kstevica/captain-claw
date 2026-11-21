@@ -61,6 +61,7 @@ import { useLessonInbox } from '../../stores/lessonInboxStore'
 import { isManagedAgent } from '../../utils/managedAgents'
 import { AttachmentChip } from './AttachmentChip'
 import { AgentPicture } from './AgentPicture'
+import { ImageLightbox, MarkdownImage } from './ImageLightbox'
 import { appendAttachmentRefs, useFileAttachments, type AgentConn } from '../../hooks/useFileAttachments'
 import { useAgentSkills } from '../../hooks/useAgentSkills'
 import { asksForInput, type AgentSkill } from '../../services/agentSkills'
@@ -124,6 +125,8 @@ import type { ModelSwitchInfo } from '../../utils/modelSwitch'
 // renders (react-markdown otherwise sees "new" plugins every render).
 const REMARK_PLUGINS = [remarkGfm, remarkMath]
 const REHYPE_PLUGINS = [rehypeKatex]
+// A picture in a reply opens in the viewer (MarkdownImage).
+const MD_COMPONENTS = { img: MarkdownImage }
 
 // The chat box's "queue it instead of sending" chord, as this keyboard names it.
 const QUEUE_CHORD = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
@@ -139,7 +142,7 @@ const QUEUE_CHORD = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(n
 // processImagePaths/stripSuggestions), not raw message.content, or those
 // transforms won't invalidate the memo.
 const MarkdownMessage = memo(function MarkdownMessage({ content }: { content: string }) {
-  return <Markdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>{content}</Markdown>
+  return <Markdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS} components={MD_COMPONENTS}>{content}</Markdown>
 })
 
 // Shared chats take no files: a drag is accepted and dropped on the floor.
@@ -2405,7 +2408,7 @@ function HeldBubble({ held, next, agentName, large, conn, sharedRef, canInsert, 
           </div>
         )}
         {sent.files.length > 0 && (
-          <FileChips files={sent.files} conn={conn} viewUrl={(f) => sentPictureUrl(f, conn, sharedRef)}
+          <FileChips files={sent.files} conn={conn} pictures="tile" viewUrl={(f) => sentPictureUrl(f, conn, sharedRef)}
             className={sent.text ? 'mt-2' : ''} />
         )}
         <span className="mt-1 flex items-center justify-end gap-1 text-[10px] text-zinc-500">
@@ -2438,9 +2441,9 @@ function HeldBubble({ held, next, agentName, large, conn, sharedRef, canInsert, 
 
 // A message you sent with files or pictures carries them as ref lines for the
 // agent ("[Attached file: name → path]", "[Attached image: path]"). On screen
-// they are pills with the name only (parseAttachmentRefs): the path is the
-// server's (its folders, an upload stamp), never something to read. What was
-// sent is unchanged.
+// (parseAttachmentRefs) a picture is a small preview that opens the viewer,
+// a file a pill with its name only: the path is the server's (its folders,
+// an upload stamp), never something to read. What was sent is unchanged.
 function splitSentFiles(content: string): { text: string; files: AttachedFile[] } {
   const p = parseAttachmentRefs(content || '')
   return { text: p.refs.length ? p.text : content, files: p.files }
@@ -2659,7 +2662,7 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
             </div>
           )}
           {sent.files.length > 0 && (
-            <FileChips files={sent.files} conn={agentConn} viewUrl={(f) => sentPictureUrl(f, agentConn, sharedRef)}
+            <FileChips files={sent.files} conn={agentConn} pictures="tile" viewUrl={(f) => sentPictureUrl(f, agentConn, sharedRef)}
               className={sent.text ? 'mt-2' : ''} />
           )}
           <span className="mt-1 block text-right text-[10px] text-zinc-500">
@@ -3013,6 +3016,8 @@ const ChatFileCard = memo(function ChatFileCard({ message, conn, agentId, large 
 }) {
   const [failed, setFailed] = useState(false)
   const [viewing, setViewing] = useState(false)
+  // A picture the turn made opens in the picture viewer.
+  const [zoom, setZoom] = useState(false)
   const path = message.content.trim()
   const name = path.split(/[\\/]/).pop() || path
   const rel = belowSaved(path)
@@ -3035,12 +3040,11 @@ const ChatFileCard = memo(function ChatFileCard({ message, conn, agentId, large 
   if (picture && url && !failed) {
     return (
       <div id={`fd-msg-${message.id}`} className="mb-3 flex flex-col items-start gap-0.5">
-        <a
-          href={url}
-          target="_blank"
-          rel="noopener noreferrer"
-          title={`Open ${name}`}
-          className="block max-w-[85%] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40 hover:border-zinc-700"
+        <button
+          type="button"
+          onClick={() => setZoom(true)}
+          title={`View ${name}`}
+          className={`block max-w-[85%] cursor-zoom-in overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40 hover:border-zinc-700 ${FOCUS}`}
         >
           <img
             src={url}
@@ -3049,7 +3053,8 @@ const ChatFileCard = memo(function ChatFileCard({ message, conn, agentId, large 
             onError={() => setFailed(true)}
             className={`block h-auto max-w-full object-contain ${large ? 'max-h-[32rem]' : 'max-h-80'}`}
           />
-        </a>
+        </button>
+        {zoom && <ImageLightbox items={[{ src: url, name }]} index={0} onClose={() => setZoom(false)} />}
         <span className="flex items-center gap-1 pl-1 text-[10px] text-zinc-600">
           <ImageIcon className="h-3 w-3" />
           <span className="truncate">{name}</span>

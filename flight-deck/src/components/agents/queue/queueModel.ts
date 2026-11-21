@@ -52,8 +52,10 @@ const IMAGE_REF = /^\[Attached image:\s*(.+?)\s*\]$/
 // "[Attached file: name → path]"; the agent's own history writes it without
 // the name ("[Attached file: path]").
 const FILE_REF = /^\[Attached file: (?:(.+?) → )?(.+?)\]$/
-// The hint earlier builds appended after image refs: kept, never shown.
-const LEGACY_HINT = /^\(To view\/understand the image\(s\), call image_vision.*\)$/
+// The hint earlier builds appended after image refs: kept, never shown. The
+// agent's own history adds its guidance for the model under the refs
+// (chat_handler.build_attachment_prefix): never the user's words either.
+const LEGACY_HINT = /^\(To view\/understand the image\(s\), call image_vision.*\)$|^\((?:The image\(s\) above are attached|An automatic visual description of the image\(s\)|The attached video\(s\) are being analyzed automatically).*\)$/
 
 export interface AttachedFile { kind: 'image' | 'file'; name: string; path: string; ref: string }
 

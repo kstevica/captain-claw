@@ -3,7 +3,7 @@ import { Tags, Loader2, AlertTriangle, RefreshCw, X, Sparkles, Search, Maximize2
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
-import { TopicChat } from './TopicChat'
+import { SentText, TopicChat } from './TopicChat'
 
 interface TopicMsg { id?: number; role: string; channel?: string; excerpt: string; ts: string; msg_id?: string }
 interface Group { id: string; name: string; count?: number }
@@ -704,9 +704,13 @@ export function TopicsPanel({ host, port, auth, agentName, onClose, embedded = f
                               <span className={m.role === 'user' ? 'text-sky-400' : m.role === 'narration' ? 'text-zinc-500' : 'text-emerald-400'}>{m.role}</span>
                               <span>{relTime(m.ts)}</span>
                             </div>
-                            <div className="fd-markdown text-xs text-zinc-300">
-                              <Markdown remarkPlugins={[remarkGfm]}>{m.excerpt}</Markdown>
-                            </div>
+                            {m.role === 'user' ? (
+                              <SentText text={m.excerpt} conn={{ host, port, auth: auth || '' }} />
+                            ) : (
+                              <div className="fd-markdown text-xs text-zinc-300">
+                                <Markdown remarkPlugins={[remarkGfm]}>{m.excerpt}</Markdown>
+                              </div>
+                            )}
                           </div>
                         )
                       })
