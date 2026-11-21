@@ -123,6 +123,23 @@ clicks, typing and screenshots in the agent's tabs — Chrome doesn't let an
 extension ask for it later) and **tab groups**. Nothing uses them until you
 turn the switch on.
 
+## Your agents' web searches, in this browser
+
+Instead of a paid search API, your agents' `web_search` can run here, on the
+engine you pick in Flight Deck → **Profile → Web searches** (Google, Bing,
+DuckDuckGo, Yahoo or Qwant; off until you pick one). The panel then asks once
+— **Allow** — and Chrome asks you to let Captain read that engine's site.
+
+Each search opens the result page in a background tab — never in front, in a
+collapsed **Captain · search** group — and closes it once the results are in.
+Flight Deck reads the results out of the page. Searches show in this
+browser's history (and in your Google or Bing activity if you're signed in).
+When Chrome is closed, or the engine asks you to prove you're not a robot,
+Flight Deck's own search answers instead — answer the check in that tab's site
+once and searches go on. Turn it off in Settings → Web searches. It works with
+**Agents can use this browser** on or off; the agents' browser tool never gets
+the search tabs.
+
 ## Record a process — an agent does it after that
 
 **Record what I do** (under Send) starts a recording in the tab in front. Do
@@ -204,6 +221,8 @@ agent makes for a clip (notes, CSVs, a brief) goes there too.
   real clicks and typing. Chrome won't let an extension ask for the debugger
   later, so it's asked for at install.
 - **alarms** — keeps the agents' connection to Flight Deck alive.
+- **The search engine's site** (one, when you press Allow for web searches) —
+  to read its result pages in the background tab.
 
 The page's text is marked for the agent as web content: instructions written
 in a page are never treated as yours.

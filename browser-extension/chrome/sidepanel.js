@@ -11,6 +11,7 @@
 import { icon } from './lib/icons.js'
 import { renderMarkdown, escapeHtml as esc } from './lib/md.js'
 import { AuthError, api, browserLabel, clearConn, loadConn, normalizeDeckUrl, publicCall, saveConn, upload } from './lib/api.js'
+import { SEARCH_ENGINES, loadSearchPrefs, saveSearchPrefs, servedEngines } from './lib/engines.js'
 
 const VERSION = chrome.runtime.getManifest().version
 const HISTORY_MAX = 30
@@ -68,6 +69,8 @@ const S = {
   handsLog: [],        // what agents did here, newest last
   handsStopped: [],    // agents the person stopped
   handsSeen: 0,        // the newest act the panel has followed
+  search: { on: false, engines: [], declined: '' },   // agents' web searches here (lib/engines.js)
+  searchServed: [],    // engines this browser runs searches on now (allowed + Chrome's permission)
   anon: null,          // the page or selection anonymized (/fd/clip/anonymize)
   rec: null,           // the recording going on (the worker's, session storage "rec")
   recNotes: {},        // the person's instructions on its steps, by step id
@@ -224,7 +227,7 @@ function renderView() {
   keepFocus(() => {
     if (S.view === 'agent') $view.innerHTML = viewAgentOwned()
     else if (S.view === 'connect') $view.innerHTML = viewConnect()
-    else if (S.view === 'main') $view.innerHTML = viewVersion() + viewRecBanner() + viewHands() + viewMain()
+    else if (S.view === 'main') $view.innerHTML = viewVersion() + viewRecBanner() + viewHands() + viewSearchAsk() + viewMain()
     else if (S.view === 'rec') $view.innerHTML = viewRec()
     else if (S.view === 'rec-edit') $view.innerHTML = viewRecEdit()
     else if (S.view === 'recs') $view.innerHTML = viewRecs()
@@ -1015,6 +1018,80 @@ async function turnHandsOn(want) {
   }
   S.hands = { ...S.hands, on: want }
   await setStore({ hands: S.hands })
+  render()
+}
+
+// ── the agents' web searches, run here (search.js) ──
+//
+// Flight Deck says which engine the person picked (/fd/clip/me → search); the
+// panel asks Chrome, once, to let Captain read that engine's result pages.
+
+function searchPick() {
+  const id = S.me?.search?.engine || ''
+  return SEARCH_ENGINES[id] ? { id, ...SEARCH_ENGINES[id] } : null
+}
+
+async function refreshSearch() {
+  S.search = await loadSearchPrefs()
+  S.searchServed = await servedEngines()
+}
+
+function searchWhat(eng) {
+  return `Your agents' web searches open ${esc(eng.name)} in a background tab here — never in front of you — and the tab closes once the results are in. ` +
+    `They show in this browser's history${eng.id === 'google' || eng.id === 'bing' ? `, and in your ${esc(eng.name)} activity if you're signed in` : ''}. ` +
+    "When Chrome is closed, Flight Deck's own search engine answers instead."
+}
+
+function viewSearchAsk() {
+  const eng = searchPick()
+  if (!eng || S.searchServed.includes(eng.id) || S.search.declined === eng.id) return ''
+  return `
+    <div class="card">
+      <div class="row">${icon('globe', 'sm')}<div class="grow"><b>Run your agents' searches on ${esc(eng.name)} here?</b>
+        <div class="dim">${searchWhat(eng)} Chrome asks you once to let Captain read ${esc(eng.host)}.</div></div></div>
+      <div class="row" style="margin-top:8px;gap:8px">
+        <button class="btn primary" data-act="search-allow" data-engine="${esc(eng.id)}">Allow</button>
+        <button class="btn" data-act="search-decline" data-engine="${esc(eng.id)}">Not in this browser</button>
+      </div>
+    </div>`
+}
+
+function viewSearchSettings() {
+  const eng = searchPick()
+  if (!eng) {
+    return `<div class="card"><div class="label">Web searches</div>
+      <div class="dim">Your agents can search the web here instead of through a paid search API. Turn it on in Flight Deck → Profile → Web searches, then come back here to allow it.</div></div>`
+  }
+  const on = S.searchServed.includes(eng.id)
+  return `<div class="card"><div class="label">Web searches</div>
+    <label class="switch"><input type="checkbox" id="searchOn" data-engine="${esc(eng.id)}" ${on ? 'checked' : ''}><div>Run my agents' web searches here, on ${esc(eng.name)}<div class="dim">${searchWhat(eng)}</div></div></label>
+    ${on && S.handsStatus?.state && !['on', 'search'].includes(S.handsStatus.state) ? `<div class="dim" style="margin-top:4px">${esc(handsStatusText())}</div>` : ''}
+  </div>`
+}
+
+// Chrome's prompt needs the click itself: nothing is awaited before it.
+function allowSearch(id) {
+  const eng = SEARCH_ENGINES[id]
+  if (!eng) return
+  chrome.permissions.request({ origins: eng.origins }).catch(() => false).then(async (ok) => {
+    if (!ok) {
+      toast(`Not allowed — your agents keep searching with Flight Deck's own engine.`)
+      render()
+      return
+    }
+    const p = await loadSearchPrefs()
+    await saveSearchPrefs({ on: true, engines: [...new Set([...p.engines, id])], declined: '' })
+    await refreshSearch()
+    toast(`Your agents' searches run on ${eng.name} here now`)
+    render()
+  })
+}
+
+async function stopSearch(id, decline = false) {
+  const p = await loadSearchPrefs()
+  const engines = p.engines.filter((e) => e !== id)
+  await saveSearchPrefs({ on: engines.length > 0, engines, declined: decline ? id : p.declined })
+  await refreshSearch()
   render()
 }
 
@@ -2259,6 +2336,7 @@ function viewSettings() {
       <label class="switch"><input type="checkbox" id="handsFront" ${S.hands.front ? 'checked' : ''} ${S.hands.on ? '' : 'disabled'}><div>Bring an agent's tab to the front while it works</div></label>
       ${S.hands.on && handsStatusText() ? `<div class="dim" style="margin-top:4px">${esc(handsStatusText())}</div>` : ''}
     </div>
+    ${viewSearchSettings()}
     <div class="card">
       <div class="label">Every time</div>
       <label class="switch"><input type="checkbox" id="prefAll" ${S.allSites ? 'checked' : ''}><div>Work on every site without asking<div class="dim">Reads pages and fetches their files anywhere; also lets screenshots work.</div></div></label>
@@ -2386,6 +2464,8 @@ $view.addEventListener('click', (ev) => {
   else if (act === 'hands-stop') setHandsStopped([...S.handsStopped, el.dataset.slug]).then(() => toast(`${handsName(el.dataset.slug)} can't use this browser now`))
   else if (act === 'hands-let') setHandsStopped(S.handsStopped.filter((s) => s !== el.dataset.slug))
   else if (act === 'hands-extensions') chrome.tabs.create({ url: 'chrome://extensions/?id=' + chrome.runtime.id })
+  else if (act === 'search-allow') allowSearch(el.dataset.engine)
+  else if (act === 'search-decline') stopSearch(el.dataset.engine, true)
   else if (act === 'clear-history') { S.history = []; setStore({ history: [] }); render() }
   else if (act === 'disconnect') {
     if (!confirm('Disconnect this browser from Flight Deck?')) return
@@ -2416,6 +2496,9 @@ $view.addEventListener('change', (ev) => {
     applyDefaults()
   } else if (el.id === 'handsOn') {
     turnHandsOn(el.checked)
+  } else if (el.id === 'searchOn') {
+    if (el.checked) allowSearch(el.dataset.engine)
+    else stopSearch(el.dataset.engine)
   } else if (el.id === 'handsFront') {
     S.hands = { ...S.hands, front: el.checked }
     setStore({ hands: S.hands })
@@ -2466,8 +2549,8 @@ chrome.tabs.onUpdated.addListener((id, info, tab) => {
   if (PINNED_TAB ? id !== PINNED_TAB : (!tab.active || tab.windowId !== S.windowId)) return
   if (info.status === 'complete' || info.url) scheduleScan(info.status === 'complete' ? 200 : 600)
 })
-chrome.permissions.onAdded.addListener(() => { refreshAllSites(); scheduleScan(0) })
-chrome.permissions.onRemoved.addListener(() => refreshAllSites())
+chrome.permissions.onAdded.addListener(() => { refreshAllSites(); refreshSearch(); scheduleScan(0) })
+chrome.permissions.onRemoved.addListener(() => { refreshAllSites(); refreshSearch().then(() => { if (S.view === 'main' || S.view === 'settings') render() }) })
 
 // A right-click on a selection, a link or an image.
 async function takeFocus() {
@@ -2531,6 +2614,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
     followHands()
     if (S.view === 'main' || S.view === 'settings') render()
   }
+  if (area === 'local' && changes.search) {
+    refreshSearch().then(() => { if (S.view === 'main' || S.view === 'settings') render() })
+  }
   if (area === 'local' && (changes.hands || changes.handsStopped)) {
     if (changes.hands) S.hands = { on: false, front: false, ...(changes.hands.newValue || {}) }
     if (changes.handsStopped) S.handsStopped = changes.handsStopped.newValue || []
@@ -2578,6 +2664,7 @@ async function start() {
     S.handsSeen = S.handsLog.length ? S.handsLog[S.handsLog.length - 1].at : 0
   } catch { /* no session storage */ }
   await refreshAllSites()
+  await refreshSearch()
   S.conn = await loadConn()
   if (!S.conn) {
     S.view = 'connect'

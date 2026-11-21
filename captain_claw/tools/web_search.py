@@ -16,6 +16,13 @@ same whichever engine is configured.
   Brave's LLM Context endpoint (same key, many chunks per page), Tavily's
   advanced depth, You.com's highlights. Keenable — and Brave when LLM Context
   fails — get the top pages read here (public addresses only, short timeout).
+* **Through the person's Chrome** — under Flight Deck, when the agent's owner
+  turned it on (Profile → Web searches: Google, Bing, DuckDuckGo, Yahoo or
+  Qwant) and allowed it in Captain for Chrome, the search runs in a background
+  tab of their own browser instead of a paid API
+  (``flight_deck/browser_search.py``). Chrome closed, a robot check, anything
+  short of results: the configured engine answers instead, as before. Never
+  for a shared agent's member turn — the owner's browser is the owner's.
 """
 
 from __future__ import annotations
@@ -35,6 +42,10 @@ from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
+
+_CHROME_WAIT = 55.0       # the person's browser: a few result pages, each a few seconds
+_CHROME_OFF_KEEP = 60.0   # "off" is believed this long before Flight Deck is asked again
+_CHROME_OFF: dict[str, float] = {}   # Flight Deck address → when it last said off
 
 # Brave Search rejects the whole request (HTTP 422) if `country` isn't one of
 # its supported codes — e.g. "HR" (Croatia) is NOT supported, which silently
@@ -247,6 +258,9 @@ class WebSearchTool(Tool):
     """Search the web using Brave Search API, Tavily, You.com, or Keenable."""
 
     name = "web_search"
+    # A search in the person's Chrome loads result pages in a real browser,
+    # and its fallback to the API engine comes after that.
+    timeout_seconds = 90.0
     description = (
         "Search the web and return ranked results with titles, links, snippets, "
         "site and date. count goes up to 50 — ask for more when you need breadth. "
@@ -365,23 +379,35 @@ class WebSearchTool(Tool):
             return ToolResult(success=False, error=f"Unsupported web_search provider: {provider}")
         engine, run = engines[provider]
 
-        try:
-            hits, notes = await run(
-                q, search_cfg, n=n, page=page, country=country, search_lang=search_lang,
-                freshness=freshness, safesearch=safesearch, enrich=want_enrich,
-            )
-        except _MissingKey as e:
-            return ToolResult(success=False, error=str(e))
-        except httpx.HTTPStatusError as e:
-            detail = self._http_detail(e)
-            log.error(f"{engine} web search failed", query=q, error=detail)
-            return ToolResult(success=False, error=detail)
-        except Exception as e:
-            log.error("Web search failed", query=q, error=str(e))
-            return ToolResult(success=False, error=str(e))
+        chrome_note = ""
+        via_chrome = None
+        if bool(getattr(search_cfg, "via_chrome", True)):
+            via_chrome, chrome_note = await self._chrome(
+                q, n=n, page=page, country=country, search_lang=search_lang,
+                freshness=freshness, safesearch=safesearch)
+        if via_chrome is not None:
+            engine, (hits, notes) = via_chrome[0], via_chrome[1:]
+            provider = "chrome"
+        else:
+            try:
+                hits, notes = await run(
+                    q, search_cfg, n=n, page=page, country=country, search_lang=search_lang,
+                    freshness=freshness, safesearch=safesearch, enrich=want_enrich,
+                )
+            except _MissingKey as e:
+                return ToolResult(success=False, error=self._with_chrome(str(e), chrome_note))
+            except httpx.HTTPStatusError as e:
+                detail = self._http_detail(e)
+                log.error(f"{engine} web search failed", query=q, error=detail)
+                return ToolResult(success=False, error=self._with_chrome(detail, chrome_note))
+            except Exception as e:
+                log.error("Web search failed", query=q, error=str(e))
+                return ToolResult(success=False, error=self._with_chrome(str(e), chrome_note))
+            if chrome_note:
+                notes.insert(0, f"Searched with {engine}: {chrome_note}")
 
         hits = self._dedupe(hits)
-        if want_enrich and provider in {"brave", "keenable"} and hits:
+        if want_enrich and provider in {"brave", "keenable", "chrome"} and hits:
             # Brave's own page extraction first (one request, gets pages that
             # turn plain HTTP clients away); reading the pages here is the net.
             by_brave = provider == "brave" and await self._brave_context(
@@ -397,6 +423,76 @@ class WebSearchTool(Tool):
             success=True,
             content=self._render(engine, q, hits, notes, self._budget(kwargs.get("_agent"))),
         )
+
+    # ── the person's own Chrome (Flight Deck) ────────────────────────
+
+    @staticmethod
+    def _with_chrome(error: str, chrome_note: str) -> str:
+        return f"{error} (The person's Chrome didn't search either: {chrome_note})" if chrome_note else error
+
+    async def _chrome(self, q: str, *, n: int, page: int, country: str, search_lang: str,
+                      freshness: str, safesearch: str) -> tuple[tuple[str, list[_Hit], list[str]] | None, str]:
+        """``((engine label, hits, notes), "")`` when the owner's Chrome ran the
+        search; ``(None, why)`` to use the configured engine — ``why`` is "" when
+        it's simply not on (or not this turn's to use), else what went wrong.
+        Never raises."""
+        try:
+            from captain_claw import speaker
+            from captain_claw.fd_client import flight_deck_base, flight_deck_headers
+
+            base = flight_deck_base()
+            if not base or speaker.member_bound() or speaker.grant_headers():
+                return None, ""   # no deck, or a shared agent's member: never the owner's browser
+            headers = flight_deck_headers()
+        except Exception:   # noqa: BLE001 — speaker context lost and the like: the API engine
+            return None, ""
+        if not headers.get("X-Agent-Auth"):
+            return None, ""
+        loop = asyncio.get_running_loop()
+        if loop.time() - _CHROME_OFF.get(base, -1e9) < _CHROME_OFF_KEEP:
+            return None, ""
+        body = {"query": q[:500], "count": n, "page": page, "search_lang": search_lang,
+                "country": country, "freshness": freshness, "safesearch": safesearch}
+        try:
+            resp = await self.client.post(f"{base}/fd/browser-hands/agent/search", json=body,
+                                          headers=headers, timeout=_CHROME_WAIT + 5)
+        except httpx.HTTPError as e:
+            log.debug("web_search: Flight Deck unreachable for a Chrome search", error=str(e))
+            return None, ""
+        if resp.status_code in (404, 405):   # a Flight Deck from before this
+            _CHROME_OFF[base] = loop.time() + 240
+            return None, ""
+        try:
+            data = resp.json()
+        except ValueError:
+            return None, ""
+        if resp.status_code >= 400 or not isinstance(data, dict):
+            return None, ""
+        if not data.get("ok"):
+            why = str(data.get("why") or "")
+            if why == "off":
+                _CHROME_OFF[base] = loop.time()
+                return None, ""
+            if why == "no_browser":
+                return None, ""   # Chrome closed or asleep: the everyday case, nothing to say
+            return None, self._clean_text(str(data.get("error") or ""), 300)
+        hits: list[_Hit] = []
+        for item in data.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").strip()
+            if not url.lower().startswith(("http://", "https://")):
+                continue
+            hits.append(_Hit(
+                title=self._clean_text(str(item.get("title") or "Untitled"), max_chars=180),
+                url=url,
+                snippet=self._clean_text(str(item.get("snippet") or "")),
+                site=self._clean_text(str(item.get("site") or _host(url)), 80),
+                date=self._clean_text(str(item.get("date") or ""), 40),
+            ))
+        notes = [self._clean_text(str(x), 300) for x in data.get("notes") or [] if x]
+        label = f"{self._clean_text(str(data.get('engine') or 'Web'), 40)} (in the person's Chrome)"
+        return (label, hits, notes), ""
 
     # ── engines ──────────────────────────────────────────────────────
 

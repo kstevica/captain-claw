@@ -39,6 +39,13 @@ drive the owner's browser either. Only a browser's own token
 (``Browser · …``, still unrevoked) may offer a browser. The extension keeps an
 agent to its own tab group and refuses Flight Deck's own address and pages
 that aren't on the web; the person can stop any agent from the panel.
+
+**Searches.** The same socket can carry the agents' web searches
+(``browser_search.py``) — opened for that alone when the person allowed it in
+the panel but didn't lend the browser's hands. The hello says which: ``hands``
+(absent = yes; extensions before 0.6 connect only for that) and ``search``
+(the engines it serves). A browser that doesn't lend its hands never gets an
+act.
 """
 
 from __future__ import annotations
@@ -74,6 +81,7 @@ from captain_claw.flight_deck.browser_clip import (
     token_kind,
     unique_name,
 )
+from captain_claw.flight_deck.browser_search import SearchBody, search_in_browser
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +133,8 @@ class _Conn:
     focused_at: float = 0.0     # the person was last at this browser (window focus)
     stopped: tuple[str, ...] = ()   # agents the person stopped in the panel
     agent_slug: str = ""        # an agent's own (headless) browser: only that agent uses it
+    hands: bool = True          # lent to the agents' browser tool (older extensions connect only then)
+    search_engines: tuple[str, ...] = ()   # engines it runs web searches on (browser_search.py)
     closed: bool = False
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -134,7 +144,8 @@ class _Conn:
 
     def view(self) -> dict:
         return {"browser": self.browser, "version": self.version, "own_of": self.agent_slug,
-                "connected_s": int(_now() - self.connected_at), "token_id": self.token_id}
+                "connected_s": int(_now() - self.connected_at), "token_id": self.token_id,
+                "searches": list(self.search_engines)}
 
 
 @dataclass(eq=False)
@@ -156,11 +167,17 @@ _CONNS: dict[str, list[_Conn]] = {}
 _ACTS: dict[str, _Act] = {}
 
 
-def connections(user_id: str) -> list[_Conn]:
-    """The person's browsers that are connected for agents, freshest first."""
+def live_connections(user_id: str) -> list[_Conn]:
+    """Every socket of the person's browsers that's open now — lent to the
+    agents' browser tool, running their web searches, or both — freshest first."""
     now = _now()
     live = [c for c in _CONNS.get(str(user_id), []) if not c.closed and now - c.last_seen < STALE_S]
     return sorted(live, key=lambda c: max(c.focused_at, c.connected_at), reverse=True)
+
+
+def connections(user_id: str) -> list[_Conn]:
+    """The person's browsers that are connected for agents, freshest first."""
+    return [c for c in live_connections(user_id) if c.hands]
 
 
 def connected_token_ids(user_id: str) -> set[str]:
@@ -371,6 +388,7 @@ async def hands_ws(ws: WebSocket) -> None:
                                   or row.get("name") or "Browser", 80),
                  version=one_line(first.get("version"), 20), agent_slug=str(row.get("agent_slug") or ""))
     conn.stopped = _stopped_list(first.get("stopped"))
+    _apply_prefs(conn, first)
     _register(conn)
     if not conn.agent_slug:
         from captain_claw.flight_deck.browser_clip import note_version
@@ -396,6 +414,8 @@ async def hands_ws(ws: WebSocket) -> None:
                 conn.focused_at = _now()
             elif kind == "stopped":
                 conn.stopped = _stopped_list(msg.get("agents"))
+            elif kind == "prefs":
+                _apply_prefs(conn, msg)
             elif kind == "result":
                 act = _ACTS.get(str(msg.get("id") or ""))
                 if act is not None and act.conn is conn and not act.future.done():
@@ -407,6 +427,19 @@ async def hands_ws(ws: WebSocket) -> None:
     finally:
         _unregister(conn)
         log.info("Browser hands disconnected: user=%s browser=%s", conn.user_id, conn.browser)
+
+
+def _apply_prefs(conn: _Conn, msg: dict) -> None:
+    """What the browser lends: its hands (``hands``, absent = yes — older
+    extensions only connect then) and the search engines it serves
+    (``search``). An agent's own headless browser never runs searches."""
+    from captain_claw.flight_deck.browser_search import ENGINES
+
+    if "hands" in msg:
+        conn.hands = bool(msg.get("hands"))
+    raw = msg.get("search")
+    if isinstance(raw, list) and not conn.agent_slug:
+        conn.search_engines = tuple(e for e in dict.fromkeys(str(x) for x in raw[:20]) if e in ENGINES)
 
 
 def _stopped_list(raw: Any) -> tuple[str, ...]:
@@ -623,6 +656,15 @@ async def _connect_outcome(ask_id: str, done: dict, owner: str, slug: str, name:
     if done.get("declined"):
         return {"ok": False, "declined": True, "error": "The person chose not to answer. Don't connect it unless they ask."}
     return {"ok": False, "error": str(done.get("error") or "No answer from the person.")}
+
+
+@agent_router.post("/search")
+async def agent_search(body: SearchBody, request: Request) -> dict:
+    """A web search run in the person's own Chrome, on the engine they picked
+    (browser_search.py). ``ok: false`` with ``why`` sends the agent to its
+    search API instead."""
+    owner, slug = _owner_of(request, "web searches through the person's browser")
+    return await search_in_browser(owner, slug, body)
 
 
 @agent_router.post("/turn-over")

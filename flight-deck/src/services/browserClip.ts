@@ -167,3 +167,28 @@ export function recordingDataUrl(id: string, itemId: string, download = false): 
   const qs = q.toString()
   return `${rec(id)}/data/${encodeURIComponent(itemId)}/file${qs ? `?${qs}` : ''}`
 }
+
+// ── The agents' web searches in the person's Chrome (browser_search.py) ──
+//
+// Off until the person picks an engine (Profile → Web searches); Captain for
+// Chrome then asks, once, to read that engine's result pages.
+
+export interface SearchEngineInfo {
+  id: string
+  name: string
+  host: string
+}
+
+export interface ChromeSearchStatus {
+  /** The engine picked ('' = off). */
+  engine: string
+  engines: SearchEngineInfo[]
+  /** The person's browsers connected now and the engines each runs searches on. */
+  browsers: { browser: string; version: string; engines: string[]; ready: boolean }[]
+  /** Captain for Chrome is paired in one of their browsers at all. */
+  extension_set_up: boolean
+}
+
+export const getChromeSearch = () => fdFetch<ChromeSearchStatus>('/fd/web-search/chrome')
+export const setChromeSearch = (engine: string) =>
+  fdFetch<ChromeSearchStatus>('/fd/web-search/chrome', { method: 'PUT', body: JSON.stringify({ engine }) })
