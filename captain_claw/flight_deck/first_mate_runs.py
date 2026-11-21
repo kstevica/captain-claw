@@ -521,6 +521,8 @@ def funnel_config(version: dict[str, Any]) -> dict[str, Any]:
         cfg["funnel_search_budget"] = int(rc["search_budget"])
     if rc.get("agent_context") is not None:
         cfg["funnel_agent_context"] = int(rc["agent_context"])
+    if rc.get("expert"):
+        cfg["funnel_expert"] = str(rc["expert"])
     return cfg
 
 

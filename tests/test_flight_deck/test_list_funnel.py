@@ -3465,3 +3465,154 @@ async def test_a_contact_page_counts_on_a_site_learnt_while_reading(deck):
     got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
     assert got == {"Alpha": "kept", "Beta": "maybe"}  # Beta's site is only named: no page of it was read
     assert funnel._read_csv(folder / funnel.ROWS)[0]["Email"] == "https://alpha.example/contact"
+
+
+# ── an expert agent beside the run (docs/funnel-expert-agent-plan.md, phase 1) ──
+# A factory's runs get the owner's pick. A run wakes it, gives it one turn in a session
+# of its own before the recipe is written, and reads what it said everywhere the brief
+# is read. It writes the new searches. One that can't be reached never stops a run.
+
+from captain_claw.flight_deck import (  # noqa: E402
+    agent_idle,
+    agent_preset,
+    fd_scheduler,
+    first_mate_agent,
+    first_mate_runs,
+    funnel_expert,  # noqa: E402
+)
+from captain_claw.flight_deck import first_mate_store as fms  # noqa: E402
+
+EXPERT_LIST = [{"id": "fm1", "text": "x", "check": {"type": "table", "path": "leads.csv", "columns": ["Name"], "min_rows": 9}}]
+SAID = ("NOTES\nSmall labs are listed by their university's core-facility pages, not in directories.\n\n"
+        "DECISIONS\n- Does a two-person lab count? Yes, any lab with a bench.\n- Hospital labs? No.")
+
+
+@pytest.fixture
+def expert(monkeypatch):
+    """One agent of the owner's, "Dr. Petri", that answers what the test says."""
+    state = {"woken": 0, "turns": [], "asks": [], "released": 0, "ready": True, "says": SAID,
+             "queries": lambda: ["core facility directory"]}
+
+    async def ready(slug, timeout=0):
+        state["woken"] += 1
+        return state["ready"]
+
+    async def capture(*, host, port, auth, prompt, timeout, automation=None, meta=None, identity=None, **_k):
+        state["turns"].append({"prompt": prompt, "automation": automation})
+        if meta is not None:
+            meta["task_session"] = {"id": "sess-1", "name": "x"}
+        return state["says"]
+
+    class Reply:
+        def __init__(self, text):
+            self.text, self.tokens = text, 7
+
+    async def complete(reader, system, user, owner, max_tokens, **_k):
+        state["asks"].append({"reader": reader, "system": system, "user": user})
+        return Reply(json.dumps({"queries": state["queries"]()}))
+
+    async def instructions(owner, slug):
+        return "Answer as a microbiologist."
+
+    from captain_claw.flight_deck import agent_exam, agent_skills
+    from captain_claw.flight_deck import server as srv
+    monkeypatch.setattr(first_mate_agent, "mine", lambda owner: [{"slug": "petri", "name": "Dr. Petri"}])
+    monkeypatch.setattr(agent_idle, "ready_for_task", ready)
+    monkeypatch.setattr(agent_idle, "touch", lambda slug: None)
+    monkeypatch.setattr(agent_idle, "release_after_task_soon", lambda slug: state.__setitem__("released", state["released"] + 1))
+    monkeypatch.setattr(fd_scheduler, "resolve_agent_by_slug", lambda slug, auth: ("localhost", 9, "t"))
+    monkeypatch.setattr(fd_scheduler, "run_prompt_and_capture", capture)
+    monkeypatch.setattr(agent_preset, "_agent_complete", complete)
+    monkeypatch.setattr(agent_preset, "agent_reader", lambda slug, entry: {"provider": "x", "model": "m"})
+    monkeypatch.setattr(agent_skills, "_instructions", instructions)
+    monkeypatch.setattr(agent_exam, "_lesson_texts", lambda slug: ["Plates are counted after 48 hours."])
+    monkeypatch.setattr(srv, "_load_process_registry", lambda: {"petri": {"name": "Dr. Petri"}})
+    return state
+
+
+def _list(deck):
+    deck["recipe"] = {"item": "lab", "key": "Name", "decide": "Labs.",
+                      "sources": [{"kind": "search", "group": "", "queries": ["labs"]}]}
+    deck["tools"] = _Tools(pages={}, results={"labs": "found N0", "core facility directory": "found N1"})
+    deck["extract"] = lambda user: {"items": [{"name": m, "fields": {"Name": m}} for m in ("N0", "N1") if f"found {m}" in user]}
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"]}} for i, f in items]
+    deck["queries"] = ["never asked"]
+
+
+def test_a_factorys_runs_get_its_expert():
+    cfg = fms.check_runner_config("funnel", {"expert": "petri", "search_budget": 50})
+    assert cfg["expert"] == "petri" and first_mate_runs.funnel_config({"runner_config": cfg})["funnel_expert"] == "petri"
+    assert "funnel_expert" not in first_mate_runs.funnel_config({"runner_config": fms.check_runner_config("funnel", {})})
+    with pytest.raises(fms.FirstMateError):
+        fms.check_runner_config("bat", {"expert": "petri"})
+
+
+async def test_the_expert_works_beside_the_run(deck, expert):
+    run, folder = await _run(deck["store"], EXPERT_LIST, {"funnel_expert": "petri"}, rid="bat_expert01")
+    _list(deck)
+    steps = await funnel.plan(run)
+    # one turn, as itself, in a session opened for this run, before the recipe is written
+    assert deck["asked"][0] == "setup" and len(expert["turns"]) == 1 and expert["woken"] == 1
+    auto = expert["turns"][0]["automation"]
+    assert auto["kind"] == "colleague" and auto["mail_write"] == "deny"
+    assert auto["task"] == {"id": "exp-bat_expert01", "name": "Expert for t", "session_id": "", "mirror": False}
+    assert "Build the list." in expert["turns"][0]["prompt"] and "as its owner" in expert["turns"][0]["prompt"]
+    assert json.loads((folder / funnel_expert.STATE).read_text())["session"] == "sess-1"
+    assert "core-facility pages" in deck["setup_prompts"][0] and "Dr. Petri" in deck["setup_prompts"][0]
+    await _go(deck["store"], run, steps)
+    assert "core-facility pages" in deck["decide_prompts"][0]  # every judging call reads its notes
+    # the new searches are the expert's, on its own model, with what it knows ahead of the question
+    ask = expert["asks"][0]
+    assert ask["reader"]["agent"] == "petri" and "Answer as a microbiologist." in ask["system"]
+    assert "Plates are counted after 48 hours." in ask["system"] and "core-facility pages" in ask["user"]
+    assert "queries" not in deck["asked"]
+    assert [r["Name"] for r in funnel._read_csv(folder / "leads.csv")] == ["N0", "N1"]
+    summary = (folder / "summary.md").read_text()
+    assert "## The expert" in summary and "Dr. Petri worked beside this run" in summary
+    assert "- Does a two-person lab count? Yes, any lab with a bench." in summary and "- Hospital labs? No." in summary
+    assert "It wrote 1 of the run's new searches. They found 1 items, 1 of them on the list." in summary
+    assert summary.index("## The expert") < summary.index("## Files")
+    assert expert["released"] == 1 and len(expert["turns"]) == 1  # asked for its notes once, let go at the end
+    said = [json.loads(ln) for ln in (folder / funnel_expert.LOG).read_text().splitlines()]
+    assert [x["what"] for x in said][:2] == ["notes", "searches"]
+
+
+async def test_a_run_goes_on_without_an_expert_it_cant_reach(deck, expert):
+    expert["ready"] = False
+    run, folder = await _run(deck["store"], EXPERT_LIST, {"funnel_expert": "petri"}, rid="bat_expert02")
+    _list(deck)
+    deck["queries"] = ["core facility directory"]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    assert expert["turns"] == [] and expert["asks"] == [] and "queries" in deck["asked"]  # the run's own model wrote them
+    assert [r["Name"] for r in funnel._read_csv(folder / "leads.csv")] == ["N0", "N1"]
+    assert "wasn't available (it couldn't be woken or started)" in (folder / "summary.md").read_text()
+    notes = [e["message"] for e in await deck["store"].list_events(run["id"]) if e["stage"] == "note"]
+    assert any("isn't available" in n and "goes on without it" in n for n in notes)
+
+
+async def test_an_agent_that_isnt_the_owners_is_never_asked(deck, expert, monkeypatch):
+    monkeypatch.setattr(first_mate_agent, "mine", lambda owner: [])
+    run, folder = await _run(deck["store"], EXPERT_LIST, {"funnel_expert": "petri"}, rid="bat_expert03")
+    _list(deck)
+    await funnel.plan(run)
+    assert expert["woken"] == 0 and expert["turns"] == []
+    assert json.loads((folder / funnel_expert.STATE).read_text())["why"] == "it isn't one of the owner's agents any more"
+
+
+async def test_a_run_without_an_expert_is_as_before(deck, expert):
+    run, folder = await _run(deck["store"], EXPERT_LIST, rid="bat_expert04")
+    _list(deck)
+    deck["queries"] = ["core facility directory"]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps)
+    assert expert["woken"] == 0 and not (folder / funnel_expert.STATE).exists()
+    assert "## The expert" not in (folder / "summary.md").read_text()
+
+
+def test_decisions_are_read_from_the_notes(tmp_path):
+    (tmp_path / "shared" / "funnel").mkdir(parents=True)
+    (tmp_path / funnel_expert.NOTES).write_text("From X:\n\nNOTES\nSomething.\n\n**DECISIONS**\n1. A? Yes.\nNone\n- B? No.\n")
+    assert funnel_expert.decisions(tmp_path) == ["A? Yes.", "B? No."]
+    (tmp_path / funnel_expert.NOTES).write_text("NOTES\nSomething.\n\nDECISIONS\nNone.\n")
+    assert funnel_expert.decisions(tmp_path) == []
