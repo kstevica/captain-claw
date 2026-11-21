@@ -1,10 +1,11 @@
 import { forwardRef, useEffect, useLayoutEffect, useRef, useState, type Ref } from 'react'
 import {
-  AlertTriangle, Check, CheckCircle2, Clock, FileIcon, Gauge, HelpCircle, ImageIcon, ListTodo, Loader2,
+  AlertTriangle, Check, CheckCircle2, Clock, Gauge, HelpCircle, ListTodo, Loader2,
   MessageSquare, MessageSquareText, MoreHorizontal, Pause, PenLine, Play, Plus, Power, RefreshCw, RotateCcw,
   SkipForward, Square, Trash2, Unplug, Wand2, WifiOff, X, XCircle, type LucideIcon, type LucideProps,
 } from 'lucide-react'
 import type { AgentConn } from '../../../hooks/useFileAttachments'
+import { kindOf } from '../fileKind'
 import { touchKeyboard } from '../../../hooks/useMediaQuery'
 import { agentFileViewUrl } from '../../../utils/agentFileUrl'
 import { fmtTokens } from '../../../utils/format'
@@ -343,49 +344,87 @@ export function ClampText({ text, lines, open, onToggle, clickToggle = false, cl
   )
 }
 
-/** A task's files as chips (a picture with a thumbnail once the agent is known). */
-export function FileChips({ files, conn, onRemove, className = '' }: {
+const PILL = 'inline-flex h-7 max-w-[220px] items-center gap-1.5 rounded-full border border-zinc-700/60 bg-zinc-950/50 pl-0.5 text-xs text-zinc-300'
+
+/** Files as pills — a task's, or a message's you sent: a picture with its
+ *  thumbnail once the agent is known, a file with its kind's icon, and the
+ *  name a person gave it (never the server's path). With `viewUrl` a picture
+ *  opens full size in a new tab. */
+export function FileChips({ files, conn, viewUrl, onRemove, className = '' }: {
   files: AttachedFile[]
   conn: AgentConn | null
+  /** Where a picture is seen in the browser (a shared agent's files go
+   *  another way than `conn`); a picture with one is a link. */
+  viewUrl?: (f: AttachedFile) => string | null
   onRemove?: (ref: string) => void
   className?: string
 }) {
   return (
-    <div className={`flex flex-wrap gap-1 ${className}`}>
-      {files.map((f) => (
-        <span
-          key={f.ref}
-          title={f.path}
-          className="inline-flex max-w-[160px] items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950/60 px-1.5 py-0.5 text-[11px] text-zinc-400"
-        >
-          {f.kind === 'image' ? <Thumb file={f} conn={conn} /> : <FileIcon className="h-3 w-3 shrink-0" />}
-          <span className="min-w-0 truncate">{f.name}</span>
-          {onRemove && (
-            <button
-              type="button"
-              onClick={() => onRemove(f.ref)}
-              aria-label={`Remove ${f.name}`}
-              className={`-mr-0.5 shrink-0 rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ${FOCUS}`}
+    <div className={`flex flex-wrap gap-1.5 ${className}`}>
+      {files.map((f) => {
+        const src = f.kind !== 'image' ? null
+          : viewUrl ? viewUrl(f)
+          : conn ? agentFileViewUrl(f.path, conn.host, conn.port, conn.auth) : null
+        const body = (
+          <>
+            {f.kind === 'image' ? <Thumb key={src ?? ''} src={src} /> : <KindDot name={f.name} />}
+            <span className="min-w-0 truncate">{f.name}</span>
+          </>
+        )
+        if (viewUrl && src && !onRemove) {
+          return (
+            <a
+              key={f.ref}
+              href={src}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`Open ${f.name}`}
+              className={`${PILL} pr-2.5 transition-colors hover:border-zinc-600 hover:bg-zinc-900 hover:text-zinc-100 ${FOCUS}`}
             >
-              <X className="h-3 w-3" />
-            </button>
-          )}
-        </span>
-      ))}
+              {body}
+            </a>
+          )
+        }
+        return (
+          <span key={f.ref} title={f.name} className={`${PILL} ${onRemove ? 'pr-1' : 'pr-2.5'}`}>
+            {body}
+            {onRemove && (
+              <button
+                type="button"
+                onClick={() => onRemove(f.ref)}
+                aria-label={`Remove ${f.name}`}
+                className={`shrink-0 rounded-full p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ${FOCUS}`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </span>
+        )
+      })}
     </div>
   )
 }
 
-function Thumb({ file, conn }: { file: AttachedFile; conn: AgentConn | null }) {
+/** A file's kind in a pill: its icon on its colour (as the composer's cards). */
+function KindDot({ name }: { name: string }) {
+  const { Icon, tile } = kindOf(name, '')
+  return (
+    <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${tile}`}>
+      <Icon className="h-3.5 w-3.5" />
+    </span>
+  )
+}
+
+function Thumb({ src }: { src: string | null }) {
   const [broken, setBroken] = useState(false)
-  if (!conn || broken) return <ImageIcon className="h-3 w-3 shrink-0" />
+  if (!src || broken) return <KindDot name="picture.png" />
   return (
     <img
-      src={agentFileViewUrl(file.path, conn.host, conn.port, conn.auth)}
+      src={src}
       alt=""
       loading="lazy"
       onError={() => setBroken(true)}
-      className="my-0.5 h-8 w-8 shrink-0 rounded object-cover"
+      className="h-6 w-6 shrink-0 rounded-full bg-zinc-800 object-cover"
     />
   )
 }
