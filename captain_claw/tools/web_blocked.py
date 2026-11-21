@@ -168,8 +168,13 @@ def block_reason(status: int | None = None, title: str = "", text: str = "", htm
 _LOGIN_PATHS = ("/authwall", "/login", "/signin", "/sign-in", "/sign_in", "/checkpoint", "/uas/login",
                 "/accounts/login", "/i/flow/login", "/auth/login", "/session/new")
 # Whole words: "Sign in | Example", "Log into Facebook" — not "Signing in with SSO".
-_LOGIN_TITLE_RE = re.compile(
-    r"^(log ?in|sign ?in|sign up|log into)\b|\b(log in or sign up|sign up \| linkedin|linkedin login|join linkedin)\b")
+_LOGIN_TITLE_RE = re.compile(r"^(log ?in|sign ?in|sign up|log into)\b")
+# The big sites' own walls, by their titles: they count at any length
+# (LinkedIn's "Sign Up | LinkedIn" carries a cookie banner, a join form and a
+# teaser of the profile — far past a short page).
+_SITE_WALL_TITLE_RE = re.compile(
+    r"\b(sign up \| linkedin|linkedin login|join linkedin|log into facebook|log in or sign up|"
+    r"login • instagram|log in to x|sign in to x)\b")
 _LOGIN_TEXT = ("sign in to see", "sign in to view", "log in to see", "log in to view", "log in to continue",
                "sign in to continue", "you must log in", "you must be logged in", "please log in", "please sign in",
                "join now to see", "join to view", "create an account or log in", "log in or sign up to view",
@@ -186,10 +191,12 @@ def login_wall(title: str = "", text: str = "", url: str = "", html: str = "") -
         path = ""
     if any(path.startswith(p) or f"{p}/" in path or path.endswith(p) for p in _LOGIN_PATHS):
         return "it shows a sign-in page"
+    t = re.sub(r"\s+", " ", str(title or "") or title_of(html)).strip().lower()
+    if t and _SITE_WALL_TITLE_RE.search(t):
+        return f"it shows a sign-in page (“{t[:60]}”)"
     body = re.sub(r"\s+", " ", str(text or "")).strip().lower()
     if len(body) >= LOGIN_PAGE_CHARS:
         return ""
-    t = re.sub(r"\s+", " ", str(title or "") or title_of(html)).strip().lower()
     if t and _LOGIN_TITLE_RE.search(t):
         return f"it shows a sign-in page (“{t[:60]}”)"
     if any(m in body for m in _LOGIN_TEXT):

@@ -22,7 +22,7 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
-WAIT_S = 40.0          # Flight Deck waits up to 30 s for the page to settle in the browser
+WAIT_S = 48.0          # Flight Deck waits up to 40 s for the page to load and be drawn in the browser
 KEEP_S = 60.0          # what Flight Deck said about the mode is believed this long
 _MODE: dict[str, tuple[float, str]] = {}   # Flight Deck address → (until, "" | "blocked" | "always")
 

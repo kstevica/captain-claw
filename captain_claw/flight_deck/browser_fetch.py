@@ -49,7 +49,7 @@ owner_router = APIRouter(prefix="/fd/web-fetch", tags=["web-fetch"])
 
 SETTING_KEY = "web-fetch:chrome"
 MODES = ("blocked", "always")
-PAGE_WAIT_S = 30.0            # one page in the person's browser, settle and scrolls included
+PAGE_WAIT_S = 40.0            # one page in the person's browser: load, drawn, scrolled through
 MAX_HTML_CHARS = 3_000_000    # the page as the extension sends it
 MAX_SITES = 50
 READS_AT_ONCE = 2             # per browser

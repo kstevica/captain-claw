@@ -734,7 +734,9 @@ class WebFetchTool(Tool):
         "the text around them) are saved for reports and listed at the end; fetching "
         "an image URL saves that picture."
     )
-    timeout_seconds = 50.0  # a deep fetch (≤ ~25 s) plus its pictures (≤ 12 s)
+    # A deep fetch (≤ ~25 s), the page again in the owner's Chrome when the site
+    # turned that away (≤ ~48 s), and its pictures (≤ 12 s).
+    timeout_seconds = 100.0
     parameters = {
         "type": "object",
         "properties": {

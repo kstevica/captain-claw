@@ -118,6 +118,13 @@ works here (`target="chrome"`), signed in as you, while you watch:
   or a link it clicked opening a new tab), the tab you were on comes back when
   the agent's run is over. If you picked another tab meanwhile, it stays.
 
+Pages that draw themselves after they load (LinkedIn, Facebook, most web
+apps) are waited for: after opening a page or a click that changed it, and
+before each read, the agent waits until the page stops changing and none of
+its data requests is still on the way (up to about 10 s). The first
+`page_text` of a page also scrolls through it a screen at a time — sections
+drawn only when scrolled to come in — and back to where it was.
+
 It uses two permissions the extension has from install: **debugger** (real
 clicks, typing and screenshots in the agent's tabs — Chrome doesn't let an
 extension ask for it later) and **tab groups**. Nothing uses them until you

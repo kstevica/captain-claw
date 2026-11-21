@@ -134,3 +134,19 @@ async def test_never_for_a_members_turn_an_opted_out_agent_or_without_flight_dec
     monkeypatch.setattr(fd_client, "flight_deck_base", lambda: "")
     assert (await _fetch(tool)).success
     assert state["deck"] == []
+
+
+def test_the_big_sites_sign_in_walls_count_at_any_length():
+    from captain_claw.tools.web_blocked import login_wall
+
+    banner = "LinkedIn respects your privacy. Select Accept to consent or Reject to decline. " * 200
+    assert login_wall("Sign Up | LinkedIn", banner)          # the wall a server gets for a profile
+    assert login_wall("Log into Facebook", banner)
+    assert not login_wall("Jane Doe - Engineer | LinkedIn", banner)   # the profile itself
+    assert not login_wall("Login flows explained", banner)            # a long page about signing in
+    assert not login_wall("Signing in with SSO", "short")
+
+
+def test_web_fetch_waits_long_enough_for_the_owners_chrome():
+    # A deep fetch, then the page read again in the person's Chrome (up to ~48 s).
+    assert WebFetchTool.timeout_seconds >= 100 > web_chrome.WAIT_S + 25
