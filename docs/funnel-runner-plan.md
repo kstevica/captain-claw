@@ -923,6 +923,18 @@ Each fault in words that fit any list:
   others alone.
 - *Items read at once each started the run's search agent.* One start, behind a lock.
 
+**The charter's own groups, searches that name them (2026-11-21).** A setup merged a charter's
+four groups into two by adding their amounts, and code then replaced every search with ones
+built from a two-letter group name. Three faults:
+
+- *A recipe's groups weren't the charter's.* A group amount that is no number the charter states
+  sends the setup back once, told which (`groups_not_the_charters`); the prompt says a group
+  that is two things at once stays one group. Not checked when the run's checks fix the groups.
+- *A short group name wasn't seen in its own searches.* A two- or three-letter name counts as a
+  whole word (`names_group`). When searches do have to be written by code for a group whose
+  name says no kind of thing, they are built from what its source looks for.
+- *New searches were written for a step's first source only.* Each of its sources in turn.
+
 ## 9. Risks
 
 - **Search quota.** About 400 searches a run. Check the Pi's provider plan before

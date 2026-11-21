@@ -718,6 +718,19 @@ async def build_brief(run: dict, folder: Path, creds: dict | None) -> str:
     return body.strip()
 
 
+def groups_not_the_charters(recipe: dict[str, Any], task: str) -> str:
+    """"" when a recipe's groups can be the charter's, else what is wrong, for the setup
+    to put right: a group's amount is a number the charter never states (two of its
+    groups were merged into one: "200 firms and 75 people in the US" as "US: 275")."""
+    stated = {int(n.replace(",", "")) for n in re.findall(r"(?<![\w.])\d{1,3}(?:,\d{3})+|(?<![\w.])\d+", task or "")}
+    odd = [f"{g} {n}" for g, n in (recipe.get("groups") or {}).items() if n and n not in stated]
+    if not odd or len(stated) < 2:
+        return ""
+    return ("These groups' amounts are not in the goal: " + ", ".join(odd) + ". The groups are the goal's own, "
+            "one for each amount it gives, each with that amount. A group that is two things at once (a kind "
+            "and a place) stays one group, named by both; its searches look for that group only.")
+
+
 def charter_checks(task: str, columns: list[str]) -> list[dict[str, Any]]:
     """A column's fixed values, as the charter lists them ("CaptainFeature is exactly
     one of: A, B, C."), anywhere in its text, as checks: they hold even when drafting
@@ -803,11 +816,32 @@ def _group_phrases(group: str, item: str = "") -> list[str]:
     return list(dict.fromkeys(out))
 
 
-def _group_queries(group: str, place: str, size: re.Match | None, item: str = "") -> list[str]:
+def _short_names(group: str) -> list[str]:
+    """A group's own short words ("US", "UK", "B2B"): too short to look for inside other
+    words, so a search names the group by one only as a whole word."""
+    return [w for w in re.findall(r"[a-z0-9]+", _fold(group)) if 2 <= len(w) <= 3 and w not in _GROUP_STOP]
+
+
+def names_group(queries: list[str], group: str, said: list[str] | None = None) -> bool | None:
+    """Whether a group's searches name it: by a stem of its words or of the words the
+    setup gave for it, or by one of its short words whole. None when the group's name
+    gives nothing to look for."""
+    words, short = _group_words(group, said), _short_names(group)
+    if not words and not short:
+        return None
+    joined = _fold(" ".join(queries))
+    return any(w in joined for w in words) or any(re.search(rf"\b{re.escape(w)}\b", joined) for w in short)
+
+
+def _group_queries(group: str, place: str, size: re.Match | None, item: str = "", about: str = "") -> list[str]:
     """Searches for pages that list many of a group's items, any kind of item: lists,
     directories, databases, rankings, for each way to say the group. A company-size
-    band adds a search for company pages with that band."""
+    band adds a search for company pages with that band. A group whose name says no
+    kind of thing (a place, a code) is searched by what its source looks for."""
     phrases = _group_phrases(group, item) or [group]
+    head = " ".join(str(about or "").split(":")[0].split())[:80]
+    if head and not _group_words(group):
+        phrases = [head if re.search(rf"\b{re.escape(group)}\b", head, re.I) else f"{group} {head}"]
     qs = [q for t in ("list of {} {}", "best {} {}", "{} directory {}", "{} {}", "top {} {}", "{} database {}")
           for q in (t.format(ph, place) for ph in phrases)]
     if size:
@@ -855,10 +889,9 @@ def tidy_recipe(recipe: dict[str, Any], task: str, folder: Path | None = None) -
     for s in recipe["sources"]:
         if s["kind"] != "search" or not s.get("group"):
             continue
-        words = _group_words(s["group"], (recipe.get("group_words") or {}).get(s["group"]))
-        joined = " ".join(s["queries"]).lower()
-        if (words and not any(w in joined for w in words)) or s["queries"] in seen_lists:
-            s["queries"] = _group_queries(s["group"], place, size, recipe.get("item", ""))
+        named = names_group(s["queries"], s["group"], (recipe.get("group_words") or {}).get(s["group"]))
+        if named is False or s["queries"] in seen_lists:
+            s["queries"] = _group_queries(s["group"], place, size, recipe.get("item", ""), s.get("about") or "")
             s["about"] = s["about"] or s["group"]
         seen_lists.append(s["queries"])
     if place:  # one place: a search that names none finds items anywhere
@@ -1203,6 +1236,9 @@ Rules:
 - An offline list (a file or documents only) has no searches and no gather unless the rules need the web.
 - A file the goal points to for information (what the owner's product is, house rules) is "reference", never a
   source: no items are taken from it, and every judging call reads it.
+- The groups are the goal's own: one for each amount it gives, with that amount, never two of them added up. A
+  group that is two things at once (a kind and a place: "200 firms in the US, 75 people in the US") stays one
+  group, named by both ("US firms", "US people"), with its own searches.
 - Each group's searches name that group; never copy one group's searches to another. When the list is about one
   place, every search names it (the country, or a state or city in it).
 - Never invent a file or a link that isn't in what you're shown.
@@ -1456,7 +1492,8 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
                   + (f"# What the owner's documents and links say (read already; write the searches, the "
                      f"rules and each column's meaning with it)\n{brief}\n\n" if brief else "")
                   + f"# The run's folder\n{await asyncio.to_thread(_folder_listing, folder)}")
-        for attempt in range(2):
+        wrong, spare = "", None
+        for attempt in range(3):
             try:
                 async with bat_routes._metered(run["id"], "funnel-setup"):
                     prov, mt = bat_routes.think_call(creds, temperature=0.2)
@@ -1464,7 +1501,8 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
                         resp = await prov.complete(messages=[
                             Message(role="system", content=SETUP_SYSTEM
                                     + ("\nThe answer is JSON only, nothing before or after it." if attempt else "")),
-                            Message(role="user", content=prompt),
+                            Message(role="user", content=prompt + (f"\n\n# Put right from your last answer\n{wrong}"
+                                                                   if wrong else "")),
                         ], temperature=0.2, max_tokens=min(mt, OUT_TOKENS["setup"]))
                 raw = fx.parse_json(resp.content or "")
                 if isinstance(raw, dict):
@@ -1472,6 +1510,10 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
                     if recipe["sources"]:
                         why = ""  # an earlier try's trouble is past
                         built = True
+                        wrong = "" if base["groups"] or wrong else groups_not_the_charters(recipe, str(run.get("task", "")))
+                        if wrong:  # asked once to put its groups right; this one stands if it can't
+                            spare, recipe = recipe, None
+                            continue
                         break
                     why = "its recipe named no source to take items from"
                 else:
@@ -1480,6 +1522,10 @@ async def setup(run: dict, folder: Path) -> tuple[dict[str, Any] | None, str]:
                 why = f"{type(e).__name__}: {str(e)[:160]}"
                 log.warning("funnel setup call failed", run_id=run.get("id"), error=str(e))
             recipe = None
+            if attempt >= 1 and spare is None:
+                break  # two tries that gave no recipe: the folder's own files, or web searches from its checks
+        if recipe is None and spare is not None:
+            recipe, built, why = spare, True, ""
     if recipe is None:
         recipe = await asyncio.to_thread(fallback_recipe, folder, base, str(run.get("task", "")))
         if recipe is not None:
@@ -2223,11 +2269,12 @@ class Work:
                 rounds += 1
                 self.queries["rounds"][self.group] = rounds
                 self._save_queries()
-                fresh = await self.new_queries(searches[0])
+                src = searches[(rounds - 1) % len(searches)]  # each of its sources in turn, not only the first
+                fresh = await self.new_queries(src)
                 if not fresh:
                     break
                 before = self._rows_now()
-                async for batch in self.candidates({**searches[0], "queries": fresh}):
+                async for batch in self.candidates({**src, "queries": fresh}):
                     await self.handle(batch)
                     if self.full() or self.stopped:
                         break
