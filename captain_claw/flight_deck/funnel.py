@@ -2115,6 +2115,26 @@ verdict and the reason agree: when you find no rule it breaks, the verdict is no
 assert DECIDE_STRICT != DECIDE_SYSTEM
 
 
+class ModelDownError(Exception):
+    """The run's model stopped answering: several calls in a row failed, each tried
+    again first. Not an empty answer: nothing was judged or found by it."""
+
+
+_OUTAGE = re.compile(r"connect|timed? ?out|unavailable|unreachable|refused|reset|overloaded|rate.?limit|"
+                     r"internal ?server|bad gateway|\b(?:429|50[0-9]|52[0-9])\b", re.I)
+
+
+def outage(e: BaseException) -> bool:
+    """Whether a failed model call says the model can't be reached or is overwhelmed (a
+    connection, a timeout, a server error), not that it refused this one request (too
+    long, malformed): only the first says anything about the next call."""
+    return bool(_OUTAGE.search(f"{type(e).__name__}: {e}"))
+
+
+MODEL_WAITS = (5.0, 20.0)   # seconds before a failed model call is tried again, each time
+MODEL_DOWN_AFTER = 3        # calls in a row that still fail: the model is down, the step stops
+
+
 class Work:
     """One work step: items from its sources, until its group is full or the sources
     run out."""
@@ -2134,6 +2154,8 @@ class Work:
         self.reference = "\n\n".join(x for x in (
             f"[the owner's documents and links, in brief]\n{self.brief}" if self.brief else "",
             reference_text(folder, recipe)) if x)
+        self.fails = 0                 # model calls in a row that failed after their retries
+        self.unread: list[str] = []    # searches made whose results the model couldn't read, since it last answered
         self.expert_wrote: dict[str, list[str]] = {}  # what the run's expert wrote lately, per column
         self.reach = {c for r in recipe["rules"] for c in r.get("reach") or []}  # cells a contact page may fill
         self.query_rounds = _int(self.cfg.get("funnel_query_rounds"), 0, 1000, MAX_QUERY_ROUNDS)
@@ -2259,13 +2281,27 @@ class Work:
         think = label == "decide" and self.thinking
         limit = THINKING_TOKENS if think else OUT_TOKENS.get(label, 4000) + (
             DECIDE_PER_ITEM * max(0, items - 1) if label == "decide" else 0)
-        async with bat_routes._metered(self.run["id"], f"funnel-{label}"):
-            prov, mt = bat_routes.think_call(creds, temperature=0.0, default_max=DECIDE_TOKENS)
-            with reasoning.call_effort(None if think else "off"):
-                resp = await prov.complete(messages=[Message(role="system", content=system),
-                                                     Message(role="user", content=user)],
-                                           temperature=0.0, max_tokens=min(mt, limit))
-        return fx.parse_json(resp.content or "")
+        for wait in (*MODEL_WAITS, None):
+            try:
+                async with bat_routes._metered(self.run["id"], f"funnel-{label}"):
+                    prov, mt = bat_routes.think_call(creds, temperature=0.0, default_max=DECIDE_TOKENS)
+                    with reasoning.call_effort(None if think else "off"):
+                        resp = await prov.complete(messages=[Message(role="system", content=system),
+                                                             Message(role="user", content=user)],
+                                                   temperature=0.0, max_tokens=min(mt, limit))
+                self.fails = 0
+                self.unread.clear()
+                return fx.parse_json(resp.content or "")
+            except Exception as e:  # noqa: BLE001 — a call that failed is not an empty answer
+                if not outage(e):
+                    raise  # it refused this request: trying again, or the next call, changes nothing
+                if wait is not None:
+                    await asyncio.sleep(wait)
+                    continue
+                self.fails += 1
+                if self.fails >= MODEL_DOWN_AFTER:
+                    raise ModelDownError(_plain_error(e)) from e
+                raise
 
     # ── the run ──
     async def run_step(self) -> dict:
@@ -2309,6 +2345,16 @@ class Work:
                 await self.flush()
                 dry = 0 if self._rows_now() > before else dry + 1
             await self.flush()
+        except ModelDownError:
+            # Searches whose results it couldn't read, and those of items it never judged,
+            # aren't used up: the step's next try makes them again.
+            back = set(self.unread) | {str(it.get("origin") or "")[8:] for it in self.pending + self.again
+                                       if str(it.get("origin") or "").startswith("search: ")}
+            self.queries["used"] = [q for q in self.queries["used"] if q not in back]
+            self._save_queries()
+            await self._event("funnel", "the model stopped answering: the step stops here and is tried again; "
+                              f"{len(back)} searches it couldn't read will be made again")
+            raise
         finally:
             await asyncio.to_thread(self.note, True)
         return self.result()
@@ -2491,10 +2537,16 @@ class Work:
                                   f"# Looking for\n{self.recipe['item']}s"
                                   + (f" ({self.group})" if self.group else "") + (f": {about}" if about else "")
                                   + f"\n\n# Columns of the list\n{cols}\n\n# Text ({origin})\n{text[:12000]}")
+        except ModelDownError:
+            if origin.startswith("search: "):
+                self.unread.append(origin[8:])
+            raise  # the model is down: the step stops and is tried again
         except RuntimeError:
             raise  # no model to call at all
         except Exception as e:  # noqa: BLE001 — a slow or broken call: these items are skipped, the step goes on
             log.warning("funnel extract call failed", run_id=self.run["id"], error=str(e))
+            if origin.startswith("search: "):
+                self.unread.append(origin[8:])
             await self._event("funnel", f"couldn't pull items out of {origin[:120]} ({_plain_error(e)})")
             return []
         items = got.get("items") if isinstance(got, dict) else got if isinstance(got, list) else []
@@ -2945,6 +2997,7 @@ class Work:
                      "regional kind of a group is that group (a region's own style of a country's kind, a "
                      "specialty within a field): it fits it."
                      if self.group else "")) if self.recipe["groups"] else ""
+        failed = False
         try:
             got = await self._ask("decide", DECIDE_LOOSE if self.loosen else DECIDE_STRICT,
                                   f"# Today\n{time.strftime('%Y-%m-%d')} (a date up to today is in the past, never "
@@ -2961,9 +3014,13 @@ class Work:
                                   + ("\n\n(Asked a second time: the first answer couldn't be read. A JSON array "
                                      "with one object for each id above, nothing else.)"
                                      if any(it.get("asked_again") for it in batch) else ""), items=len(batch))
+        except ModelDownError:
+            self.pending = batch + self.pending  # not judged: they wait for the step's next try
+            raise
         except Exception as e:  # noqa: BLE001 — these go back for the next call
             log.warning("funnel decide call failed", run_id=self.run["id"], error=str(e))
             got = None
+            failed = outage(e)  # no answer was given, so none is missing: asked again, uncounted
         verdicts = answers_by_id(got, len(batch))
         for i, it in enumerate(batch, start=1):
             if i in verdicts and isinstance(verdicts[i].get("row"), dict):
@@ -2974,6 +3031,9 @@ class Work:
         for i, it in enumerate(batch, start=1):
             v = verdicts.get(i)
             if v is None:
+                if failed:
+                    again.append(it)
+                    continue
                 if not it.get("asked_again"):  # left out of the answer: asked once more, never dropped for it
                     it["asked_again"] = True
                     again.append(it)
@@ -3268,6 +3328,8 @@ class Work:
                                               + (["read one of the owner's files"] if files else [])) + ", or stop.")
             try:
                 got = await self._ask("look", LOOK_SYSTEM, user)
+            except ModelDownError:
+                raise  # the model is down: the step stops and is tried again
             except Exception as e:  # noqa: BLE001 — the item stays as it was
                 log.warning("funnel look call failed", run_id=self.run["id"], error=str(e))
                 break
@@ -3409,6 +3471,8 @@ class Work:
                                            "Keep your thinking short.",
                                   f"# The owner's material\n{self.reference or '(none)'}\n\n# Columns to fill\n{spec}"
                                   f"\n\n# Items\n{items}")
+        except ModelDownError:
+            raise  # the model is down: the step stops and is tried again
         except Exception as e:  # noqa: BLE001 — the rows stay as they are: nearly there
             log.warning("funnel owner-columns call failed", run_id=self.run["id"], error=str(e))
             return
@@ -3629,6 +3693,8 @@ class Work:
             got = await self._ask("group", GROUP_SYSTEM,
                                   f"# The list\n{(self.recipe.get('decide') or '')[:600]}\n\n# Its groups\n{groups}\n\n"
                                   f"# The item\n{self._name_of(item)}\n\n# What was read about it\n{read}")
+        except ModelDownError:
+            raise  # the model is down: the step stops and is tried again
         except Exception as e:  # noqa: BLE001 — the judging answer decides
             log.warning("funnel group call failed", run_id=self.run["id"], error=str(e))
             return None
@@ -3877,6 +3943,8 @@ class Work:
         for _try in range(2):  # an empty or unreadable answer is asked for once more, not taken as "no more"
             try:
                 got = await self._new_queries_call(src, worked, used)
+            except ModelDownError:
+                raise  # the model is down: the step stops and is tried again
             except Exception as e:  # noqa: BLE001 — no new searches this round
                 log.warning("funnel queries call failed", run_id=self.run["id"], error=str(e))
                 continue
@@ -4974,6 +5042,12 @@ async def attempt(run: dict, step: dict) -> dict:
         return await work.run_step()
     except RuntimeError as e:
         return {"ok": False, "error": str(e), "usd": 0.0, "tokens": 0}
+    except ModelDownError as e:
+        log.warning("funnel step stopped: model down", run_id=run.get("id"), step=step.get("step_key"), error=str(e))
+        return {"ok": False, "usd": 0.0, "tokens": 0,
+                "error": f"the model stopped answering ({e}): several calls in a row failed, each tried again "
+                         "first. Its items so far are kept, nothing was dropped for it, and the next try picks up "
+                         "where it left off"}
     except Exception as e:  # noqa: BLE001 — what it did is kept: the next try picks up from there
         log.warning("funnel step stopped", run_id=run.get("id"), step=step.get("step_key"), error=str(e))
         return {"ok": False, "usd": 0.0, "tokens": 0,

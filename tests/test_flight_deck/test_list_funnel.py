@@ -203,6 +203,7 @@ async def deck(tmp_path, monkeypatch):
         return state["tools"]
 
     monkeypatch.setattr(funnel, "make_tools", no_tools)
+    monkeypatch.setattr(funnel, "MODEL_WAITS", (0.0, 0.0))  # a failed call is tried again at once here
     from captain_claw.flight_deck import jev_routes
 
     async def no_jev(*_a, **_k):  # no Jev here unless a test connects one
@@ -1141,8 +1142,8 @@ async def test_a_slow_call_skips_what_it_was_for_and_the_step_goes_on(deck):
 
     def extract(user):
         calls.append(1)
-        if len(calls) == 1:
-            raise httpx.ReadTimeout("slow")  # the first list of results: skipped
+        if len(calls) <= 3:
+            raise httpx.ReadTimeout("slow")  # the first list of results, tried three times: skipped
         return {"items": [{"name": "Alpha", "url": "https://alpha.example",
                            "fields": {"Firm": "Alpha", "Website": "https://alpha.example"}}]}
 
@@ -3806,3 +3807,76 @@ async def test_the_experts_short_calls_count_toward_the_runs_tokens(deck, expert
     await _go(deck["store"], run, steps)
     after = int((await deck["store"].get_run(run["id"])).get("cumulative_tokens") or 0)
     assert after - before == 7 * len(expert["asks"]) and expert["asks"]  # the stand-in says 7 tokens a call
+
+
+# ── a model that fails is not a model that found nothing ──────────────────
+
+def test_an_outage_is_told_from_a_request_the_model_refused():
+    import httpx
+    assert funnel.outage(httpx.ConnectError("All connection attempts failed"))
+    assert funnel.outage(httpx.ReadTimeout("slow")) and funnel.outage(RuntimeError("InternalServerError: 503"))
+    assert funnel.outage(RuntimeError("openai streaming callback failed: Connection error."))
+    assert not funnel.outage(ValueError("this model's maximum context length is 8192 tokens"))
+    assert not funnel.outage(RuntimeError("BadRequestError: 400 invalid schema"))
+
+
+async def test_a_dead_model_stops_the_step_and_loses_nothing(deck):
+    """A local model dropped mid-run. The step read each search's results as "no items",
+    dropped what it couldn't judge as unanswered, used up its searches in four minutes
+    and went on. Now calls are tried again, and when several in a row still fail the
+    step stops: nothing is dropped, the searches it couldn't read aren't used up, and
+    its next try carries on."""
+    import httpx
+    run, folder = await _run(deck["store"], REACH, rid="bat_down0001")
+    deck["recipe"] = {"item": "lead", "key": "Name", "decide": "Leads.", "decide_batch": 1,
+                      "sources": [{"kind": "search", "group": "", "queries": ["q1", "q2", "q3", "q4"]}]}
+    deck["tools"] = _Tools(pages={}, results={f"q{n}": f"found N{n}" for n in range(1, 5)})
+    down = {"on": False}
+
+    def extract(user):
+        if down["on"]:
+            raise httpx.ConnectError("All connection attempts failed")
+        return {"items": [{"name": m, "fields": {"Name": m}} for m in re.findall(r"found (N\d)", user)]}
+
+    def decide(items):
+        if items[0][1]["Name"] == "N1":
+            down["on"] = True  # it answers for the first, then goes down
+        if down["on"] and items[0][1]["Name"] != "N1":
+            raise httpx.ConnectError("All connection attempts failed")
+        return [{"id": i, "verdict": "keep", "row": {"Name": f["Name"]}} for i, f in items]
+
+    deck["extract"], deck["decide"] = extract, decide
+    steps = await funnel.plan(run)
+    first = (await _go(deck["store"], run, steps[:1]))[0]
+    assert not first["ok"] and "the model stopped answering" in first["error"] and "next try picks up" in first["error"]
+    items = funnel._read_csv(folder / funnel.ITEMS)
+    assert [(r["name"], r["status"]) for r in items] == [("N1", "kept")]  # nothing dropped for a call that failed
+    state = json.loads((folder / funnel.QUERIES).read_text())
+    assert state["used"] == ["q1"] and state["searches"] == 4  # the three it couldn't read will be made again
+    notes = [(e.get("data") or {}).get("detail", "") for e in await deck["store"].list_events(run["id"])]
+    assert any("the model stopped answering" in n and "3 searches" in n for n in notes)
+    down["on"] = False
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"]}} for i, f in items]
+    second = (await _go(deck["store"], run, steps[:1]))[0]
+    assert second["ok"] and [r["Name"] for r in funnel._read_csv(folder / funnel.ROWS)] == ["N1", "N2", "N3", "N4"]
+
+
+async def test_a_request_the_model_refuses_is_skipped_not_taken_for_an_outage(deck):
+    run, folder = await _run(deck["store"], REACH, rid="bat_down0002")
+    deck["recipe"] = {"item": "lead", "key": "Name", "decide": "Leads.", "decide_batch": 1,
+                      "sources": [{"kind": "search", "group": "", "queries": ["q1", "q2", "q3", "q4", "q5"]}]}
+    deck["tools"] = _Tools(pages={}, results={f"q{n}": f"found N{n}" for n in range(1, 6)})
+    calls = []
+
+    def extract(user):
+        calls.append(1)
+        if "found N5" not in user:
+            raise ValueError("this model's maximum context length is 8192 tokens")  # four in a row, each once
+        return {"items": [{"name": "N5", "fields": {"Name": "N5"}}]}
+
+    deck["extract"] = extract
+    deck["decide"] = lambda items: [{"id": i, "verdict": "keep", "row": {"Name": f["Name"]}} for i, f in items]
+    steps = await funnel.plan(run)
+    got = (await _go(deck["store"], run, steps[:1]))[0]
+    assert got["ok"] and [r["Name"] for r in funnel._read_csv(folder / funnel.ROWS)] == ["N5"]
+    assert len(calls) == 5  # a refused request isn't tried again
