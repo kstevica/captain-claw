@@ -104,3 +104,58 @@ export function ImageLightbox({ items, index, onClose }: {
     document.body,
   )
 }
+
+/** A picture's name from where it is seen: the agent path a deck proxy URL
+ *  carries (`?path=…`), else the URL's last part. */
+function pictureName(src: string, alt?: string): string {
+  if (alt?.trim()) return alt.trim()
+  try {
+    const u = new URL(src, window.location.href)
+    const p = u.searchParams.get('path') || u.pathname
+    return decodeURIComponent(p.split(/[\\/]/).filter(Boolean).pop() || 'Picture')
+  } catch {
+    return 'Picture'
+  }
+}
+
+/** A picture inside a reply (markdown's img): a click opens it in the viewer
+ *  with the reply's other pictures — unless it sits in a link, which it then
+ *  follows. */
+export function MarkdownImage(props: React.ImgHTMLAttributes<HTMLImageElement> & { node?: unknown }) {
+  // react-markdown hands its syntax node along too: not an <img> attribute.
+  const { src, alt, className, node, ...rest } = props
+  void node
+  const [view, setView] = useState<{ items: LightboxItem[]; index: number } | null>(null)
+  if (typeof src !== 'string' || !src) return null
+  const open = (el: HTMLImageElement) => {
+    if (el.closest('a')) return false
+    const root = el.closest('.fd-markdown') ?? el.parentElement
+    const imgs = Array.from(root?.querySelectorAll<HTMLImageElement>('img[data-fd-zoom]') ?? [])
+    const list = imgs.includes(el) ? imgs : [el]
+    setView({
+      items: list.map((im) => ({ src: im.currentSrc || im.src, name: pictureName(im.getAttribute('src') || im.src, im.alt) })),
+      index: list.indexOf(el),
+    })
+    return true
+  }
+  return (
+    <>
+      <img
+        {...rest}
+        src={src}
+        alt={alt ?? ''}
+        data-fd-zoom
+        role="button"
+        tabIndex={0}
+        title={rest.title ?? 'View picture'}
+        onClick={(e) => { if (open(e.currentTarget)) e.preventDefault() }}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return
+          if (open(e.currentTarget)) e.preventDefault()
+        }}
+        className={`${className ?? ''} cursor-zoom-in`}
+      />
+      {view && <ImageLightbox items={view.items} index={view.index} onClose={() => setView(null)} />}
+    </>
+  )
+}

@@ -23,6 +23,8 @@ import { uploadFileToAgent } from '../../services/fileTransfer'
 import { imageRef, type ChatMessage } from '../../services/agentChat'
 import { injectedAs, noteSummary, tidyServerPaths } from '../../utils/chatOrigin'
 import { FileChips } from './queue/QueueHero'
+import { MarkdownImage } from './ImageLightbox'
+import { agentFileViewUrl } from '../../utils/agentFileUrl'
 import { parseAttachmentRefs } from './queue/queueModel'
 
 interface Attachment {
@@ -37,16 +39,23 @@ interface Attachment {
   error?: string
 }
 
-/** Convert bare image file paths in message content to markdown images proxied through Flight Deck. */
+// A picture in a reply opens in the viewer (MarkdownImage).
+const MD_COMPONENTS = { img: MarkdownImage }
+
+/** Agent-local pictures in message content, proxied through Flight Deck:
+ *  those in markdown image syntax (file:///, saved/, output/, an absolute
+ *  path — as the full chat's processImagePaths), and bare paths on a line
+ *  of their own. */
 function processImagePaths(content: string, agentHost?: string, agentPort?: number, agentAuth?: string): string {
   if (!agentPort) return content
-  const imagePathRe = /^([`*]*)(\/?(?:\/[\w.@: -]+)+\.(?:png|jpg|jpeg|gif|webp|bmp|svg))([`*]*)$/gm
-  return content.replace(imagePathRe, (_match, _pre, filePath, _post) => {
-    const params = new URLSearchParams({ path: filePath })
-    if (agentAuth) params.set('token', agentAuth)
-    const url = `/fd/agent-file-view/${encodeURIComponent(agentHost || 'localhost')}/${agentPort}?${params}`
-    return `![](${url})`
+  const proxy = (filePath: string) => agentFileViewUrl(filePath, agentHost, agentPort, agentAuth)
+  const out = content.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (match, alt, src) => {
+    if (/^(https?:|data:|blob:)/i.test(src) || src.startsWith('/fd/')) return match
+    if (/^file:\/\/\//i.test(src)) return `![${alt}](${proxy('/' + src.replace(/^file:\/\/\//i, ''))})`
+    return /^(saved\/|output\/|\/)/.test(src) ? `![${alt}](${proxy(src)})` : match
   })
+  const imagePathRe = /^([`*]*)(\/?(?:\/[\w.@: -]+)+\.(?:png|jpg|jpeg|gif|webp|bmp|svg))([`*]*)$/gm
+  return out.replace(imagePathRe, (_match, _pre, filePath) => `![](${proxy(filePath)})`)
 }
 
 let attachId = 0
@@ -472,6 +481,20 @@ function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message
     )
   }
 
+  // A picture the turn made: a small preview that opens in the viewer.
+  if (message.role === 'image' && agentPort) {
+    const path = message.content.trim()
+    const name = path.split(/[\\/]/).pop() || path
+    return (
+      <FileChips
+        files={[{ kind: 'image', name, path, ref: message.id }]}
+        conn={{ host: agentHost || 'localhost', port: agentPort, auth: agentAuth || '' }}
+        pictures="tile-sm"
+        className="mb-2"
+      />
+    )
+  }
+
   // A file the turn made: its name (the full chat opens it).
   if (message.role === 'image' || message.role === 'html_file' || message.role === 'file') {
     const name = message.content.trim().split(/[\\/]/).pop() || message.content
@@ -489,7 +512,7 @@ function EmbeddedMessage({ message, agentHost, agentPort, agentAuth }: { message
     <div className="mb-2">
       <div className={`max-w-[90%] rounded-lg rounded-bl-sm bg-zinc-800/60 px-2.5 py-1.5 ${message.replay ? 'opacity-60' : ''}`}>
         <div className="fd-markdown text-xs text-zinc-300">
-          <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{tidyServerPaths(processImagePaths(cleanContent, agentHost, agentPort, agentAuth))}</Markdown>
+          <Markdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={MD_COMPONENTS}>{tidyServerPaths(processImagePaths(cleanContent, agentHost, agentPort, agentAuth))}</Markdown>
         </div>
         <div className="mt-0.5 flex items-center gap-1.5 text-[9px] text-zinc-600">
           <span>{formatTime(message.timestamp)}</span>
