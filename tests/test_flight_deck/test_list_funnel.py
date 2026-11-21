@@ -3438,3 +3438,30 @@ async def test_a_why_it_fits_column_is_written_from_the_owners_material(deck):
     assert "why it would use Counter" in line and "names what of the owner's fits" in line
     assert not next(ln for ln in deck["decide_prompts"][0].splitlines() if ln.startswith("- Name")).endswith("any item.")
     assert funnel._read_csv(folder / funnel.ROWS)[0]["Reason"].endswith("Counter counts colonies from a photo.")
+
+
+async def test_a_contact_page_counts_on_a_site_learnt_while_reading(deck):
+    """An item found on a directory has no site in its listing; its site is learnt while
+    it is read and named in its row. Its contact page there was read, yet the item came
+    close for having no address."""
+    run, folder = await _run(deck["store"], REACH, rid="bat_reach02")
+    rule = "an email published on its own site"
+    deck["recipe"] = {"item": "lead", "key": "Email", "site_column": "Web", "decide": "Leads.", "shortage_ok": True,
+                      "sources": [{"kind": "search", "group": "", "queries": ["leads"]}],
+                      "gather": [{"kind": "search", "query": "\"{Name}\" contact", "count": 5}],
+                      "rules": [{"rule": rule, "kind": "must", "fact": "contact", "columns": ["Email"]}],
+                      "checks": [{"column": "Email", "op": "required"}]}
+    deck["extract"] = lambda user: {"items": [{"name": n, "fields": {"Name": n}} for n in ("Alpha", "Beta")]}
+    deck["tools"] = _Tools(pages={}, results={
+        "leads": "list results",
+        '"Alpha" contact': _result("Alpha - Contact us", "https://alpha.example/contact", "Use the form to write to Alpha."),
+        '"Beta" contact': _result("Beta on a directory", "https://directory.example/firms/beta", "Beta, a firm.")})
+    deck["decide"] = lambda items: [{"id": i, "verdict": "maybe", "missing": [1], "reason": "No email; a form only.",
+                                     "row": {"Name": f["name"], "Email": "",
+                                             "Web": "https://alpha.example" if f["name"] == "Alpha" else "https://beta.example"}}
+                                    for i, f in items]
+    steps = await funnel.plan(run)
+    await _go(deck["store"], run, steps[:1])
+    got = {r["name"]: r["status"] for r in funnel._read_csv(folder / funnel.ITEMS)}
+    assert got == {"Alpha": "kept", "Beta": "maybe"}  # Beta's site is only named: no page of it was read
+    assert funnel._read_csv(folder / funnel.ROWS)[0]["Email"] == "https://alpha.example/contact"

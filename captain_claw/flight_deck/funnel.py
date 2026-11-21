@@ -2731,15 +2731,27 @@ class Work:
                         evidence.append(e)
             item["found"] = self.facts(item, evidence)
 
-    def _contact_link(self, item: dict) -> str:
+    def _contact_link(self, item: dict, row: dict | None = None) -> str:
+        """The item's contact page (:meth:`_contact_page`), on the site its listing gave or,
+        when the listing gave none (found on a directory, its site learnt while reading),
+        the site its row names: only pages read there count, so a site merely named
+        proves nothing."""
+        col = self.recipe.get("site_column") or ""
+        named = str((row or {}).get(col) or "").strip() if col else ""
+        for site in dict.fromkeys(x for x in (self._site_of(item), named) if x):
+            link = self._contact_page(item, site)
+            if link:
+                return link
+        return ""
+
+    def _contact_page(self, item: dict, site: str) -> str:
         """The contact page of an item's own site, from what was read: a page read there
         whose address says so, else a link on one of its pages that does (by its words or
         its address). "" when it has no site of its own or none was found: a directory's
         or a social site's contact page is never the item's."""
-        site = self._site_of(item)
-        if not site or self._shared_site(site):
-            return ""
         own = fx.domain_of(site)
+        if not own or self._shared_site(site) or any(fx.same_site(own, s) for s in self.skip_sites):
+            return ""
         pages = [e for e in item.get("evidence") or [] if str(e.get("source") or "").startswith(("http://", "https://"))
                  and fx.same_site(fx.domain_of(e["source"]), own)]
         for e in pages:
@@ -2971,7 +2983,8 @@ class Work:
                     continue
             if verdict == "maybe":
                 met, rest = self._alternatives(v)
-                far = [r for r in met if r.get("reach") and not self._contact_link(it)]
+                far = [r for r in met if r.get("reach")
+                       and not self._contact_link(it, v.get("row") if isinstance(v.get("row"), dict) else None)]
                 if far:  # no contact page read on its own site: that alternative isn't met
                     met, rest = [r for r in met if r not in far], rest + far
                 has_row = isinstance(v.get("row"), dict) and any(str(x).strip() for x in v["row"].values())
@@ -3042,7 +3055,7 @@ class Work:
                     cols = r.get("reach") or []
                     if not cols or any(row.get(c) for c in cols):
                         continue
-                    link = self._contact_link(it)
+                    link = self._contact_link(it, row)
                     if not link:
                         lacked = self._named(v.get("missing")) + self._named(v.get("_lacked"))
                         if r in loosened or (r not in lacked and not any(
