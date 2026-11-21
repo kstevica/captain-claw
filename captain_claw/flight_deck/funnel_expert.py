@@ -70,6 +70,18 @@ unless the column says otherwise; a column with a fixed set of values takes one 
 shown under the item; never invent one. Keep your thinking short."""
 
 
+SECOND_SYSTEM = """An item came close to a list: the judging call couldn't settle it. You decide, as the expert
+on this and as the list's owner would. Reply ONLY with JSON: {"verdict": "keep|drop|stay", "reason": "<one line>"}.
+keep: by what you know of the field, it is what the list is for, and the open points below are met by what is
+shown. drop: it is not what the list is for. stay: what is shown doesn't let you tell.
+You settle questions of judgement only. You may not supply a fact that isn't shown below (an address, a number,
+a date, a name): when one is needed and missing, the answer is stay. Keep your thinking short."""
+
+VETO_LINE = ("\nAn item that plainly isn't what the list is for, by what you know, you turn down instead: "
+             '{"<id>": {"drop": "<why, one line>"}}.')
+CALLS_MAX = 2000          # short calls to the expert in one run (config funnel_expert_calls)
+
+
 def slug_for(run: dict) -> str:
     return str((run.get("config") or {}).get("funnel_expert") or "").strip()
 
@@ -206,6 +218,22 @@ async def ask(run: dict, folder: Path, state: dict[str, Any], system: str, user:
     model."""
     if not state.get("ok"):
         return None
+    try:
+        cap = int((run.get("config") or {}).get("funnel_expert_calls") or CALLS_MAX)
+    except (TypeError, ValueError):
+        cap = CALLS_MAX
+    used = _CALLS.get(run["id"])
+    if used is None:  # a run picked up after a restart: what it had already asked
+        try:
+            used = sum(1 for ln in (folder / LOG).read_text(encoding="utf-8").splitlines() if '"turn": true' not in ln)
+        except OSError:
+            used = 0
+    if used >= cap:
+        if used == cap:
+            _CALLS[run["id"]] = used + 1
+            await _note(run, f"Expert: its {cap} calls for this run are used. The run goes on without asking it.")
+        return None
+    _CALLS[run["id"]] = used + 1
     from captain_claw.flight_deck import agent_idle, agent_preset, agent_skills
     from captain_claw.flight_deck import server as srv
     slug, owner = state["slug"], str(run.get("owner_id") or "")
@@ -276,18 +304,43 @@ async def searches(run: dict, folder: Path, user: str) -> Any:
     return fx.parse_json(said) if said else None
 
 
+_CALLS: dict[str, int] = {}  # short calls made, per run
+
+
+def veto_on(run: dict) -> bool:
+    """Whether the expert may also turn down a row the run would keep (the owner's switch)."""
+    return bool((run.get("config") or {}).get("funnel_expert_veto"))
+
+
+async def second(run: dict, folder: Path, user: str) -> tuple[str, str] | None:
+    """The expert's ruling on an item that came close: ("keep" | "drop", why), or None
+    when it leaves it as it is, can't be asked, or gave nothing readable."""
+    if not available(run, folder):
+        return None
+    from captain_claw.flight_deck import funnel_extract as fx
+    said = await ask(run, folder, _read(folder), SECOND_SYSTEM, user, "second", max_tokens=600)
+    got = fx.parse_json(said) if said else None
+    if isinstance(got, list):
+        got = next((x for x in got if isinstance(x, dict)), None)
+    if not isinstance(got, dict):
+        return None
+    verdict = str(got.get("verdict") or "").strip().lower()
+    why = " ".join(str(got.get("reason") or "").split())[:300]
+    return (verdict, why or "no reason given") if verdict in ("keep", "drop") else None
+
+
 def available(run: dict, folder: Path) -> bool:
     """Whether this run has an expert it could reach when it started."""
     return bool(slug_for(run)) and bool(_read(folder).get("ok"))
 
 
-async def columns(run: dict, folder: Path, user: str) -> Any:
+async def columns(run: dict, folder: Path, user: str, veto: bool = False) -> Any:
     """The expert's own columns for the rows a judging call keeps; None when it can't
     be asked or gave nothing readable (the judging call's values stand)."""
     if not available(run, folder):
         return None
     from captain_claw.flight_deck import funnel_extract as fx
-    said = await ask(run, folder, _read(folder), COLUMNS_SYSTEM, user, "columns")
+    said = await ask(run, folder, _read(folder), COLUMNS_SYSTEM + (VETO_LINE if veto else ""), user, "columns")
     return fx.parse_json(said) if said else None
 
 
@@ -303,7 +356,8 @@ async def release(run: dict) -> None:
         log.debug("funnel expert: couldn't release it", exc_info=True)
 
 
-def summary_lines(folder: Path, items: list[dict[str, str]], written: list[str]) -> list[str]:
+def summary_lines(folder: Path, items: list[dict[str, str]], written: list[str],
+                  ruled: dict[str, int] | None = None) -> list[str]:
     """The summary's part on the expert: who, whether it could be reached, what it
     decided for the owner, and what its searches found."""
     state = _read(folder)
@@ -335,5 +389,15 @@ def summary_lines(folder: Path, items: list[dict[str, str]], written: list[str])
     if wrote:
         lines += ["", f"It wrote the owner's columns (why an item fits, what to offer it) for the rows being kept: "
                   f"asked {wrote} time{'' if wrote == 1 else 's'}."]
+    ruled = ruled or {}
+    asked = sum(ruled.get(k, 0) for k in ("keep", "drop", "stay"))
+    if asked:
+        lines += ["", f"It was asked about {asked} item{'' if asked == 1 else 's'} that came close on a question of "
+                  f"judgement: {ruled.get('keep', 0)} it kept, {ruled.get('drop', 0)} it dropped, "
+                  f"{ruled.get('stay', 0)} it left as they were. It never supplied a fact: every value on the list "
+                  "was still checked against what was read."]
+    if ruled.get("veto"):
+        lines += ["", f"It turned down {ruled['veto']} row{'' if ruled['veto'] == 1 else 's'} the run would have kept "
+                  "(you switched that on); they are among the dropped, with its reason."]
     lines.append(f"Everything it was asked and said: `{LOG}`.")
     return lines

@@ -523,6 +523,8 @@ def funnel_config(version: dict[str, Any]) -> dict[str, Any]:
         cfg["funnel_agent_context"] = int(rc["agent_context"])
     if rc.get("expert"):
         cfg["funnel_expert"] = str(rc["expert"])
+        if rc.get("expert_veto") is True:
+            cfg["funnel_expert_veto"] = True
     return cfg
 
 

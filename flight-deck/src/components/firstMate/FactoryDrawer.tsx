@@ -96,7 +96,7 @@ function eventText(e: FactoryEvent): string {
 }
 
 /** The editable part of a draft, as the form holds it: its goals each on or off. */
-interface Form { charter: string; goals: Goal[]; schedule: string; runner: Version['runner']; leftovers: boolean; loosen: boolean; searches: string; expert: string }
+interface Form { charter: string; goals: Goal[]; schedule: string; runner: Version['runner']; leftovers: boolean; loosen: boolean; searches: string; expert: string; veto: boolean }
 
 function formOf(v: Version): Form {
   const sched = v.triggers.find((t): t is Extract<Trigger, { kind: 'schedule' }> => t.kind === 'schedule')
@@ -109,17 +109,18 @@ function formOf(v: Version): Form {
     loosen: (v.runner_config?.loosen ?? 'short') !== 'never',
     searches: v.runner_config?.search_budget == null ? '' : String(v.runner_config.search_budget),
     expert: typeof v.runner_config?.expert === 'string' ? v.runner_config.expert : '',
+    veto: v.runner_config?.expert_veto === true,
   }
 }
 
 /** The runner settings a form asks for: the version's own while its runner stays. */
 function runnerConfigOf(form: Form, v: Version): Record<string, unknown> {
   if (form.runner === 'funnel') {
-    const { search_budget: _was, expert: _who, ...rest } = (v.runner === 'funnel' ? v.runner_config : {}) as Record<string, unknown>
-    void _was; void _who
+    const { search_budget: _was, expert: _who, expert_veto: _veto, ...rest } = (v.runner === 'funnel' ? v.runner_config : {}) as Record<string, unknown>
+    void _was; void _who; void _veto
     return { ...rest, leftovers: form.leftovers ? 'agent' : 'none', loosen: form.loosen ? 'short' : 'never',
       ...(form.searches.trim() ? { search_budget: Math.min(100000, Number(form.searches)) } : {}),
-      ...(form.expert ? { expert: form.expert } : {}) }
+      ...(form.expert ? { expert: form.expert, ...(form.veto ? { expert_veto: true } : {}) } : {}) }
   }
   return form.runner === v.runner ? v.runner_config : {}
 }
@@ -364,6 +365,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
                             listy={form.goals.some((g) => g.on && goalKind(g.text) === 'countable')}
                             searches={form.searches} onSearches={(searches) => setForm({ ...form, searches })}
                             expert={form.expert} agents={agents} onExpert={(expert) => setForm({ ...form, expert })}
+                            veto={form.veto} onVeto={(veto) => setForm({ ...form, veto })}
                             onChange={(runner, leftovers, loosen) => setForm({ ...form, runner, leftovers, loosen })} />
                         )}
                       </div>

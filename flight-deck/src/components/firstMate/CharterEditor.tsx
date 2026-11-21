@@ -229,7 +229,7 @@ const HOW: { value: HowItRuns; label: string; icon: typeof Bot; hint: string }[]
 /** How a factory's runs do the work: Bat's agents, or the list funnel (with or without
  *  an agent to finish what's short, and with or without rows on a looser reading of
  *  the soft rules when a group runs short). */
-export function RunnerPicker({ value, leftovers, loosen, onChange, listy, searches, onSearches, expert, agents, onExpert }: {
+export function RunnerPicker({ value, leftovers, loosen, onChange, listy, searches, onSearches, expert, agents, onExpert, veto, onVeto }: {
   value: HowItRuns
   leftovers: boolean
   loosen: boolean
@@ -242,6 +242,9 @@ export function RunnerPicker({ value, leftovers, loosen, onChange, listy, search
   expert?: string
   agents?: { slug: string; name: string }[]
   onExpert?: (slug: string) => void
+  /** Whether the expert may also turn down a row the run would keep, and its setter. */
+  veto?: boolean
+  onVeto?: (on: boolean) => void
   /** Its goals ask for an amount: it reads as a list. */
   listy: boolean
 }) {
@@ -300,7 +303,14 @@ export function RunnerPicker({ value, leftovers, loosen, onChange, listy, search
                 {expert && !(agents ?? []).some((a) => a.slug === expert) && <option value={expert}>{expert} (not found)</option>}
                 {(agents ?? []).map((a) => <option key={a.slug} value={a.slug}>{a.name}</option>)}
               </select>
-              <span className="basis-full text-zinc-500">One of your agents works beside each run, in a new session of its own: it adds what it knows before the run starts, settles what the charter leaves open as you would, and writes the new searches. A run wakes it when it sleeps. What it decided for you is listed in the run’s summary.</span>
+              <span className="basis-full text-zinc-500">One of your agents works beside each run, in a new session of its own: it adds what it knows before the run starts, settles what the charter leaves open as you would, and writes the new searches. A run wakes it when it sleeps. It writes the columns that say why an item fits, and settles items that come close on a question of judgement; it never supplies a fact. What it decided for you is listed in the run’s summary.</span>
+            </label>
+          )}
+          {onVeto && expert && (
+            <label className="mt-1.5 flex cursor-pointer items-start gap-2 text-[11px] text-zinc-400">
+              <input type="checkbox" checked={!!veto} onChange={(e) => onVeto(e.target.checked)}
+                className="mt-0.5 h-3.5 w-3.5 accent-violet-600" />
+              <span>It may also turn down a row the run would keep, when the item plainly isn’t what the list is for. Those rows are dropped with its reason.</span>
             </label>
           )}
         </>

@@ -2982,6 +2982,11 @@ class Work:
                 continue
             verdict = str(v.get("verdict") or "").lower()
             reason = " ".join(str(v.get("reason") or "").split())[:400]  # whole: its last words say why
+            if v.get("_expert_drop"):
+                self._ruled("veto")
+                await self.record(it, "dropped", f"turned down by the run's expert: {v['_expert_drop']}"
+                                  + (f" ({reason})" if reason else ""), stage="judge")
+                continue
             if verdict == "loose" and not self.loosen:
                 verdict = "maybe"  # no looser reading in this run: it's nearly there
             if verdict == "drop" and self._unbacked_drop(v, it):
@@ -3018,6 +3023,16 @@ class Work:
                         v = {**v, "_lacked": [r["rule"] for r in met]}
                 elif met:  # what's left to find; the near miss still records all it lacked
                     v = {**v, "missing": [r["rule"] for r in rest], "_lacked": [r["rule"] for r in met + rest]}
+            if verdict == "maybe":
+                ruling = await self._second_opinion(v, it, reason)
+                if ruling and ruling[0] == "drop":
+                    await self.record(it, "dropped", f"the run's expert: {ruling[1]}" + (f" ({reason})" if reason else ""),
+                                      stage="judge")
+                    continue
+                if ruling:  # kept on its judgement; every cell is still checked below
+                    verdict = "keep"
+                    reason = f"{reason}; settled by the run's expert: {ruling[1]}" if reason else \
+                        f"settled by the run's expert: {ruling[1]}"
             if verdict == "maybe" and self.loosen:
                 verdict, loosened = self._maybe_or_loose(v)
             elif verdict == "loose":
@@ -3405,6 +3420,38 @@ class Work:
                 if not str(v["row"].get(c) or "").strip() and str(fill.get(c) or "").strip():
                     v["row"][c] = " ".join(str(fill[c]).split())[:500]
 
+    def _ruled(self, how: str) -> None:
+        got = self.queries.setdefault("expert_ruled", {})
+        got[how] = int(got.get(how, 0)) + 1
+        self._save_queries()
+
+    async def _second_opinion(self, v: dict, it: dict, reason: str) -> tuple[str, str] | None:
+        """The run's expert on an item that came close, once: ("keep" | "drop", why), or
+        None. Asked only when what it lacks is a question of judgement (what the item
+        is, whether it fits): a missing fact (a place, a count, a way to reach it) is
+        never the expert's to supply, so such an item isn't put to it at all."""
+        from captain_claw.flight_deck import funnel_expert
+        if it.get("second") or not funnel_expert.available(self.run, self.folder):
+            return None
+        row = v.get("row") if isinstance(v.get("row"), dict) else {}
+        if not any(str(x).strip() for x in row.values()):
+            return None
+        lacks = self._named(v.get("_lacked") or v.get("missing"))
+        if any(_fact_of(r) not in ("identity", "other") or r.get("reach") for r in lacks):
+            return None
+        it["second"] = True
+        read = "\n".join(f"[{e['source']}] " + " ".join(e.get("text", "").split())[:900]
+                         for e in (it.get("evidence") or [])[:5])[:4000]
+        said = await funnel_expert.second(
+            self.run, self.folder,
+            f"# The list\n{self.recipe['decide'] or self.charter}\n\n" + self._numbered_rules()
+            + (f"# The owner's material\n{self.reference}\n\n" if self.reference else "")
+            + "# What is open\n" + ("\n".join(f"- {r['rule']}" for r in lacks) or "- (no rule named)")
+            + f"\nThe judging call said: {reason or 'it seems to fit, but it could not tell'}\n\n"
+            f"# The item\n{json.dumps(row, ensure_ascii=False)[:1500]}\n\n# What was read about it\n{read}")
+        self._ruled(said[0] if said else "stay")
+        return said
+
     async def _expert_columns(self, verdicts: dict[int, dict], batch: list[dict]) -> None:
         """With an expert beside the run, the owner's columns of a row that is being
         kept are the expert's to write: it knows the owner's offer and the field, and
@@ -3412,7 +3459,8 @@ class Work:
         column's fixed set, or no answer, leaves what the judging call wrote."""
         from captain_claw.flight_deck import funnel_expert
         cols = judgement_columns(self.recipe, self.reference)
-        if not cols or not funnel_expert.available(self.run, self.folder):
+        veto = funnel_expert.veto_on(self.run)
+        if not (cols or veto) or not funnel_expert.available(self.run, self.folder):
             return
         todo = {i: v for i, v in verdicts.items()
                 if str(v.get("verdict") or "").lower() in ("keep", "loose") and isinstance(v.get("row"), dict)}
@@ -3434,13 +3482,17 @@ class Work:
             f"# The owner's material\n{self.reference or '(none)'}\n\n# Columns to write\n{spec}"
             + (f"\n\n# Written for other items lately (say what fits THIS item best; the same point again only "
                f"when it truly is the best one here)\n{lately}" if lately else "")
-            + f"\n\n# Items\n{items}")
+            + f"\n\n# Items\n{items}", veto=veto)
         if not isinstance(got, dict):
             return
         if len(todo) == 1 and not any(str(k) in got for k in todo):  # one item: its columns, bare
             got = {str(next(iter(todo))): got}
         for i, v in todo.items():
             fill = got.get(str(i)) if isinstance(got.get(str(i)), dict) else {}
+            turned = " ".join(str(fill.get("drop") or "").split())[:300] if veto else ""
+            if turned:  # the owner let it turn down a row the run would keep
+                v["_expert_drop"] = turned
+                continue
             for c in cols:
                 said = " ".join(str(fill.get(c) or "").split())[:500]
                 if not said:
@@ -4730,7 +4782,11 @@ def write_summary(folder: Path, recipe: dict[str, Any], rows: int, dropped: int,
         written = json.loads((folder / QUERIES).read_text(encoding="utf-8")).get("by_expert") or []
     except (OSError, ValueError):
         written = []
-    said = funnel_expert.summary_lines(folder, _read_csv(folder / ITEMS), written)
+    try:
+        ruled = json.loads((folder / QUERIES).read_text(encoding="utf-8")).get("expert_ruled") or {}
+    except (OSError, ValueError):
+        ruled = {}
+    said = funnel_expert.summary_lines(folder, _read_csv(folder / ITEMS), written, ruled)
     if said:  # the expert's part, before the list of files
         at = lines.index("## Files")
         lines[at:at] = said[1:] + [""]

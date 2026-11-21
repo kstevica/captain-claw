@@ -303,7 +303,7 @@ def check_runner_config(runner: str, value: Any) -> dict[str, Any]:
             raise FirstMateError("worker_mode must be plain or archetype")
         cfg = {"worker_mode": mode, "steps": _str_list("steps", cfg.get("steps"))}
     elif runner == "funnel":
-        _known("runner settings", cfg, ("leftovers", "loosen", "search_budget", "agent_context", "expert"))
+        _known("runner settings", cfg, ("leftovers", "loosen", "search_budget", "agent_context", "expert", "expert_veto"))
         out: dict[str, Any] = {"leftovers": str(cfg.get("leftovers") or "agent"),
                                "loosen": str(cfg.get("loosen") or "short")}
         if out["leftovers"] not in FUNNEL_LEFTOVERS:
@@ -318,6 +318,8 @@ def check_runner_config(runner: str, value: Any) -> dict[str, Any]:
                 out[key] = v
         if cfg.get("expert") not in (None, ""):  # the owner's agent that works beside its runs
             out["expert"] = _text("expert", cfg["expert"], 120, required=True)
+            if cfg.get("expert_veto") is True:  # it may also turn down a row the run would keep
+                out["expert_veto"] = True
         cfg = out
     elif runner == "flow":
         _known("runner settings", cfg, ("flow_id",))
