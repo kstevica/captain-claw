@@ -60,6 +60,7 @@ import { useLessonMarks } from '../../stores/lessonMarksStore'
 import { useLessonInbox } from '../../stores/lessonInboxStore'
 import { isManagedAgent } from '../../utils/managedAgents'
 import { AttachmentChip } from './AttachmentChip'
+import { AgentPicture } from './AgentPicture'
 import { appendAttachmentRefs, useFileAttachments, type AgentConn } from '../../hooks/useFileAttachments'
 import { useAgentSkills } from '../../hooks/useAgentSkills'
 import { asksForInput, type AgentSkill } from '../../services/agentSkills'
@@ -340,9 +341,9 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
       .map((a) => ({ id: a.id, name: a.name, host: a.host, port: a.port, auth: a.authToken })),
   ]
 
-  // On a phone the simple layout's own header names the agent: the tab bar
-  // goes. On a phone in either layout the queue button sits on the lane row
-  // and the queue opens as a view of its own.
+  // On a phone the simple layout's own header names the agent: its bar keeps
+  // only the conversation, a new topic and the queue. On a phone in either
+  // layout the queue opens as a view of its own.
   const phoneSimple = simple && isMobile
   const queueTitle = simpleQueueOpen
     ? 'Hide queue'
@@ -364,6 +365,184 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
       {!simpleQueueOpen && <QueueBadge signal={queueSignal} />}
     </button>
   )
+  // The simple layout's: a pill that says "Queue" (just the icon on a phone)
+  // and how many tasks are left, amber when the queue needs you.
+  const queueCount = queueSignal.left > 99 ? '99+' : queueSignal.left > 0 ? String(queueSignal.left)
+    : queueSignal.tone === 'needs' ? '!' : ''
+  const queuePill = (
+    <button
+      onClick={() => setSimpleQueueOpen(!simpleQueueOpen)}
+      title={queueTitle}
+      aria-label={queueTitle}
+      aria-pressed={simpleQueueOpen}
+      data-fd-queue-toggle
+      className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[13px] font-medium transition-colors wide:px-3 ${FOCUS} ${
+        simpleQueueOpen
+          ? 'border-violet-500/40 bg-violet-600/15 text-violet-700 dark:text-violet-200'
+          : 'border-zinc-700 text-zinc-300 hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-100'
+      }`}
+    >
+      <ListTodo className="h-4 w-4" />
+      <span className="hidden wide:inline">Queue</span>
+      {queueSignal.tone !== 'none' && (queueCount ? (
+        <span className={`min-w-[18px] rounded-full px-1.5 text-center text-[11px] font-semibold leading-[18px] tabular-nums ${
+          queueSignal.tone === 'needs' ? 'bg-amber-500 text-amber-950'
+            : queueSignal.tone === 'running' ? 'bg-violet-600 text-white'
+            : 'bg-zinc-700 text-zinc-200'
+        }`}>{queueCount}</span>
+      ) : (
+        <span aria-hidden className={`h-2 w-2 rounded-full ${queueSignal.tone === 'running' ? 'animate-pulse bg-violet-500' : 'bg-zinc-500'}`} />
+      ))}
+    </button>
+  )
+
+  // The shared-agent badge and the deck tools (flows, send context, plan
+  // routing, traces): the full layout's tab bar, the simple layout's bar.
+  const sharedBadge = (
+    <>
+    {shared && (
+      <span
+        className="mr-1 flex shrink-0 items-center gap-1 rounded border border-sky-500/25 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300"
+        title={`${session.containerName} belongs to ${shared.ownerName || 'another user'}. Your chats are private from other members, not from ${shared.ownerName || 'its owner'} or this deck's admins.`
+          + (caps.files || caps.deep_memory ? ' During your chats it uses your own files and deep memory, and your Google only if you turned it on.' : '')}
+      >
+        <Users className="h-3 w-3" />
+        Shared · {shared.ownerName || 'another user'}
+      </span>
+    )}
+    </>
+  )
+  const headerTools = (
+    <>
+    {!kiosk && !shared && (
+      <button
+        onClick={() => setShowFlows(true)}
+        title="Flows — enable/disable and start a flow"
+        className="mr-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+      >
+        <Workflow className="h-4 w-4" />
+      </button>
+    )}
+    {!kiosk && !shared && (
+      <button
+        onClick={() => setShowSendContext(true)}
+        title="Send context to another agent"
+        className="mr-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+      >
+        <Forward className="h-4 w-4" />
+      </button>
+    )}
+    {/* Combined plan toggle + level selector. The button shows the current
+        state ("OFF" when planning auto-routing is disabled, otherwise the
+        level abbreviation) and opens a 5-row dropdown: Off + the four
+        enrichment levels. Picking a level enables planning AND sets the
+        level in one click; picking Off disables auto-routing while
+        preserving the previously-chosen level. */}
+    {!kiosk && !shared && (
+    <div className="relative mr-1" ref={planLevelMenuRef}>
+      <button
+        onClick={() => setPlanLevelMenuOpen((o) => !o)}
+        title={
+          session.planningEnabled
+            ? `Planning ON (${session.planLevel}). Click to change level or turn off.`
+            : 'Planning OFF. Click to choose an enrichment level and turn on.'
+        }
+        className={`relative flex items-center gap-1 rounded px-1.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
+          session.planningEnabled
+            ? 'bg-violet-500 text-white shadow-sm shadow-violet-500/40 ring-1 ring-violet-300/60 hover:bg-violet-400'
+            : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+        }`}
+      >
+        <ListChecks className="h-4 w-4" />
+        <span className="leading-none">
+          {session.planningEnabled
+            ? (session.planLevel || 'plain').slice(0, 3)
+            : 'OFF'}
+        </span>
+        <ChevronDown className="h-3 w-3 opacity-70" />
+        {session.planState && session.planState.status === 'running' && (
+          <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-emerald-400 ring-2 ring-zinc-900" />
+        )}
+      </button>
+      {planLevelMenuOpen && (
+        <div className="absolute right-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-lg">
+          <button
+            onClick={() => {
+              // Always send /planning off, even if FD thinks it's already
+              // off — same staleness concern as the level picker below.
+              setPlanningEnabled(session.key, false)
+              setPlanLevelMenuOpen(false)
+            }}
+            className={`flex w-full flex-col items-start gap-0.5 border-b border-zinc-800 px-3 py-2 text-left text-xs transition-colors ${
+              !session.planningEnabled
+                ? 'bg-zinc-800/80 text-zinc-200'
+                : 'text-zinc-300 hover:bg-zinc-800'
+            }`}
+          >
+            <span className="font-semibold uppercase tracking-wide">Off</span>
+            <span className="text-[10px] text-zinc-400">Disable plan auto-routing</span>
+          </button>
+          {PLAN_LEVELS.map((lvl) => {
+            const desc: Record<PlanLevel, string> = {
+              plain: 'No enrichment (default)',
+              enriched: '+ latest reflection',
+              insightful: '+ top user insights',
+              complete: '+ persona-aware planner',
+            }
+            const active = session.planningEnabled && session.planLevel === lvl
+            return (
+              <button
+                key={lvl}
+                onClick={() => {
+                  // Always send both commands unconditionally. Skipping
+                  // them when the FD mirror "looks right" lets a stale
+                  // mirror (e.g., after a ws drop or a missed command_result)
+                  // hide the fact that the agent's plan_mode_auto is still
+                  // off — the user picks a level, the UI shows it active,
+                  // but auto-routing never engages and they have to type
+                  // /plan manually. Both commands are idempotent so the
+                  // double-send when state already matches is harmless.
+                  // Set level first so the /planning on confirmation
+                  // already reflects the new level.
+                  setPlanLevel(session.key, lvl)
+                  setPlanningEnabled(session.key, true)
+                  setPlanLevelMenuOpen(false)
+                }}
+                className={`flex w-full flex-col items-start gap-0.5 border-b border-zinc-800 px-3 py-2 text-left text-xs last:border-b-0 transition-colors ${
+                  active
+                    ? 'bg-violet-500/20 text-violet-200'
+                    : 'text-zinc-300 hover:bg-zinc-800'
+                }`}
+              >
+                <span className="font-semibold uppercase tracking-wide">{lvl}</span>
+                <span className="text-[10px] text-zinc-400">{desc[lvl]}</span>
+              </button>
+            )
+          })}
+        </div>
+      )}
+    </div>
+    )}
+    {!kiosk && !shared && (
+      <button
+        onClick={() => setShowTracePanel(!showTracePanel)}
+        title={showTracePanel ? 'Hide traces' : 'Show orchestrator traces'}
+        className={`relative mr-1 rounded p-1 transition-colors ${
+          showTracePanel
+            ? 'bg-violet-600/20 text-violet-400'
+            : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+        }`}
+      >
+        <Activity className="h-4 w-4" />
+        {traceSpanCount > 0 && (
+          <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-violet-600 px-0.5 text-[8px] font-bold text-white">
+            {traceSpanCount > 99 ? '99+' : traceSpanCount}
+          </span>
+        )}
+      </button>
+    )}
+    </>
+  )
 
   // Cmd/Ctrl+Enter in the chat box: the message goes to this lane's queue,
   // on Auto, and the queue comes into view — its column (a phone's queue
@@ -383,8 +562,23 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
 
   return (
     <div ref={rootRef} className={`flex h-full flex-col bg-zinc-950/80 ${simple ? '' : 'border-l border-zinc-800'}`}>
-      {/* Tab bar */}
-      {!phoneSimple && (
+      {/* The simple layout: one bar — the agent, which of its conversations
+          (lane and topic, switched from one menu), a new topic and the queue. */}
+      {simple && (
+        <ConversationBar
+          agentId={session.containerId}
+          agentName={session.containerName}
+          activeLane={session.lane}
+          identity={!phoneSimple}
+          trailing={queuePill}
+        >
+          {!phoneSimple && sharedBadge}
+          {!phoneSimple && headerTools}
+        </ConversationBar>
+      )}
+
+      {/* Tab bar (full layout) */}
+      {!simple && (
       <div className="flex items-center border-b border-zinc-800 bg-zinc-900/60">
         <div className="flex flex-1 items-center gap-0.5 overflow-x-auto px-1 py-1">
           {chatTabs.map((s) => (
@@ -408,144 +602,8 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
             </button>
           ))}
         </div>
-        {shared && (
-          <span
-            className="mr-1 flex shrink-0 items-center gap-1 rounded border border-sky-500/25 bg-sky-500/15 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:text-sky-300"
-            title={`${session.containerName} belongs to ${shared.ownerName || 'another user'}. Your chats are private from other members, not from ${shared.ownerName || 'its owner'} or this deck's admins.`
-              + (caps.files || caps.deep_memory ? ' During your chats it uses your own files and deep memory, and your Google only if you turned it on.' : '')}
-          >
-            <Users className="h-3 w-3" />
-            Shared · {shared.ownerName || 'another user'}
-          </span>
-        )}
-        {simple && queueToggle}
-        {!kiosk && !shared && (
-          <button
-            onClick={() => setShowFlows(true)}
-            title="Flows — enable/disable and start a flow"
-            className="mr-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-          >
-            <Workflow className="h-4 w-4" />
-          </button>
-        )}
-        {!kiosk && !shared && (
-          <button
-            onClick={() => setShowSendContext(true)}
-            title="Send context to another agent"
-            className="mr-1 rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
-          >
-            <Forward className="h-4 w-4" />
-          </button>
-        )}
-        {/* Combined plan toggle + level selector. The button shows the current
-            state ("OFF" when planning auto-routing is disabled, otherwise the
-            level abbreviation) and opens a 5-row dropdown: Off + the four
-            enrichment levels. Picking a level enables planning AND sets the
-            level in one click; picking Off disables auto-routing while
-            preserving the previously-chosen level. */}
-        {!kiosk && !shared && (
-        <div className="relative mr-1" ref={planLevelMenuRef}>
-          <button
-            onClick={() => setPlanLevelMenuOpen((o) => !o)}
-            title={
-              session.planningEnabled
-                ? `Planning ON (${session.planLevel}). Click to change level or turn off.`
-                : 'Planning OFF. Click to choose an enrichment level and turn on.'
-            }
-            className={`relative flex items-center gap-1 rounded px-1.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors ${
-              session.planningEnabled
-                ? 'bg-violet-500 text-white shadow-sm shadow-violet-500/40 ring-1 ring-violet-300/60 hover:bg-violet-400'
-                : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
-            }`}
-          >
-            <ListChecks className="h-4 w-4" />
-            <span className="leading-none">
-              {session.planningEnabled
-                ? (session.planLevel || 'plain').slice(0, 3)
-                : 'OFF'}
-            </span>
-            <ChevronDown className="h-3 w-3 opacity-70" />
-            {session.planState && session.planState.status === 'running' && (
-              <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-emerald-400 ring-2 ring-zinc-900" />
-            )}
-          </button>
-          {planLevelMenuOpen && (
-            <div className="absolute right-0 top-full z-50 mt-1 w-60 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-lg">
-              <button
-                onClick={() => {
-                  // Always send /planning off, even if FD thinks it's already
-                  // off — same staleness concern as the level picker below.
-                  setPlanningEnabled(session.key, false)
-                  setPlanLevelMenuOpen(false)
-                }}
-                className={`flex w-full flex-col items-start gap-0.5 border-b border-zinc-800 px-3 py-2 text-left text-xs transition-colors ${
-                  !session.planningEnabled
-                    ? 'bg-zinc-800/80 text-zinc-200'
-                    : 'text-zinc-300 hover:bg-zinc-800'
-                }`}
-              >
-                <span className="font-semibold uppercase tracking-wide">Off</span>
-                <span className="text-[10px] text-zinc-400">Disable plan auto-routing</span>
-              </button>
-              {PLAN_LEVELS.map((lvl) => {
-                const desc: Record<PlanLevel, string> = {
-                  plain: 'No enrichment (default)',
-                  enriched: '+ latest reflection',
-                  insightful: '+ top user insights',
-                  complete: '+ persona-aware planner',
-                }
-                const active = session.planningEnabled && session.planLevel === lvl
-                return (
-                  <button
-                    key={lvl}
-                    onClick={() => {
-                      // Always send both commands unconditionally. Skipping
-                      // them when the FD mirror "looks right" lets a stale
-                      // mirror (e.g., after a ws drop or a missed command_result)
-                      // hide the fact that the agent's plan_mode_auto is still
-                      // off — the user picks a level, the UI shows it active,
-                      // but auto-routing never engages and they have to type
-                      // /plan manually. Both commands are idempotent so the
-                      // double-send when state already matches is harmless.
-                      // Set level first so the /planning on confirmation
-                      // already reflects the new level.
-                      setPlanLevel(session.key, lvl)
-                      setPlanningEnabled(session.key, true)
-                      setPlanLevelMenuOpen(false)
-                    }}
-                    className={`flex w-full flex-col items-start gap-0.5 border-b border-zinc-800 px-3 py-2 text-left text-xs last:border-b-0 transition-colors ${
-                      active
-                        ? 'bg-violet-500/20 text-violet-200'
-                        : 'text-zinc-300 hover:bg-zinc-800'
-                    }`}
-                  >
-                    <span className="font-semibold uppercase tracking-wide">{lvl}</span>
-                    <span className="text-[10px] text-zinc-400">{desc[lvl]}</span>
-                  </button>
-                )
-              })}
-            </div>
-          )}
-        </div>
-        )}
-        {!kiosk && !shared && (
-          <button
-            onClick={() => setShowTracePanel(!showTracePanel)}
-            title={showTracePanel ? 'Hide traces' : 'Show orchestrator traces'}
-            className={`relative mr-1 rounded p-1 transition-colors ${
-              showTracePanel
-                ? 'bg-violet-600/20 text-violet-400'
-                : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
-            }`}
-          >
-            <Activity className="h-4 w-4" />
-            {traceSpanCount > 0 && (
-              <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-violet-600 px-0.5 text-[8px] font-bold text-white">
-                {traceSpanCount > 99 ? '99+' : traceSpanCount}
-              </span>
-            )}
-          </button>
-        )}
+        {sharedBadge}
+        {headerTools}
         {!simple && (
           <button
             onClick={toggleChatFullscreen}
@@ -569,12 +627,14 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
 
       {/* Trace panel (replaces chat when active) */}
       {/* Lanes: three parallel contexts on this one agent. */}
-      <LaneStrip
-        agentId={session.containerId}
-        activeLane={session.lane}
-        agentName={session.containerName}
-        trailing={isMobile ? queueToggle : undefined}
-      />
+      {!simple && (
+        <LaneStrip
+          agentId={session.containerId}
+          activeLane={session.lane}
+          agentName={session.containerName}
+          trailing={isMobile ? queueToggle : undefined}
+        />
+      )}
 
       {/* Today's plan allowance; when it's spent the composer stays closed */}
       <PlanUsageBar simple={simple} />
@@ -1524,6 +1584,243 @@ function LaneStrip({ agentId, activeLane, agentName, trailing }: {
   )
 }
 
+// ── Conversation bar (simple layout) ─────────────────────────────────
+//
+// One bar over the simple layout's chat, in place of the agent tabs (the
+// agent column switches agents) and the lane row: the agent, which of its
+// conversations you're in — the lane and its current topic, one button whose
+// menu switches lane or goes back to an earlier topic — a new topic, and the
+// queue. The full layout keeps its tabs and lane row.
+
+type LaneSession = NonNullable<ReturnType<ReturnType<typeof useChatStore.getState>['sessions']['get']>>
+type LaneTone = 'none' | 'waiting' | 'running' | 'idle'
+const LANE_DOT: Record<LaneTone, string> = {
+  none: 'bg-zinc-700',
+  waiting: 'bg-amber-400',
+  running: 'animate-pulse bg-violet-400',
+  idle: 'bg-emerald-400',
+}
+const laneName = (lane: string) => (lane === LANE_AUTO ? 'Auto' : lane)
+
+/** A lane's state: never opened, waiting on an answer, working, or idle
+ *  (with how many queued tasks wait there). */
+function laneState(s: LaneSession | undefined): { tone: LaneTone; text: string } {
+  if (!s) return { tone: 'none', text: 'Not started' }
+  if (s.queue.some((q) => q.awaitingAnswer)) return { tone: 'waiting', text: 'Waiting on you' }
+  if (s.busy) return { tone: 'running', text: 'Working' }
+  const pending = s.queue.filter((q) => q.status === 'pending').length
+  return { tone: 'idle', text: pending ? `${pending} queued` : 'Idle' }
+}
+
+const clipTitle = (t: string) => (t.length > 60 ? `${t.slice(0, 59).trimEnd()}…` : t)
+
+/** What a lane's current topic is about: its divider's title, else the first
+ *  thing you said since (without the ref lines of files sent with it); ''
+ *  when nothing was said yet. */
+function laneTitle(messages: ChatMessage[] | undefined): string {
+  if (!messages?.length) return ''
+  let from = 0
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const t = messages[i].topic
+    if (!t) continue
+    if (t.title) return clipTitle(t.title)
+    from = i + 1
+    break
+  }
+  for (let i = from; i < messages.length; i++) {
+    const m = messages[i]
+    if (m.role !== 'user' || !m.content) continue
+    const p = parseAttachmentRefs(m.content)
+    const text = p.text.replace(/\s+/g, ' ').trim()
+    if (text.startsWith('/')) continue
+    if (text) return clipTitle(text)
+    if (p.files.length) return p.files[0].kind === 'image' ? 'A picture' : p.files[0].name
+  }
+  return ''
+}
+
+function ConversationBar({ agentId, agentName, activeLane, identity, trailing, children }: {
+  agentId: string
+  agentName: string
+  activeLane: string
+  /** The agent's picture and name (a phone's own header has them). */
+  identity: boolean
+  /** The queue pill, last on the bar. */
+  trailing: React.ReactNode
+  /** The shared badge and the deck tools, before New topic. */
+  children?: React.ReactNode
+}) {
+  const sessions = useChatStore((s) => s.sessions)
+  const newSession = useChatStore((s) => s.newSession)
+  // Where the switcher was when it was clicked: the menu hangs under it.
+  const [anchor, setAnchor] = useState<DOMRect | null>(null)
+  const active = sessions.get(laneKey(agentId, activeLane))
+  // A shared agent's member has lanes A-C of their own, no automation lane.
+  const shared = agentId.startsWith('shared:') || !!active?.shared
+  const lanes = shared ? LANES.filter((l) => l !== LANE_AUTO) : LANES
+  const title = useMemo(() => laneTitle(active?.messages), [active?.messages])
+  const state = laneState(active)
+  // Something finished on another lane while you were on this one.
+  const elsewhere = lanes.some((l) => l !== activeLane && sessions.get(laneKey(agentId, l))?.unread)
+  const open = anchor !== null
+  const label = title ? title : activeLane === LANE_AUTO ? 'Automatic runs' : ''
+
+  return (
+    <div className={`flex shrink-0 items-center gap-2 border-b border-zinc-800 ${identity ? 'h-14 pl-3 pr-2.5' : 'h-12 px-2'}`}>
+      {identity && (
+        <div className="flex min-w-0 max-w-[35%] shrink-0 items-center gap-2.5" title={agentName}>
+          <span className="relative flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-[var(--fd-accent-soft)] text-[11px] font-semibold text-[var(--fd-accent-text)]">
+            <AgentPicture agentId={agentId} name={agentName} />
+          </span>
+          <span className="truncate text-[15px] font-semibold text-zinc-100">{agentName}</span>
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={(e) => {
+          const r = e.currentTarget.getBoundingClientRect()
+          setAnchor((a) => (a ? null : r))
+        }}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        title={`${activeLane === LANE_AUTO ? 'Automated turns' : `Lane ${activeLane}`} · ${state.text} — switch lane or go back to an earlier topic`}
+        data-fd-conversation
+        className={`flex h-9 min-w-0 max-w-[26rem] items-center gap-2 rounded-[var(--fd-radius-control)] px-2.5 text-[13px] transition-colors ${FOCUS} ${
+          open ? 'bg-zinc-800 text-zinc-100' : 'bg-zinc-900 text-zinc-200 hover:bg-zinc-800'
+        }`}
+      >
+        <span className={`h-2 w-2 shrink-0 rounded-full ${LANE_DOT[state.tone]}`} />
+        <span className="shrink-0 font-semibold">{label ? laneName(activeLane) : activeLane === LANE_AUTO ? 'Auto' : `Lane ${activeLane}`}</span>
+        {label && (
+          <>
+            <span aria-hidden className="shrink-0 text-zinc-500">·</span>
+            <span className="min-w-0 truncate">{label}</span>
+          </>
+        )}
+        {elsewhere && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" title="Something new on another lane" />}
+        <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      <div className="min-w-0 flex-1" />
+      {children}
+      {/* A fresh topic on this lane (the agent's /new): its context starts
+          over, the transcript keeps going with a divider. */}
+      {!shared && (
+        <button
+          type="button"
+          onClick={() => active && newSession(active.key)}
+          disabled={!active || active.busy}
+          title="Start a new topic — the agent begins with a fresh context; earlier messages stay"
+          aria-label="New topic"
+          className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-400 ${FOCUS}`}
+        >
+          <Plus className="h-4 w-4" />
+          <span className="hidden wide:inline">New topic</span>
+        </button>
+      )}
+      {trailing}
+      {open && (
+        <ConversationMenu
+          agentId={agentId}
+          activeLane={activeLane}
+          lanes={lanes}
+          shared={shared}
+          anchor={anchor}
+          onClose={() => setAnchor(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+/** The switcher's menu: every lane with what it's about and doing, then the
+ *  topics of the lane you're on (jump, rename, resume). A phone gets it as a
+ *  sheet from the bottom. */
+function ConversationMenu({ agentId, activeLane, lanes, shared, anchor, onClose }: {
+  agentId: string
+  activeLane: string
+  lanes: readonly string[]
+  shared: boolean
+  anchor: DOMRect | null
+  onClose: () => void
+}) {
+  const { isMobile } = useIsMobile()
+  const sessions = useChatStore((s) => s.sessions)
+  const setActiveLane = useChatStore((s) => s.setActiveLane)
+  const active = sessions.get(laneKey(agentId, activeLane))
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.stopPropagation()
+      onClose()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onClose])
+
+  const style: React.CSSProperties = isMobile
+    ? { left: 0, right: 0, bottom: 0, maxHeight: '75dvh' }
+    : {
+      top: (anchor?.bottom ?? 48) + 6,
+      left: Math.max(8, Math.min(anchor?.left ?? 8, window.innerWidth - 368)),
+      width: 360, maxHeight: '70vh',
+    }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[70]" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-label="Conversations"
+        className={`fixed flex flex-col overflow-hidden border border-zinc-700 bg-zinc-900 shadow-xl ${
+          isMobile ? 'rounded-t-2xl pb-[env(safe-area-inset-bottom)]' : 'rounded-xl'
+        }`}
+        style={style}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="shrink-0 px-2 pb-1.5 pt-2">
+          <div className="px-2 pb-1 text-[11px] font-medium text-zinc-500">Lanes</div>
+          {lanes.map((lane) => {
+            const s = sessions.get(laneKey(agentId, lane))
+            const st = laneState(s)
+            const on = lane === activeLane
+            const auto = lane === LANE_AUTO
+            const about = laneTitle(s?.messages)
+              || (auto ? 'Scheduled and automatic runs' : !s ? 'Start a parallel chat' : 'Nothing said yet')
+            return (
+              <button
+                key={lane}
+                type="button"
+                onClick={() => { setActiveLane(agentId, lane); onClose() }}
+                aria-current={on ? 'true' : undefined}
+                title={auto ? 'Automated turns (scheduler, autonomy, plans, peer tasks) — results for you also show in lane A' : `Lane ${lane} · ${st.text}`}
+                className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left text-[13px] transition-colors pointer-coarse:py-3 ${FOCUS} ${
+                  on ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'
+                }`}
+              >
+                <span className={`h-2 w-2 shrink-0 rounded-full ${LANE_DOT[st.tone]}`} />
+                <span className="w-9 shrink-0 font-semibold text-zinc-100">{laneName(lane)}</span>
+                <span className={`min-w-0 flex-1 truncate ${s && laneTitle(s.messages) ? 'text-zinc-200' : 'text-zinc-500'}`}>{about}</span>
+                {s?.unread && !on && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" title="Something new here" />}
+                <span className={`shrink-0 text-[11px] ${st.tone === 'waiting' ? 'text-amber-700 dark:text-amber-300' : 'text-zinc-500'}`}>{st.text}</span>
+              </button>
+            )
+          })}
+        </div>
+        {!shared && active && (
+          <div className="flex min-h-0 flex-1 flex-col border-t border-zinc-800">
+            <div className="shrink-0 px-4 pb-1 pt-2.5 text-[11px] font-medium text-zinc-500">
+              Topics {activeLane === LANE_AUTO ? 'in Auto' : `in lane ${activeLane}`}
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto pb-1.5">
+              <TopicRows sessionKey={active.key} onClose={onClose} />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
 // New topic and Topics on the lane row: buttons, a size up from the lane tabs.
 const TOPIC_BTN = 'flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-zinc-700 px-3 py-1.5 text-sm font-medium text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-100'
 
@@ -1559,6 +1856,43 @@ function TopicsMenu({ sessionKey, anchor, onClose }: {
   onClose: () => void
 }) {
   const { isMobile } = useIsMobile()
+  const rect = anchor
+  const style: React.CSSProperties = isMobile
+    ? { left: 0, right: 0, bottom: 0, maxHeight: '70dvh' }
+    : {
+      top: (rect?.bottom ?? 48) + 6,
+      right: Math.max(8, window.innerWidth - (rect?.right ?? window.innerWidth)),
+      width: 340, maxHeight: '60vh',
+    }
+
+  return createPortal(
+    <div className="fixed inset-0 z-[70]" onClick={onClose}>
+      <div
+        className={`fixed flex flex-col overflow-hidden border border-zinc-700 bg-zinc-900 shadow-xl ${
+          isMobile ? 'rounded-t-2xl pb-[env(safe-area-inset-bottom)]' : 'rounded-lg'
+        }`}
+        style={style}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Topics</span>
+          <button onClick={onClose} aria-label="Close" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto py-1">
+          <TopicRows sessionKey={sessionKey} onClose={onClose} />
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+/** A lane's topics, newest first: a row jumps to its divider, the pencil
+ *  renames it, Resume puts the agent's context back on it. The Topics menu
+ *  and the conversation menu both list them. */
+function TopicRows({ sessionKey, onClose }: { sessionKey: string; onClose: () => void }) {
   const [topics, setTopics] = useState<TopicInfo[] | null>(null)
   const agentSessionId = useChatStore((s) => s.sessions.get(sessionKey)?.agentSessionId ?? '')
   const busy = useChatStore((s) => s.sessions.get(sessionKey)?.busy ?? false)
@@ -1599,31 +1933,8 @@ function TopicsMenu({ sessionKey, anchor, onClose }: {
     onClose()
   }
 
-  const rect = anchor
-  const style: React.CSSProperties = isMobile
-    ? { left: 0, right: 0, bottom: 0, maxHeight: '70dvh' }
-    : {
-      top: (rect?.bottom ?? 48) + 6,
-      right: Math.max(8, window.innerWidth - (rect?.right ?? window.innerWidth)),
-      width: 340, maxHeight: '60vh',
-    }
-
-  return createPortal(
-    <div className="fixed inset-0 z-[70]" onClick={onClose}>
-      <div
-        className={`fixed flex flex-col overflow-hidden border border-zinc-700 bg-zinc-900 shadow-xl ${
-          isMobile ? 'rounded-t-2xl pb-[env(safe-area-inset-bottom)]' : 'rounded-lg'
-        }`}
-        style={style}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
-          <span className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Topics</span>
-          <button onClick={onClose} aria-label="Close" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto py-1">
+  return (
+    <>
           {rows === null && <p className="px-3 py-3 text-xs text-zinc-500">Loading…</p>}
           {rows !== null && rows.length === 0 && (
             <p className="px-3 py-3 text-xs text-zinc-500">
@@ -1688,10 +1999,7 @@ function TopicsMenu({ sessionKey, anchor, onClose }: {
               </div>
             )
           })}
-        </div>
-      </div>
-    </div>,
-    document.body,
+    </>
   )
 }
 
