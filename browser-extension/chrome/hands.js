@@ -16,9 +16,16 @@
 // read here for their web_fetch (pages.js) when the person turned those on —
 // then it's open even with "Agents can use this browser" off, and Flight Deck
 // sends no acts (the hello says what's lent).
+//
+// Chrome keeps the debugger off a tab that holds a frame of another extension
+// (a helper button some extension put into the page). There the acts that can
+// go without it run plain — the page helpers through chrome.scripting (which
+// needs "Work on every site"), navigation through chrome.tabs, screenshots of
+// the tab in front — and the rest say what's in the way (lib/hands-errors.js).
 
 import { browserLabel, loadConn } from './lib/api.js'
 import { saveSearchPick, servedEngines } from './lib/engines.js'
+import { cleanError, LOST_DEBUGGER, needsDebugger, noScripting, OTHER_EXTENSION, plainNote } from './lib/hands-errors.js'
 import { scrollThrough, settleInPage } from './lib/settle.js'
 import { readsPages, runFetch, saveFetchMode } from './pages.js'
 import { runSearch } from './search.js'
@@ -54,6 +61,9 @@ let groups = {}         // agent slug → { groupId, windowId, name, current }
 let log = []
 let loaded = null
 const attached = new Map()   // tabId → { lastUse, world, console: [], net: Map, shotScale, since }
+// Tabs Chrome keeps the debugger off (another extension's frame is in the
+// page) → { ext: [its extension ids], scriptable: chrome.scripting may run there }.
+const plainTabs = new Map()
 const cancelled = new Set()
 // Where to go back when an agent's run is over: window id → the tab the person
 // was on when one of that agent's tabs took the front ({ tabId, slug }).
@@ -277,7 +287,15 @@ async function runAct(msg) {
     const fn = ACTIONS[action]
     if (!fn) throw new Refusal(`“${action}” isn't something this browser does (Captain for Chrome ${VERSION}).`)
     const conn = wsConn || (await loadConn())
-    result = await fn({ id, agent, args, conn })
+    const ctx = { id, agent, args, conn, action }
+    try {
+      result = await fn(ctx)
+    } catch (e) {
+      // Chrome cut the debugger off mid-way (another extension's frame just
+      // appeared): an act that only reads goes again — plain, if it must.
+      if (e instanceof Refusal || !AGAIN_OK.has(action) || !lostDebugger(e)) throw e
+      result = await fn(ctx)
+    }
     result = { ok: true, ...result }
     entry.state = 'done'
   } catch (e) {
@@ -369,17 +387,12 @@ chrome.tabs.onActivated.addListener(({ windowId }) => {
   saveReturn()
 })
 
-function cleanError(e) {
-  let s = String(e?.message || e || 'Something went wrong.')
-  s = s.replace(/^(Uncaught )?(Error|TypeError): /, '').split('\n    at ')[0]
-  if (/Cannot access a chrome|cannot be scripted|Cannot attach to this target|chrome-extension:\/\//i.test(s)) {
-    return "Chrome doesn't let extensions work on this page (a chrome:// or extension page, or the Web Store)."
-  }
-  if (/Another debugger is already attached/i.test(s)) {
-    return 'DevTools (or another debugger) is open on that tab — the person has to close it first.'
-  }
-  if (/No tab with id/i.test(s)) return 'That tab was closed.'
-  return clip(s, 2000)
+// Acts safe to run twice: when Chrome cuts the debugger off mid-way they go again.
+const AGAIN_OK = new Set(['navigate', 'read_page', 'find', 'page_text', 'page_files', 'screenshot', 'zoom', 'save_page', 'scroll_to'])
+
+function lostDebugger(e) {
+  const s = String(e?.message || e || '')
+  return LOST_DEBUGGER.test(s) || OTHER_EXTENSION.test(s)
 }
 
 // ── the agent's tabs ──
@@ -487,16 +500,78 @@ function checkUrl(raw, conn) {
   return u.href
 }
 
+// The agent's tab with the debugger on it. Where Chrome keeps the debugger off
+// (another extension's frame is in the page) the tab comes back marked plain
+// for an act that can go without it — opts.plain: 'script' (needs
+// chrome.scripting there) or 'tabs' (chrome.tabs is enough) — and any other
+// act is refused, saying why (opts.need names it, else the act).
 async function useTab(ctx, args, opts = {}) {
   const tab = await tabFor(ctx.agent, args, opts)
   guardTab(tab, ctx.conn)
-  await attach(tab.id)
+  let plain = null
+  try {
+    await attach(tab.id)
+    plainTabs.delete(tab.id)
+  } catch (e) {
+    if (!OTHER_EXTENSION.test(String(e?.message || e))) throw e
+    plain = await goPlain(tab.id)
+    if (!opts.plain) throw new Refusal(needsDebugger(opts.need || ctx.action || 'that', plain))
+    if (opts.plain === 'script' && !plain.scriptable) throw new Refusal(noScripting(plain))
+  }
   if (prefs.front && !tab.active) await chrome.tabs.update(tab.id, { active: true }).catch(() => {})
-  return chrome.tabs.get(tab.id)
+  const now = await chrome.tabs.get(tab.id)
+  if (plain) now.plain = plain
+  return now
+}
+
+// The tab holds another extension's frame: from now on its page helpers run
+// through chrome.scripting (while the person lets Captain work on every site).
+async function goPlain(tabId) {
+  attached.delete(tabId)
+  const page = { ext: [], scriptable: true, shotScale: plainTabs.get(tabId)?.shotScale || 1 }
+  try {
+    const [r] = await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: extensionFrames })
+    page.ext = (Array.isArray(r?.result) ? r.result : []).filter((id) => id !== chrome.runtime.id)
+  } catch {
+    page.scriptable = false
+  }
+  plainTabs.set(tabId, page)
+  return page
+}
+
+// Runs in the page: the ids of extensions whose frames are in it (in shadow roots too).
+function extensionFrames() {
+  const ids = new Set()
+  const look = (root, depth) => {
+    for (const f of root.querySelectorAll('iframe, frame, embed, object')) {
+      const m = /^chrome-extension:\/\/([a-p]{32})\//.exec(f.src || f.data || '')
+      if (m) ids.add(m[1])
+    }
+    if (depth >= 3) return
+    for (const el of root.querySelectorAll('*')) {
+      const shadow = globalThis.chrome?.dom?.openOrClosedShadowRoot?.(el) || el.shadowRoot
+      if (shadow) look(shadow, depth + 1)
+    }
+  }
+  look(document, 0)
+  return [...ids].slice(0, 3)
+}
+
+// After a page loaded in the agent's tab: '' while the debugger works there,
+// else a note on what works without it.
+async function debuggerNote(tabId) {
+  try {
+    await attach(tabId)
+    plainTabs.delete(tabId)
+    return ''
+  } catch (e) {
+    if (!OTHER_EXTENSION.test(String(e?.message || e))) return ''
+  }
+  return `\n${plainNote(await goPlain(tabId))}`
 }
 
 chrome.tabs.onCreated.addListener((tab) => {
-  if (tab.openerTabId !== undefined && attached.has(tab.openerTabId)) {
+  if (tab.openerTabId !== undefined && (attached.has(tab.openerTabId) || plainTabs.has(tab.openerTabId))) {
     const list = openedFrom.get(tab.openerTabId) || []
     list.push(tab.id)
     openedFrom.set(tab.openerTabId, list.slice(-10))
@@ -504,6 +579,7 @@ chrome.tabs.onCreated.addListener((tab) => {
 })
 chrome.tabs.onRemoved.addListener((tabId) => {
   attached.delete(tabId)
+  plainTabs.delete(tabId)
   openedFrom.delete(tabId)
 })
 
@@ -556,8 +632,12 @@ setInterval(() => {
 chrome.debugger?.onDetach.addListener((src) => {
   // Cancel on Chrome's "is debugging this browser" bar only hides it: the next
   // act attaches again. Stopping an agent is the panel's Stop (people press
-  // Cancel to get rid of the bar, not to stop their agent).
-  if (src.tabId !== undefined) attached.delete(src.tabId)
+  // Cancel to get rid of the bar, not to stop their agent). A page that's
+  // loading for an act is waited for without the debugger from here.
+  if (src.tabId === undefined) return
+  const t = attached.get(src.tabId)
+  attached.delete(src.tabId)
+  if (t) for (const done of t.loads.splice(0)) done('detached')
 })
 
 function remoteText(a) {
@@ -705,10 +785,34 @@ async function evaluate(tabId, expression, { main = false, timeout = 20000, repl
 }
 
 async function helper(tabId, fn, arg = {}, sid = '') {
+  if (plainTabs.has(tabId) && !sid) return plainHelper(tabId, fn, arg)
   if (!helperSrc) helperSrc = await source('hands-page.js')
   const prefix = sid ? `f${holderOf(tabId, sid).index}_` : ''
   const res = await evaluate(tabId, `${helperSrc}\n;globalThis.__captainRefPrefix = ${JSON.stringify(prefix)};globalThis.__captainHands.${fn}(${JSON.stringify(arg)})`, { sid })
   return res.value
+}
+
+// A page helper run through chrome.scripting, in Captain's own isolated world
+// of the page (the debugger can't go there). Its refs are ref_p12 — never
+// mistaken for refs read with the debugger, which live in another world.
+async function plainHelper(tabId, fn, arg = {}) {
+  const target = { tabId, frameIds: [0] }
+  const call = async () => {
+    const [res] = await chrome.scripting.executeScript({ target, args: [fn, arg], func: async (name, a) => {
+      if (!globalThis.__captainHands) return { missing: true }
+      globalThis.__captainRefPrefix = 'p'
+      try { return { ok: true, value: await globalThis.__captainHands[name](a) } } catch (e) { return { ok: false, error: String(e?.message || e) } }
+    } })
+    return res?.result
+  }
+  let r = await call()
+  if (r?.missing) {
+    await chrome.scripting.executeScript({ target, files: ['hands-page.js'] })
+    r = await call()
+  }
+  if (!r || r.missing) throw new Error('The page did not answer (it is loading or changing?) — try again.')
+  if (!r.ok) throw new Error(r.error)
+  return r.value
 }
 
 // The frame a ref lives in ('' = the page itself): ref_f2_5 is frame 2's.
@@ -809,9 +913,15 @@ function fieldSays(info) {
 }
 
 async function capturePage(tabId) {
-  if (!captureSrc) captureSrc = await source('capture.js')
-  const res = await evaluate(tabId, captureSrc, { timeout: 30000 })
-  const v = res.value
+  let v
+  if (plainTabs.has(tabId)) {
+    const [res] = await withTimeout(chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ['capture.js'] }),
+      30000, 'The page took too long to answer.')
+    v = res?.result
+  } else {
+    if (!captureSrc) captureSrc = await source('capture.js')
+    v = (await evaluate(tabId, captureSrc, { timeout: 30000 })).value
+  }
   if (!v || !v.ok) throw new Error('Could not read the page.')
   return v
 }
@@ -846,8 +956,7 @@ async function waitDrawn(tabId, opts) {
     const left = end - Date.now()
     if (left <= 0) break
     try {
-      const res = await evaluate(tabId, `(${settleInPage})(${JSON.stringify({ ...opts, maxMs: left })})`, { timeout: left + 4000 })
-      r = res.value || null
+      r = await inPage(tabId, settleInPage, { ...opts, maxMs: left }, left + 4000)
     } catch { return r }
     if (!dataPending(tabId)) return r
     // Data still on its way: wait for it, then for what it draws.
@@ -860,18 +969,56 @@ async function waitDrawn(tabId, opts) {
 // Sections drawn only when scrolled to: a screen at a time down, then back.
 async function scrollToLoad(tabId, opts) {
   try {
-    const r = await evaluate(tabId, `(${scrollThrough})(${JSON.stringify(opts)})`, { timeout: (opts.totalMs || 15000) + 5000 })
-    return r.value || null
+    return await inPage(tabId, scrollThrough, opts, (opts.totalMs || 15000) + 5000)
   } catch { return null }
+}
+
+// One of lib/settle.js's functions run in the page: through the debugger, or
+// through chrome.scripting where the debugger can't go.
+async function inPage(tabId, func, arg, timeout) {
+  if (plainTabs.has(tabId)) {
+    const [res] = await withTimeout(chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func, args: [arg] }),
+      timeout, 'The page took too long to answer.')
+    return res?.result ?? null
+  }
+  return (await evaluate(tabId, `(${func})(${JSON.stringify(arg)})`, { timeout })).value || null
 }
 
 async function navigateTab(tabId, url) {
   const t = attached.get(tabId) || (await attach(tabId))
   const loaded = new Promise((resolve) => t.loads.push(resolve))
-  const res = await cdp(tabId, 'Page.navigate', { url })
+  let res
+  try {
+    res = await cdp(tabId, 'Page.navigate', { url })
+  } catch (e) {
+    if (!lostDebugger(e)) throw e
+    // Cut off as the page came (another extension's frame in it): it loads on.
+    const now = await chrome.tabs.get(tabId).catch(() => null)
+    if (!now) throw new Refusal('The tab closed.')
+    if (now.status !== 'loading' && now.url !== url && now.pendingUrl !== url) return plainNavigate(tabId, url)
+    return waitComplete(tabId, NAV_WAIT_MS)
+  }
   if (res.errorText && res.errorText !== 'net::ERR_ABORTED') throw new Refusal(`Couldn't open ${url}: ${res.errorText}`)
   if (!res.loaderId) return true   // same document (#hash)
-  return withTimeout(loaded, NAV_WAIT_MS, 'slow').then(() => true, () => false)
+  const how = await withTimeout(loaded, NAV_WAIT_MS, 'slow').catch(() => false)
+  // The debugger went (the page has another extension's frame): wait the plain way.
+  if (how === 'detached') return waitComplete(tabId, NAV_WAIT_MS)
+  return how === true
+}
+
+// Navigation without the debugger: the tab is sent there and waited for.
+async function plainNavigate(tabId, url) {
+  await chrome.tabs.update(tabId, { url })
+  const start = Date.now()
+  let seen = false
+  while (Date.now() - start < NAV_WAIT_MS) {
+    await sleep(200)
+    const t = await chrome.tabs.get(tabId).catch(() => null)
+    if (!t) throw new Refusal('The tab closed.')
+    if (t.status === 'loading') seen = true
+    else if (seen || Date.now() - start > 1500) return true   // loaded — or never had to (#hash)
+  }
+  return false
 }
 
 async function waitComplete(tabId, ms) {
@@ -948,14 +1095,26 @@ function modsOf(text) {
   return m
 }
 
+// Returns 'cut' when Chrome took the debugger off as the last release went in:
+// the click landed and what it did brought another extension's frame (a
+// composer opening with that extension's button in it).
 async function mouseClick(tabId, x, y, { button = 'left', count = 1, mods = 0 } = {}) {
   const buttons = button === 'right' ? 2 : button === 'middle' ? 4 : 1
   await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, modifiers: mods })
   for (let i = 1; i <= count; i++) {
     await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button, buttons, clickCount: i, modifiers: mods })
-    await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount: i, modifiers: mods })
+    try {
+      await cdp(tabId, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button, buttons: 0, clickCount: i, modifiers: mods })
+    } catch (e) {
+      if (i === count && LOST_DEBUGGER.test(String(e?.message || e))) return 'cut'
+      throw e
+    }
   }
+  return ''
 }
+
+const CUT_SAYS = "As it landed Chrome took Captain's debugger off this tab — another extension put a frame of its own into the " +
+  'page just then. Check it took with read_page, which also says what works on this page now.'
 
 const NAMED_KEYS = {
   enter: ['Enter', 'Enter', 13, '\r'], return: ['Enter', 'Enter', 13, '\r'], tab: ['Tab', 'Tab', 9],
@@ -1057,6 +1216,13 @@ async function blobToB64(blob) {
 }
 
 async function rawShot(tabId) {
+  if (plainTabs.has(tabId)) {
+    // Without the debugger Chrome pictures only the tab in front of its window.
+    const tab = await chrome.tabs.get(tabId)
+    if (!tab.active) { await chrome.tabs.update(tabId, { active: true }); await sleep(300) }
+    const url = await withTimeout(chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' }), 10000, 'The tab did not draw a picture in time.')
+    return { data: String(url).split(',')[1] || '' }
+  }
   const params = { format: 'png', fromSurface: true }
   try {
     return await withTimeout(cdp(tabId, 'Page.captureScreenshot', params), 5000, 'slow')
@@ -1073,7 +1239,7 @@ async function shoot(tabId, region = null) {
   const shot = await rawShot(tabId)
   const bmp = await createImageBitmap(b64ToBlob(shot.data, 'image/png'))
   const k = bmp.width / Math.max(1, inf.vw)   // device pixels per CSS pixel
-  const t = attached.get(tabId)
+  const t = attached.get(tabId) || plainTabs.get(tabId)
   let sx = 0
   let sy = 0
   let sw = bmp.width
@@ -1129,21 +1295,44 @@ function pointNotes(p) {
     p.visible === false ? 'It has no size on the page (hidden?) — check with a screenshot.' : '', p.note || ''].filter(Boolean)
 }
 
+const PLAIN_SAYS = '(made of page events — no debugger on this page; check it took)'
+
 async function clickLike(ctx, args, { button = 'left', count = 1, verb = 'Clicked' } = {}) {
-  const tab = await useTab(ctx, args)
+  const atPoint = Array.isArray(args.coordinate) && args.coordinate.length >= 2
+  const simple = button === 'left' && count === 1 && !args.modifiers && !atPoint
+  const tab = await useTab(ctx, args, simple ? { plain: 'script' }
+    : { need: atPoint ? 'a click at a coordinate (click a ref instead)' : args.modifiers ? 'a click with keys held' : ctx.action })
   const pre = await problemsAll(tab.id)
+  if (tab.plain) {
+    if (!args.ref && !args.selector && !args.text && !args.role) throw new Refusal('Point at something: ref (from read_page or find — best), selector, or text.')
+    const before = await groupTabIds(ctx.agent)
+    const p = await helper(tab.id, 'press', { ref: args.ref || '', selector: args.selector || '', text: args.text || '', role: args.role || '', nth: args.nth ?? null })
+    const after = await settle(ctx, tab, tab.url, before)
+    const said = newProblems(pre, await problemsAll(tab.id))
+    return { content: [`${verb} ${p.what}${p.ref ? ` [${p.ref}]` : ''} ${PLAIN_SAYS}.`, ...pointNotes(p), after, said].filter(Boolean).join('\n') }
+  }
   const p = await pointFor(tab, args)
   const before = await groupTabIds(ctx.agent)
-  await mouseClick(tab.id, p.x, p.y, { button, count, mods: modsOf(args.modifiers) })
+  const cut = await mouseClick(tab.id, p.x, p.y, { button, count, mods: modsOf(args.modifiers) })
   const after = await settle(ctx, tab, tab.url, before)
   const said = newProblems(pre, await problemsAll(tab.id))
-  return { content: [`${verb} ${p.what}${p.ref ? ` [${p.ref}]` : ''}.`, ...pointNotes(p), after, said].filter(Boolean).join('\n') }
+  return { content: [`${verb} ${p.what}${p.ref ? ` [${p.ref}]` : ''}.`, cut ? CUT_SAYS : '', ...pointNotes(p), after, said].filter(Boolean).join('\n') }
 }
 
 // Typing into a field (a ref, a selector, a point) replaces what's in it unless
 // append is set; the answer says what the field holds afterwards.
 async function typeInto(ctx, tab, args, text) {
   const pre = await problemsAll(tab.id)
+  if (tab.plain) {
+    if (Array.isArray(args.coordinate)) throw new Refusal(needsDebugger('typing at a coordinate (give the field\'s ref instead)', tab.plain))
+    const before = await groupTabIds(ctx.agent)
+    const r = await helper(tab.id, 'typeIn', { ref: args.ref || '', selector: args.selector || '', nth: args.nth ?? null, value: text, append: !!args.append })
+    const after = await settle(ctx, tab, tab.url, before)
+    const said = newProblems(pre, await problemsAll(tab.id))
+    return [`Typed ${text.length} character${text.length === 1 ? '' : 's'} into ${r.what} [${r.ref}]${args.append ? '' : ', replacing what was there'} ${PLAIN_SAYS}.`,
+      /\n/.test(text) ? 'A line break went in as text: it pressed no Enter (nothing was sent or submitted) — click the button for that.' : '',
+      r.note, fieldSays(r.field), after, said].filter(Boolean).join('\n')
+  }
   let into = ''
   if (args.ref || args.selector || Array.isArray(args.coordinate)) {
     const p = await pointFor(tab, { ref: args.ref, selector: args.selector, coordinate: args.coordinate, nth: args.nth })
@@ -1169,17 +1358,24 @@ async function typeInto(ctx, tab, args, text) {
 
 // ── files ──
 
+// Runs in the page: a file fetched with the page's own session, as base64.
+async function pageFetch(url, max) {
+  const r = await fetch(url, { credentials: 'include' })
+  if (!r.ok) return { ok: false, status: r.status }
+  const blob = await r.blob()
+  if (blob.size > max) return { ok: false, big: blob.size }
+  const data = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = rej; fr.readAsDataURL(blob) })
+  return { ok: true, type: blob.type, size: blob.size, data, disposition: r.headers.get('content-disposition') || '', final: r.url }
+}
+
 async function fetchInPage(tabId, url) {
-  const expr = `(async () => {
-    const r = await fetch(${JSON.stringify(url)}, { credentials: 'include' })
-    if (!r.ok) return { ok: false, status: r.status }
-    const blob = await r.blob()
-    if (blob.size > ${FILE_MAX}) return { ok: false, big: blob.size }
-    const data = await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1] || ''); fr.onerror = rej; fr.readAsDataURL(blob) })
-    return { ok: true, type: blob.type, size: blob.size, data, disposition: r.headers.get('content-disposition') || '', final: r.url }
-  })()`
   try {
-    const res = await evaluate(tabId, expr, { timeout: 45000 })
+    if (plainTabs.has(tabId)) {
+      const [res] = await withTimeout(chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: pageFetch, args: [url, FILE_MAX] }),
+        45000, 'The page took too long to answer.')
+      return res?.result || { ok: false }
+    }
+    const res = await evaluate(tabId, `(${pageFetch})(${JSON.stringify(url)}, ${FILE_MAX})`, { timeout: 45000 })
     return res.value
   } catch (e) {
     return { ok: false, error: String(e.message || e) }
@@ -1261,7 +1457,7 @@ const ACTIONS = {
     if (!url) return { content: `Opened a new empty tab ${tab.id} — now your current tab.` }
     const done = await navigateTab(tab.id, url)
     const t = await chrome.tabs.get(tab.id)
-    return { content: `Opened tab ${t.id} (now current): ${clip(t.title || '', 120)} — ${t.url}${done ? '' : '\n(It was still loading after 30 s.)'}` }
+    return { content: `Opened tab ${t.id} (now current): ${clip(t.title || '', 120)} — ${t.url}${done ? '' : '\n(It was still loading after 30 s.)'}${await debuggerNote(t.id)}` }
   },
 
   async tab_close(ctx, args = ctx.args) {
@@ -1283,32 +1479,34 @@ const ACTIONS = {
   async navigate(ctx, args = ctx.args) {
     const where = String(args.url || '').trim()
     if (where === 'back' || where === 'forward') {
-      const tab = await useTab(ctx, args)
+      const tab = await useTab(ctx, args, { plain: 'tabs' })
       await (where === 'back' ? chrome.tabs.goBack(tab.id) : chrome.tabs.goForward(tab.id)).catch(() => {
         throw new Refusal(`There's no page to go ${where} to.`)
       })
       await sleep(300)
       await waitComplete(tab.id, 15000)
+      const plain = await debuggerNote(tab.id)
       await waitDrawn(tab.id, { maxMs: 8000, quietMs: 700 })
       const t = await chrome.tabs.get(tab.id)
       guardTab(t, ctx.conn)
-      return { content: `Went ${where}: ${clip(t.title || '', 120)} — ${t.url}` }
+      return { content: `Went ${where}: ${clip(t.title || '', 120)} — ${t.url}${plain}` }
     }
     const url = checkUrl(where, ctx.conn)
-    const tab = await useTab(ctx, args, { create: true })
-    const done = await navigateTab(tab.id, url)
+    const tab = await useTab(ctx, args, { create: true, plain: 'tabs' })
+    const done = tab.plain ? await plainNavigate(tab.id, url) : await navigateTab(tab.id, url)
+    const plain = await debuggerNote(tab.id)
     const drawn = done ? await waitDrawn(tab.id, { maxMs: 10000, quietMs: 800, minMs: 1500 }) : null
     const t = await chrome.tabs.get(tab.id)
     const note = !done ? '\n(It was still loading after 30 s — take a screenshot or read the page to see.)'
       : drawn && !drawn.quiet ? '\n(It was still drawing after 10 s — read it again in a moment if something is missing.)' : ''
-    return { content: `Opened in tab ${t.id}: ${clip(t.title || '', 120)} — ${t.url}${note}` }
+    return { content: `Opened in tab ${t.id}: ${clip(t.title || '', 120)} — ${t.url}${note}${plain}` }
   },
 
   async back(ctx) { return ACTIONS.navigate({ ...ctx, args: { ...ctx.args, url: 'back' } }) },
   async forward(ctx) { return ACTIONS.navigate({ ...ctx, args: { ...ctx.args, url: 'forward' } }) },
 
   async read_page(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     const filter = args.filter === 'all' ? 'all' : 'interactive'
     const maxChars = Math.min(Math.max(Number(args.max_chars) || 40000, 2000), 200000)
     const inside = args.ref || args.ref_id || ''
@@ -1320,7 +1518,7 @@ const ACTIONS = {
   },
 
   async find(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     const query = args.query || args.text || ''
     await waitDrawn(tab.id, { maxMs: 4000, quietMs: 500 })
     const here = await helper(tab.id, 'find', { query })
@@ -1330,7 +1528,7 @@ const ACTIONS = {
   },
 
   async page_text(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     const offset = Math.max(0, Number(args.offset) || 0)
     await waitDrawn(tab.id, { maxMs: 6000, quietMs: 700 })
     // The first read goes through the whole page, so sections drawn only when
@@ -1351,7 +1549,7 @@ const ACTIONS = {
   },
 
   async page_files(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     const cap = await capturePage(tab.id)
     const all = [...(cap.files || []), ...(cap.images || [])]
     if (!all.length) return { content: 'No files are linked from this page.' }
@@ -1361,7 +1559,7 @@ const ACTIONS = {
   },
 
   async download(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     let wanted = Array.isArray(args.urls) ? args.urls.map(String) : args.url ? [String(args.url)] : []
     const names = {}
     if (!wanted.length && args.all) {
@@ -1406,21 +1604,26 @@ const ACTIONS = {
   },
 
   async save_page(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
-    const { data } = await withTimeout(cdp(tab.id, 'Page.captureSnapshot', { format: 'mhtml' }), 45000, 'Saving the page took too long.')
+    const tab = await useTab(ctx, args, { plain: 'tabs' })
+    const blob = tab.plain
+      ? await withTimeout(chrome.pageCapture.saveAsMHTML({ tabId: tab.id }), 45000, 'Saving the page took too long.')
+      : new Blob([(await withTimeout(cdp(tab.id, 'Page.captureSnapshot', { format: 'mhtml' }), 45000, 'Saving the page took too long.')).data], { type: 'multipart/related' })
     const base = (oneLine(tab.title) || hostOf(tab.url) || 'page').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').slice(0, 80)
-    const up = await uploadFiles(ctx, [{ blob: new Blob([data], { type: 'multipart/related' }), name: `${base}.mhtml` }], { url: tab.url, title: tab.title })
+    const up = await uploadFiles(ctx, [{ blob, name: `${base}.mhtml` }], { url: tab.url, title: tab.title })
     return { content: `Saved the whole page (${tab.url}) as ${(up.saved || [])[0]?.path || up.folder} — it opens offline in a browser.` }
   },
 
   async form_input(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     if (!args.ref) throw new Refusal('form_input needs a ref (from read_page or find) and a value.')
     const value = args.value ?? args.text ?? ''
-    const sid = sidOfRef(tab.id, args.ref)
+    const sid = tab.plain ? '' : sidOfRef(tab.id, args.ref)
     const pre = await problemsAll(tab.id)
     let said
-    if (await helper(tab.id, 'fieldKind', { ref: args.ref }, sid) === 'text') {
+    if (tab.plain && await helper(tab.id, 'fieldKind', { ref: args.ref }) === 'text') {
+      // No debugger: the text goes in as an editing command, which pages see as input.
+      said = fieldSays((await helper(tab.id, 'typeIn', { ref: args.ref, value: String(value) })).field)
+    } else if (await helper(tab.id, 'fieldKind', { ref: args.ref }, sid) === 'text') {
       // A text field is set the way a person does it — select what's there, then
       // the new text as real input — so React, Vue and the rest all see it.
       await helper(tab.id, 'selectField', { ref: args.ref }, sid)
@@ -1467,7 +1670,7 @@ const ACTIONS = {
   async type(ctx, args = ctx.args) {
     const text = String(args.text ?? '')
     if (!text) throw new Refusal('type needs the text to type.')
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     return { content: await typeInto(ctx, tab, args, text) }
   },
 
@@ -1483,9 +1686,14 @@ const ACTIONS = {
   },
 
   async scroll(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, Array.isArray(args.coordinate) ? { need: 'scrolling at a coordinate (give a ref, or none for the page)' } : { plain: 'script' })
     const dir = String(args.scroll_direction || 'down')
     const amount = Math.min(Math.max(Number(args.scroll_amount) || 500, 10), 20000)
+    if (tab.plain) {
+      const inf = await helper(tab.id, 'wheel', { ref: args.ref || '', dx: dir === 'left' ? -amount : dir === 'right' ? amount : 0,
+        dy: dir === 'up' ? -amount : dir === 'down' ? amount : 0 })
+      return { content: `Scrolled ${dir} ${amount} px. The page is at ${inf.sy} of ${inf.sh} px${inf.sx ? `, x ${inf.sx}` : ''}.` }
+    }
     let x
     let y
     if (Array.isArray(args.coordinate)) {
@@ -1508,12 +1716,12 @@ const ACTIONS = {
   },
 
   async scroll_to(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     return { content: await refHelper(tab.id, 'scrollTo', { ref: args.ref }) }
   },
 
   async screenshot(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     await waitDrawn(tab.id, { maxMs: 3000, quietMs: 400 })
     const s = await shoot(tab.id)
     const t = await chrome.tabs.get(tab.id)
@@ -1524,7 +1732,7 @@ const ACTIONS = {
 
   async zoom(ctx, args = ctx.args) {
     if (!Array.isArray(args.region) || args.region.length !== 4) throw new Refusal('zoom needs region: [x0, y0, x1, y1] in a screenshot.')
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     const s = await shoot(tab.id, args.region)
     return { image: s.image, image_type: 'image/jpeg',
       content: `Closer look at [${args.region.join(', ')}] (${s.width}×${s.height} px). Coordinates for clicks still come from the full screenshot.` }
@@ -1577,7 +1785,7 @@ const ACTIONS = {
   },
 
   async resize(ctx, args = ctx.args) {
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     const width = Math.round(Number(args.width))
     const height = Math.round(Number(args.height))
     if (!(width >= 300 && height >= 200)) throw new Refusal('resize needs width and height (at least 300×200).')
@@ -1589,14 +1797,14 @@ const ACTIONS = {
   async upload_file(ctx, args = ctx.args) {
     const f = args.file || {}
     if (!args.ref || !f.data) throw new Refusal('upload_file needs ref (the file field) and the file.')
-    const tab = await useTab(ctx, args)
+    const tab = await useTab(ctx, args, { plain: 'script' })
     return { content: await refHelper(tab.id, 'upload', { ref: args.ref, name: String(f.name || 'file'), type: String(f.type || 'application/octet-stream'), data: String(f.data) }) }
   },
 
   async release(ctx) {
     const g = await agentGroup(ctx.agent)
     const tabs = await groupTabs(g)
-    for (const t of tabs) await detach(t.id)
+    for (const t of tabs) { await detach(t.id); plainTabs.delete(t.id) }
     if (g) { g.current = null; saveGroups() }
     return { content: `Let go of the person's Chrome.${tabs.length ? ` Your ${tabs.length} tab${tabs.length === 1 ? ' stays' : 's stay'} open in the “${ctx.agent.name}” group for them.` : ''}` }
   },

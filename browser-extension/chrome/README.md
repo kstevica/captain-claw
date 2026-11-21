@@ -112,6 +112,14 @@ works here (`target="chrome"`), signed in as you, while you watch:
 - Flight Deck's own pages, `chrome://` pages and anything that isn't a web
   page are off-limits. Only your own agents can use it; a shared agent's
   member chats never can.
+- **A page with another extension's frame in it** (a helper button some
+  extension puts into a message box, say) — Chrome keeps Captain's debugger
+  off that tab. The agent still navigates there, and with **Work on every
+  site** on it also reads the page, fills fields, clicks and types (as page
+  events, not real input), scrolls and takes screenshots (the tab comes to the
+  front). Keys, hovering, dragging, clicks at a point and scripts need the
+  debugger: the agent tells you which extension it is — set its **Site
+  access** to **On click** in `chrome://extensions` and reload the page.
 - **Bring an agent's tab to the front while it works** — off by default, so
   an agent working in the background doesn't take your tab away.
 - **Back where you were** — when an agent's tab took the front (that switch,
