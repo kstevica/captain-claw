@@ -131,3 +131,36 @@ def reaped(pid: int) -> bool:
         return bool(os.waitpid(pid, os.WNOHANG)[0])
     except ChildProcessError:
         return False  # not ours: an agent from before a deck restart
+
+
+# Open files a deck should be able to hold: agents' sockets, their log files,
+# SQLite databases and their WAL/SHM files add up. Linux's default soft limit is
+# 1024 while the hard limit is far higher.
+OPEN_FILES_WANTED = 65536
+
+
+def raise_open_file_limit(wanted: int = OPEN_FILES_WANTED) -> tuple[int, int] | None:
+    """Lift this process's soft open-file limit toward *wanted*, never past the
+    hard limit. Children (agents) inherit it. Returns (before, after), or None
+    where there are no such limits (Windows) or they can't be read."""
+    try:
+        import resource
+    except ImportError:  # Windows
+        return None
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        return None
+    if soft == resource.RLIM_INFINITY:
+        return soft, soft
+    ceiling = wanted if hard == resource.RLIM_INFINITY else min(wanted, hard)
+    # macOS refuses a soft limit above kern.maxfilesperproc (often 10240).
+    for target in (ceiling, 10240):
+        if target <= soft:
+            break
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            return soft, target
+        except (OSError, ValueError):
+            continue
+    return soft, soft

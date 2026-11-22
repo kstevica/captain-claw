@@ -336,14 +336,14 @@ class _FakePopen:
     def __init__(self, args, cwd=None, env=None, stdout=None, stderr=None, start_new_session=None,
                  creationflags=0):
         slug = Path(cwd).name
-        _FakePopen.calls.append({"slug": slug, "env": dict(env or {})})
+        # The log handle is kept, not closed here: closing the deck's copy is the
+        # spawn path's job (TestLogHandleClosed).
+        _FakePopen.calls.append({"slug": slug, "env": dict(env or {}), "stdout": stdout})
         self.pid = 424242
         reg = server._load_process_registry()
         if slug in reg:
             reg[slug]["web_port"] = int(reg[slug]["web_port"]) + 1
             server._save_process_registry(reg)
-        if stdout is not None:
-            stdout.close()
 
     def poll(self):
         return None
@@ -546,6 +546,26 @@ class TestRestartRepinsOwnerAndFdUrl:
         assert env["FD_OWNER_ID"] == BOB
         assert env["CLAW_VFS_USER"] == BOB
         assert env["FOO"] == "bar"
+
+
+class TestLogHandleClosed:
+    """The child gets its own copy of process.log; the deck's copy used to stay
+    open, one more open file for every agent start (cohort001 ran out of files)."""
+
+    def test_restart_closes_the_decks_copy(self, spawn_env):
+        (spawn_env / "bob-agent").mkdir()
+        entry = server._load_process_registry()["bob-agent"]
+        assert server._start_registered_process("bob-agent", entry)
+        handle = _FakePopen.calls[-1]["stdout"]
+        assert handle is not None and handle.closed
+
+    async def test_spawn_closes_the_decks_copy(self, spawn_env, users):
+        async with _client(LOOPBACK) as c:
+            r = await c.post("/fd/spawn-process", json={"name": "logged", "web_port": 24550},
+                             headers={"Authorization": f"Bearer {create_access_token(BOB)}"})
+        assert r.status_code == 200, r.text
+        handle = _FakePopen.calls[-1]["stdout"]
+        assert handle is not None and handle.closed
 
 
 # ── clone ────────────────────────────────────────────────────────────

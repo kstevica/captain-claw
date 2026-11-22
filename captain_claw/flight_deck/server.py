@@ -52,6 +52,7 @@ from captain_claw.flight_deck import deck_update
 from captain_claw.flight_deck import proc_compat
 from captain_claw.flight_deck import origin_guard
 from captain_claw.flight_deck import agent_ws_quiet
+from captain_claw.flight_deck import docker_probe
 from captain_claw.flight_deck import tenant_profile
 from captain_claw.flight_deck import course_carrier
 from captain_claw.flight_deck import agent_sharing
@@ -320,9 +321,17 @@ _client: docker.DockerClient | None = None
 
 
 def get_docker() -> docker.DockerClient:
+    """The deck's Docker client. Raises a ``DockerException`` when Docker can't be
+    reached; on a host without it, that answer is remembered for a minute so the
+    probes don't each leave a socket open (docker_probe)."""
     global _client
     if _client is None:
-        _client = docker.from_env()
+        docker_probe.check()
+        try:
+            _client = docker.from_env()
+        except Exception as exc:
+            docker_probe.mark_down(f"Docker isn't reachable: {type(exc).__name__}")
+            raise
     return _client
 
 
@@ -825,16 +834,18 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
 
     log_file = _rotated_process_log(agent_dir)
     try:
-        log_fh = open(log_file, "a", encoding="utf-8")
-        proc = subprocess.Popen(
-            [_resolve_cc_web_bin(), "--port", str(web_port)],
-            cwd=str(agent_dir),
-            env=environment,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            creationflags=proc_compat.NO_WINDOW,
-            start_new_session=True,
-        )
+        # The child gets its own copy of the handle; the deck's is closed at once
+        # (it used to stay open, one more file for every agent start).
+        with open(log_file, "a", encoding="utf-8") as log_fh:
+            proc = subprocess.Popen(
+                [_resolve_cc_web_bin(), "--port", str(web_port)],
+                cwd=str(agent_dir),
+                env=environment,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                creationflags=proc_compat.NO_WINDOW,
+                start_new_session=True,
+            )
         _processes[slug] = proc
         entry["pid"] = proc.pid
         return True
@@ -10818,9 +10829,8 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         from captain_claw.flight_deck.agent_bundle import restore as bundle_restore
         await bundle_restore.unpack_on_spawn(config._bundle, slug, agent_dir, owner_id or "")
 
-    # Open log file
+    # The agent's log file (opened right at Popen, so nothing in between can strand the handle)
     log_file = _rotated_process_log(agent_dir)
-    log_fh = open(log_file, "a", encoding="utf-8")
 
     # Resolve captain-claw-web binary: bundled (PyInstaller) or PATH
     cc_web_bin = _resolve_cc_web_bin()
@@ -10886,21 +10896,23 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
             log.warning("Could not schedule a shared-context refresh",
                         error=type(_cp_exc).__name__)
 
+    log_fh = open(log_file, "a", encoding="utf-8")
     try:
-        proc = subprocess.Popen(
-            [cc_web_bin, "--port", str(config.web_port)],
-            cwd=str(agent_dir),
-            env=environment,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # Detach from parent (Unix; Windows ignores it)
-            creationflags=proc_compat.NO_WINDOW,
-        )
+        # The child gets its own copy of the handle; the deck's is closed at once
+        # (it used to stay open, one more file for every agent start).
+        with log_fh:
+            proc = subprocess.Popen(
+                [cc_web_bin, "--port", str(config.web_port)],
+                cwd=str(agent_dir),
+                env=environment,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,  # Detach from parent (Unix; Windows ignores it)
+                creationflags=proc_compat.NO_WINDOW,
+            )
     except FileNotFoundError:
-        log_fh.close()
         raise HTTPException(500, f"captain-claw-web not found at '{cc_web_bin}'. Install captain-claw via pip first.")
     except Exception as exc:
-        log_fh.close()
         raise HTTPException(500, f"Failed to start process: {exc}")
 
     _processes[slug] = proc
@@ -12233,6 +12245,9 @@ def main():
     _log_file = fd_logfile.install(DATA_DIR)
     if _log_file is not None:
         log.info("Flight Deck log file: %s", _log_file)
+    _files = proc_compat.raise_open_file_limit()
+    if _files and _files[1] != _files[0]:
+        log.info("Open-file limit raised from %s to %s", _files[0], _files[1])
     log.info("Flight Deck starting on http://%s:%s", args.host, args.port)
     # log_config=None: keep our colored formatter from _configure_fd_logging()
     # instead of letting uvicorn slap its default handlers back on.
