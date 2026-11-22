@@ -50,6 +50,7 @@
     },
     "dmg": {
       "title": "Captain",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
       "background": "icons/dmg-background.png",
       "iconSize": 112,
       "window": {
@@ -76,6 +77,8 @@
       ]
     },
     "nsis": {
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}",
+      "include": "installer.nsh",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
