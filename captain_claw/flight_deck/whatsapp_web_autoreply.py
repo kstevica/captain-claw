@@ -59,6 +59,7 @@ from typing import Any
 
 from captain_claw.flight_deck import gmail_autoreply_writer as writer
 from captain_claw.flight_deck import tenant_profile
+from captain_claw.flight_deck.whatsapp_web.store import strip_signature
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -173,9 +174,10 @@ def _label(m: dict[str, Any]) -> str:
 
 
 def transcript(messages: list[dict[str, Any]], *, owner_name: str, agent_name: str,
-               new_ids: set[str]) -> str:
+               new_ids: set[str], signature: str = "") -> str:
     """The conversation, oldest first, one line per message; the messages this
-    decision is about are starred."""
+    decision is about are starred. The agent's own messages without the
+    *signature* the send added: shown signed, a model signs its answer too."""
     lines = []
     for m in messages:
         if m.get("deleted"):
@@ -187,7 +189,10 @@ def transcript(messages: list[dict[str, Any]], *, owner_name: str, agent_name: s
         except (OSError, ValueError, OverflowError):
             when = "?"
         star = "* " if m.get("id") in new_ids else ""
-        body = _label(m) + _clean(m.get("text") or "", CONTEXT_CLIP)
+        text = str(m.get("text") or "")
+        if m.get("by_agent"):
+            text = strip_signature(text, signature)
+        body = _label(m) + _clean(text, CONTEXT_CLIP)
         lines.append(f"{star}[{when}] {who}: {body}".rstrip())
     return "\n".join(lines)
 
@@ -265,7 +270,8 @@ def parse(text: str, nonce: str, *, search_ok: bool) -> tuple[str, str]:
     if len(found) != 1:
         return "skip", "format"
     kind, body = found[0][0].lower(), found[0][1]
-    body = writer._visible(body).strip()
+    # A ⏎ is how the transcript shows a line break; a model copying it meant one.
+    body = re.sub(r"[ \t]*⏎[ \t]*", "\n", writer._visible(body)).strip()
     if kind == "skip":
         return "silent", body[:120]
     if "<<<" in body or ">>>" in body or _CONTROL_RE.search(body.replace("\n", "")):
@@ -410,8 +416,9 @@ async def _respond(sup: Any, owner: str, chat: str, events: list[dict[str, Any]]
         return "skip:no context"
     owner_name = await _owner_name(sup.db, owner)
     nonce = secrets.token_hex(6)
+    signature = str(last.get("signature") or "")
     chat_text = transcript(history, owner_name=owner_name, agent_name=agent_name,
-                           new_ids={str(e.get("id")) for e in events})
+                           new_ids={str(e.get("id")) for e in events}, signature=signature)
     messages = build_messages(nonce=nonce, agent_name=agent_name, owner_name=owner_name,
                               chat_title=str(last.get("chat") or ""), is_group=bool(last.get("is_group")),
                               mode=mode, chat_text=chat_text, triggers=triggers, called=called,
@@ -436,14 +443,20 @@ async def _respond(sup: Any, owner: str, chat: str, events: list[dict[str, Any]]
         return f"skip:{body}"
     if kill_switch() or wsup.send_kill_switch():  # switched off while the model wrote
         return "off:switch"
+    if signature and (unsigned := strip_signature(body, signature)) != body:
+        body = trace["steps"][-1]["text"] = unsigned  # the send signs it once
+        if not body:
+            return "skip:length"
     try:
-        await sup.request("POST", f"/links/{owner}/send",
-                          {"chat": chat, "text": body, "agent": rec.slug, "allow_repeat": False}, timeout=60.0)
+        sent = await sup.request("POST", f"/links/{owner}/send",
+                                 {"chat": chat, "text": body, "agent": rec.slug, "allow_repeat": False}, timeout=60.0)
     except (wsup.ServiceDown, wsup.ServiceError) as exc:
         log.info("WhatsApp auto-reply not sent", status=getattr(exc, "status", 0))
         trace["error"] = str(getattr(exc, "detail", "") or exc)[:300]
         return f"skip:refused {getattr(exc, 'status', '')}".strip()
     st.replies.append(now)
+    # The card asks the sends' receipts whether this answer reached the chat.
+    trace["sent_id"] = str(sent.get("id") or "") if isinstance(sent, dict) else ""
     return "sent"
 
 

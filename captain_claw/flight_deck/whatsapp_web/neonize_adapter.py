@@ -260,6 +260,9 @@ class NeonizeAdapter:
 
         on(ev.HistorySyncEv, "history", lambda e: parse.history_chunk(e.Data))
         on(ev.MessageEv, "message", parse.live_row)
+        # Whether what an agent sent reached the other phone (delivered / read),
+        # or WhatsApp turned it away: WhatsApp accepting a send isn't delivery.
+        on(ev.ReceiptEv, "receipt", parse.receipt)
 
     async def connect(self) -> None:
         self._stopping = False

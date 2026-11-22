@@ -162,7 +162,19 @@ export interface WhatsAppWebSend {
   status: 'sending' | 'sent' | 'unknown' | 'failed'
   error: string
   text: string
+  // What WhatsApp's receipts said (absent from an older WhatsApp Web service).
+  delivery?: WhatsAppWebDelivery
+  delivered_at?: number | null
+  read_at?: number | null
 }
+
+// "" = no phone has confirmed it yet · retry = the phone asked for it again ·
+// error = WhatsApp turned it away · untracked = sent before receipts were kept
+export type WhatsAppWebDelivery = '' | 'retry' | 'error' | 'delivered' | 'read' | 'untracked'
+
+// How long a send may wait for the other phone before it reads as not delivered
+// (the service rings its bell then too).
+export const WHATSAPP_WEB_UNDELIVERED_AFTER = 600
 
 export interface WhatsAppWebSending {
   available: boolean
@@ -230,6 +242,8 @@ export interface WhatsAppWebAutoreplyEntry {
   steps?: WhatsAppWebAutoreplyStep[]
   seconds?: number
   error?: string
+  // The answer that went out: what its receipts said.
+  delivery?: { sent_at: number; delivery: WhatsAppWebDelivery; delivered_at: number | null; read_at: number | null }
 }
 
 export const getWhatsAppWebAutoreplyActivity = (ignored = false, limit = 50) =>

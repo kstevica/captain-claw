@@ -15,7 +15,9 @@ import {
   getWhatsAppWebSending,
   setWhatsAppWebSending,
   getWhatsAppWebAutoreplyActivity,
+  WHATSAPP_WEB_UNDELIVERED_AFTER,
   type WhatsAppWebAutoreplyEntry,
+  type WhatsAppWebDelivery,
   type MyWhatsAppWeb,
   type WhatsAppWebSending,
   type WhatsAppWebSendingChanges,
@@ -93,6 +95,21 @@ const KIND_LABEL: Record<string, string> = {
 }
 
 const SEND_STATUS: Record<string, string> = { sent: 'sent', unknown: 'not confirmed', failed: 'failed', sending: 'sending' }
+
+// Whether a send reached the other phone, from WhatsApp's receipts. WhatsApp
+// taking a message isn't delivery: it can hold back a linked device's sends.
+function deliveryLabel(delivery: WhatsAppWebDelivery | undefined, sentAt: number): { text: string; tone: Tone; hint?: string } | null {
+  if (delivery === undefined || delivery === 'untracked') return null
+  if (delivery === 'read') return { text: 'read', tone: 'on' }
+  if (delivery === 'delivered') return { text: 'delivered', tone: 'on' }
+  if (delivery === 'error') return { text: 'WhatsApp turned it away', tone: 'warn' }
+  const late = Date.now() / 1000 - sentAt > WHATSAPP_WEB_UNDELIVERED_AFTER
+  if (!late) return { text: delivery === 'retry' ? 'phone asked for it again' : 'not delivered yet', tone: 'wait' }
+  return {
+    text: 'not delivered', tone: 'warn',
+    hint: 'WhatsApp took it, but no phone has confirmed it. If that phone is on, WhatsApp may be holding back messages from this linked device.',
+  }
+}
 
 const AGENT_REASON: Record<string, string> = {
   agent_no_token: 'no web token', agent_no_port: 'no port', agent_managed: 'a worker', agent_not_found: 'not found',
@@ -329,6 +346,7 @@ function Sending() {
                     <div className="text-zinc-500">
                       {stamp(m.ts)} · {m.chat} · {m.agent || 'agent'} ·{' '}
                       <span className={m.status === 'sent' ? '' : 'text-amber-600 dark:text-amber-400'}>{SEND_STATUS[m.status] ?? m.status}</span>
+                      {m.status === 'sent' && <DeliveryNote delivery={m.delivery} sentAt={m.ts} />}
                     </div>
                     <div className="text-zinc-300 whitespace-pre-wrap break-words">{m.text}</div>
                   </div>
@@ -362,9 +380,17 @@ const STEP_LABEL: Record<string, string> = {
   reply: 'Answer', silent: 'Stayed silent', search: 'Searched the web for', skip: 'Unusable answer', error: 'No answer',
 }
 
+function DeliveryNote({ delivery, sentAt, dot = true }: { delivery: WhatsAppWebDelivery | undefined; sentAt: number; dot?: boolean }) {
+  const d = deliveryLabel(delivery, sentAt)
+  if (!d) return null
+  const color = d.tone === 'warn' ? 'text-amber-600 dark:text-amber-400' : d.tone === 'on' ? 'text-emerald-600 dark:text-emerald-500' : ''
+  return <span className={color} title={d.hint}>{dot ? ' · ' : ''}{d.text}</span>
+}
+
 function ActivityEntry({ e }: { e: WhatsAppWebAutoreplyEntry }) {
   const [open, setOpen] = useState(false)
   const label = outcomeLabel(e.outcome)
+  const delivered = e.delivery ? deliveryLabel(e.delivery.delivery, e.delivery.sent_at) : null
   const steps = e.steps ?? []
   const why = [...steps].reverse().find((s) => s.why)?.why
   const final = steps[steps.length - 1]
@@ -376,6 +402,7 @@ function ActivityEntry({ e }: { e: WhatsAppWebAutoreplyEntry }) {
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-zinc-500">
         <span>{stamp(e.ts)} · {e.chat}</span>
         <span className={`inline-flex items-center text-[11px] px-1.5 py-px rounded-full border ${PILL[label.tone]}`}>{label.text}</span>
+        {e.delivery && <DeliveryNote delivery={e.delivery.delivery} sentAt={e.delivery.sent_at} dot={false} />}
         {how && <span>{how}</span>}
         {steps.length > 0 && (
           <button onClick={() => setOpen((v) => !v)} className="ml-auto flex items-center gap-0.5 text-violet-500 hover:underline">
@@ -394,6 +421,7 @@ function ActivityEntry({ e }: { e: WhatsAppWebAutoreplyEntry }) {
       )}
       {final?.kind === 'silent' && final.text && <div className="text-zinc-400">Its reason: {final.text}</div>}
       {e.error && <div className="text-amber-600 dark:text-amber-400">{e.error}</div>}
+      {delivered?.hint && <div className="text-amber-600 dark:text-amber-400">{delivered.hint}</div>}
       {open && (
         <div className="space-y-2 rounded-md border border-zinc-800 bg-zinc-900/40 px-2.5 py-2">
           {steps.map((s, i) => (

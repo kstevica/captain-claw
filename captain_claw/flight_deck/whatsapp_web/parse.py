@@ -187,6 +187,38 @@ def live_row(ev: Any) -> dict[str, Any]:
     return row
 
 
+# Receipts that say what happened to a message this account sent, by WhatsApp's
+# name for them → what the store records. The others (``SENDER``, ``READ_SELF``,
+# ``PEER_MSG`` …) are the account's own devices talking among themselves.
+RECEIPT_KINDS = {
+    "DELIVERED": "delivered", "READ": "read", "PLAYED": "read",
+    "RETRY": "retry", "SERVER_ERROR": "error", "INACTIVE": "inactive",
+}
+
+
+def receipt(ev: Any) -> dict[str, Any]:
+    """A neonize ``Receipt`` → ``kind`` (a :data:`RECEIPT_KINDS` value, or ""
+    for one that doesn't concern a sent message), the message ids and who sent
+    the receipt."""
+    raw = getattr(ev, "Type", "")
+    try:
+        name = raw if isinstance(raw, str) else ev.ReceiptType.Name(raw)
+    except (AttributeError, ValueError):
+        name = ""
+    src = getattr(ev, "MessageSource", None)
+    from_me = bool(getattr(src, "IsFromMe", False))
+    kind = RECEIPT_KINDS.get(str(name).upper(), "")
+    if from_me and kind in ("delivered", "read"):
+        kind = ""  # one of this account's own devices, not the other side
+    return {
+        "kind": kind,
+        "ids": [str(i) for i in getattr(ev, "MessageIDs", []) if i],
+        "chat": jid_str(getattr(src, "Chat", "")),
+        "sender": jid_str(getattr(src, "Sender", "")),
+        "ts": ts_seconds(getattr(ev, "Timestamp", 0)),
+    }
+
+
 def history_rows(conv: Any) -> list[dict[str, Any]]:
     """One history-sync ``Conversation`` → its rows, the reactions it carries
     as ``react`` rows."""
