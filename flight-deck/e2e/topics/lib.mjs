@@ -62,9 +62,28 @@ export async function setup({ auth = true, log = makeLog(), holdHistory = true }
       else rows = rows.slice(-limit)
       return json(rows.map((r) => ({ ...r })))
     }
+    if (/\/fd\/chat\/sessions\/[^/]+\/topics$/.test(u) && method === 'GET') {
+      // The whole log's dividers, oldest first (db.list_chat_topics), not just a window's.
+      const out = []
+      for (const r of log.rows) {
+        const t = JSON.parse(r.metadata || '{}').topic
+        if (t) out.push({ row_id: r.id, agent_session_id: t.agentSessionId, action: t.action, title: t.title || '', started_at: r.created_at, first_user_message: '', message_count: 0 })
+      }
+      return json(out)
+    }
     if (/\/fd\/chat\/sessions\/[^/]+\/messages$/.test(u) && method === 'POST') {
+      // As db.add_chat_messages: a healed turn (40+ chars) the log has word for
+      // word is not written again; its row id comes back and its index in `known`.
       const body = JSON.parse(init.body)
-      return json({ ok: true, ids: log.add(body.messages) })
+      const ids = []
+      const known = []
+      body.messages.forEach((m, i) => {
+        const healed = JSON.parse(m.metadata || '{}').healed === true
+        const had = healed && (m.role === 'user' || m.role === 'assistant') && m.content.length >= 40
+          ? [...log.rows].reverse().find((r) => r.role === m.role && r.content === m.content) : undefined
+        if (had) { ids.push(had.id); known.push(i) } else ids.push(log.add([m])[0])
+      })
+      return json({ ok: true, ids, ...(known.length ? { known } : {}) })
     }
     return { ok: false, status: 404, json: async () => ({}) }
   }

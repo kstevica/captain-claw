@@ -167,6 +167,124 @@ S.reconnectOtherSessionAuthOff = async () => {
   done()
 }
 
+// ── A long chat: the session's divider is older than the loaded window ──
+//
+// cohort001 (2026-11): a log with many tool rows puts the session's only
+// divider beyond the newest 500 rows. A reload then marked "New topic" for the
+// session the chat was already on, and the replay merge, anchored on that new
+// divider, saved the agent's whole session a second time (58 rows at once).
+
+/** A log of one session: its divider, then `pairs` turns — more rows than a page. */
+function longLog(pairs = 300) {
+  const rows = [divider('new', 's1')]
+  for (let i = 0; i < pairs; i++) { rows.push(turn('user', 'u' + i)); rows.push(turn('assistant', 'a' + i)) }
+  return makeLog(rows)
+}
+/** The agent's replay of the session's last `n` turns. */
+const tail = (pairs, n) => {
+  const out = []
+  for (let i = pairs - n; i < pairs; i++) { out.push(['user', 'u' + i]); out.push(['assistant', 'a' + i]) }
+  return out
+}
+
+for (const [label, replayFirst] of [['longLogHistoryFirst', false], ['longLogReplayFirst', true]]) {
+  S[label] = async () => {
+    const log = longLog()
+    const rows = log.rows.length
+    const h = await setup({ auth: true, log, holdHistory: replayFirst })
+    if (!replayFirst) await h.release()
+    h.ev.connected(); h.ev.welcome('s1'); h.ev.replay(tail(300, 30)); h.ev.replayDone()
+    if (replayFirst) await h.release()
+    await h.flush()
+    check('nothing written to the log', log.rows.length === rows, log.view().slice(rows - 2))
+    check('no divider for the session it was already on', !h.view().some((v) => v.startsWith('[')), h.view().filter((v) => v.startsWith('[')))
+    check('no turn shown twice', count(h.view(), 'user:u299') === 1 && count(h.view(), 'user:u280') === 1, h.view().slice(-4))
+    done()
+  }
+}
+
+// The same long chat with a reply it missed: only that reply is added.
+S.longLogMissedReply = async () => {
+  const log = longLog()
+  const rows = log.rows.length
+  const h = await setup({ auth: true, log, holdHistory: false })
+  await h.release()
+  h.ev.connected(); h.ev.welcome('s1'); h.ev.replay([...tail(300, 10), ['user', 'u300'], ['assistant', 'a300']]); h.ev.replayDone()
+  await h.flush()
+  check('only the missing turns written', same(log.view().slice(rows), ['user:u300', 'assistant:a300']), log.view().slice(rows))
+  done()
+}
+
+// Back on the main chat after a cron run's own session marked a divider here
+// (a scheduled job runs in its own session): the turns above it are not added again.
+S.otherSessionDividerLast = async () => {
+  const log = makeLog([divider('new', 's1'), turn('user', 'u1'), turn('assistant', 'a1'), turn('user', 'u2'),
+    turn('assistant', 'a2'), divider('new', 'cron1'), turn('assistant', 'cron result')])
+  const h = await setup({ auth: true, log, holdHistory: false })
+  await h.release()
+  h.ev.connected(); h.ev.welcome('s1'); h.ev.replay([['user', 'u1'], ['assistant', 'a1'], ['user', 'u2'], ['assistant', 'a2']]); h.ev.replayDone()
+  await h.flush()
+  const v = log.view()
+  check('no turn written twice', count(v, 'user:u1') === 1 && count(v, 'assistant:a2') === 1, v)
+  check('marked as back on s1', v.at(-1) === '[resume:s1]', v)
+  done()
+}
+
+// Back on a session whose turns are all older than the window (another session
+// filled the newest page meanwhile): its replay can't be checked here and isn't
+// written again; only a turn newer than the window is.
+S.resumedSessionOlderThanWindow = async () => {
+  const rows = [divider('new', 's1'), turn('user', 'old question'), turn('assistant', 'old answer'), divider('new', 's2')]
+  for (let i = 0; i < 300; i++) { rows.push(turn('user', 'q' + i)); rows.push(turn('assistant', 'r' + i)) }
+  const log = makeLog(rows)
+  log.rows.slice(0, 3).forEach((r) => { r.created_at = '2026-10-20T08:00:00Z' })   // s1, two days earlier
+  const before = log.rows.length
+  const h = await setup({ auth: true, log, holdHistory: false })
+  await h.release()
+  h.ev.connected(); h.ev.welcome('s1')
+  h.emit('replay_batch', { messages: [
+    { type: 'chat_message', role: 'user', content: 'old question', replay: true, timestamp: '2026-10-20T08:00:00Z' },
+    { type: 'chat_message', role: 'assistant', content: 'old answer', replay: true, timestamp: '2026-10-20T08:00:01Z' },
+    { type: 'chat_message', role: 'user', content: 'asked on the phone', replay: true, timestamp: '2026-10-23T08:00:00Z' },
+  ] })
+  h.ev.replayDone()
+  await h.flush()
+  check('only the newer turn written, under "back on s1"', same(log.view().slice(before), ['[resume:s1]', 'user:asked on the phone']), log.view().slice(before))
+  done()
+}
+
+// The server's backstop: the chat took a turn for missing that the log has
+// after all (beyond anything the chat can see) — not written, and gone from view.
+S.serverKnowsHealedTurn = async () => {
+  const long = 'a reply long enough that the log would never hold it twice by chance'
+  const rows = [divider('new', 's1'), turn('assistant', long)]
+  for (let i = 0; i < 300; i++) { rows.push(turn('user', 'u' + i)); rows.push(turn('assistant', 'a' + i)) }
+  const log = makeLog(rows)
+  const before = log.rows.length
+  const h = await setup({ auth: true, log, holdHistory: false })
+  await h.release()
+  h.ev.connected(); h.ev.welcome('s1'); h.ev.replay([...tail(300, 5), ['assistant', long]]); h.ev.replayDone()
+  await h.flush(); await h.flush()
+  check('nothing written', log.rows.length === before, log.view().slice(before))
+  check('not shown again at the bottom', h.view().at(-1) === 'assistant:a299', h.view().slice(-2))
+  done()
+}
+
+// A turn the log really is missing goes in flagged, so the server can drop
+// one it already has (db.add_chat_messages).
+S.healedRowsFlagged = async () => {
+  const log = makeLog([divider('new', 's1'), turn('user', 'u1'), turn('assistant', 'a1')])
+  const h = await setup({ auth: true, log, holdHistory: false })
+  await h.release()
+  h.ev.connected(); h.ev.welcome('s1'); h.ev.replay([['user', 'u1'], ['assistant', 'a1'], ['user', 'u2'], ['assistant', 'a2']]); h.ev.replayDone()
+  await h.flush()
+  const added = log.rows.slice(3).map((r) => JSON.parse(r.metadata || '{}').healed === true)
+  check('the healed rows say so', added.length === 2 && added.every(Boolean), log.rows.slice(3))
+  h.ev.user('u3'); await h.flush()
+  check('a live row does not', JSON.parse(log.rows.at(-1).metadata || '{}').healed === undefined, log.rows.at(-1))
+  done()
+}
+
 // ── A message sent as the socket dies (held again, sent once) ──
 //
 // Not dividers, but the same store and fake socket: a frame the agent never

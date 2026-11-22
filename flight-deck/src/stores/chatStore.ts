@@ -464,6 +464,7 @@ async function _flushMessages() {
               ...(m.task ? { task: m.task } : {}),
               ...(m.automation ? { automation: m.automation } : {}),
               ...(m.narration ? { narration: true } : {}),
+              ...(m.healed ? { healed: true } : {}),
               ...(m.note ? { note: m.note } : {}),
               ...(m.fileSize !== undefined ? { file_size: m.fileSize } : {}),
               // Any other system row says it is one, so a reload never takes
@@ -476,26 +477,31 @@ async function _flushMessages() {
       if (!res.ok) continue
       // The log's row ids come back in order: stamp them on the messages so a
       // divider just inserted is jumpable and "earlier" paging knows the edge.
-      const body = await res.json().catch(() => null) as { ids?: number[] } | null
+      const body = await res.json().catch(() => null) as { ids?: number[]; known?: number[] } | null
       const ids = body?.ids
       if (!ids || ids.length !== msgs.length) continue
+      // Healed turns the log had after all (further up than the window
+      // reached): not written again, and taken back out of the window. Their
+      // ids are the earlier rows', never to be deleted or stamped here.
+      const known = new Set((body?.known ?? []).map((i) => msgs[i]?.id).filter((id): id is string => !!id))
       // A row withdrawn while this batch was in flight is deleted now.
       msgs.forEach((m, i) => {
         if (_dropped.has(m.id)) {
           _dropped.delete(m.id)
-          void serverDeleteMessage(sessionId, ids[i])
+          if (!known.has(m.id)) void serverDeleteMessage(sessionId, ids[i])
         }
       })
-      const rowIds = new Map(msgs.map((m, i) => [m.id, ids[i]] as const))
+      const rowIds = new Map(msgs.filter((m) => !known.has(m.id)).map((m) => [m.id, ids[msgs.indexOf(m)]] as const))
       useChatStore.setState((state) => {
         const s = state.sessions.get(sessionId)
         if (!s) return state
         let changed = false
-        const messages = s.messages.map((m) => {
+        const messages = s.messages.flatMap((m) => {
+          if (known.has(m.id)) { changed = true; return [] }
           const rid = rowIds.get(m.id)
-          if (rid === undefined || m.rowId === rid) return m
+          if (rid === undefined || m.rowId === rid) return [m]
           changed = true
-          return { ...m, rowId: rid }
+          return [{ ...m, rowId: rid }]
         })
         if (!changed) return state
         const sessions = new Map(state.sessions)
@@ -1884,6 +1890,11 @@ interface ChatSession {
   /** The loaded window of the log starts after older rows ("Earlier
    *  messages" fetches the page before it). */
   hasOlder: boolean
+  /** The agent sessions of the whole log's dividers, oldest first — read with
+   *  the history only when its newest page holds no divider while older rows
+   *  exist (a long chat), so `reconcileTopic` knows where the log ends.
+   *  Null when not read, or the log couldn't say. */
+  logTopics: string[] | null
   /** The window stops before newer rows of the log — the reader jumped to
    *  or paged back into the past ("Later messages" fetches the page after
    *  it). While set, the window is not the end of the transcript: nothing
@@ -2094,6 +2105,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       agentSessionId: '',
       historyLoaded: false,
       hasOlder: false,
+      logTopics: null,
       hasNewer: false,
       windowEndRowId: 0,
       holdScrollUntil: 0,
@@ -2146,9 +2158,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // Server-side chat persistence: upsert session & load history
     if (useAuthStore.getState().authEnabled) {
       serverUpsertSession(key, containerId, containerName).then(() =>
-        serverLoadMessages(key).then((history) => {
+        serverLoadMessages(key).then(async (history) => {
           // Unreadable log: keep whatever the agent replays, as before.
           if (history === null) return
+          // A long chat whose newest page holds no divider: where does the log
+          // end? Its dividers say (reconcileTopic).
+          const partial = history.length >= HISTORY_PAGE
+          const logTopics = partial && !history.some((m) => m.topic) ? await serverTopicSessions(key) : null
           // The log is the transcript. A replay that arrived first is folded
           // into it (only what the log is missing gets appended, and
           // persisted); live rows that arrived meanwhile stay at the end.
@@ -2160,7 +2176,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const live = s.messages.filter((m) => !m.replay)
             const updated = {
               ...s, messages: [...history, ...live],
-              historyLoaded: true, hasOlder: history.length >= HISTORY_PAGE,
+              historyLoaded: true, hasOlder: partial, logTopics,
             }
             const newSessions = new Map(state.sessions)
             newSessions.set(key, updated)
@@ -2181,7 +2197,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // an empty new one below.)
           const replayTurns = pendingReplay.length ? replayTurnsToAdd(key, pendingReplay) : []
           reconcileTopic(key)
-          for (const m of replayTurns) addMessage(key, { ...m, replay: false })
+          for (const m of replayTurns) addMessage(key, { ...m, replay: false, healed: true })
         })
       )
     }
@@ -4136,14 +4152,42 @@ async function serverSetTopicTitle(sessionId: string, rowId: number, title: stri
 
 /** With the log loaded and the agent's session known: when the transcript
  *  doesn't end on a divider for that session (started on another channel,
- *  after a restart, or before dividers existed), add one. */
+ *  after a restart, or before dividers existed), add one — "Back on" when the
+ *  session has one further up.
+ *
+ *  A window with no divider at all, when the log goes further back, can't say
+ *  where the transcript ends (a long chat's only divider can be older than the
+ *  newest page): the log's own dividers decide. Marking it anyway put "New
+ *  topic" over the session the chat was already on after every reload. */
 function reconcileTopic(key: string) {
   if (!useAuthStore.getState().authEnabled) return
   const s = useChatStore.getState().sessions.get(key)
   if (!s || !s.historyLoaded || !s.agentSessionId) return
   // A window into the past says nothing about where the transcript ends.
   if (s.hasNewer) return
-  markTopic(key, { id: s.agentSessionId, name: '', action: 'new', source: 'agent' })
+  const sid = s.agentSessionId
+  if (lastTopicIndex(s.messages) >= 0 || !s.hasOlder) {
+    const action = lastTopicIndex(s.messages, sid) >= 0 ? 'resume' : 'new'
+    markTopic(key, { id: sid, name: '', action, source: 'agent' })
+    return
+  }
+  const logged = s.logTopics
+  // The log couldn't say: no divider rather than a wrong one.
+  if (!logged || logged.at(-1) === sid) return
+  markTopic(key, { id: sid, name: '', action: logged.includes(sid) ? 'resume' : 'new', source: 'agent' })
+}
+
+/** The agent sessions of the whole log's dividers, oldest first; null when
+ *  the log can't be read. */
+async function serverTopicSessions(key: string): Promise<string[] | null> {
+  try {
+    const res = await fetch(`/fd/chat/sessions/${encodeURIComponent(key)}/topics`, {
+      headers: _chatHeaders(), credentials: 'include',
+    })
+    if (!res.ok) return null
+    const rows = await res.json() as Array<Record<string, unknown>>
+    return rows.map((r) => String(r.agent_session_id ?? ''))
+  } catch { return null }
 }
 
 /** Keep the window within WINDOW_MAX rows by dropping persisted rows from
@@ -4192,36 +4236,68 @@ function turnKey(m: ChatMessage): string {
 
 /** The turns of the agent's replay of a session (the lane's current one
  *  unless `sid` names another) that the loaded log is missing: user/assistant
- *  turns it doesn't have since that session's divider (or anywhere in the
- *  window when it has none). Replays never add tool cards. */
+ *  turns it doesn't have anywhere from that session's first divider in the
+ *  window (or anywhere in the window when it has none). Replays never add
+ *  tool cards.
+ *
+ *  Not just since the session's last divider: a divider can come again for
+ *  the session the chat was already on (back from a scheduled run's own
+ *  session, or the window reaching back past the old one), and everything
+ *  above it would then read as missing and be saved a second time (cohort001:
+ *  58 rows at once). Turns are counted, so a line said twice is matched
+ *  twice. A replayed turn older than the window, when the log goes further
+ *  back, can't be checked here and is left alone: the log took it when it
+ *  happened. */
 function replayTurnsToAdd(key: string, replayed: ChatMessage[], sid?: string): ChatMessage[] {
   const s = useChatStore.getState().sessions.get(key)
   if (!s) return []
   // A window into the past doesn't hold the current session: merging would
   // re-add (and re-persist) turns the log already has further down.
   if (s.hasNewer) return []
-  const start = lastTopicIndex(s.messages, (sid ?? s.agentSessionId) || undefined)
-  const seen = new Set<string>()
+  const start = firstTopicIndex(s.messages, (sid ?? s.agentSessionId) || undefined)
+  const have = new Map<string, number>()
   for (let i = start + 1; i < s.messages.length; i++) {
     const m = s.messages[i]
-    if (m.role === 'user' || m.role === 'assistant') seen.add(turnKey(m))
+    if (m.role !== 'user' && m.role !== 'assistant') continue
+    const k = turnKey(m)
+    have.set(k, (have.get(k) ?? 0) + 1)
   }
+  const windowStart = s.hasOlder ? oldestPersistedTime(s.messages) : null
   const out: ChatMessage[] = []
   for (const m of replayed) {
     if (m.role !== 'user' && m.role !== 'assistant') continue
     const k = turnKey(m)
-    if (seen.has(k)) continue
-    seen.add(k)
+    const n = have.get(k) ?? 0
+    if (n > 0) { have.set(k, n - 1); continue }
+    const at = Date.parse(m.timestamp)
+    if (windowStart !== null && Number.isFinite(at) && at < windowStart) continue
     out.push(m)
   }
   return out
+}
+
+/** Index of the first divider for `agentSessionId` in the window; -1 when
+ *  there is none (or no session is given). */
+function firstTopicIndex(messages: ChatMessage[], agentSessionId?: string): number {
+  if (!agentSessionId) return -1
+  return messages.findIndex((m) => m.topic?.agentSessionId === agentSessionId)
+}
+
+/** When the oldest row of the loaded window was written (ms), or null. */
+function oldestPersistedTime(messages: ChatMessage[]): number | null {
+  for (const m of messages) {
+    if (m.rowId === undefined) continue
+    const t = Date.parse(m.timestamp)
+    return Number.isFinite(t) ? t : null
+  }
+  return null
 }
 
 /** Fold the agent's replay of its current session into the loaded log: the
  *  turns it is missing are appended as persisted rows, so the log heals. */
 function mergeReplay(key: string, replayed: ChatMessage[], sid?: string): ChatMessage[] {
   const added = replayTurnsToAdd(key, replayed, sid)
-  for (const m of added) addMessage(key, { ...m, replay: false })
+  for (const m of added) addMessage(key, { ...m, replay: false, healed: true })
   return added
 }
 

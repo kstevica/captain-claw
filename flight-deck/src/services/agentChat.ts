@@ -24,6 +24,9 @@ export interface ChatMessage {
   content: string
   timestamp: string
   replay?: boolean
+  /** A turn the log was missing, added from the agent's replay (mergeReplay):
+   *  saved flagged, so Flight Deck drops it if the log has it after all. */
+  healed?: boolean
   tool_name?: string
   tool_arguments?: Record<string, unknown>
   tool_output?: string
