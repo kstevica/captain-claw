@@ -9,7 +9,7 @@ export interface AskQuestion {
   question: string
   // "secret": a password or a code (request_secret), typed into a masked box;
   // the agent gets a reference, never the value.
-  kind: 'text' | 'choice' | 'multiple' | 'confirm' | 'secret'
+  kind: 'text' | 'choice' | 'multiple' | 'confirm' | 'secret' | 'number'
   help?: string
   optional: boolean
   choices?: string[]
@@ -17,15 +17,25 @@ export interface AskQuestion {
   max?: number
   lines?: number
   default?: unknown
+  // text: its length and what it must look like
+  min_length?: number
+  max_length?: number
+  format?: 'email' | 'uri' | 'date' | 'date-time'
+  // number: its range, and whether it's a whole number
+  min_value?: number
+  max_value?: number
+  integer?: boolean
 }
 
 export interface OpenAsk {
   id: string
   // "tool": a custom tool running for the person asks; "agent": an agent asks (ask_user);
-  // "approval": an agent asks before it pays, sends, posts, shares, deletes… (approvals.py).
-  source: 'tool' | 'agent' | 'approval'
-  /** An approval card's facts: its kind and what the call will do. */
-  detail?: { kind: string; kind_label: string; summary: string; mode: string }
+  // "approval": an agent asks before it pays, sends, posts, shares, deletes… (approvals.py);
+  // "mcp": an MCP server one of their agents is using asks before it goes on (mcp_elicitation.py).
+  source: 'tool' | 'agent' | 'approval' | 'mcp'
+  /** An approval card's facts: its kind and what the call will do; an MCP
+   *  server's question: the server and its message. */
+  detail?: { kind?: string; kind_label?: string; summary?: string; mode?: string; server?: string; message?: string }
   title: string
   owner_name: string
   agent_name: string
