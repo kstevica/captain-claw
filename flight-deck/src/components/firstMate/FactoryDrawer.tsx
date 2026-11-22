@@ -262,7 +262,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
     setTab('checks')
   })
 
-  const tabCls = (t: Tab) => `rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+  const tabCls = (t: Tab) => `shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
     tab === t ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:bg-[var(--fd-hover)] hover:text-zinc-200'}`
   const input = 'w-full rounded-xl border border-[var(--fd-line)] bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none'
 
@@ -319,7 +319,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
           ) : <Loader2 className="mt-1 h-4 w-4 animate-spin text-zinc-500" />}
         </div>
         {f && (
-          <div role="tablist" className={`flex gap-1 overflow-x-auto px-5 pb-3 ${wrap}`}>
+          <div role="tablist" className={`flex flex-wrap gap-1 px-5 pb-3 ${wrap}`}>
             <button role="tab" aria-selected={tab === 'charter'} className={tabCls('charter')} onClick={() => setTab('charter')}>Charter</button>
             {f.live?.runner === 'funnel' && (
               <button role="tab" aria-selected={tab === 'recipe'} className={tabCls('recipe')} onClick={() => setTab('recipe')}>Recipe</button>
@@ -555,11 +555,7 @@ export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onCh
 
           {f && tab === 'results' && <FactoryResults factoryId={factoryId} onNotice={onNotice} />}
 
-          {f && tab === 'recipe' && (
-            <div className={`px-5 pb-8 pt-4 ${wrap}`}>
-              <FactoryRecipe factoryId={factoryId} onNotice={onNotice} onChanged={() => void load()} />
-            </div>
-          )}
+          {f && tab === 'recipe' && <FactoryRecipe factoryId={factoryId} onNotice={onNotice} onChanged={() => void load()} />}
 
           {f && tab === 'data' && (
             <FactoryData factoryId={factoryId} title={f.title} items={f.data ?? []} onNotice={onNotice}
