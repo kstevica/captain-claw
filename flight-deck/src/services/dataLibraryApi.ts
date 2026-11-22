@@ -5,6 +5,7 @@
  * The rows are read live from the datastore, so the table view is never stale.
  */
 
+import type { ValueStats } from '../components/library/columnFilters'
 import { useAuthStore } from '../stores/authStore'
 import { api, type Facet, type LibrarySource, type LibraryState, type LibraryStatus } from './fileLibraryApi'
 
@@ -132,6 +133,10 @@ export const dataLibraryApi = {
   /** `filters`: the column filters, as JSON (columnFilters' ColumnFilter + `kind`). */
   rows: (id: string, opts: { limit?: number; offset?: number; q?: string; sort?: string; dir?: 'asc' | 'desc'; filters?: string }) =>
     api<RowsPage>(`/fd/data-library/tables/${encodeURIComponent(id)}/rows?${qs(opts)}`),
+  /** One column's values (most common first, with counts) and its range, among the rows
+   *  the search `q` and the other columns' `filters` leave; `search` narrows the values. */
+  values: (id: string, opts: { col: string; kind?: string; q?: string; filters?: string; search?: string; limit?: number }) =>
+    api<ValueStats>(`/fd/data-library/tables/${encodeURIComponent(id)}/values?${qs(opts)}`),
   resummarize: (id: string) =>
     api<DataTable>(`/fd/data-library/tables/${encodeURIComponent(id)}/summarize`, { method: 'POST' }),
   /** Add a row by hand; columns left out stay empty. Values are stored as
