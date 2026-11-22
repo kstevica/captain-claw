@@ -237,10 +237,36 @@ def is_lane_note(msg: Any) -> bool:
     )
 
 
+# The line a scheduled run's reply ships with when the run called none of the
+# tools its task names, every retry spent (fabrication_guard's backstop).
+UNCHECKED_RUN_NOTE = "Note: this scheduled run used none of its tools — nothing above was checked."
+# What the model's history carries in place of such a reply.
+UNCHECKED_RUN_REPLAY = (
+    "[This scheduled run called none of its tools, so nothing was checked — its report "
+    "was not real and is left out.]"
+)
+
+
+def is_unchecked_run_report(msg: Any) -> bool:
+    """A scheduled run's reply that shipped with :data:`UNCHECKED_RUN_NOTE`:
+    the user was told nothing in it was checked. Replayed whole, it is a
+    "live check" the next run copies — a weak model wrote them run after run
+    (a self-hosted deck's reply-watch, 2026-11-18..22)."""
+    return (
+        isinstance(msg, dict)
+        and str(msg.get("role", "")).strip().lower() == "assistant"
+        and not msg.get("tool_calls")
+        and UNCHECKED_RUN_NOTE in str(msg.get("content") or "")
+    )
+
+
 def is_turned_down(msg: Any) -> bool:
-    """A reply a gate turned down, or the corrective sent back about it: no
-    part of the conversation to carry on, summarize or remember."""
-    return isinstance(msg, dict) and origin_of(msg) in ("rejected", "corrective")
+    """A reply a gate turned down, or the corrective sent back about it — or
+    a scheduled run's report that shipped saying nothing in it was checked:
+    no part of the conversation to carry on, summarize or remember."""
+    return isinstance(msg, dict) and (
+        origin_of(msg) in ("rejected", "corrective") or is_unchecked_run_report(msg)
+    )
 
 
 def is_code_corrective(msg: Any) -> bool:

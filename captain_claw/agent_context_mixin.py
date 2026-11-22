@@ -5297,6 +5297,19 @@ class AgentContextMixin:
                 if msg_origin.is_lane_note(msg):
                     pending_lane_notes.append((idx, self._lane_note_as_user(msg)))
                     continue
+                # A scheduled run's report that shipped saying none of its
+                # tools ran goes as one line: whole, it is a "live check" the
+                # next run copies instead of calling its tools. Kept as a
+                # line, not dropped, so the run's opener still gets a reply.
+                if msg_origin.is_unchecked_run_report(msg):
+                    msg = {**msg, "content": msg_origin.UNCHECKED_RUN_REPLAY}
+                    # Its reasoning planned the made-up report: only the
+                    # field stays, for servers that want one on every step.
+                    if msg.get("reasoning_content"):
+                        msg["reasoning_content"] = _REASONING_OMITTED
+                    for _key in ("token_count", "_tc_counted", "_rc_counted",
+                                 "reasoning_token_count"):
+                        msg.pop(_key, None)
                 # A check's note goes out framed as the system's, or the model
                 # answers it as the user pushing back ("You're right, …").
                 if msg_origin.is_code_corrective(msg):

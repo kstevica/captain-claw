@@ -1399,6 +1399,15 @@ class AgentOrchestrationMixin:
             role="user", content=verdict.corrective, origin="corrective", origin_detail=detail,
         )
 
+    def _force_tool_on_next_call(self) -> None:
+        """The very next provider call must call a tool (``tool_choice``
+        "required"); the provider consumes the override once, then it is
+        "auto" again."""
+        try:
+            setattr(self.provider, "_tool_choice_override", "required")
+        except Exception:
+            pass
+
     def _log_fabrication(self, verdict: fabrication_guard.Verdict, text: str, **extra: Any) -> None:
         log.warning(
             "fabricated_reply",
@@ -3947,18 +3956,31 @@ class AgentOrchestrationMixin:
             # for every kind, apart from the stall one; the false reply is
             # stored as rejected so later turns never replay it as an example.
             # The corrective only asks for a true reply — never a send or a
-            # calendar change — and no tool_choice is forced.
+            # calendar change — and no tool_choice is forced, except for a
+            # scheduled run that called none of the tools its task names: its
+            # retry must call one. Asked in words only, a weak model wrote
+            # the same made-up "live check" again (a self-hosted deck's
+            # reply-watch, 2026-11-18..22: 37 replies turned down, 11 runs
+            # shipped unchecked); forced, it called imap_mail at once. What
+            # the call may do is still the job's to decide (mail_authority).
             _fab_verdict = fabrication_guard.Verdict()
             if not response.tool_calls:
                 _fab_verdict = self._judge_reply(
                     _raw_reply, _stall_resp_text, turn_start_idx, user_input, _offered_tools,
                 )
             if _fab_verdict.false:
-                self._log_fabrication(_fab_verdict, _stall_resp_text)
-                if self._fabrication_retry_count < MAX_FABRICATION_RETRIES:
+                _retrying = self._fabrication_retry_count < MAX_FABRICATION_RETRIES
+                _force_tool = (
+                    _retrying and bool(tool_defs)
+                    and fabrication_guard.SKIPPED_TOOLS in _fab_verdict.kinds
+                )
+                self._log_fabrication(_fab_verdict, _stall_resp_text, force_tool=_force_tool)
+                if _retrying:
                     # The reply as written: the corrective may name an ID the
                     # lane-note cut took out.
                     self._reject_fabrication(_raw_reply, _fab_verdict)
+                    if _force_tool:
+                        self._force_tool_on_next_call()
                     continue
                 # Budget spent, still false: the user is told plainly.
                 if _fab_verdict.backstop:
@@ -4118,14 +4140,9 @@ class AgentOrchestrationMixin:
                     self._add_session_message(role="assistant", content=_stall_resp_text, origin="rejected")
                 self._add_session_message(role="user", content=_retry_instruction)
                 # Force tool use on the very next provider call so the
-                # retry can't repeat the same intent-only stall. The
-                # override is consumed inside the provider payload
-                # builder and resets to "auto" automatically.
+                # retry can't repeat the same intent-only stall.
                 if _force_tool:
-                    try:
-                        setattr(self.provider, "_tool_choice_override", "required")
-                    except Exception:
-                        pass
+                    self._force_tool_on_next_call()
                 continue
 
             # ── Tool-avoidance nudge ──────────────────────────────
