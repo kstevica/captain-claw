@@ -33,6 +33,9 @@ _log = logging.getLogger(__name__)
 # Keep references to in-flight judge tasks so they aren't garbage-collected.
 _BG_TASKS: set[asyncio.Task] = set()
 
+# Output cap for the judge's verdict: room for a model that thinks first.
+JUDGE_MAX_TOKENS = 2_000
+
 _JUDGE_SYSTEM = (
     "You are a strict evaluator. Given an action the assistant was asked to carry "
     "out, the PATH it took, and the result it produced, decide whether the action "
@@ -338,11 +341,11 @@ async def _judge_outcome(
         return {"success": False, "why": "no agent to judge with"}
     try:
         from captain_claw.games.remote_provider import RemoteLLMProvider
-        from captain_claw.llm import Message
+        from captain_claw.llm import Message, reasoning
 
         provider = RemoteLLMProvider(
             host=agent["host"], port=agent["port"], auth=agent["auth"],
-            name=agent.get("name", ""),
+            name=agent.get("name", ""), reasoning_effort=reasoning.QUIET,
         )
         user_prompt = (
             f"Intended action ({action.get('kind')}): {action.get('title')}\n"
@@ -357,7 +360,7 @@ async def _judge_outcome(
                 Message(role="user", content=user_prompt),
             ],
             temperature=0.0,
-            max_tokens=200,
+            max_tokens=JUDGE_MAX_TOKENS,
         )
     except Exception as exc:
         return {"success": False, "why": f"judge error: {exc}"}

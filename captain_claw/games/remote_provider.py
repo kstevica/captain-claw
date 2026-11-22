@@ -20,7 +20,7 @@ class RemoteLLMProvider(LLMProvider):
     """Proxy provider that forwards ``complete()`` calls over HTTP."""
 
     def __init__(self, host: str, port: int, auth: str = "", name: str = "", *,
-                 defer_s: float = 0.0) -> None:
+                 defer_s: float = 0.0, reasoning_effort: str | None = None) -> None:
         self.host = host
         self.port = port
         self.auth = auth
@@ -29,6 +29,12 @@ class RemoteLLMProvider(LLMProvider):
         # > 0: a background call that can wait — the agent holds it while it's
         # at work on a self-hosted model, up to this long (side_calls).
         self.defer_s = defer_s
+        # How hard the remote model thinks for these calls. None: the model's
+        # default — a thinking model (Qwen on llama.cpp) then spends the whole
+        # output budget thinking. ``reasoning.QUIET`` turns thinking off where
+        # the model can switch it off: the deck's background calls (its
+        # reflection, the arbiter, plans) want an answer, not thoughts.
+        self.reasoning_effort = reasoning_effort
 
     @property
     def label(self) -> str:
@@ -55,6 +61,8 @@ class RemoteLLMProvider(LLMProvider):
         if self.defer_s > 0:
             payload["defer"] = True
             payload["defer_max_s"] = self.defer_s
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
 
         async with httpx.AsyncClient(timeout=120.0 + max(self.defer_s, 0.0)) as client:
             resp = await client.post(

@@ -31,6 +31,8 @@ from captain_claw.logging import get_logger
 log = get_logger(__name__)
 
 ESTIMATES_PER_PULSE = 3
+# Output cap for a goal-progress estimate: room for a model that thinks first.
+THINK_MAX_TOKENS = 2_000
 STALL_DAYS = {"short": 3, "medium": 7}
 _SCOPE_WORD = {"instance": "the deck's", "user": "the user's own", "agent": "one agent's"}
 _LINK_WORD = {
@@ -53,16 +55,17 @@ def thinkers(user_id: str, agents: list[dict[str, Any]] | None = None) -> list[d
 
 
 async def think(agents: list[dict[str, Any]], system: str, user: str, *,
-                max_tokens: int = 600) -> tuple[str, dict[str, Any]] | None:
+                max_tokens: int = THINK_MAX_TOKENS) -> tuple[str, dict[str, Any]] | None:
     """One completion through the first agent that answers: ``(text, agent)``,
-    or None when none could."""
+    or None when none could. Thinking off where the model can switch it off."""
     from captain_claw.games.remote_provider import RemoteLLMProvider
-    from captain_claw.llm import Message
+    from captain_claw.llm import Message, reasoning
 
     last: Exception | None = None
     for agent in agents:
         provider = RemoteLLMProvider(host=agent["host"], port=agent["port"],
-                                     auth=agent.get("auth", ""), name=agent.get("name", ""))
+                                     auth=agent.get("auth", ""), name=agent.get("name", ""),
+                                     reasoning_effort=reasoning.QUIET)
         try:
             resp = await provider.complete(
                 messages=[Message(role="system", content=system),
