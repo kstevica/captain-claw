@@ -743,7 +743,7 @@ function FactoryRow({ factory: f, busy, autoOn, onOpen, onResults, onRun, onStat
         </button>
         {f.latest_result && (
           <button onClick={onResults} title="Its results: open the table, download it, add it to the Library"
-            className={`mt-2.5 inline-flex max-w-full items-center gap-2 rounded-xl border py-1.5 pl-2 pr-3 text-left text-xs transition-colors ${
+            className={`mt-2.5 inline-flex max-w-full flex-wrap items-center gap-x-2 gap-y-0.5 rounded-xl border py-1.5 pl-2 pr-3 text-left text-xs transition-colors ${
               f.latest_result.status === 'done' ? 'border-emerald-500/25 bg-emerald-500/[0.06] hover:border-emerald-500/50'
                 : 'border-[var(--fd-line)] bg-zinc-900/40 hover:border-violet-500/40'}`}>
             <Trophy className={`h-3.5 w-3.5 shrink-0 ${f.latest_result.status === 'done' ? 'text-emerald-600 dark:text-emerald-400' : 'text-zinc-500'}`} />
@@ -844,7 +844,8 @@ function NewFactory({ busy, drafting, draftError, onCreate, onDescribe, onCancel
             <>
               <label htmlFor="fm-goal" className="sr-only">For a Course goal</label>
               <select id="fm-goal" value={goalId} onChange={(e) => setGoalId(e.target.value)} disabled={drafting}
-                className="h-8 max-w-[16rem] rounded-full border border-[var(--fd-line)] bg-zinc-950 px-3 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
+                title={goals.find((g) => g.id === goalId)?.title ?? 'Not for a goal'}
+                className="h-8 min-w-0 max-w-[16rem] truncate rounded-full border border-[var(--fd-line)] bg-zinc-950 pl-3 pr-8 text-xs text-zinc-200 focus:border-violet-500/50 focus:outline-none">
                 <option value="">Not for a goal</option>
                 {goals.map((g) => <option key={g.id} value={g.id}>For: {g.title}</option>)}
               </select>
