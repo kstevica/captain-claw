@@ -1139,8 +1139,8 @@ async def lifespan(app: FastAPI):
     # The same for every agent's Course files, then the review sweep: goals
     # that came due are asked about on the Line; stale ones leave the prompts.
     app.state.course_reconcile = asyncio.create_task(course_carrier.reconcile(_fd_db))
-    # …and every agent's family block (who made whom: family_carrier).
-    app.state.family_reconcile = asyncio.create_task(asyncio.to_thread(family_carrier.refresh))
+    # …and every agent's family block (who made whom, its agent groups: family_carrier).
+    app.state.family_reconcile = asyncio.create_task(family_carrier.reconcile(_fd_db))
     app.state.course_review_stop = asyncio.Event()
     app.state.course_review_task = asyncio.create_task(
         course_carrier.review_loop(_fd_db, app.state.course_review_stop))

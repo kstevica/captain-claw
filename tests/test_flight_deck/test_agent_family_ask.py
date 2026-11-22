@@ -41,6 +41,31 @@ FAMILY = dict(top=("",), me=("top",), sib=("top",), sib2=("top",), kid=("me",), 
               theirs=("top", "v"))
 
 
+class TestGroupNames:
+    def test_a_group_is_reached_by_the_name_the_agent_was_shown(self):
+        reg = _reg(**FAMILY)
+        groups = [{"id": "g", "name": "  **Deal_flow**\n", "type": "group", "agentIds": ["proc-sib"]},
+                  {"id": "r", "name": "Reviewers", "type": "role", "agentIds": ["proc-sib2"]}]
+        assert fam.folders(groups) == [("Deal flow", ["sib"])]  # roles aren't groups
+        assert fam.recipients(reg, "me", "group:deal flow", groups=groups) == ["sib"]
+        assert fam.recipients(reg, "me", "group:Deal_flow", groups=groups) == ["sib"]
+        with pytest.raises(fam.FamilyError, match="no agent group called 'Reviewers'"):
+            fam.recipients(reg, "me", "group:Reviewers", groups=groups)
+
+    def test_groups_of(self):
+        reg = _reg(**FAMILY)
+        reg["w"] = {"slug": "w", "owner": "u", "parent": "top", "role": "worker"}
+        groups = [{"name": "Ops", "type": "group", "agentIds": ["proc-top"]},
+                  {"name": "Research", "type": "group",
+                   "agentIds": ["proc-sib", "proc-me", "proc-w", "proc-theirs", "proc-gone", "proc-sib"]}]
+        assert fam.groups_of(reg, "me", groups) == [
+            {"name": "Research", "members": ["sib"], "mine": True},   # own first; no worker, stranger or ghost
+            {"name": "Ops", "members": ["top"], "mine": False},
+        ]
+        assert fam.groups_of(reg, "w", groups) == [] and fam.groups_of(reg, "nobody", groups) == []
+        assert fam.groups_of(reg, "me", None) == [] and fam.groups_of(reg, "me", "junk") == []
+
+
 class TestRecipients:
     def test_by_relation(self):
         reg = _reg(**FAMILY)
@@ -65,7 +90,7 @@ class TestRecipients:
         reg = _reg(**FAMILY)
         groups = [{"id": "g", "name": "Research", "type": "group", "agentIds": ["proc-sib", "proc-me", "abc123", "proc-theirs"]}]
         assert fam.recipients(reg, "me", "group:research", groups=groups) == ["sib"]
-        with pytest.raises(fam.FamilyError, match="no agent group called"):
+        with pytest.raises(fam.FamilyError, match="no agent group called 'Ops'. Their groups: Research."):
             fam.recipients(reg, "me", "group:Ops", groups=groups)
         with pytest.raises(fam.FamilyError, match="live in the browser"):
             fam.recipients(reg, "me", "group:Research", groups=None)

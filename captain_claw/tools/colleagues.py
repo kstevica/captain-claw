@@ -4,7 +4,8 @@ An owner's standing agents are a team. This tool lets one of them see who else
 is on it (each one's role, what it does, its email) and give a colleague a
 piece of work. Flight Deck keeps it (:mod:`captain_claw.flight_deck.colleagues`):
 
-* ``list``: you and your colleagues — name, role, what each does, email.
+* ``list``: you and your colleagues — name, role, what each does, email —
+  and the owner's agent groups (the ones you are in first, with who else is in them).
 * ``hand_over``: give a colleague a piece of work (``to``, ``instructions``,
   optionally ``title``). It becomes a task on the owner's Taskboard, part of the
   board task you are on when you are on one, and the colleague starts on it at
@@ -119,6 +120,30 @@ def _who(c: dict[str, Any]) -> str:
     return head + (f": {'; '.join(bits)}" if bits else "") + f" (to='{c.get('slug')}')"
 
 
+def _groups_lines(groups: list[dict[str, Any]]) -> list[str]:
+    """Your owner's agent groups: yours with who is in them, then the others."""
+    if not groups:
+        return []
+
+    def members(g: dict[str, Any]) -> str:
+        names = [str(m.get("name") or m.get("slug")) for m in g.get("members") or [] if isinstance(m, dict)]
+        return ", ".join(names) if names else "nobody else"
+
+    mine = [g for g in groups if g.get("mine")]
+    other = [g for g in groups if not g.get("mine")]
+    out = [""]
+    if mine:
+        out.append("Your groups (your owner's agent groups you are in):")
+        out += [f"- {g.get('name')}: with {members(g)}" for g in mine]
+    else:
+        out.append("You are in none of your owner's agent groups.")
+    if other:
+        out.append("Your owner's other groups:" if mine else "Your owner's groups:")
+        out += [f"- {g.get('name')}: {members(g)}" for g in other]
+    out.append("To ask or task a whole group at once: the flight_deck tool's ask or task with to='group:<name>'.")
+    return out
+
+
 class ColleaguesTool(Tool):
     """Your owner's other agents: who they are, and handing them work."""
 
@@ -132,7 +157,8 @@ class ColleaguesTool(Tool):
         "owner's Taskboard and they start at once; when they finish you get their answer back "
         "automatically, so don't wait, poll or do their part yourself — finish your own part and say "
         "it is with them. Hand over only work that is clearly theirs by role, and never to yourself. "
-        "action='handed': what you handed out lately and how far each one is."
+        "action='handed': what you handed out lately and how far each one is. The list also shows your "
+        "owner's agent groups and which ones you are in."
     )
     parameters = {
         "type": "object",
@@ -176,6 +202,7 @@ class ColleaguesTool(Tool):
             lines.append(f"Your colleagues ({len(team)}):")
             lines += [f"- {_who(c)}" for c in team]
             lines.append("Hand one of them work with action='hand_over' to=<slug> instructions=<…>.")
+        lines += _groups_lines([g for g in data.get("groups") or [] if isinstance(g, dict)])
         return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod

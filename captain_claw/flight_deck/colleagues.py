@@ -792,7 +792,27 @@ async def agent_roster(request: Request) -> dict:
 
         me = view({"slug": slug, "name": agent_name(slug)}, ident, await _inboxes(owner))
     return {"me": me, "colleagues": [{**a, "can_hand_to": may_hand_to(ident, a["slug"])}
-                                     for a in team if a["slug"] != slug]}
+                                     for a in team if a["slug"] != slug],
+            "groups": await _groups(owner, slug)}
+
+
+async def _groups(owner: str, slug: str) -> list[dict]:
+    """The owner's agent groups as ``slug`` may know them (its own first):
+    ``{name, mine, members: [{slug, name}]}``. [] on a deck without sign-in."""
+    from captain_claw.flight_deck import agent_family
+    from captain_claw.flight_deck import server as srv
+
+    try:
+        groups = await srv._owner_agent_groups(owner)
+        if not groups:
+            return []
+        reg = await asyncio.to_thread(srv._load_process_registry)
+        return [{"name": g["name"], "mine": g["mine"],
+                 "members": [{"slug": s, "name": agent_family.name_of(reg, s)} for s in g["members"]]}
+                for g in agent_family.groups_of(reg, slug, groups)]
+    except Exception as exc:  # noqa: BLE001 — the roster still shows without them
+        log.debug("Colleagues: groups unreadable", error=str(exc)[:200])
+        return []
 
 
 @router.post("/agent/hand_over")

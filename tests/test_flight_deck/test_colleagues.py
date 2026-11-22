@@ -409,6 +409,38 @@ def test_the_agent_sees_itself_and_its_colleagues(client, team):
     assert by["writer"]["can_hand_to"] is True and by["editor"]["can_hand_to"] is False
 
 
+def test_the_roster_shows_the_owners_agent_groups(client, team, monkeypatch):
+    from captain_claw.flight_deck import server as srv
+    from captain_claw.tools.colleagues import _groups_lines
+
+    reg = {a["slug"]: {"slug": a["slug"], "name": a["name"], "owner": ALICE} for a in TEAM}
+
+    async def groups(owner):
+        assert owner == ALICE
+        return [{"name": "Desk", "type": "group", "agentIds": ["proc-editor"]},
+                {"name": "Deals", "type": "group", "agentIds": ["proc-researcher", "proc-writer"]}]
+
+    monkeypatch.setattr(srv, "_owner_agent_groups", groups)
+    monkeypatch.setattr(srv, "_load_process_registry", lambda: reg)
+    data = client.http.post("/fd/colleagues/agent/roster").json()
+    assert data["groups"] == [
+        {"name": "Deals", "mine": True, "members": [{"slug": "writer", "name": "Writer"}]},
+        {"name": "Desk", "mine": False, "members": [{"slug": "editor", "name": "Editor"}]},
+    ]
+    lines = _groups_lines(data["groups"])
+    assert "- Deals: with Writer" in lines and "Your owner's other groups:" in lines and "- Desk: Editor" in lines
+    assert lines[-1].endswith("to='group:<name>'.")
+    assert _groups_lines([{"name": "Desk", "mine": False, "members": []}])[1:3] == [
+        "You are in none of your owner's agent groups.", "Your owner's groups:"]
+    assert _groups_lines([]) == []
+
+    async def none(owner):
+        return None
+
+    monkeypatch.setattr(srv, "_owner_agent_groups", none)  # no sign-in: groups live in the browser
+    assert client.http.post("/fd/colleagues/agent/roster").json()["groups"] == []
+
+
 def test_hand_over_route_answers_with_what_to_say(client, team):
     r = client.http.post("/fd/colleagues/agent/hand_over", json={"to": "nobody", "instructions": "x"})
     assert r.status_code == 404 and "Your colleagues" in r.json()["detail"]
