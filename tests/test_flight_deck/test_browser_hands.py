@@ -10,7 +10,9 @@ Pinned here:
   agent, a browser that goes away or takes too long each get a plain answer;
 * files the browser fetched for an act land in the owner's Web clips folder
   and are listed in the act's answer; nobody else can post to that act;
-* Connections → Browser shows which browsers agents can use now.
+* Connections → Browser shows which browsers agents can use now;
+* a page holding another extension's frame (Chrome keeps the debugger off it)
+  is named as that — never "a chrome:// page" — with what still works there.
 """
 
 from __future__ import annotations
@@ -351,6 +353,79 @@ def test_the_extension_asks_for_the_debugger_the_way_chrome_allows():
     for name in ("background.js", "hands.js"):
         for n, line in enumerate((EXTENSION / name).read_text().splitlines(), 1):
             assert not re.match(r"chrome\.(debugger|tabGroups|permissions)\.", line), f"{name}:{n}: {line}"
+
+
+# A page with another extension's frame in it: Chrome keeps the debugger off
+# the tab. The words for it (lib/hands-errors.js) run in node.
+
+_ERRORS_JS = EXTENSION / "lib" / "hands-errors.js"
+_RUN_ERRORS = r"""
+const m = await import(process.argv[1])
+const cases = JSON.parse(process.argv[2])
+const out = {}
+for (const [key, [fn, ...args]] of Object.entries(cases)) out[key] = fn in m && typeof m[fn] === 'function' ? m[fn](...args) : m[fn]
+console.log(JSON.stringify(out))
+"""
+
+
+def _errors(**cases):
+    import shutil
+    import subprocess
+
+    if shutil.which("node") is None:
+        pytest.skip("needs node")
+    out = subprocess.run(["node", "--input-type=module", "-e", _RUN_ERRORS, _ERRORS_JS.as_uri(), json.dumps(cases)],
+                         capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+_OTHER_ID = "abcdefghijklmnopabcdefghijklmnop"
+
+
+def test_another_extensions_frame_is_named_not_called_a_chrome_page():
+    got = _errors(
+        refused=["cleanError", {"message": "Cannot access a chrome-extension:// URL of different extension"}],
+        cut=["cleanError", {"message": "Detached while handling command."}],
+        gone=["cleanError", {"message": "Debugger is not attached to the tab with id: 12."}],
+        chrome_page=["cleanError", {"message": "Cannot access a chrome:// URL"}],
+        store=["cleanError", {"message": "The extensions gallery cannot be scripted."}],
+        needs=["needsDebugger", "press_key", {"ext": [_OTHER_ID], "scriptable": True}],
+        no_scripting=["needsDebugger", "press_key", {"ext": [], "scriptable": False}],
+        note=["plainNote", {"ext": [_OTHER_ID], "scriptable": True}],
+    )
+    for key in ("refused", "needs", "no_scripting", "note"):
+        assert "Another Chrome extension put a frame" in got[key], key
+        assert "chrome:// or extension page" not in got[key], key
+        assert "chrome://extensions" in got[key] and "On click" in got[key], key
+    for key in ("cut", "gone"):
+        assert "took Captain's debugger off" in got[key] and "read_page" in got[key], key
+    # A real chrome:// page or the Web Store keeps its own answer.
+    assert "a chrome:// or extension page" in got["chrome_page"] and "a chrome:// or extension page" in got["store"]
+    # The person is pointed at that very extension, and told what still works.
+    assert f"chrome://extensions/?id={_OTHER_ID}" in got["needs"] and "press_key can't work" in got["needs"]
+    assert "read_page" in got["needs"] and "form_input" in got["needs"]
+    assert "Work on every site" in got["no_scripting"] and "navigate" in got["no_scripting"]
+    assert "read_page" in got["note"] and "press_key" in got["note"]
+
+
+def test_every_act_says_whether_it_works_without_the_debugger():
+    """An act that runs plain where the debugger can't go is listed as working
+    there; one that needs it is listed as needing it — the agent is told both."""
+    lists = _errors(can=["PLAIN_CAN"], cannot=["PLAIN_CANNOT"])
+    src = (EXTENSION / "hands.js").read_text()
+    actions = src[src.index("const ACTIONS = {"):]
+    plain, debugger_only = set(), set()
+    for name, body in re.findall(r"\n  async (\w+)\(ctx[^)]*\) \{\n(.*?)\n  \},", actions, re.S):
+        call = re.search(r"useTab\(ctx, args(, [^\n]*)?\)", body)
+        if call:
+            (plain if "plain" in (call.group(1) or "") else debugger_only).add(name)
+    assert {"navigate", "read_page", "find", "page_text", "form_input", "screenshot"} <= plain
+    assert {"press_key", "javascript", "hover"} <= debugger_only
+    for name in plain:
+        assert re.search(rf"\b{name}\b", lists["can"]), f"{name} works without the debugger but isn't said to"
+    for name in debugger_only:
+        assert re.search(rf"\b{name}\b", lists["cannot"]), f"{name} needs the debugger but isn't said to"
 
 
 # ── an agent's own browser ────────────────────────────────────────────

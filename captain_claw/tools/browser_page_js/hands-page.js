@@ -8,7 +8,10 @@
 // globalThis.__captainHands once per document; refs last until the page
 // navigates. In a frame from another site the worker sets
 // globalThis.__captainRefPrefix first ("f2_"), so its refs (ref_f2_5) never
-// collide with the page's.
+// collide with the page's. Where Chrome keeps the debugger off the tab (another
+// extension's frame is in the page) the worker runs this through
+// chrome.scripting in Captain's own isolated world instead, prefix "p"
+// (ref_p12), and clicks and types with press and typeIn below.
 
 (() => {
   if (globalThis.__captainHands) return
@@ -439,7 +442,14 @@
   }
 
   /** The old way of pointing: a CSS selector, visible text, or a role and its name, nth for the n-th. */
-  function pointBy({ selector = '', text = '', role = '', nth = null } = {}) {
+  function pointBy(how = {}) {
+    const { el, note } = findOne(how)
+    const p = pointAt(el)
+    if (note) p.note = note
+    return p
+  }
+
+  function findOne({ selector = '', text = '', role = '', nth = null } = {}) {
     let found = []
     const want = oneLine(text).toLowerCase()
     if (selector) {
@@ -475,9 +485,87 @@
     if (!list.length) throw new Error(`Nothing on the page matches ${selector ? q(selector) : role ? `role=${role}${want ? ` named ${q(text)}` : ''}` : q(text)}.`)
     const i = nth === null || nth === undefined ? 0 : Number(nth)
     if (i < 0 || i >= list.length) throw new Error(`There are ${list.length} matches; nth=${i} is out of range.`)
-    const p = pointAt(list[i])
-    if (list.length > 1 && (nth === null || nth === undefined)) p.note = `${list.length} matched; used the first (nth=0).`
+    return { el: list[i], note: list.length > 1 && (nth === null || nth === undefined) ? `${list.length} matched; used the first (nth=0).` : '' }
+  }
+
+  // ── without the debugger ──
+  // Where Chrome keeps the debugger off the tab (another extension put a frame
+  // of its own in the page), the worker runs these through chrome.scripting:
+  // a click and typing made of DOM events, scrolling by script.
+
+  /** Click *el* (a ref, or a selector, text or role): pointer and mouse events, then click(). */
+  function press({ ref = '', selector = '', text = '', role = '', nth = null } = {}) {
+    const { el, note } = ref ? { el: byRef(ref), note: '' } : findOne({ selector, text, role, nth })
+    if (el.disabled) throw new Error(`${describe(el)} is disabled.`)
+    const p = pointAt(el)
+    const at = { bubbles: true, cancelable: true, composed: true, clientX: p.x, clientY: p.y, button: 0 }
+    const ptr = { ...at, pointerId: 1, pointerType: 'mouse', isPrimary: true }
+    el.dispatchEvent(new PointerEvent('pointerover', ptr))
+    el.dispatchEvent(new MouseEvent('mouseover', at))
+    el.dispatchEvent(new PointerEvent('pointerdown', { ...ptr, buttons: 1 }))
+    el.dispatchEvent(new MouseEvent('mousedown', { ...at, buttons: 1 }))
+    if (typeof el.focus === 'function') el.focus({ preventScroll: true })
+    el.dispatchEvent(new PointerEvent('pointerup', ptr))
+    el.dispatchEvent(new MouseEvent('mouseup', at))
+    el.click()
+    if (note) p.note = note
     return p
+  }
+
+  /** Type *value* into a field (a ref, a selector, or the one that has the keyboard) as text input. */
+  function typeIn({ ref = '', selector = '', nth = null, value = '', append = false } = {}) {
+    let el
+    let note = ''
+    if (ref) el = byRef(ref)
+    else if (selector) ({ el, note } = findOne({ selector, nth }))
+    else {
+      el = document.activeElement
+      while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement
+      if (!el || el === document.body || el === document.documentElement) {
+        throw new Error('Nothing on the page has the keyboard — say where to type: a ref (from read_page or find).')
+      }
+    }
+    if (fieldKind({ ref: refOf(el) }) !== 'text') throw new Error(`${describe(el)} [${refOf(el)}] isn't a text field — find the field with read_page.`)
+    if (el.disabled) throw new Error(`${describe(el)} is disabled.`)
+    if (el.readOnly) throw new Error(`${describe(el)} is read-only.`)
+    const doc = el.ownerDocument
+    if (append) {
+      el.focus()
+      if (el.isContentEditable) {
+        const range = doc.createRange()
+        range.selectNodeContents(el)
+        range.collapse(false)
+        doc.getSelection().removeAllRanges()
+        doc.getSelection().addRange(range)
+      } else {
+        try { el.setSelectionRange(el.value.length, el.value.length) } catch { /* a type without a caret */ }
+      }
+    } else {
+      selectField({ ref: refOf(el) })
+    }
+    const text = String(value ?? '')
+    const before = el.isContentEditable ? el.innerText : el.value
+    const done = text ? doc.execCommand('insertText', false, text) : doc.execCommand('delete')
+    const now = el.isContentEditable ? el.innerText : el.value
+    if ((!done || now === before) && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) {
+      // A field that takes no editing commands (number, email…): set it as a page would.
+      const proto = el.tagName === 'INPUT' ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, append ? el.value + text : text)
+      fire(el, 'input', text)
+      fire(el, 'change')
+    }
+    return { field: fieldInfo(el), what: describe(el), ref: refOf(el), note }
+  }
+
+  /** Scroll what's under *ref* (its nearest scrolling box) or the page by dx, dy. */
+  function wheel({ ref = '', dx = 0, dy = 0 } = {}) {
+    let box = null
+    for (let n = ref ? byRef(ref) : null; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      const st = styleOf(n)
+      if (st && /(auto|scroll|overlay)/.test(st.overflowY + st.overflowX) && (n.scrollHeight > n.clientHeight || n.scrollWidth > n.clientWidth)) { box = n; break }
+    }
+    ;(box || window).scrollBy({ left: dx, top: dy, behavior: 'instant' })
+    return info()
   }
 
   function scrollTo({ ref } = {}) {
@@ -679,5 +767,5 @@
   }
 
   globalThis.__captainHands = { tree, find, point, pointBy, scrollTo, formInput, upload, info,
-    fieldKind, selectField, field, focused, problems }
+    fieldKind, selectField, field, focused, problems, press, typeIn, wheel }
 })()
