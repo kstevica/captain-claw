@@ -131,7 +131,7 @@ def fields_of(data: dict[str, Any]) -> dict[str, Any]:
                           "input": str(c.get("input") or "").strip(),
                           "expect": _lines(c.get("good_result"), 10)})
     return {"title": title, "charter": charter, "triggers": fms.check_triggers(triggers),
-            "grants": fms.check_grants(grants), "is_list": data.get("is_list") is True,
+            "grants": fms.check_grants(grants), "is_list": data.get("is_list") is not False,  # a list unless the draft says it isn't
             "checks": {"contract": _lines(data.get("done_when"), DONE_WHEN_MAX)},
             "cases": cases[:DRAFT_CASES_MAX]}
 
@@ -212,7 +212,7 @@ async def draft(store: fms.FirstMateStore, owner_id: str, words: str, *, goal: d
         "Drafted from your words, rewritten as a charter" if rephrase else "Drafted from your words, the charter as written")
     f = store.create(owner, title=fields["title"], charter=fields["charter"], triggers=fields["triggers"],
                      grants=fields["grants"], checks=fields["checks"], goal_id=(goal or {}).get("id", ""),
-                     runner="funnel" if fields["is_list"] else "bat", note=note, created_by=by)
+                     runner=fms.DEFAULT_RUNNER if fields["is_list"] else "bat", note=note, created_by=by)
     from captain_claw.flight_deck import first_mate_cases
     added = 0
     for c in fields["cases"]:

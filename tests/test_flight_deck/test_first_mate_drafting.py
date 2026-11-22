@@ -298,3 +298,14 @@ def test_the_rewrite_keeps_what_a_why_it_fits_column_is_for():
     from captain_claw.flight_deck import first_mate_drafting as d
     assert "keeps that purpose in their words" in d.system_for(True)
     assert "keeps that purpose" not in d.system_for(False)
+
+
+def test_a_draft_is_a_list_unless_it_says_it_isnt():
+    """The list funnel is what a new factory runs on. A draft that doesn't say what its
+    result is gets it; only one that says the result is not a list goes to agents."""
+    from captain_claw.flight_deck import first_mate_drafting as d
+    from captain_claw.flight_deck import first_mate_store as fms
+    base = {"title": "T", "charter": "Find things.", "done_when": ["a file"]}
+    assert d.fields_of(base)["is_list"] is True and d.fields_of({**base, "is_list": True})["is_list"] is True
+    assert d.fields_of({**base, "is_list": False})["is_list"] is False
+    assert fms.DEFAULT_RUNNER == "funnel" and fms.check_runner("") == "funnel" and fms.check_runner("bat") == "bat"
