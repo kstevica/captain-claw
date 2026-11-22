@@ -2366,7 +2366,7 @@ CALENDAR_BACKSTOP = "Note: no calendar event was created or changed in this turn
 CALENDAR_BACKSTOP_REFUSED = ("Note: no calendar event was created or changed in this turn — the "
                              "change was refused.")
 LOOKUP_BACKSTOP = "Note: the searches and checks described above did not run."
-SKIPPED_TOOLS_BACKSTOP = "Note: this scheduled run used none of its tools — nothing above was checked."
+SKIPPED_TOOLS_BACKSTOP = msg_origin.UNCHECKED_RUN_NOTE
 _ID_BACKSTOP_TAIL = " returned by any tool."
 # The lookups a corrective may point at, read-only, when the turn offers them.
 _LOOKUP_CALLS = (
@@ -2392,7 +2392,8 @@ def has_backstop(text: str) -> bool:
     return (MAIL_BACKSTOP.rstrip(".") in text or CALENDAR_BACKSTOP.rstrip(".") in text
             or LOOKUP_BACKSTOP in text or (_ID_BACKSTOP_TAIL in text and "Note: `" in text)
             or PAYMENT_BACKSTOP in text or DELEGATION_BACKSTOP in text
-            or SCHEDULE_BACKSTOP in text or SCHEDULE_BACKSTOP_OTHER in text)
+            or SCHEDULE_BACKSTOP in text or SCHEDULE_BACKSTOP_OTHER in text
+            or SKIPPED_TOOLS_BACKSTOP in text)
 
 
 def _quote(text: str) -> str:

@@ -84,14 +84,24 @@ def fake_litellm(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_task_naming_drops_a_rejected_temperature_and_remembers(fake_litellm):
+    # A model the table says takes a temperature, rejecting it anyway.
     name = await chat_handler._generate_task_name(
-        "Napravi report o bateriji", [], "anthropic/claude-haiku-5-5", api_key="k")
+        "Napravi report o bateriji", [], "anthropic/claude-haiku-4-5", api_key="k")
     assert name == "Battery report"
     assert [("temperature" in c) for c in fake_litellm] == [True, False]
 
     fake_litellm.clear()
     await chat_handler._generate_task_name(
-        "Koliko je sati?", [], "anthropic/claude-haiku-5-5", api_key="k")
+        "Koliko je sati?", [], "anthropic/claude-haiku-4-5", api_key="k")
+    assert [("temperature" in c) for c in fake_litellm] == [False]
+
+
+@pytest.mark.asyncio
+async def test_task_naming_sends_no_temperature_to_a_model_known_to_refuse_it(fake_litellm):
+    """Haiku 5.5 is known up front (llm._claude_without_sampling): no failed first call."""
+    name = await chat_handler._generate_task_name(
+        "Napravi report o bateriji", [], "anthropic/claude-haiku-5-5", api_key="k")
+    assert name == "Battery report"
     assert [("temperature" in c) for c in fake_litellm] == [False]
 
 
