@@ -916,6 +916,14 @@ class ModelReply(NamedTuple):
     reasoning: str = ""        # a thinking model's thoughts, when its server sends them apart
 
 
+def _quiet() -> contextlib.AbstractContextManager:
+    """A description call runs with thinking off where the model can switch it
+    off: a thinking model counts its thinking against max_tokens, and on a
+    small budget it can think through all of it and never write the JSON."""
+    from captain_claw.llm import reasoning
+    return reasoning.quiet_call()
+
+
 def cut_off(reply: ModelReply) -> bool:
     """The answer stopped at its max_tokens, not where the model ended it."""
     return reply.finish_reason.strip().lower() in ("length", "max_tokens")
@@ -1235,9 +1243,10 @@ async def _summarize_picture(row: dict, path: Path, owner_id: str, reach: MediaR
                 if model_id in reach.refused:
                     continue
                 try:
-                    content, tokens = await call_model(
-                        model, _PICTURE_SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id,
-                        max_tokens=_PICTURE_MAX_TOKENS, images=[picture])
+                    with _quiet():
+                        content, tokens = await call_model(
+                            model, _PICTURE_SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id,
+                            max_tokens=_PICTURE_MAX_TOKENS, images=[picture])
                 finally:
                     reach.probed.add(model_id)
             parsed = _parse_reply(content)
@@ -1406,8 +1415,9 @@ async def _summarize_transcript(row: dict, text: str, seconds: float, tier: dict
     user_msg = (f"File: {row['rel_path']}\n{where_line(row['agent_slug'], row.get('agent_name') or row['agent_slug'])}\n"
                 f"This is {what}{length}; below is the transcript of what is said in it.\n\n---\n{body}")
     try:
-        content, tokens = await call_model(
-            tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id)
+        with _quiet():
+            content, tokens = await call_model(
+                tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id)
         parsed = _parse_reply(content)
     except Exception:
         # Keep the transcript (search finds it meanwhile): the retry only
@@ -1460,8 +1470,9 @@ async def summarize_row(row: dict, tier: dict, owner_id: str,
     body = text if len(text) <= _LLM_CHARS else text[:_LLM_CHARS] + "\n\n[… truncated]"
     user_msg = (f"File: {row['rel_path']}\n{where_line(row['agent_slug'], row.get('agent_name') or row['agent_slug'])}\n"
                 f"Size: {row['size']} bytes\n\n---\n{body}")
-    content, tokens = await call_model(
-        tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id)
+    with _quiet():
+        content, tokens = await call_model(
+            tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id)
     parsed = _parse_reply(content)
     return {
         "status": "done",

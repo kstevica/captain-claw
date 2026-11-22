@@ -55,10 +55,11 @@ from captain_claw.flight_deck.file_library import (
     _resolve_tier,
     _vfs_owner,
     _workspace,
-    call_model,
     caller_sources,
     clean_tags,
+    cut_off,
     folder_of,
+    model_reply,
     reply_json,
     source_facets,
     source_fields,
@@ -560,9 +561,21 @@ async def summarize_table(t: dict, tier: dict, owner_id: str, agent_name: str) -
                 "summary": f"Empty table — no rows yet. Columns: {cols}." if cols else "Empty table.",
                 "category": "other", "tags": [], "insights": [], "column_notes": {},
                 "error": "", "model": "", "tokens": 0, "summarized_at": time.time()}
-    content, tokens = await call_model(
-        tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES), _prompt(t, agent_name), owner_id, _MAX_TOKENS)
-    data = reply_json(content)
+    from captain_claw.llm import reasoning
+    # Thinking off where the model can switch it off: a thinking model counts
+    # its thinking against max_tokens, and Qwen 3.8 on llama.cpp thought
+    # through all of them and never wrote the JSON.
+    with reasoning.quiet_call():
+        reply = await model_reply(tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES),
+                                  _prompt(t, agent_name), owner_id, max_tokens=_MAX_TOKENS)
+    try:
+        data = reply_json(reply.text)
+    except ValueError:
+        if cut_off(reply):
+            raise ValueError(f"the answer was cut off at {_MAX_TOKENS} tokens before its JSON "
+                             "(a thinking model can spend them all thinking)") from None
+        raise
+    tokens = reply.tokens
     category = str(data.get("category") or "").strip().lower()
     names = {c["name"] for c in t["columns"]}
     notes_raw = data.get("columns") if isinstance(data.get("columns"), dict) else {}

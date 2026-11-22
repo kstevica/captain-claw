@@ -29,7 +29,7 @@ from PIL import Image, ImageStat
 from captain_claw import llm
 from captain_claw.flight_deck import file_library as fl
 from captain_claw.flight_deck import server, soniox_routes
-from captain_claw.llm import vision
+from captain_claw.llm import reasoning, vision
 from captain_claw.soniox_api import SonioxError, Transcript
 from captain_claw.tools import video_vision
 
@@ -78,7 +78,7 @@ def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     async def call_model(tier, system, user, owner_id, max_tokens=700, request_timeout=None, images=None):
         state.calls.append({"tier": tier, "system": system, "user": user, "images": images,
-                            "max_tokens": max_tokens})
+                            "max_tokens": max_tokens, "effort": reasoning.requested_effort()})
         model = tier.get("model")
         state.in_flight[model] = state.in_flight.get(model, 0) + 1
         state.most_in_flight[model] = max(state.most_in_flight.get(model, 0), state.in_flight[model])
@@ -365,6 +365,25 @@ async def test_svg_and_icons_are_never_shown_to_a_model(deck: _State):
     assert all(not c["images"] for c in deck.calls)
     assert _row("favicon.ico")["status"] == "skipped"
     assert _row("logo.svg")["status"] == "done"          # read as text, as before
+
+
+# ── Thinking ──────────────────────────────────────────────────────────
+
+
+async def test_every_description_is_asked_with_thinking_off(deck: _State):
+    # A thinking model counts its thinking against max_tokens: on a small
+    # budget it can think through all of it and never write the JSON.
+    deck.agent_model(provider="anthropic", model="claude-sonnet-4-6", vision=True)
+    deck.soniox_key = "sx-key"
+    (deck.workspace / "notes.md").write_text("Launch moved to March.\n")
+    _picture(deck.workspace / "saved" / "bike.png")
+    _sound(deck.workspace / "saved" / "standup.wav")
+    await _scan()
+
+    assert len(deck.calls) == 3
+    assert [c["effort"] for c in deck.calls] == [reasoning.QUIET] * 3
+    # …and only for the call: nothing leaks out of it.
+    assert reasoning.requested_effort() is None
 
 
 # ── Recordings ────────────────────────────────────────────────────────
