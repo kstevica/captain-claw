@@ -22,7 +22,7 @@ Mix providers freely — each session independently selects its model.
 
 Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), Microsoft 365 (Outlook mail, Calendar, OneDrive), Jev calibrated judgments (TypeSafe AI), Soniox speech in and out (`audio`), public file links, topic switching by asking (`sessions`), a read-only Telegram inbox, the StopWatch's background picture, bill payments (opt-in), WhatsApp file delivery, intentions (proactive future actions), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), Basna (read and start multi-agent ensemble runs), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
 
-New in 0.10.0:
+New in 0.9.2:
 
 | Tool | What it does |
 |---|---|
@@ -31,7 +31,7 @@ New in 0.10.0:
 
 That makes **83 built-in tools** per agent (82 in the desktop app, which has no Captain Swarm). Past 16,000 tokens of tool descriptions, an agent in full mode sends only some of them in full and loads the rest with `search_tools` (on Claude models, Anthropic's own tool search); see [USAGE](../../USAGE.md).
 
-Also new in 0.10.0: `web_search` can run on Google, Bing, DuckDuckGo, Yahoo or Qwant in the owner's own Chrome, and `web_fetch` can read pages there signed in as them (LinkedIn, X and sites that turn a server away), both opt-in per person; see [Web searches and pages in your Chrome](web-in-your-chrome.md). `web_fetch` keeps a page's headings, lists and tables as Markdown. The `browser` tool types secrets by reference and, in the owner's Chrome, waits for a page to finish drawing. The `flight_deck` tool can `report` to an agent's parent and `ask` or `task` its family at once.
+Also new in 0.9.2: `web_search` can run on Google, Bing, DuckDuckGo, Yahoo or Qwant in the owner's own Chrome, and `web_fetch` can read pages there signed in as them (LinkedIn, X and sites that turn a server away), both opt-in per person; see [Web searches and pages in your Chrome](web-in-your-chrome.md). `web_fetch` keeps a page's headings, lists and tables as Markdown. The `browser` tool types secrets by reference and, in the owner's Chrome, waits for a page to finish drawing. The `flight_deck` tool can `report` to an agent's parent and `ask` or `task` its family at once.
 
 New in 0.9.1:
 

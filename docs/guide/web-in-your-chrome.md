@@ -2,7 +2,7 @@
 
 [← README](../../README.md) · [All guides](README.md)
 
-New in 0.10.0. Your agents can read a LinkedIn profile, a post on X, or any page that turns a server away, the way you see it: in your own Chrome, signed in as you. Their web searches can run there too, on Google or another ordinary search engine, instead of the deck's paid search service. Both go through Captain for Chrome, in a background tab you never have to look at, and both stay off until you turn them on.
+New in 0.9.2. Your agents can read a LinkedIn profile, a post on X, or any page that turns a server away, the way you see it: in your own Chrome, signed in as you. Their web searches can run there too, on Google or another ordinary search engine, instead of the deck's paid search service. Both go through Captain for Chrome, in a background tab you never have to look at, and both stay off until you turn them on.
 
 For LinkedIn and X, the short version is: **Web pages** on **Every page** for `linkedin.com, x.com, twitter.com`, and **Web searches** on **Google**. The steps are below, and [LinkedIn and X](#linkedin-and-x) explains why.
 

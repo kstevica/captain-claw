@@ -97,7 +97,7 @@ Nothing rings twice. In quiet hours only nudges reach phones, and devices get th
 
 ## Captain for Chrome
 
-*New in 0.8.8.* A browser extension (Chrome, Edge, Brave, Arc; Chromium 116+) that sends the page you're on to one of your agents. It reads the page **in your browser**, signed in and as you see it: a portal, an intranet, a paywalled article, a dashboard drawn by JavaScript. It also downloads the files the page links to with your session. An agent's own web tools, fetching from the server, would get a sign-in page or a bot wall instead, unless you let them search and read pages in your Chrome too (0.10.0, [below](#web-searches-and-web-pages-in-your-chrome)).
+*New in 0.8.8.* A browser extension (Chrome, Edge, Brave, Arc; Chromium 116+) that sends the page you're on to one of your agents. It reads the page **in your browser**, signed in and as you see it: a portal, an intranet, a paywalled article, a dashboard drawn by JavaScript. It also downloads the files the page links to with your session. An agent's own web tools, fetching from the server, would get a sign-in page or a bot wall instead, unless you let them search and read pages in your Chrome too (0.9.2, [below](#web-searches-and-web-pages-in-your-chrome)).
 
 - **Open it** with the toolbar icon, **Alt+Shift+C**, or a right-click on a page, a selection, a link or a picture. Pick an agent and an action:
 
@@ -132,7 +132,7 @@ The extension keeps a token of its own, `Browser · <browser>`, never a password
 
 ### Web searches and web pages in your Chrome
 
-*New in 0.10.0, Captain for Chrome 0.7.2.* Your agents' `web_search` and `web_fetch` can run in this browser too, in a background tab that never comes to the front, signed in as you.
+*New in 0.9.2, Captain for Chrome 0.7.2.* Your agents' `web_search` and `web_fetch` can run in this browser too, in a background tab that never comes to the front, signed in as you.
 
 - **Web searches** run on Google, Bing, DuckDuckGo, Yahoo or Qwant instead of the deck's paid search service. Pick one in **Profile → Personal → Web searches** (**Search through my Chrome with**), then press **Allow** on the card the panel shows, or have **Work on every site without asking** on.
 - **Web pages**: LinkedIn, X, Facebook and other sites that turn a server away open the way they do for you. In **Profile → Personal → Web pages**, set **Read pages through my Chrome** to **Only pages that turn Flight Deck away** or **Every page**, and name the sites in **Only these sites**. Page reads need **Work on every site without asking**.
@@ -144,11 +144,11 @@ Step by step, with example asks, safety and limits: [Web searches and pages in y
 
 ### Agents in this browser
 
-With **Agents can use this browser** on (panel **Settings**), your agents' `browser` tool works in this Chrome (`target="chrome"`), in tabs of their own, while you watch. Since 0.10.0 it waits for a page to finish drawing, not just loading, before it reads, and the first `page_text` scrolls through the page for sections drawn as you scroll. It also keeps working on a page where another extension put a frame, which keeps Chrome's debugger away: most actions run without it, and the few that need it (keys, hovering, dragging, clicks at a point, scripts) name the extension in the way. Setting that extension's **Site access** to **On click** in `chrome://extensions` and reloading the page clears it.
+With **Agents can use this browser** on (panel **Settings**), your agents' `browser` tool works in this Chrome (`target="chrome"`), in tabs of their own, while you watch. Since 0.9.2 it waits for a page to finish drawing, not just loading, before it reads, and the first `page_text` scrolls through the page for sections drawn as you scroll. It also keeps working on a page where another extension put a frame, which keeps Chrome's debugger away: most actions run without it, and the few that need it (keys, hovering, dragging, clicks at a point, scripts) name the extension in the way. Setting that extension's **Site access** to **On click** in `chrome://extensions` and reloading the page clears it.
 
 ### Recordings: show it once, an agent does it after that
 
-*New in 0.10.0.* **Record what I do** in the panel records a process on a site, each step in words ("Click the button “Delete” in the row …"), not coordinates.
+*New in 0.9.2.* **Record what I do** in the panel records a process on a site, each step in words ("Click the button “Delete” in the row …"), not coordinates.
 
 1. **Add an instruction** to any step, while recording or after: what to pick, when to skip it, what to check.
 2. **Stop and review**: give it a name and **What it's for**, reorder or remove steps, or **Add a step in your own words**. Each value you typed or picked gets **This value**: **Always the same**, **Ask me before it starts** (a field on the Run form), **Ask me when it gets there** (the agent stops there and asks, in the panel and in Flight Deck), or **The agent decides** (it tells you afterwards what it used). Passwords, one-time codes and card fields are never recorded; the agent asks for them when it gets there.
@@ -159,9 +159,9 @@ In Flight Deck, **Connections → Browser → Recordings** shows each recording'
 
 ### Updates and versions
 
-*New in 0.10.0.* The panel tells you when your Flight Deck has a newer Captain for Chrome: "Captain for Chrome <new> is ready — this one is <yours>." **Download** fetches it; unzip it over the folder you loaded the extension from and press **Reload**. **Later** hides the note for that version; the panel's **Settings** always shows it, with the panel's own version at the bottom. If the extension is newer than the deck's copy, the panel says the deck needs updating instead.
+*New in 0.9.2.* The panel tells you when your Flight Deck has a newer Captain for Chrome: "Captain for Chrome <new> is ready — this one is <yours>." **Download** fetches it; unzip it over the folder you loaded the extension from and press **Reload**. **Later** hides the note for that version; the panel's **Settings** always shows it, with the panel's own version at the bottom. If the extension is newer than the deck's copy, the panel says the deck needs updating instead.
 
-**Connections → Browser** shows each connected browser's extension version, with the same note when it's behind or ahead. You can always download the deck's copy there with **Download the extension**. Extensions older than 0.5.1 can't show the note themselves. 0.10.0 ships Captain for Chrome 0.7.2.
+**Connections → Browser** shows each connected browser's extension version, with the same note when it's behind or ahead. You can always download the deck's copy there with **Download the extension**. Extensions older than 0.5.1 can't show the note themselves. 0.9.2 ships Captain for Chrome 0.7.2.
 
 ## Captain for Mac
 

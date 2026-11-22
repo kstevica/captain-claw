@@ -4,9 +4,9 @@
 
 Every release from the newest back to 0.4.29. The full notes for each, with upgrade steps, are in [release-notes/](../../release-notes/).
 
-**Jump to:** [0.10.0](#whats-new-in-0100) · [0.9.1](#whats-new-in-091) · [0.9.0](#whats-new-in-090) · [0.8.11](#whats-new-in-0811) · [0.8.10](#whats-new-in-0810) · [0.8.9](#whats-new-in-089) · [0.8.8](#whats-new-in-088) · [0.8.7](#whats-new-in-087) · [0.8.6](#whats-new-in-086) · [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+**Jump to:** [0.9.2](#whats-new-in-092) · [0.9.1](#whats-new-in-091) · [0.9.0](#whats-new-in-090) · [0.8.11](#whats-new-in-0811) · [0.8.10](#whats-new-in-0810) · [0.8.9](#whats-new-in-089) · [0.8.8](#whats-new-in-088) · [0.8.7](#whats-new-in-087) · [0.8.6](#whats-new-in-086) · [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
 
-## What's New in 0.10.0
+## What's New in 0.9.2
 
 **Landfall.** 164 merged PRs (#578–#742). **Restart Flight Deck, then every agent, hard-refresh the browsers, and reload Captain for Chrome (0.7.2).** First Mate is off until an admin turns it on; a browser tab opens the kiosk or the Admin console; shared folders stay in the File library only when someone added them; scheduled tasks pause for people away a week.
 
@@ -20,7 +20,7 @@ Every release from the newest back to 0.4.29. The full notes for each, with upgr
 - **Leaner agents**: tool search past 16k tokens of tool descriptions (Anthropic's own on Claude), an **Eco mode** switch, scheduled prompts in their own "⏰" session, housekeeping with thinking off, side calls after the run on self-hosted models, only urgent nudges to phones.
 - **And**: a conversation bar, picture previews and a viewer in the chat; **Computer User**, the fifth Featured archetype (132 archetypes); `web_fetch` keeps headings, lists and tables; one **Add data** panel; a run's CSV files edited as a table; team models locked for non-admins on team tiers; Crew hosted apps for approved people. **83 built-in tools** (82 in the desktop app).
 
-See [RELEASE_NOTES_0.10.0.md](../../release-notes/RELEASE_NOTES_0.10.0.md).
+See [RELEASE_NOTES_0.9.2.md](../../release-notes/RELEASE_NOTES_0.9.2.md).
 
 ## What's New in 0.9.1
 

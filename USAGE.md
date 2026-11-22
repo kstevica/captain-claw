@@ -26,8 +26,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Admin Commands](#admin-commands)
 - [Tools Reference](#tools-reference)
   - [browser](#browser)
-  - [first_mate](#first_mate--new-in-0100)
-  - [request_secret](#request_secret--new-in-0100)
+  - [first_mate](#first_mate--new-in-092)
+  - [request_secret](#request_secret--new-in-092)
   - [anonymize](#anonymize--new-in-091)
   - [model_switch](#model_switch--new-in-091)
   - [image_manipulation](#image_manipulation--new-in-090)
@@ -126,8 +126,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Lessons to approve](#lessons-to-approve--new-in-090)
   - [External memory](#external-memory--new-in-090)
   - [Course](#course-the-goals-your-agents-work-for--new-in-090)
-  - [Agent family](#agent-family--new-in-0100)
-  - [Bat](#bat--the-stubborn-finisher-new-in-080) (runs that finish: 0.10.0)
+  - [Agent family](#agent-family--new-in-092)
+  - [Bat](#bat--the-stubborn-finisher-new-in-080) (runs that finish: 0.9.2)
 - [Kiosk (Simple Layout)](#kiosk-simple-layout)
   - [Agent groups](#agent-groups--new-in-085)
   - [The agent menu](#the-agent-menu--new-in-081)
@@ -142,15 +142,15 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Desktop app mode](#desktop-app-mode--new-in-081)
 - [Anonymization — NEW in 0.9.1](#anonymization--new-in-091)
 - [Data Rooms — NEW in 0.9.1](#data-rooms--new-in-091)
-- [First Mate — NEW in 0.10.0](#first-mate--new-in-0100)
-  - [The list funnel](#the-list-funnel--new-in-0100)
-- [Web in Your Chrome — NEW in 0.10.0](#web-in-your-chrome--new-in-0100)
-  - [Recordings in Captain for Chrome](#recordings-in-captain-for-chrome--new-in-0100)
-- [Safer Agents — NEW in 0.10.0](#safer-agents--new-in-0100)
-  - [Approval cards](#approval-cards--new-in-0100)
-  - [Why did this happen?](#why-did-this-happen--new-in-0100)
-  - [Secrets and Its browser](#secrets-and-its-browser--new-in-0100)
-  - [Needs you, task cards and new words](#needs-you-task-cards-and-new-words--new-in-0100)
+- [First Mate — NEW in 0.9.2](#first-mate--new-in-092)
+  - [The list funnel](#the-list-funnel--new-in-092)
+- [Web in Your Chrome — NEW in 0.9.2](#web-in-your-chrome--new-in-092)
+  - [Recordings in Captain for Chrome](#recordings-in-captain-for-chrome--new-in-092)
+- [Safer Agents — NEW in 0.9.2](#safer-agents--new-in-092)
+  - [Approval cards](#approval-cards--new-in-092)
+  - [Why did this happen?](#why-did-this-happen--new-in-092)
+  - [Secrets and Its browser](#secrets-and-its-browser--new-in-092)
+  - [Needs you, task cards and new words](#needs-you-task-cards-and-new-words--new-in-092)
 - [Deck Administration — NEW in 0.8.1](#deck-administration--new-in-081)
   - [Admin console](#admin-console)
   - [Admin console → Activity](#admin-console--activity--new-in-090)
@@ -501,7 +501,7 @@ Model selection persists per session. Use `default` to revert to the global conf
 
 Cron is pseudo-cron managed inside the Captain Claw runtime. Guardrails remain active for every execution. Output is tagged with `[CRON ...]` in chat and monitor panes.
 
-**Routine safety — NEW in 0.10.0.** For an agent's own jobs (`/cron`, the `cron` tool, REST), with limits from the [`cron:`](#cron) config section. Flight Deck's UI calls these jobs *automations*.
+**Routine safety — NEW in 0.9.2.** For an agent's own jobs (`/cron`, the `cron` tool, REST), with limits from the [`cron:`](#cron) config section. Flight Deck's UI calls these jobs *automations*.
 
 - **"Did nothing" is a failure.** A prompt run that called no tool and answered empty, only announced work or narrated lookups is recorded as failed ("did nothing"). A run whose task names one of the agent's tools by its code name (`web_search`) and called none is sent back once; if it still calls none, the reply ships with a line saying nothing in it was checked.
 - **Auto-pause.** A recurring job pauses after `pause_after_bad_runs` (10) failed or did-nothing runs in a row; resuming resets the count.
@@ -676,9 +676,9 @@ Smart fallback: tries plain HTTP first, then transparently retries through a hea
 | `url` | string | yes | URL to fetch |
 | `max_chars` | number | no | Max output chars (default: `tools.web_fetch.max_chars`, 200000 since 0.8.0). The configured value is a floor for a smaller model-passed value, and every value is bounded by 35% of the agent's context window |
 
-**Structure kept (0.10.0).** The text keeps a page's headings as `#` lines, lists as `-` or numbered items and data tables as `| a | b |` rows, with a merged cell repeated down its rows so each row stands alone. Layout tables are still read as plain text, and a page the layout pass can't handle falls back to plain text. The call's timeout is 100 s.
+**Structure kept (0.9.2).** The text keeps a page's headings as `#` lines, lists as `-` or numbered items and data tables as `| a | b |` rows, with a merged cell repeated down its rows so each row stands alone. Layout tables are still read as plain text, and a page the layout pass can't handle falls back to plain text. The call's timeout is 100 s.
 
-**In the person's own Chrome (0.10.0).** Under Flight Deck, when the owner turned on **Profile → Personal → Web pages** (see [Web in Your Chrome](#web-in-your-chrome--new-in-0100)), `web_fetch` reads the page in their Chrome through Captain for Chrome, signed in as them. With **Every page** Chrome is asked first. With **Only pages that turn Flight Deck away** it's asked after the deck was refused: HTTP 401, 403, 429 or 999, a dropped connection, a bot check, or a sign-in wall (`/authwall`, `/login`, "Log into Facebook", "Sign in to X" and the like, at any page length). The result starts with `[Read in the person's own Chrome (<browser>), signed in as them]` and shows `[Mode: chrome]`. Anything short of a page (the setting off, Chrome closed, a site not on the list, a refused address, not an HTML page) falls back to the usual fetch without a word. Never on a shared agent's member turn. `tools.web_fetch.via_chrome: false` keeps one agent out. `web_fetch_batch` and `web_get` never go through Chrome.
+**In the person's own Chrome (0.9.2).** Under Flight Deck, when the owner turned on **Profile → Personal → Web pages** (see [Web in Your Chrome](#web-in-your-chrome--new-in-092)), `web_fetch` reads the page in their Chrome through Captain for Chrome, signed in as them. With **Every page** Chrome is asked first. With **Only pages that turn Flight Deck away** it's asked after the deck was refused: HTTP 401, 403, 429 or 999, a dropped connection, a bot check, or a sign-in wall (`/authwall`, `/login`, "Log into Facebook", "Sign in to X" and the like, at any page length). The result starts with `[Read in the person's own Chrome (<browser>), signed in as them]` and shows `[Mode: chrome]`. Anything short of a page (the setting off, Chrome closed, a site not on the list, a refused address, not an HTML page) falls back to the usual fetch without a word. Never on a shared agent's member turn. `tools.web_fetch.via_chrome: false` keeps one agent out. `web_fetch_batch` and `web_get` never go through Chrome.
 
 ### web_fetch_batch — NEW in 0.5.4
 
@@ -775,7 +775,7 @@ Search the web via Brave Search (default), Tavily, You.com (NEW in 0.8.0), or Ke
 
 Brave requires `BRAVE_API_KEY` or `tools.web_search.api_key`; Tavily uses `tools.web_search.tavily_api_key`; You.com uses `tools.web_search.youcom_api_key` or `YDC_API_KEY` (web and news results merged, count clamped to 20); Keenable needs no key (optional `tools.web_search.keenable_api_key` or `KEENABLE_API_KEY` uses the keyed endpoint for higher limits).
 
-**In the person's own Chrome (0.10.0).** Under Flight Deck, when the owner picked an engine in **Profile → Personal → Web searches** (see [Web in Your Chrome](#web-in-your-chrome--new-in-0100)), the search runs on Google, Bing, DuckDuckGo, Yahoo or Qwant in their Chrome, in a background tab, instead of the provider above: up to 50 results a search on Google and Bing, 35 on Yahoo, 10 on DuckDuckGo and Qwant. Language, country, freshness and safe-search pass through to the engine. Anything short of results (the setting off, Chrome closed or asleep, the engine not allowed in the extension) falls back to `tools.web_search.provider`; a robot check or a cookie question falls back too, with a note asking the person to answer it once in Chrome. The agent remembers "off" for 60 s. With `enrich=true` the passages are still read on the deck. Never on a shared agent's member turn. `tools.web_search.via_chrome: false` keeps one agent out.
+**In the person's own Chrome (0.9.2).** Under Flight Deck, when the owner picked an engine in **Profile → Personal → Web searches** (see [Web in Your Chrome](#web-in-your-chrome--new-in-092)), the search runs on Google, Bing, DuckDuckGo, Yahoo or Qwant in their Chrome, in a background tab, instead of the provider above: up to 50 results a search on Google and Bing, 35 on Yahoo, 10 on DuckDuckGo and Qwant. Language, country, freshness and safe-search pass through to the engine. Anything short of results (the setting off, Chrome closed or asleep, the engine not allowed in the extension) falls back to `tools.web_search.provider`; a robot check or a cookie question falls back too, with a note asking the person to answer it once in Chrome. The agent remembers "off" for 60 s. With `enrich=true` the passages are still read on the deck. Never on a shared agent's member turn. `tools.web_search.via_chrome: false` keeps one agent out.
 
 ### browser
 
@@ -787,13 +787,13 @@ Drives a web browser: a headless Chromium on the agent's machine (default), or w
 | `target` | string | no | `headless` (default) or `chrome` |
 | `ref` | string | no | An element's ref from `read_page` or `find` (`ref_12`), the surest way to point at something |
 | `text` / `value` | string | no | What `type` / `form_input` puts in a field |
-| `secret_ref` | string | no | **NEW in 0.10.0.** For `type` / `form_input`: a password or code the person gave through [`request_secret`](#request_secret--new-in-0100) (`sec_…`), typed instead of `text` |
+| `secret_ref` | string | no | **NEW in 0.9.2.** For `type` / `form_input`: a password or code the person gave through [`request_secret`](#request_secret--new-in-092) (`sec_…`), typed instead of `text` |
 
-- **Secrets (0.10.0).** With `secret_ref` the browser fetches the value from Flight Deck as it types and never returns it; the value is scrubbed from that browser session's later results (plain, JSON- and URL-encoded). It's refused while a headless workflow recording is on ("stop it (workflow_record_stop) first"). Screenshots can't be scrubbed.
-- **Pages that finish drawing (0.10.0).** In Chrome, `navigate` waits at least 1.5 s and up to 10 s for the page to stop drawing (no page changes or requests for about 0.9 s, nothing `aria-busy`) and says when it's still drawing; the first `page_text` scrolls through the page, and reads wait for it to settle. Captain for Chrome 0.7.1 or later.
-- **Another extension's frame (0.10.0).** Chrome drops its debugger on a page where another extension injected a frame. `navigate`, `read_page`, `find`, `page_text`, `click`, `type`, `form_input`, `scroll`, `screenshot`, `save_page` and similar actions then run without it; `press_key`, `hover`, drag, clicks at coordinates, `javascript` and the console and network logs say they need the debugger and name the other extension. Captain for Chrome 0.7.2.
+- **Secrets (0.9.2).** With `secret_ref` the browser fetches the value from Flight Deck as it types and never returns it; the value is scrubbed from that browser session's later results (plain, JSON- and URL-encoded). It's refused while a headless workflow recording is on ("stop it (workflow_record_stop) first"). Screenshots can't be scrubbed.
+- **Pages that finish drawing (0.9.2).** In Chrome, `navigate` waits at least 1.5 s and up to 10 s for the page to stop drawing (no page changes or requests for about 0.9 s, nothing `aria-busy`) and says when it's still drawing; the first `page_text` scrolls through the page, and reads wait for it to settle. Captain for Chrome 0.7.1 or later.
+- **Another extension's frame (0.9.2).** Chrome drops its debugger on a page where another extension injected a frame. `navigate`, `read_page`, `find`, `page_text`, `click`, `type`, `form_input`, `scroll`, `screenshot`, `save_page` and similar actions then run without it; `press_key`, `hover`, drag, clicks at coordinates, `javascript` and the console and network logs say they need the debugger and name the other extension. Captain for Chrome 0.7.2.
 - **Looking again.** A successful action on the page resets the duplicate-call count, so `read_page` on a page that changed isn't blocked as a repeat after three looks.
-- The owner can watch the headless browser and take it over: [Its browser](#secrets-and-its-browser--new-in-0100).
+- The owner can watch the headless browser and take it over: [Its browser](#secrets-and-its-browser--new-in-092).
 
 ### pdf_extract
 
@@ -1494,20 +1494,20 @@ Discover and communicate with peer agents in the Flight Deck environment. Always
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `action` | string | yes | `list_agents`, `consult`, `delegate`, `spawn_agent`, and (NEW in 0.10.0) `report`, `ask`, `task` |
+| `action` | string | yes | `list_agents`, `consult`, `delegate`, `spawn_agent`, and (NEW in 0.9.2) `report`, `ask`, `task` |
 | `agent_name` | string | for consult/delegate/spawn_agent | Name of the peer agent to message, or of the new agent |
 | `message` | string | for consult/delegate/report/ask/task | Message or task to send |
-| `to` | string | for ask/task | **NEW in 0.10.0.** `parent`, `children`, `siblings`, `family` (all of them), `group:<name>` (one of the owner's agent groups) or one agent's name; at most 12 agents |
-| `made_for` | string | no | **NEW in 0.10.0.** spawn_agent: one line on why the agent is made; the new agent becomes the caller's child, shown under it with this line |
+| `to` | string | for ask/task | **NEW in 0.9.2.** `parent`, `children`, `siblings`, `family` (all of them), `group:<name>` (one of the owner's agent groups) or one agent's name; at most 12 agents |
+| `made_for` | string | no | **NEW in 0.9.2.** spawn_agent: one line on why the agent is made; the new agent becomes the caller's child, shown under it with this line |
 | `archetype` | string | no | spawn_agent: base the new agent on a library archetype (`fact-checker` or `fact-checker@reason`) |
 
 **Actions:**
 - **`list_agents`** — queries `GET /fd/fleet` for a live list of all running agents (Docker, process, local) with name, kind, status, port, and description. Marks the calling agent in the output.
 - **`consult`** — synchronous peer consultation. Looks up the target agent from the live fleet, sends a message via `/fd/consult-peer`, and streams the response with heartbeat monitoring. Use for quick questions where you need the answer immediately. Includes deduplication to prevent hammering a peer with identical requests.
 - **`delegate`** — fire-and-forget task delegation. Sends a task to a peer agent via `/fd/delegate-peer` and returns immediately, freeing the calling agent. The peer works independently and delivers results back as a notification when finished. Use for large/long-running tasks like research, scraping, analysis, or file creation.
-- **`spawn_agent`** — creates a new agent in the fleet; since 0.10.0 it is the caller's child ([Agent family](#agent-family--new-in-0100)).
-- **`report`** (0.10.0) — sends the agent's parent a report; it reaches the parent even when it's asleep.
-- **`ask`** / **`task`** (0.10.0) — asks, or gives a task to, every agent in `to` at once (`POST /fd/family/agent/send`). An ask waits for all the answers and returns them together (4 minutes by default, 8 at most); a task returns at once, and the results come back together when all are done (20 minutes by default). Two going per caller; an agent being asked can't ask in turn. Groups need a deck with sign-in.
+- **`spawn_agent`** — creates a new agent in the fleet; since 0.9.2 it is the caller's child ([Agent family](#agent-family--new-in-092)).
+- **`report`** (0.9.2) — sends the agent's parent a report; it reaches the parent even when it's asleep.
+- **`ask`** / **`task`** (0.9.2) — asks, or gives a task to, every agent in `to` at once (`POST /fd/family/agent/send`). An ask waits for all the answers and returns them together (4 minutes by default, 8 at most); a task returns at once, and the results come back together when all are done (20 minutes by default). Two going per caller; an agent being asked can't ask in turn. Groups need a deck with sign-in.
 
 Unlike `consult_peer` (which uses the static peer list pushed at connect time), `flight_deck` always queries the live fleet — so newly spawned agents are immediately discoverable.
 
@@ -1606,9 +1606,9 @@ HTML in, the page and a PNG of it out, for charts, diagrams and dashboards inste
 
 The PNG reaches the chat, Telegram, WhatsApp and the Files menu, and goes into a `.docx` or `.md` as `![caption](path)`. Script errors, failed loads, empty canvases and a blank picture come back for the agent to fix. The page never touches the host: it's served from an address that doesn't exist, every request goes through the public-only client, and WebSockets are closed.
 
-### first_mate — NEW in 0.10.0
+### first_mate — NEW in 0.9.2
 
-The owner's [First Mate](#first-mate--new-in-0100) factories, from chat. Offered under a Flight Deck (the Line's gate), never on a shared agent's member turn. Follows the deck's First Mate switch and who may use it. Refused inside any worker run or rehearsal ("First Mate is for your owner's own turns, not inside a run.").
+The owner's [First Mate](#first-mate--new-in-092) factories, from chat. Offered under a Flight Deck (the Line's gate), never on a shared agent's member turn. Follows the deck's First Mate switch and who may use it. Refused inside any worker run or rehearsal ("First Mate is for your owner's own turns, not inside a run.").
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1620,7 +1620,7 @@ The owner's [First Mate](#first-mate--new-in-0100) factories, from chat. Offered
 
 `draft` makes a factory that waits for the owner's approval (a Line card **A new factory to approve** with **Approve and start**) and never runs before it. The tool never approves a charter or what a factory would do, never carries anything out and never changes trust: the owner does that on First Mate or the Line. Route: `POST /fd/first-mate/agent/tool` (the agent's own secret; the deck resolves the owner).
 
-### request_secret — NEW in 0.10.0
+### request_secret — NEW in 0.9.2
 
 Asks the person the turn is for to type a password or a one-time code into a masked box in Flight Deck (every tab of theirs, with a hold-to-show eye), for a sign-in or a form the agent is filling with [`browser`](#browser). Registered only under Flight Deck.
 
@@ -1670,7 +1670,7 @@ Reads or changes the model the agent runs on, among its own provider's models (s
 
 The choices are the catalog's models for OpenAI, Anthropic, Gemini, Grok and DeepSeek, or the ones an admin lists for a custom endpoint under **Console → Models → Models agents can switch to**. A conversation's pick survives a restart, `/clear` and `/new`. Refused for a shared agent's members and for visitors on their own keys. The kiosk's chat box has the same picker beside the effort picker.
 
-**Team models stay put (0.10.0).** A non-admin's agent on the team's tiers (the team's key, the deck's own key, `@system`, no key where the team has one, or a keyless endpoint a published tier uses) keeps its configured model: `set` and `/session model` refuse with the reason, the chat box's picker is hidden, and a conversation already switched goes back at its next turn. Its **Agent settings** show the model fields locked, with **Use my own API key instead**; `PUT /fd/agent-model` and `PUT /fd/agent-config` answer 403 naming the team's models, and `GET /fd/agent-config` returns `model_locked`. Admins, admins acting for a user and agents on the owner's own key switch as before.
+**Team models stay put (0.9.2).** A non-admin's agent on the team's tiers (the team's key, the deck's own key, `@system`, no key where the team has one, or a keyless endpoint a published tier uses) keeps its configured model: `set` and `/session model` refuse with the reason, the chat box's picker is hidden, and a conversation already switched goes back at its next turn. Its **Agent settings** show the model fields locked, with **Use my own API key instead**; `PUT /fd/agent-model` and `PUT /fd/agent-config` answer 403 naming the team's models, and `GET /fd/agent-config` returns `model_locked`. Admins, admins acting for a user and agents on the owner's own key switch as before.
 
 ### image_manipulation — NEW in 0.9.0
 
@@ -2087,7 +2087,7 @@ Manage persistent relational data tables in a local SQLite database. Create tabl
 
 **Protection system:** Four levels prevent accidental data modification. Protected operations return `success=false` with a blocking message. See [Datastore](#datastore) for details.
 
-**One-call writes (0.10.0).** `insert` into a table with a unique key checks for clashes first and names them; with a clash it writes nothing unless `on_conflict` is `"skip"` (add the new rows, leave existing ones) or `"update"` (run as an upsert). `upsert` always matches the table's unique key and reports how many rows it inserted and updated. `update` with no `where` on a table of two rows or more is refused, as `delete` with no `where` always was; `{"_all": true}` touches every row. Common aliases (`upsert_rows`, `merge`, `insert_or_update`, …) are understood, and `list_tables` / `describe` show the unique key.
+**One-call writes (0.9.2).** `insert` into a table with a unique key checks for clashes first and names them; with a clash it writes nothing unless `on_conflict` is `"skip"` (add the new rows, leave existing ones) or `"update"` (run as an upsert). `upsert` always matches the table's unique key and reports how many rows it inserted and updated. `update` with no `where` on a table of two rows or more is refused, as `delete` with no `where` always was; `{"_all": true}` touches every row. Common aliases (`upsert_rows`, `merge`, `insert_or_update`, …) are understood, and `list_tables` / `describe` show the unique key.
 
 Enabled by default. Stored at `~/.captain-claw/datastore.db`. Table list is automatically injected into the LLM context when `datastore.inject_table_list` is true.
 
@@ -2545,7 +2545,7 @@ tools:
     max_chars: 200000               # single page (was 100000 before 0.8.0)
     batch_per_url_max_chars: 100000
     batch_total_max_chars: 400000
-    via_chrome: true                # 0.10.0: read pages in the owner's Chrome when they turned it on; false = never for this agent
+    via_chrome: true                # 0.9.2: read pages in the owner's Chrome when they turned it on; false = never for this agent
   web_search:
     provider: "brave"
     api_key: ""                   # or BRAVE_API_KEY env var
@@ -2555,7 +2555,7 @@ tools:
     timeout: 20
     safesearch: "moderate"        # off, moderate, strict
     enrich: false                 # true = every search also returns matching passages
-    via_chrome: true              # 0.10.0: search in the owner's Chrome when they picked an engine; false = never for this agent
+    via_chrome: true              # 0.9.2: search in the owner's Chrome when they picked an engine; false = never for this agent
   image_gen:
     timeout_seconds: 120
     default_size: "1024x1024"     # 1024x1024, 1536x1024, 1024x1536
@@ -2619,7 +2619,7 @@ The others are still named, each with a one-line summary, in the system prompt's
 
 To change it without editing the config, open the agent's **Settings** in Flight Deck (kiosk: the agent's menu → Settings; full layout: Agent options → General) and use **Tool search**: an on/off switch and a limit of 8k, 16k, 24k or 32k tokens of tool descriptions per message. It is saved at once and applies from the agent's next message, with no restart. Flight Deck writes `~/.captain-claw/tool_search.json` for the agent and the same values into every copy of its config. Right above it, the kiosk's Agent settings has an **Eco mode** switch (compact instructions and a small set of tools, for small and local models), which also applies from the next message. With Eco mode on, Tool search is dimmed with "Applies when Eco mode is off". Where nano mode or `context.micro_instructions` in the agent's config.yaml keeps Eco mode on, the switch is shown on and locked, with the reason. Turning Eco mode off now also reaches a container agent's own `eco_mode.txt`; before, a container spawned in eco mode stayed in it. The agent's own Settings page has the same two fields under Tools → Tool Search, and saving there clears the Flight Deck switch so the config decides again.
 
-**Native tool search on Claude (0.10.0).** On Claude models through Anthropic's API, tool search uses Anthropic's own: every definition is sent, the deferred ones marked `defer_loading`, and the model searches them server-side in the same response, so loading a tool keeps the prompt cache and costs no extra round trip. Other providers keep `search_tools`. `tools.tool_search.native: false` forces the generic path (config only).
+**Native tool search on Claude (0.9.2).** On Claude models through Anthropic's API, tool search uses Anthropic's own: every definition is sent, the deferred ones marked `defer_loading`, and the model searches them server-side in the same response, so loading a tool keeps the prompt cache and costs no extra round trip. Other providers keep `search_tools`. `tools.tool_search.native: false` forces the generic path (config only).
 
 ### skills
 
@@ -2741,7 +2741,7 @@ execution_queue:
 
 ### cron
 
-NEW in 0.10.0. Safety limits on an agent's own scheduled jobs (`cron` tool, `/cron`, REST). New and edited jobs are checked; jobs that already exist keep running. See [Cron Commands](#cron-commands) for what each limit does.
+NEW in 0.9.2. Safety limits on an agent's own scheduled jobs (`cron` tool, `/cron`, REST). New and edited jobs are checked; jobs that already exist keep running. See [Cron Commands](#cron-commands) for what each limit does.
 
 ```yaml
 cron:
@@ -5372,7 +5372,7 @@ Hosting (sidebar: **Workspace → Hosting**) publishes a VFS folder at a public,
 
 So a client call should be `fetch(\`${FD_BASE_PATH}api/x\`)` (or a bundler base derived from `FD_BASE_PATH`), never `fetch("/api")`. Apps built with the **Code** module get this baked in automatically — its plan/build prompts require base-path awareness and the code-reviewer flags root-absolute URLs and hardcoded ports as findings.
 
-Endpoints: management under `/fd/hosting/*` (list / publish `POST` / edit `PUT` / `start` / `stop` / `restart` / unpublish `DELETE`); public serving at `/vfs/<name>/…` and `/vfs-apps/<name>/…` (registered before the SPA catch-all). A stopped site or app answers 404 and keeps its address, and so does an unknown name (it was 502 before 0.10.0). Agents do the same with the `hosting` tool: `publish`, `list`, `start`, `stop`, `restart` (0.10.0: stop an app and start it again to pick up changed files), `status`, `unpublish`. Flight Deck decides per call who may run an app.
+Endpoints: management under `/fd/hosting/*` (list / publish `POST` / edit `PUT` / `start` / `stop` / `restart` / unpublish `DELETE`); public serving at `/vfs/<name>/…` and `/vfs-apps/<name>/…` (registered before the SPA catch-all). A stopped site or app answers 404 and keeps its address, and so does an unknown name (it was 502 before 0.9.2). Agents do the same with the `hosting` tool: `publish`, `list`, `start`, `stop`, `restart` (0.9.2: stop an app and start it again to pick up changed files), `status`, `unpublish`. Flight Deck decides per call who may run an app.
 
 **Who can run an app.** A page is anyone's. An app runs a program on the server, so on a deck with sign-in it needs an admin, or someone an admin approved for Crew with **Hosted apps** ticked (Users → Crew). It's the app's owner who counts, whoever presses Start: an admin can't start an app for someone who isn't approved. A non-admin's app gets what their Crew worker already has and no more: the deck's system user, their own Crew home, a short list of variables, and none of the deck's keys or their saved logins. It runs at a lower priority, and within limits: how many at once for one person and for the deck, a port from one range, and memory, checked every 30 seconds, plus an optional running time. One that goes past a limit is stopped, with a line saying why in its output. Taking the tick away, or the approval, stops their apps, and they keep their addresses. Admins' apps run as before, with Flight Deck's environment minus its own secrets, and have none of these limits.
 
@@ -5494,7 +5494,7 @@ Crew lets Captain run Claude Code, Codex, OpenCode, Crush and Pi for you. You ta
 - **From an agent**: files your agents saved in their own folder (`saved/` and the rest of their workspace), from one agent or several, ticked from a list you can search. The worker gets copies; the agent keeps its own. It works while an agent is asleep. Only your own agents are listed, hidden files and folders like `.git` and `node_modules` are left out, and files that look like keys, `.env` files and databases are refused, as for mail.
 - **A conversation**: pick an agent, then one of your sessions with it (the chat's topics, newest first), then tap the first and the last message to send only part of it (all of it is chosen to start with). **Add another** keeps that one on a list and lets you pick from another agent too. Each becomes a Markdown file, `conversation-<agent>-<date>.md`, holding your messages and the agent's final answers only: its steps, tool calls, slash commands and automated messages (scheduled runs, plans) are left out. It comes from Flight Deck's chat log, which is kept only when sign-in is on, and it's always your own.
 
-Both arrive in `.crew-attachments` like any attached file, and the worker is told that what they say is information, not instructions. Since 0.10.0 they sit in one **Add data…** panel beside **Attach files** (paste, agents' files, Flight Deck folders, a conversation), the same panel [First Mate](#first-mate--new-in-0100) uses.
+Both arrive in `.crew-attachments` like any attached file, and the worker is told that what they say is information, not instructions. Since 0.9.2 they sit in one **Add data…** panel beside **Attach files** (paste, agents' files, Flight Deck folders, a conversation), the same panel [First Mate](#first-mate--new-in-092) uses.
 
 Your agent can do the same. Send it a screenshot in chat and say "have OpenCode fix this": the `crew` tool's `attachments` takes the files it has, on `dispatch`, `prepare_env` and `steer`, as a `saved/` path, a path a tool printed, or `vfs:<project>/<path>`. It refuses what mail attachments refuse, like keys, `.env` files and databases, and a user-tier agent stays inside its own folders. Agents need a restart to get this.
 
@@ -5887,9 +5887,9 @@ The goals your agents' work is for. **Workspace → Course** in the full layout'
 
 Deck goals are editable only by an admin, and an admin's act-as doesn't reach anyone else's goals. Goals live in `<FD data dir>/course.db`. Deleting a user or removing an agent deletes their goals. `FD_COURSE_REVIEW_TICK_S` (default 1800) sets how often, in seconds, the review sweep runs. Routes: `/fd/course`, `/fd/course/preview`, `/fd/course/goals/*`, `/fd/course/served`, `/fd/course/prefs` and `/fd/admin/course/settings`; agents use `POST /fd/course/agent/*`. Design: [docs/course-plan.md](docs/course-plan.md).
 
-**Course in 0.10.0.** A **Needs you** band on top (suggestions with **Accept** / **Edit and accept** / **Decline**; off-course or review-due goals with **Still on course**), goal rows with a progress ring, status pills and a ⋯ menu (**Edit**, **Pause**, **Done**, **Drop**), a goal drawer, and a shorter goal form (Cmd/Ctrl+Enter saves). It opens wide in the kiosk.
+**Course in 0.9.2.** A **Needs you** band on top (suggestions with **Accept** / **Edit and accept** / **Decline**; off-course or review-due goals with **Still on course**), goal rows with a progress ring, status pills and a ⋯ menu (**Edit**, **Pause**, **Done**, **Drop**), a goal drawer, and a shorter goal form (Cmd/Ctrl+Enter saves). It opens wide in the kiosk.
 
-### Agent family — NEW in 0.10.0
+### Agent family — NEW in 0.9.2
 
 Flight Deck records which agent made which.
 
@@ -5927,9 +5927,9 @@ A new orchestration mode beside Basna, Vatra and Council for work that has to **
 
 `FD_BAT_DISABLED=1` turns Bat off. Set `CLAW_BROWSER_CREDENTIAL_KEY` before letting a run create accounts, or stored credentials fall back to base64 obfuscation. Design notes: [docs/bat-stubborn-loop-plan.md](docs/bat-stubborn-loop-plan.md).
 
-#### Runs that finish — NEW in 0.10.0
+#### Runs that finish — NEW in 0.9.2
 
-All of this applies to every Bat run: from the Bat page, the `bat` tool or a [First Mate](#first-mate--new-in-0100) factory.
+All of this applies to every Bat run: from the Bat page, the `bat` tool or a [First Mate](#first-mate--new-in-092) factory.
 
 - **Keeps going while it makes progress.** A worker step has no fixed step count or 30–60 minute limit any more. Progress extends the turn up to the step ceiling (5,000 steps), only a long silence (15 minutes: a hung model call) ends it, and a turn going nowhere is still stopped early. A context overflow is trimmed and retried; old tool results fold into notes in the run's folder. The run's token cap still bounds spending.
 - **Saves as it goes, resumes.** Each step adds its results to the run's folder after each batch and keeps `progress/<step>.md` current (done, left, criteria); notes don't count as results. A step that runs again (after Continue, a deck restart, a timeout or a failure) gets a "Don't start over" section with its note, its research notes and the folder's files, and an interruption doesn't use up its three tries.
@@ -6955,15 +6955,15 @@ Flight Deck uses environment variables:
 | `FD_ARCHETYPE_GRID` | (unset) | `1` = function × domain archetype grid (`reviewer.legal`) |
 | `FD_BAT_DISABLED` / `FD_BAT_SPEND` | (unset) | Bat is on by default — `FD_BAT_DISABLED=1` turns it off; real-money spend stays off unless `FD_BAT_SPEND=1` |
 | `FD_BAT_DEFAULT_LLM_USD` | `50` | The LLM ceiling for a Bat run that doesn't name one, covering any runs its workers start; `0` means none |
-| `FD_BAT_MAX_PARALLEL` | `3` | How many steps of one Bat run may run at once. Since 0.10.0 only the default for **Console → Settings → Bat → Steps at the same time** |
-| `FD_BAT_STEP_CEILING` / `FD_BAT_IDLE_MINUTES` / `FD_BAT_CALL_MINUTES` | `5000` / `15` / `20` | **NEW in 0.10.0.** Defaults for the [Bat card](#runs-that-finish--new-in-0100): steps one worker turn may take while it makes progress (300–100,000); quiet minutes before a step stops (3–240); minutes one of Bat's own model calls may take (3–120) |
-| `FD_BAT_WORKER_TIER` | (planning tier) | **NEW in 0.10.0.** Default for **Workers use**: `reason`, `balanced`, `fast`, `longctx`, `coding`, `vision` or `micro` |
-| `CLAW_BAT_TOKEN_CEILING` | `20000000` | **NEW in 0.10.0.** Where a Bat run with no token cap stops (it can be continued); `0` = never. Read by Flight Deck |
-| `CLAW_FUNNEL_RECORD` | (unset) | **NEW in 0.10.0.** `1` records every [list funnel](#the-list-funnel--new-in-0100) run's searches and pages, as **Record this run** does |
-| `FD_FIRST_MATE_DISABLED` | (unset) | **NEW in 0.10.0.** `true` doesn't start [First Mate](#first-mate--new-in-0100)'s supervisor at all (the on/off switch is the console setting) |
-| `FD_FIRST_MATE_TICK_SECONDS` | `60` | **NEW in 0.10.0.** How often First Mate's supervisor scans factories |
-| `FD_LOG_FILE` | `<FD_DATA_DIR>/logs/flight_deck.log` | **NEW in 0.10.0.** The deck's rotating log file (20 MB × 5, structured lines included); another path, or `off` |
-| `FD_ACCESS_LOG` | (unset) | **NEW in 0.10.0.** `all` logs the successful polling requests (bell, Line, update notice, task lists…) that are left out by default; failed ones always show |
+| `FD_BAT_MAX_PARALLEL` | `3` | How many steps of one Bat run may run at once. Since 0.9.2 only the default for **Console → Settings → Bat → Steps at the same time** |
+| `FD_BAT_STEP_CEILING` / `FD_BAT_IDLE_MINUTES` / `FD_BAT_CALL_MINUTES` | `5000` / `15` / `20` | **NEW in 0.9.2.** Defaults for the [Bat card](#runs-that-finish--new-in-092): steps one worker turn may take while it makes progress (300–100,000); quiet minutes before a step stops (3–240); minutes one of Bat's own model calls may take (3–120) |
+| `FD_BAT_WORKER_TIER` | (planning tier) | **NEW in 0.9.2.** Default for **Workers use**: `reason`, `balanced`, `fast`, `longctx`, `coding`, `vision` or `micro` |
+| `CLAW_BAT_TOKEN_CEILING` | `20000000` | **NEW in 0.9.2.** Where a Bat run with no token cap stops (it can be continued); `0` = never. Read by Flight Deck |
+| `CLAW_FUNNEL_RECORD` | (unset) | **NEW in 0.9.2.** `1` records every [list funnel](#the-list-funnel--new-in-092) run's searches and pages, as **Record this run** does |
+| `FD_FIRST_MATE_DISABLED` | (unset) | **NEW in 0.9.2.** `true` doesn't start [First Mate](#first-mate--new-in-092)'s supervisor at all (the on/off switch is the console setting) |
+| `FD_FIRST_MATE_TICK_SECONDS` | `60` | **NEW in 0.9.2.** How often First Mate's supervisor scans factories |
+| `FD_LOG_FILE` | `<FD_DATA_DIR>/logs/flight_deck.log` | **NEW in 0.9.2.** The deck's rotating log file (20 MB × 5, structured lines included); another path, or `off` |
+| `FD_ACCESS_LOG` | (unset) | **NEW in 0.9.2.** `all` logs the successful polling requests (bell, Line, update notice, task lists…) that are left out by default; failed ones always show |
 | `FD_CAPTAIN_SWARM_DISABLED` | (unset) | **NEW in 0.8.6.** `1` turns [Captain Swarm](#captain-swarm--new-in-086)'s supervisor off |
 | `FD_CAPTAIN_SWARM_MAX_RUNS` / `FD_CAPTAIN_SWARM_MAX_LANES` / `FD_CAPTAIN_SWARM_PER_SITE` / `FD_CAPTAIN_SWARM_MEASURE_PARALLEL` | `1` / `4` / `1` / `1` | **NEW in 0.8.6.** Captain Swarm runs at once per person; attempts at once in a run (1–8); attempts at once on one site or account (1–4); measurements at once (1–8) |
 | `FD_CAPTAIN_SWARM_BROWSER` | on | **NEW in 0.8.6.** `0` keeps Captain Swarm's own checks to plain fetching, without headless Chromium |
@@ -7028,7 +7028,7 @@ An admin decides in **Admin → Settings → Kiosk mode** (or the [Admin console
 - **Everyone** — every non-admin.
 - **Selected users** — tick **Kiosk mode** on a user (Users page, or the Add user and Invite forms); a **kiosk** badge shows who is locked.
 
-**A browser tab opens the kiosk (0.10.0).** In a browser, people get the kiosk and admins the [Admin console](#admin-console) or the kiosk (switched with **Switch to user view** / the shield button); the classic full layout opens only with `?app=classic`, which Payments review links (`/payments/…`) now need too. The kiosk-mode choice below still decides who is *locked*.
+**A browser tab opens the kiosk (0.9.2).** In a browser, people get the kiosk and admins the [Admin console](#admin-console) or the kiosk (switched with **Switch to user view** / the shield button); the classic full layout opens only with `?app=classic`, which Payments review links (`/payments/…`) now need too. The kiosk-mode choice below still decides who is *locked*.
 
 **New users start in kiosk mode** pre-ticks the mark for accounts created from then on (Add user or self sign-up). `captain-claw-fd --simple-chat` (or `FD_SIMPLE_CHAT=1`) only sets the starting value (Everyone) until an admin picks a mode. The server resolves the lock per user and returns it with the user on sign-in, token refresh, `/me`, registration and device pairing; a signed-in user picks up a change on the next token refresh (within about 15 minutes) or a reload. Admins are never locked. A deck without sign-in goes by the deck-wide flag.
 
@@ -7040,8 +7040,8 @@ Locked users have no full layout and no agent options beyond what this section d
 - **The nav** above the agent list: **Today · Agents · Inbox · Tasks · People · Automations · Activity**. **Inbox** is the Line, **Tasks** the Taskboard (with the count of what needs you), **Automations** the **Scheduled tasks** window. On a phone the tiles leave out Today and Agents.
 - **Agents**: one card per agent that is up, with its picture, its live state (Ready, Working, New reply, Asleep, Starting), **Chat** or **Wake and chat**, and **Pinned**, **Shared with you** or **On this computer**, grouped and ordered like the agent list, plus an **Agent store** button.
 - **People**: everyone on your own Taskboard tasks (the deck's users left out). Search by name or email (every word must match, accents ignored), sort **Most tasks** or **Name A–Z**, filter **Pending** (**All · 1 · 2–5 · 6–9 · 10+**). A row reads "8 tasks · 3 pending · 5 done"; opening a person lists their pending tasks under a filter, else their latest five. A task opened from People opens over it and comes back to it; a Taskboard opened on one task shows "**Showing one task:**" and **Show all tasks**.
-- **New agent opens the Agent store** in a window over the layout. **Featured** shows five ready agents (0.10.0 added **Computer User**, which uses your browser and computer like a person until the goal is reached; 132 archetypes); **Add** opens **Add to my team** (or **Add and set up** when **Set up its way of working next** is on). **Advanced**, top right, opens the old picker with **From a file** and **Forge agents**.
-- **Under the agent list**: **Library · Data · Folders · More**. **More** has *Your agents at work* (Crew, Captain Swarm and, since 0.10.0, [First Mate](#first-mate--new-in-0100), where allowed), *Agents as a team* (**Vatra**, **Basna**, **Council**; see [docs/guide/vatra-basna-council.md](docs/guide/vatra-basna-council.md)) and *What they keep* (**Anonymize**, **Data rooms**). **Settings** has the same sections.
+- **New agent opens the Agent store** in a window over the layout. **Featured** shows five ready agents (0.9.2 added **Computer User**, which uses your browser and computer like a person until the goal is reached; 132 archetypes); **Add** opens **Add to my team** (or **Add and set up** when **Set up its way of working next** is on). **Advanced**, top right, opens the old picker with **From a file** and **Forge agents**.
+- **Under the agent list**: **Library · Data · Folders · More**. **More** has *Your agents at work* (Crew, Captain Swarm and, since 0.9.2, [First Mate](#first-mate--new-in-092), where allowed), *Agents as a team* (**Vatra**, **Basna**, **Council**; see [docs/guide/vatra-basna-council.md](docs/guide/vatra-basna-council.md)) and *What they keep* (**Anonymize**, **Data rooms**). **Settings** has the same sections.
 - **Agent pictures**: **⋯ → Picture** — one of 30 icons, **Upload a picture** (PNG, JPEG or WebP up to 256 KB, cut to about 192 px), or **Initials**. Each member of a shared agent picks their own.
 - **The chat**: steps fold into one line ("‹Agent› worked through N steps", **See what happened**), approvals ask "Good to go?" with **Approve** / **Dismiss**, the final answer has no bubble, and the chat box has a model picker beside the effort picker ([model_switch](#model_switch--new-in-091)).
 - **Data library tables** can be edited by hand: double-click a cell, **Add row**, delete from the row panel (owner only). The File and Data libraries list your own shared folders too (**Agents & folders**).
@@ -7140,7 +7140,7 @@ After **Stop** the lane stays busy until the stopped turn has ended, and the sto
 - **Actions:** **Edit** (in the [file editor](#file-editor-flight-deck)), **Present as deck**, **Public link** (see [Public file links](#public-file-links--new-in-081)), the phone's share sheet, and **Everything it keeps** for the agent's live files-and-data view.
 - **Costs.** The model calls count toward the owner's daily token allowance; a scan stops when it's spent, or after repeated model failures, and says why. **Rescan** also retries failed files.
 
-**Shared folders only when added (0.10.0).** A shared folder (`vfs:<folder>/`, a Bat run's folder too) is in the File library only when someone added it: **Add folder to Library**, or **Add to Library** on single files, in Shared folders, a First Mate run's **Results** and its file viewer; the Library's own detail takes one out. At the first scan after the upgrade, shared folders nobody added leave the File library. Agents' own workspaces are still listed whole, and the Data library still lists every folder's tables. Picks: `GET`/`POST`/`DELETE /fd/file-library/picks`.
+**Shared folders only when added (0.9.2).** A shared folder (`vfs:<folder>/`, a Bat run's folder too) is in the File library only when someone added it: **Add folder to Library**, or **Add to Library** on single files, in Shared folders, a First Mate run's **Results** and its file viewer; the Library's own detail takes one out. At the first scan after the upgrade, shared folders nobody added leave the File library. Agents' own workspaces are still listed whole, and the Data library still lists every folder's tables. Picks: `GET`/`POST`/`DELETE /fd/file-library/picks`.
 
 Routes (owner-checked): `/fd/file-library/status`, `/fd/file-library/scan`, `/fd/file-library/files`, and `/fd/file-library/files/{id}/summarize|view|download|thumb`.
 
@@ -7171,9 +7171,9 @@ Due tasks run concurrently, one at a time per agent, and wait up to 20 minutes f
 
 **When the agent is off (0.9.0).** A task no longer fails with "agent not running". An agent that is asleep is woken, as before. One that crashed, or didn't come back after a restart, is started and stays on. One its owner switched off is started about five minutes before the run (`FD_AGENT_IDLE_WAKE_LEAD_S`, default 300 seconds), then switched off again after, when no other run holds or waits on it, no task is due soon, and it isn't mid-turn. If you switch it on or off meanwhile, your choice wins. The editor says "‹agent› is off. It is turned on a few minutes before each run and off again after." This covers Flight Deck's scheduled tasks, not an agent's own `cron`.
 
-**Paused for people who are away (0.10.0).** On a deck with accounts, an hourly check (the first 10 minutes after the deck starts) pauses the scheduled tasks of anyone with no sign-in and no message to their agents for N days, together with their agents' own jobs. Nothing is deleted; one **Needs you** item on their Line, "Scheduled tasks paused (N)", says so, and they resume each task here. Admins set N under **Console → Settings → Agents → Pause scheduled tasks for people who are away**: 3, 5, 7 (default), 14, 30, 60 or 90 days, or off. It's the deck setting `scheduled_idle_pause_days` (1–365, 0 = never), not an environment variable.
+**Paused for people who are away (0.9.2).** On a deck with accounts, an hourly check (the first 10 minutes after the deck starts) pauses the scheduled tasks of anyone with no sign-in and no message to their agents for N days, together with their agents' own jobs. Nothing is deleted; one **Needs you** item on their Line, "Scheduled tasks paused (N)", says so, and they resume each task here. Admins set N under **Console → Settings → Agents → Pause scheduled tasks for people who are away**: 3, 5, 7 (default), 14, 30, 60 or 90 days, or off. It's the deck setting `scheduled_idle_pause_days` (1–365, 0 = never), not an environment variable.
 
-**Admins see their own (0.10.0).** The Scheduled tasks window, its runs and the agents' jobs show an admin only their own and ownerless system tasks, not everyone's. An agent's own jobs are called *automations* in the UI.
+**Admins see their own (0.9.2).** The Scheduled tasks window, its runs and the agents' jobs show an admin only their own and ownerless system tasks, not everyone's. An agent's own jobs are called *automations* in the UI.
 
 ### Onboarding — NEW in 0.8.4
 
@@ -7201,7 +7201,7 @@ Due tasks run concurrently, one at a time per agent, and wait up to 20 minutes f
 
 ### Taskboard — NEW in 0.8.4
 
-Everything a user's agents were asked and sent, on every channel, in `taskboard.db`, per user. Since 0.10.0 the UI calls it **Tasks** and its first lane **Needs you** (was *Needs me*). Open it from the **Tasks** tile, **⋯ → Tasks**, **Settings → Tasks** or the phone header. Lanes: **Needs you**, **Waiting on others**, **Agents working**, **Done**, **All**. A member's turn goes to the member's board only; owners and admins never see it.
+Everything a user's agents were asked and sent, on every channel, in `taskboard.db`, per user. Since 0.9.2 the UI calls it **Tasks** and its first lane **Needs you** (was *Needs me*). Open it from the **Tasks** tile, **⋯ → Tasks**, **Settings → Tasks** or the phone header. Lanes: **Needs you**, **Waiting on others**, **Agents working**, **Done**, **All**. A member's turn goes to the member's board only; owners and admins never see it.
 
 **Sources.** Scheduled jobs, Autonomous Work proposals, follow-ups, held Gmail auto-replies and sends, and linked systems, swept 20 s after start and then every 120 s. Agents report each turn through the turn register (`captain_claw/turn_register.py`, `CLAW_TURN_REGISTER=off` stops it). Agents' to-do lists show as tasks. The last 30 days of each agent's chats are read once, marked as history, and never proposed on or notified. `FD_TASKBOARD_DISABLED=true` stops the sweep and triage; the board then fills only when opened.
 
@@ -7322,9 +7322,9 @@ A virtual data room (a ZIP or a folder) anonymized into one vault, checked, revi
 | `room_tasks` | The tasks you left in a room, in tokens. |
 | `room_get_delivery` | One of Claude's earlier deliveries, in tokens, page by page: the context a task refers to. |
 
-## First Mate — NEW in 0.10.0
+## First Mate — NEW in 0.9.2
 
-Standing jobs ("factories") that run for one person under their own account. Each has a charter they approve, goals every run is checked against (**Done when**), when it runs, a cap per run and a share of a weekly token budget. Every run is a [Bat](#runs-that-finish--new-in-0100) run, or a [list funnel](#the-list-funnel--new-in-0100) run when the result is a list. **The step-by-step guide is [docs/guide/first-mate.md](docs/guide/first-mate.md)**; this is the reference. Design: [docs/first-mate-plan.md](docs/first-mate-plan.md).
+Standing jobs ("factories") that run for one person under their own account. Each has a charter they approve, goals every run is checked against (**Done when**), when it runs, a cap per run and a share of a weekly token budget. Every run is a [Bat](#runs-that-finish--new-in-092) run, or a [list funnel](#the-list-funnel--new-in-092) run when the result is a list. **The step-by-step guide is [docs/guide/first-mate.md](docs/guide/first-mate.md)**; this is the reference. Design: [docs/first-mate-plan.md](docs/first-mate-plan.md).
 
 **Turning it on.** Off on a new or upgraded deck. **Console → Settings → First Mate** (admins; the page's **This deck** box has the same two switches, as **First Mate on this deck** and **Admins only**):
 
@@ -7381,11 +7381,11 @@ Grants to send or organize mail are drafted only when the person's words ask for
 
 **On the Line.** One thread per factory: "‹name›: done", "‹name›: the run failed", "‹name›: carried out", "‹name› would do N things", "‹name› is paused", "‹name›: version N is live", "‹name› now acts within its grants". A finished run's message starts with its result file (rows, size), its timing and anything worth a look; 👍 / 👎 and **Open First Mate** are on the card. **First Mate's week** comes at the first scan after 07:00 UTC each Monday; a quiet week sends nothing. Phones get what needs the owner, and a finished run started by hand or taking 30 minutes or more.
 
-**Agents** use the [`first_mate`](#first_mate--new-in-0100) tool: list, status, run, pause, resume, report, draft; never approve, carry out or change trust.
+**Agents** use the [`first_mate`](#first_mate--new-in-092) tool: list, status, run, pause, resume, report, draft; never approve, carry out or change trust.
 
 **Storage and routes.** `<FD_DATA_DIR>/first_mate.db`. Each factory's extra data, `_checked.csv` (**Already checked**) and `_recipe.json` (the pinned list recipe) are in `<FD_DATA_DIR>/first_mate_data/<factory>/`. Routes, for the signed-in person only, under `/fd/first-mate`: `/prefs`, `/my-agent`, `/draft`, `/templates`, `/report`, `/factories` and `/factories/{id}` with `/data`, `/checked`, `/recipe`, `/results`, `/draft`, `/submit`, `/approve`, `/decline`, `/state`, `/trust`, `/run` (`record` for a list funnel), `/runs`, `/archive`, `/cases`, `/check`, `/improve`, `/improvements`; `/runs/{id}/` `continue`, `stop`, `progress`, `approve`, `reject`, `thumbs`, `archive`, `data`. Agents: `POST /fd/first-mate/agent/tool`.
 
-### The list funnel — NEW in 0.10.0
+### The list funnel — NEW in 0.9.2
 
 How a factory whose result is a list runs. Code searches, fetches pages, filters, merges duplicates and checks every row; a model judges each item once, in a short fresh call (keep, came close or drop) and writes its row. Every value must be on a page or in a file that was read. Picked in the charter under **How it runs → List funnel** ("Code searches, reads and checks; a model judges each item once"); a run that isn't a list goes to agents anyway. The factory's chip reads **List funnel** (an agents factory's reads **Bat**). Plan: [docs/funnel-runner-plan.md](docs/funnel-runner-plan.md).
 
@@ -7421,7 +7421,7 @@ python -m captain_claw.flight_deck.funnel_eval score <run folder> [<expected.csv
 
 A run given a set as `extra/tape/` replays it with no web calls (model calls stay live) and writes `test-report.md`. `expected.csv` has `name`, `verdict` (`keep`, `close`, `drop`), `group` and any known columns. No sets ship with Captain.
 
-## Web in Your Chrome — NEW in 0.10.0
+## Web in Your Chrome — NEW in 0.9.2
 
 Agents' `web_search` and `web_fetch` can run in the person's own Chrome through Captain for Chrome, in a background tab, signed in as them: searches on an ordinary engine instead of the deck's paid search API, and pages that turn a server away (LinkedIn's 999 and authwall, "Log into Facebook", X's sign-in, bot checks) read as they are for the person. Off until each person opts in, on both ends. **The step-by-step guide is [docs/guide/web-in-your-chrome.md](docs/guide/web-in-your-chrome.md)**; this is the reference.
 
@@ -7449,9 +7449,9 @@ Agents' `web_search` and `web_fetch` can run in the person's own Chrome through 
 
 For LinkedIn and X: **Web pages → Every page** with **Only these sites** = `linkedin.com, x.com, twitter.com`. The site check uses the host the agent asked for, so `x.com` doesn't cover `twitter.com` links.
 
-### Recordings in Captain for Chrome — NEW in 0.10.0
+### Recordings in Captain for Chrome — NEW in 0.9.2
 
-**Record what I do** in Captain for Chrome's panel records a process on a site as steps in words: open a page, click, type, choose from a list, tick, pick a file, press Enter or Escape. Each step has **Add an instruction**. **Stop and review** (or **Discard**): name it, say what it's for, reorder or remove steps, **Add a step in your own words**, **Save**. Each typed or chosen value gets **This value**: **Always the same**, **Ask me before it starts** (a field on the Run form), **Ask me when it gets there** (the agent stops there and asks in a dialog, also in Flight Deck; Cancel stops the run) or **The agent decides** (it says afterwards what it used). Passwords, one-time codes and card fields are never recorded: the agent asks for them with [`request_secret`](#request_secret--new-in-0100), and the deck drops a secret value sent anyway.
+**Record what I do** in Captain for Chrome's panel records a process on a site as steps in words: open a page, click, type, choose from a list, tick, pick a file, press Enter or Escape. Each step has **Add an instruction**. **Stop and review** (or **Discard**): name it, say what it's for, reorder or remove steps, **Add a step in your own words**, **Save**. Each typed or chosen value gets **This value**: **Always the same**, **Ask me before it starts** (a field on the Run form), **Ask me when it gets there** (the agent stops there and asks in a dialog, also in Flight Deck; Cancel stops the run) or **The agent decides** (it says afterwards what it used). Passwords, one-time codes and card fields are never recorded: the agent asks for them with [`request_secret`](#request_secret--new-in-092), and the deck drops a secret value sent anyway.
 
 **Recordings → Run**: **Who does it**, the ask-before values (a list step offers its recorded choices), **Anything different this time? (optional)**, extra data for **Every run** or **This run only**, then **Run with ‹agent›**. The run goes to the agent as the person's own turn, with the steps written out and `recording.md` in a run folder under web-clips. The agent works in its own tab group with `browser` `target="chrome"` (without **Let agents use this browser** it has only a browser of its own) and stops to ask when a step doesn't fit the page. **Earlier runs** keeps the history.
 
@@ -7461,9 +7461,9 @@ Limits: 200 recordings per person, 300 steps each; 30 extra-data files per recor
 
 **Version check.** From 0.5.1 the panel says when Flight Deck has a newer Captain for Chrome ("Captain for Chrome X is ready — this one is Y.", **Download**, **Reload**, **Later**; **Later** hides it for that version only) or when the extension is newer than the deck's copy. **Connections → Browser** shows each browser's version ("· extension X") and the same notes. Versions are kept in `<FD_DATA_DIR>/browser-versions.json`.
 
-## Safer Agents — NEW in 0.10.0
+## Safer Agents — NEW in 0.9.2
 
-### Approval cards — NEW in 0.10.0
+### Approval cards — NEW in 0.9.2
 
 A card before an agent pays, sends, posts, shares, deletes or stores a password. The kind comes from the tool, its action and a browser button's label, never from what the agent says.
 
@@ -7472,16 +7472,16 @@ A card before an agent pays, sends, posts, shares, deletes or stores a password.
 - **Profile → Personal → Approvals** lists what the person always allows, with **Ask me again** (`GET /fd/approvals/mine`, `DELETE /fd/approvals/mine/{agent}/{kind}`).
 - With nobody there (a schedule, autonomous work), an **Ask** kind goes ahead only when the person always allows it for that agent. Telegram and WhatsApp turns get the card in Flight Deck, not in the chat. Not covered: Mrav agents and the shell's own ask.
 
-### Why did this happen? — NEW in 0.10.0
+### Why did this happen? — NEW in 0.9.2
 
 **Why did this happen?** on a call in **Activity** (or the Admin console's **Audit**) re-runs the approval and guard deciders on the recorded call, with no model call: **What it was**, **Who started it**, **Approval** (then and by today's rules), **Guard**, **How it ended**. **Different today** marks what today's rules would settle the other way. Routes `GET /fd/tool-audit/calls/{id}/why` and, for admins, `GET /fd/admin/tool-audit/calls/{id}/why`.
 
-### Secrets and Its browser — NEW in 0.10.0
+### Secrets and Its browser — NEW in 0.9.2
 
-- **Typing a secret.** [`request_secret`](#request_secret--new-in-0100) opens a masked box for a password or a one-time code; the agent gets only a reference for [`browser`](#browser)'s `secret_ref`. Kept in memory only: 10 minutes, 3 uses.
+- **Typing a secret.** [`request_secret`](#request_secret--new-in-092) opens a masked box for a password or a one-time code; the agent gets only a reference for [`browser`](#browser)'s `secret_ref`. Kept in memory only: 10 minutes, 3 uses.
 - **Its browser** (the agent menu, for the owner or an admin, on process agents) shows the agent's headless browser live, about once a second. **Take control** pauses the agent's browser steps (up to 15 minutes) while the person clicks, types and scrolls, for a sign-in, a check or a step it's stuck on; **Hand it back** resumes it, and the agent's next result says who had control and where the page is. Not for the person's own Chrome. Routes `GET /fd/agents/{slug}/browser/live`, `POST /fd/agents/{slug}/browser/control` and `/browser/input`.
 
-### Needs you, task cards and new words — NEW in 0.10.0
+### Needs you, task cards and new words — NEW in 0.9.2
 
 - **Needs you means you.** The bell's and the Line's **Needs you** hold only what's blocked on the person: a question, an approval, a Go, a decision. News is a report, and a kind the deck doesn't know defaults to a report. Bat questions, Captain Swarm's Go and purchases leave Needs you only when answered or cancelled where they live. Updates ready to install, data-room deliveries, deck notices and Telegram access results are reports; Course conflicts stay in Needs you.
 - **Task cards.** A Bat run started from chat gets a live card in the chat (Working, Needs you, Done, Failed or Stopped, with its cost) and **Stop**, **Try again** and **Open** (full layout).
@@ -7497,14 +7497,14 @@ What an admin does to set up and look after a team deck. Deploying one (auth, se
 A layout of its own for admins, with no chat and no agent desktop — just setting the deck up and looking after it. Every page has an address, `<deck>/console/<page>`, so a link opens it directly and Back / Forward move between pages:
 
 - **Overview** — people, agents running, messages today, 30-day spend, waitlist and Telegram requests to review, a setup checklist, and the machine's load, memory and disk.
-- **Models** — tier sets as cards, each tier opening an editor (context sizes, abilities, key and endpoint); one model for every tier; publish to the team, with "changed since published"; team API keys; and **Extra keys for agents** (environment variables passed to spawned agents) on a full-width row as a Name / Value table, each value behind a show / hide toggle (on a phone the value stacks under the name). Since 0.10.0 a **Rename** button sits beside the tier set's name (Enter or **Save** keeps it, Esc cancels, 80 characters).
+- **Models** — tier sets as cards, each tier opening an editor (context sizes, abilities, key and endpoint); one model for every tier; publish to the team, with "changed since published"; team API keys; and **Extra keys for agents** (environment variables passed to spawned agents) on a full-width row as a Name / Value table, each value behind a show / hide toggle (on a phone the value stacks under the name). Since 0.9.2 a **Rename** button sits beside the tier set's name (Enter or **Save** keeps it, Esc cancels, 80 characters).
 - **Archetypes** — search and filters, a sectioned editor with "draft from a description", read-only built-ins with **Make a copy**, forge and share.
 - **Connections** — each service with its status. The deck-wide part (the Google and Microsoft OAuth clients, the team Telegram bot, the Jev and Soniox team keys, MCP servers shared with everyone) sits above the admin's own connection.
 - **Users** — Users · Invitations · Waitlist, as on the Users page.
 - **Usage & limits** — today per person against the plan, spend by person and run kind, the plan limits in one table, recent activity.
 - **Activity** (0.9.0) — who is using the deck, who has gone quiet, and whether you've written to them. See [Admin console → Activity](#admin-console--activity--new-in-090).
 - **Updates** — this deck's version, what's new on its branch, and the button that installs it. See [Updating the deck](#updating-the-deck--new-in-085).
-- **Settings** — branding, sign-up and the waitlist, kiosk mode, Docker, and the profile defaults. Since 0.9.0 also [Custom tools](#custom-tools--new-in-090), **Agent files** (trusted decks for [signed agent files](#agent-files-export-import-and-backups--new-in-090)) and [Course](#course-the-goals-your-agents-work-for--new-in-090)'s horizons and limits. Since 0.10.0 also [First Mate](#first-mate--new-in-0100), [Bat](#runs-that-finish--new-in-0100), [Approvals](#approval-cards--new-in-0100) and, under **Agents**, [Pause scheduled tasks for people who are away](#scheduled-tasks--new-in-081).
+- **Settings** — branding, sign-up and the waitlist, kiosk mode, Docker, and the profile defaults. Since 0.9.0 also [Custom tools](#custom-tools--new-in-090), **Agent files** (trusted decks for [signed agent files](#agent-files-export-import-and-backups--new-in-090)) and [Course](#course-the-goals-your-agents-work-for--new-in-090)'s horizons and limits. Since 0.9.2 also [First Mate](#first-mate--new-in-092), [Bat](#runs-that-finish--new-in-092), [Approvals](#approval-cards--new-in-092) and, under **Agents**, [Pause scheduled tasks for people who are away](#scheduled-tasks--new-in-081).
 
 **Admins start there.** Signing in from a form (sign in, sign up, an accepted invitation) takes an admin to the console's Overview; an admin who never picked a layout starts there, and a reload keeps the layout they chose last. Other ways in: `/console`, a button in the top bar and one in the simple layout. The full layout's Admin, Users, Library and Connections pages are still there. Non-admins never see the console.
 
@@ -7541,7 +7541,7 @@ It refuses before touching anything when the checkout has commits the branch doe
 
 **Changing `.env`.** The new version reads `.env` as any start does, and what's already in the environment wins. A deck started plainly picks up your edits. A deck started by exporting the file first (`set -a && source .env && set +a`) picks up a key you added but keeps the old value of one you changed, so restart it by hand the same way after that.
 
-**Letting it run by itself.** Under **Automatically**: **Off** (it looks only when you press Check now), **Tell me** (it looks every 15 minutes, and tells admins in the bell; since 0.10.0 once per version the deck runs, then weekly while it's behind, not once per new commit), or **Install by itself** (it starts when no agent is mid-turn, still gives everyone the countdown, waits for any turn begun during it, and doesn't retry a version that failed). With Install by itself, whatever is merged to the branch goes live once it passes step 1.
+**Letting it run by itself.** Under **Automatically**: **Off** (it looks only when you press Check now), **Tell me** (it looks every 15 minutes, and tells admins in the bell; since 0.9.2 once per version the deck runs, then weekly while it's behind, not once per new commit), or **Install by itself** (it starts when no agent is mid-turn, still gives everyone the countdown, waits for any turn begun during it, and doesn't retry a version that failed). With Install by itself, whatever is merged to the branch goes live once it passes step 1.
 
 **An agent can ask.** An admin's agent with Crew can run `crew action=update_deck`, which puts an Approve in the bell. The Approve covers that commit and no later one, waits for turns to finish, counts down for `FD_UPDATE_COUNTDOWN_S`, and the agent is called back when it's over. Only admins, and their agents, can get near this.
 

@@ -309,7 +309,7 @@ Connections panel).
 - **Course**: deck goals are set by admins and read by everyone, including members of shared agents.
   Their horizons, caps and suggestion limits are on **Console → Settings → Course**.
 
-## What 0.10.0 changes for a team deck
+## What 0.9.2 changes for a team deck
 
 - **First Mate** is off until an admin turns it on (**Console → Settings → First Mate → On for this deck**),
   and then for admins only until **Admins only** is switched off. **Limits** caps factories per person (8)

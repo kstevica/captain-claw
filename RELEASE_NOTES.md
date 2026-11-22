@@ -1,4 +1,4 @@
-# Captain Claw v0.10.0 Release Notes
+# Captain Claw v0.9.2 Release Notes
 
 **Release title:** Landfall
 **Release date:** 2026-11-22

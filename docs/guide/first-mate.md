@@ -2,7 +2,7 @@
 
 [← README](../../README.md) · [All guides](README.md)
 
-New in 0.10.0. First Mate runs **factories**: standing jobs under your own account. Each one works on a charter you approve, is checked against goals you choose on every run, starts when you say, and spends from a weekly budget in tokens. You set one up once, and it keeps doing the job: drafting replies every weekday morning, building a list of leads, writing a weekly report.
+New in 0.9.2. First Mate runs **factories**: standing jobs under your own account. Each one works on a charter you approve, is checked against goals you choose on every run, starts when you say, and spends from a weekly budget in tokens. You set one up once, and it keeps doing the job: drafting replies every weekday morning, building a list of leads, writing a weekly report.
 
 Every run is a [Bat](flight-deck.md#seven-orchestration-modes) run or a **list funnel**. A Bat run plans the work, does it in steps, checks itself and is judged by reviewers before it counts as done. A list funnel is the cheaper way to build a list of rows.
 
