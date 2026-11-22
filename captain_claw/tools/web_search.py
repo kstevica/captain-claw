@@ -28,6 +28,7 @@ same whichever engine is configured.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import os
 import re
@@ -65,6 +66,9 @@ _YOUCOM_MAX = 50          # You.com allows 100, but only 50 with highlights
 _RETRY_DELAY = 1.1        # seconds before the one retry after HTTP 429
 _MIN_DEFAULT_COUNT = 10   # older agent configs say max_results: 5 — ignored
 _BRAVE_CONTEXT_URL = "https://api.search.brave.com/res/v1/llm/context"
+# Brave keys (hashed) whose plan has no LLM Context: a 400 OPTION_NOT_IN_PLAN
+# came back once, so this process reads pages for them without asking again.
+_CONTEXT_NOT_IN_PLAN: set[str] = set()
 
 _FRESHNESS_WORDS = {"pd": "day", "pw": "week", "pm": "month", "py": "year"}
 
@@ -590,6 +594,10 @@ class WebSearchTool(Tool):
             date=str(item.get("age") or item.get("page_age") or "").strip(),
         )
 
+    @staticmethod
+    def _key_tag(api_key: str) -> str:
+        return hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:16]
+
     async def _brave_context(self, hits: list[_Hit], q: str, cfg: Any, *,
                              country: str, search_lang: str) -> bool:
         """Fill ``passages`` from Brave's LLM Context endpoint: query-matched
@@ -602,6 +610,8 @@ class WebSearchTool(Tool):
             str(getattr(cfg, "api_key", "") or "").strip()
             or str(os.environ.get("BRAVE_API_KEY", "")).strip()
         )
+        if self._key_tag(api_key) in _CONTEXT_NOT_IN_PLAN:
+            return False
         pages = min(max(_int(getattr(cfg, "enrich_pages", 5), 5), 1), 20)
         budget = _enrich_budget(cfg)
         per_url = min(max(budget // 4, 512), 8192)  # ≈4 characters a token
@@ -625,6 +635,11 @@ class WebSearchTool(Tool):
             )
         except Exception as e:  # noqa: BLE001 — plan without it, outage: read pages instead
             detail = self._http_detail(e) if isinstance(e, httpx.HTTPStatusError) else str(e)
+            if "OPTION_NOT_IN_PLAN" in detail:
+                # Not this key's plan: asking again only adds a failed call to each search.
+                _CONTEXT_NOT_IN_PLAN.add(self._key_tag(api_key))
+                log.info("Brave LLM Context isn't in this key's plan; reading pages instead from now on")
+                return False
             log.warning("Brave LLM Context failed; reading pages instead", error=detail)
             return False
         grounding = data.get("grounding") if isinstance(data, dict) else None

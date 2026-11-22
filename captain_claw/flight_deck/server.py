@@ -691,6 +691,16 @@ def _owner_is_admin(owner_id: str) -> bool:
     return bool(row) and row[0] == "admin"
 
 
+def _pin_key_source(environment: dict[str, str], own_keys: bool) -> None:
+    """``FD_KEY_SOURCE=byok`` for an agent on its owner's own API keys
+    (byok.py): it marks its usage rows so, and the spend ledger counts them as
+    the owner's money, not the deck's. Never taken from the deck's environment
+    or the agent's own .env. (Switching keys restarts the agent.)"""
+    environment.pop("FD_KEY_SOURCE", None)
+    if own_keys:
+        environment["FD_KEY_SOURCE"] = "byok"
+
+
 def _pin_confinement(environment: dict[str, str], base: dict[str, str], *,
                      agent_dir: Path, owner_id: str, workspace: str = "") -> None:
     """Pin the agent's confinement (deck_confine) LAST, over whatever its .env
@@ -821,6 +831,7 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
         environment["CLAW_VFS_USER"] = _owner
     _pin_confinement(environment, base_env, agent_dir=agent_dir, owner_id=_owner,
                      workspace=str(entry.get("workspace") or ""))
+    _pin_key_source(environment, entry.get("key_source") == "byok")
     _withhold_deck_keys(environment, base_env, agent_dir=agent_dir, owner_id=_owner)
 
     log_file = _rotated_process_log(agent_dir)
@@ -10777,6 +10788,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     environment["FD_AGENT_SLUG"] = slug
     _pin_confinement(environment, base_env, agent_dir=agent_dir, owner_id=owner_id or "",
                      workspace=config.workspace_path or "")
+    _pin_key_source(environment, bool(config._byok))
     _withhold_deck_keys(environment, base_env, agent_dir=agent_dir, owner_id=owner_id or "")
 
     # Set HOME to the agent's home-config directory so captain-claw

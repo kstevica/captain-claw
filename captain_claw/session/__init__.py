@@ -1,6 +1,7 @@
 """Session management with SQLite storage."""
 
 import json
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -3203,7 +3204,11 @@ class SessionManager:
         task_name: str = "",
         byok: bool = False,
     ) -> None:
-        """Persist a single LLM call usage record."""
+        """Persist a single LLM call usage record. ``byok``: paid with someone's
+        own key — a visitor's (the caller says so), or every call of an agent
+        Flight Deck started on its owner's own API keys (``FD_KEY_SOURCE``),
+        so the deck's spend ledger counts it as theirs, not the deck's."""
+        byok = bool(byok) or os.environ.get("FD_KEY_SOURCE", "").strip().lower() == "byok"
         await self._ensure_db()
         assert self._db is not None
         now_iso = _utcnow_iso()

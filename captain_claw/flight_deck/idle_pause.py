@@ -11,6 +11,11 @@ deck config, default 7), their scheduled tasks are paused — Flight Deck's own 
 up for themselves (``agent_cron_routes``) — and one item on their Line says so.
 Nothing is deleted; they resume each one in Scheduled tasks.
 
+A job that runs less often than that waits longer: twice its own period (a
+weekly job pauses after two weeks away). Someone who reads a Monday scan each
+Monday is not away from it; their weekly job was paused three days after the
+Monday they last came (cohort001, 2026-11-20, with the setting at 3 days).
+
 Activity is the later of: signing in or coming back to the deck on a saved
 session (``users.last_login_at``), and a message they sent their agents from any
 channel (``daily_usage``). A new account counts from when it was made.
@@ -20,6 +25,7 @@ A setting of 0 turns it off.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -83,6 +89,39 @@ def last_activity(user: dict[str, Any], last_typed_day: str = "") -> float:
     return max(_epoch(user.get("last_login_at")), typed, _epoch(user.get("created_at")))
 
 
+def period_days(schedule: Any) -> float:
+    """How many days apart a job's runs are, from its schedule: Flight Deck's
+    own (``"weekly mon 08:00"``, ``"every 2d"``…) or an agent's (``{"type":
+    "weekly", …}``). 0 for a one-shot or a schedule this can't read."""
+    if isinstance(schedule, dict):
+        typ = str(schedule.get("type") or "").strip().lower()
+        if typ == "interval":
+            try:
+                n = max(0, int(schedule.get("interval", 0)))
+            except (TypeError, ValueError):
+                return 0.0
+            unit = str(schedule.get("unit") or "minutes").lower()
+            return n / (24.0 if unit.startswith("hour") else 1440.0)
+        return {"daily": 1.0, "weekly": 7.0}.get(typ, 0.0)
+    text = str(schedule or "").strip().lower()
+    m = re.fullmatch(r"every\s+(\d+)\s*([mhd])", text)
+    if m:
+        return int(m.group(1)) / {"m": 1440.0, "h": 24.0, "d": 1.0}[m.group(2)]
+    if re.match(r"(?:daily|weekdays)\s", text):
+        return 1.0
+    m = re.fullmatch(r"weekly\s+([a-z][a-z,\s]*?)\s+\d{1,2}:\d{2}", text)
+    if m:
+        days = {d for d in re.split(r"[,\s]+", m.group(1)) if d}
+        return 7.0 / max(1, len(days))
+    return 0.0
+
+
+def pause_after_days(schedule: Any, days: int) -> float:
+    """Days away before a job with *schedule* pauses: the setting, or twice the
+    job's own period when that is longer."""
+    return max(float(days), 2.0 * period_days(schedule))
+
+
 def _srv():
     from captain_claw.flight_deck import server
 
@@ -103,14 +142,15 @@ def _owned_agents(user_id: str) -> dict[str, dict]:
     return out
 
 
-def _pause_deck_tasks(user_id: str) -> list[str]:
-    """Pause the user's enabled Flight Deck tasks; their names."""
+def _pause_deck_tasks(user_id: str, away: float, days: int) -> list[str]:
+    """Pause the user's enabled Flight Deck tasks whose wait (pause_after_days)
+    *away* days are past; their names."""
     from captain_claw.flight_deck.fd_scheduler import get_store
 
     store = get_store()
     names: list[str] = []
     for job in store.list(owner_id=user_id):
-        if not job.get("enabled"):
+        if not job.get("enabled") or away < pause_after_days(job.get("schedule"), days):
             continue
         try:
             store.update(job["id"], enabled=False)
@@ -121,15 +161,17 @@ def _pause_deck_tasks(user_id: str) -> list[str]:
     return names
 
 
-async def _pause_agent_jobs(user_id: str) -> list[str]:
-    """Pause the jobs the user's agents set up for themselves; their names."""
+async def _pause_agent_jobs(user_id: str, away: float, days: int) -> list[str]:
+    """Pause the jobs the user's agents set up for themselves whose wait
+    (pause_after_days) *away* days are past; their names."""
     from captain_claw.flight_deck import agent_cron_routes as acr
 
     names: list[str] = []
     for slug, entry in _owned_agents(user_id).items():
         agent = str(entry.get("name") or slug)
         for row in acr._read_rows(slug):
-            if not row["enabled"]:
+            schedule = acr._loads(row["schedule"], {}) if "schedule" in row.keys() else {}
+            if not row["enabled"] or away < pause_after_days(schedule, days):
                 continue
             job_id = str(row["id"])
             try:
@@ -156,16 +198,18 @@ def _line_body(names: list[str], days: int) -> str:
             "want them running again.")
 
 
-async def pause_idle_owner(user: dict[str, Any], days: int) -> int:
-    """Pause one away owner's tasks and tell them on their Line; how many."""
+async def pause_idle_owner(user: dict[str, Any], days: int, away: float | None = None) -> int:
+    """Pause an owner's tasks *away* days (default: the setting) away is
+    past the wait of, and tell them on their Line; how many."""
     uid = str(user.get("id") or "")
-    names = _pause_deck_tasks(uid) + await _pause_agent_jobs(uid)
+    away = float(days) if away is None else away
+    names = _pause_deck_tasks(uid, away, days) + await _pause_agent_jobs(uid, away, days)
     if not names:
         return 0
-    log.info("Idle pause: tasks paused", owner=uid, tasks=len(names), idle_days=days)
+    log.info("Idle pause: tasks paused", owner=uid, tasks=len(names), idle_days=days, away_days=int(away))
     from captain_claw.flight_deck import line
 
-    await line.post(uid, "deck", f"Scheduled tasks paused ({len(names)})", _line_body(names, days),
+    await line.post(uid, "deck", f"Scheduled tasks paused ({len(names)})", _line_body(names, int(away)),
                     bell_type="scheduled_paused", needs_you=True, source="Flight Deck")
     return len(names)
 
@@ -175,17 +219,18 @@ async def sweep(db: Any, now: float | None = None) -> int:
     days = await pause_days()
     if days <= 0:
         return 0
-    cutoff = (now if now is not None else time.time()) - days * 86400.0
+    now = now if now is not None else time.time()
     typed = await db.message_day_bounds()
     paused = 0
     for user in await db.list_users(limit=100_000):
         uid = str(user.get("id") or "")
         if not uid:
             continue
-        if last_activity(user, str((typed.get(uid) or {}).get("last_day") or "")) > cutoff:
+        away = (now - last_activity(user, str((typed.get(uid) or {}).get("last_day") or ""))) / 86400.0
+        if away < days:
             continue
         try:
-            paused += await pause_idle_owner(user, days)
+            paused += await pause_idle_owner(user, days, away)
         except Exception as exc:  # noqa: BLE001 — one owner never stops the others
             log.warning("Idle pause: owner skipped", owner=uid, error=str(exc))
     return paused
