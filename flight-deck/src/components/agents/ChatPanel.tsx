@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
+import { createContext, useContext, useState, useRef, useEffect, useCallback, useMemo, useId, memo } from 'react'
 import {
   AlarmClock,
   Info,
@@ -979,7 +979,24 @@ function ChatContent({
   }
   const handleSend = () => submit(onSend)
 
+  // Suggested next steps (the pills under the reply). The × hides them, and
+  // the box's suggestion with them, until the next set arrives.
+  const steps = session.nextStepOptions ?? []
+  const stepsKey = steps.map((o) => o.label).join('\n')
+  const [stepsDismissed, setStepsDismissed] = useState('')
+  const showSteps = !session.busy && steps.length > 0 && stepsDismissed !== stepsKey
+  // The first one waits, greyed, in the empty box: Tab writes it there, to
+  // send as it is or change first. Not on a touch screen (no Tab key).
+  const suggestion = showSteps && !input && session.connected && !closed && !quotaSpent && !touchKeyboard()
+    ? steps[0].action : ''
+  const suggestionId = useId()
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Tab' && suggestion && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !e.nativeEvent.isComposing) {
+      e.preventDefault()
+      draftInBox(suggestion)
+      return
+    }
     if (e.key !== 'Enter') return
     // Cmd/Ctrl+Enter queues it, on any keyboard. Plain Enter sends — except
     // on an on-screen keyboard, where it starts a new line (as in any
@@ -1225,13 +1242,14 @@ function ChatContent({
         ))}
 
         {/* Suggested next steps: under the reply they came from. */}
-        {!session.busy && session.nextStepOptions && session.nextStepOptions.length > 0 && (
+        {showSteps && (
           <NextSteps
-            options={session.nextStepOptions}
+            options={steps}
             disabled={!session.connected}
             large={simple}
             phone={isMobile}
             onPick={(action) => onSend(action)}
+            onDismiss={() => setStepsDismissed(stepsKey)}
           />
         )}
 
@@ -1309,24 +1327,28 @@ function ChatContent({
                 )}
               </div>
             )}
-            <textarea
-              ref={inputRef}
-              data-fd-chat-input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              onPaste={shared ? undefined : handlePasteEvent}
-              placeholder={placeholder}
-              disabled={(!session.connected && !sleeping) || closed || quotaSpent}
-              rows={1}
-              className="block max-h-48 min-h-[52px] w-full resize-none rounded-2xl bg-transparent px-4 pb-1 pt-3.5 text-base text-zinc-100 placeholder-zinc-500 focus:outline-none disabled:opacity-40 wide:text-[17px]"
-              style={{ height: 'auto', overflow: 'hidden' }}
-              onInput={(e) => {
-                const el = e.currentTarget
-                el.style.height = 'auto'
-                el.style.height = Math.min(el.scrollHeight, 192) + 'px'
-              }}
-            />
+            <div className="relative">
+              <textarea
+                ref={inputRef}
+                data-fd-chat-input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                onPaste={shared ? undefined : handlePasteEvent}
+                placeholder={placeholder}
+                aria-describedby={suggestion ? suggestionId : undefined}
+                disabled={(!session.connected && !sleeping) || closed || quotaSpent}
+                rows={1}
+                className={`block max-h-48 min-h-[52px] w-full resize-none rounded-2xl bg-transparent px-4 pb-1 pt-3.5 text-base text-zinc-100 focus:outline-none disabled:opacity-40 wide:text-[17px] ${suggestion ? 'placeholder-transparent' : 'placeholder-zinc-500'}`}
+                style={{ height: 'auto', overflow: 'hidden' }}
+                onInput={(e) => {
+                  const el = e.currentTarget
+                  el.style.height = 'auto'
+                  el.style.height = Math.min(el.scrollHeight, 192) + 'px'
+                }}
+              />
+              {suggestion && <BoxSuggestion id={suggestionId} text={suggestion} className="px-4 pt-3.5 text-base wide:text-[17px]" />}
+            </div>
             <div className="flex items-center gap-1 px-2 pb-2">
               {!shared && <>
                 <button
@@ -1434,24 +1456,28 @@ function ChatContent({
               <Clipboard className="h-4 w-4" />
             </button>
           </div>}
-          <textarea
-            ref={inputRef}
-            data-fd-chat-input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onPaste={shared ? undefined : handlePasteEvent}
-            placeholder={placeholder}
-            disabled={(!session.connected && !sleeping) || closed || quotaSpent}
-            rows={1}
-            className="max-h-32 min-h-[38px] min-w-0 flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-base text-zinc-200 wide:text-sm placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none disabled:opacity-40"
-            style={{ height: 'auto', overflow: 'hidden' }}
-            onInput={(e) => {
-              const el = e.currentTarget
-              el.style.height = 'auto'
-              el.style.height = Math.min(el.scrollHeight, 128) + 'px'
-            }}
-          />
+          <div className="relative min-w-0 flex-1">
+            <textarea
+              ref={inputRef}
+              data-fd-chat-input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onPaste={shared ? undefined : handlePasteEvent}
+              placeholder={placeholder}
+              aria-describedby={suggestion ? suggestionId : undefined}
+              disabled={(!session.connected && !sleeping) || closed || quotaSpent}
+              rows={1}
+              className={`block max-h-32 min-h-[38px] w-full resize-none rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-base text-zinc-200 wide:text-sm focus:border-violet-500/50 focus:outline-none disabled:opacity-40 ${suggestion ? 'placeholder-transparent' : 'placeholder-zinc-600'}`}
+              style={{ height: 'auto', overflow: 'hidden' }}
+              onInput={(e) => {
+                const el = e.currentTarget
+                el.style.height = 'auto'
+                el.style.height = Math.min(el.scrollHeight, 128) + 'px'
+              }}
+            />
+            {suggestion && <BoxSuggestion id={suggestionId} text={suggestion} className="border border-transparent px-3 py-2 text-base wide:text-sm" />}
+          </div>
           {session.busy && (
             <button
               onClick={onCancel}
@@ -1480,21 +1506,34 @@ function ChatContent({
   )
 }
 
+// The first suggested next step, greyed in the empty chat box with its key
+// (Tab writes it in). Laid over the box's own text area: a placeholder can't
+// end in "…" on one line, and an instruction is often longer than the box.
+function BoxSuggestion({ id, text, className }: { id: string; text: string; className: string }) {
+  return (
+    <>
+      <div aria-hidden className={`pointer-events-none absolute inset-x-0 top-0 flex items-center gap-2 text-zinc-500 ${className}`}>
+        <span className="min-w-0 truncate">{text}</span>
+        <kbd className="shrink-0 rounded border border-zinc-700 px-1.5 font-sans text-[11px] leading-4 text-zinc-500">Tab</kbd>
+      </div>
+      <span id={id} className="sr-only">Suggested: {text}. Press Tab to write it in the box.</span>
+    </>
+  )
+}
+
 // What the agent suggests doing next, under its reply: numbered pills (the
 // numbers match the menu a reply often ends with: "or should I start with
 // item 1?"). Pointing at one says what it will do; a click sends it. Folded
 // away with the ×, until the next set arrives.
-function NextSteps({ options, disabled, large, phone, onPick }: {
+function NextSteps({ options, disabled, large, phone, onPick, onDismiss }: {
   options: NextStepOption[]
   disabled: boolean
   large: boolean
   phone: boolean
   onPick: (action: string) => void
+  onDismiss: () => void
 }) {
-  const key = options.map((o) => o.label).join('\n')
-  const [dismissed, setDismissed] = useState('')
   const [hover, setHover] = useState<number | null>(null)
-  if (dismissed === key) return null
   const shown = hover != null ? options[hover] : null
   const what = shown ? (shown.description || shown.action) : ''
   return (
@@ -1504,7 +1543,7 @@ function NextSteps({ options, disabled, large, phone, onPick }: {
         <span>Next steps</span>
         <button
           type="button"
-          onClick={() => setDismissed(key)}
+          onClick={onDismiss}
           title="Hide these suggestions"
           aria-label="Hide suggested next steps"
           className="ml-0.5 flex h-5 w-5 items-center justify-center rounded-full text-zinc-600 transition-colors hover:bg-zinc-800 hover:text-zinc-300"
