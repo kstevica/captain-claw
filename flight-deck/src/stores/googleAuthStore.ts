@@ -45,6 +45,8 @@ export interface GoogleAuthConfig {
   default_scopes: string[]
   scope_catalog: ScopeCatalogEntry[]
   redirect_uri: string
+  // The Google Picker's browser API key is saved (Pick files from Google Drive).
+  picker_api_key_set?: boolean
 }
 
 // The signed-in user's Gmail sending policy (GET/PUT /fd/google/gmail-send).
@@ -110,6 +112,7 @@ interface GoogleAuthStore {
     project_id: string
     location: string
     scopes: string[]
+    picker_api_key: string
   }>) => Promise<boolean>
   clearCredentials: () => Promise<boolean>
   connect: () => Promise<void>

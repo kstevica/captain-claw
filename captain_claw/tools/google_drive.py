@@ -86,9 +86,12 @@ _IN_PLACE_KINDS: dict[str, tuple[str, str, str]] = {
     "doc": ("Google Doc", _DOC_MIME, "doc_read / doc_replace_text / doc_append_text / doc_insert_text"),
 }
 _FULL_DRIVE_NEEDED = (
-    "Google is connected without full Drive access, so this Google Sheet/Doc "
-    "can't be opened or edited in place. The admin must enable Drive (full access) in "
-    "Flight Deck → Connections → Google, and everyone reconnects Google."
+    "Google is connected with per-file Drive access, so this Google Sheet/Doc "
+    "(one Captain didn't create) can't be opened yet. Ask the person to give "
+    "Captain this one file: Flight Deck → Connections → Google → \"Pick files "
+    "from Google Drive\", choose it, then try again — that reaches only the "
+    "files they pick. (Or an admin enables Drive (full access) there and "
+    "everyone reconnects Google.)"
 )
 
 # Fields to request from the files endpoint.
