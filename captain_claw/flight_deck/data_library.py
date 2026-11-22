@@ -848,16 +848,149 @@ def _open_table(t: dict) -> tuple[sqlite3.Connection, str, list[dict]]:
     return c, internal, _columns(c, t["table_name"])
 
 
-def _read_rows(t: dict, limit: int, offset: int, q: str, sort: str, desc: bool) -> dict:
+# ── Column filters ────────────────────────────────────────────────────
+#
+# The table view filters any column, as many as the person likes, every
+# filter narrowing the rows further (AND). Each says how its column reads —
+# text, number, date or yes/no, the kind the view shows it as (a text
+# column holding numbers filters as numbers) — and what to keep. They match
+# the way the view's own filter on a file's table does (columnFilters.tsx):
+# text without case, a number as a person wrote it ("1 234,5", "12%"), a
+# date by its day; "isn't" and "doesn't contain" keep the empty cells, as a
+# spreadsheet's do.
+
+_MAX_FILTERS = 30
+_FILTER_OPS = {
+    "text": {"contains", "not_contains", "eq", "ne", "starts", "empty", "not_empty"},
+    "number": {"eq", "ne", "gt", "gte", "lt", "lte", "between", "empty", "not_empty"},
+    "date": {"eq", "lt", "gt", "between", "empty", "not_empty"},
+    "boolean": {"yes", "no", "empty"},
+}
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_THOUSANDS_RE = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")
+_NUMBER_RE = re.compile(r"^-?\d*\.?\d+(e-?\d+)?$", re.IGNORECASE)
+_YES = ("1", "1.0", "true", "yes", "y")
+_NO = ("0", "0.0", "false", "no", "n")
+
+
+def _to_number(v: Any) -> float | None:
+    """A cell as a number, the way a person may have written it; None when it isn't one."""
+    if v is None or isinstance(v, bytes):
+        return None
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    t = re.sub(r"[\s\u00a0]", "", str(v)).removesuffix("%")
+    if not t:
+        return None
+    t = t.replace(",", "") if _THOUSANDS_RE.match(t) else t.replace(",", ".", 1)
+    if not _NUMBER_RE.match(t):
+        return None
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def _like(term: str) -> str:
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _filter_where(filters: list[dict], names: list[str]) -> tuple[list[str], list[Any]]:
+    """The SQL conditions (and their arguments) for the column filters. A
+    filter on a column the table doesn't have, an operator its kind doesn't
+    take, or a value that isn't what it needs is refused (ValueError)."""
+    where: list[str] = []
+    args: list[Any] = []
+    if len(filters) > _MAX_FILTERS:
+        raise ValueError(f"at most {_MAX_FILTERS} filters")
+    for f in filters:
+        if not isinstance(f, dict):
+            raise ValueError("a filter is an object")
+        col, op, kind = f.get("col"), f.get("op"), f.get("kind") or "text"
+        if col not in names:
+            raise ValueError(f"no column {col!r}")
+        if kind not in _FILTER_OPS or op not in _FILTER_OPS[kind]:
+            raise ValueError(f"can't filter {kind} by {op!r}")
+        c = _q(col)
+        text = f"TRIM(CAST({c} AS TEXT))"
+        filled = f"({c} IS NOT NULL AND {text} <> '')"
+        a = str(f.get("value") or "").strip()
+        b = str(f.get("value2") or "").strip()
+        if op == "empty":
+            where.append(f"NOT {filled}")
+            continue
+        if op == "not_empty":
+            where.append(filled)
+            continue
+        if kind == "boolean":
+            yes = op == "yes"
+            where.append(f"LOWER({text}) IN ({', '.join('?' * len(_YES if yes else _NO))})")
+            args += list(_YES if yes else _NO)
+            continue
+        if kind == "number":
+            x = _to_number(a)
+            y = _to_number(b) if op == "between" else 0.0
+            if x is None or y is None:
+                raise ValueError(f"{(b if x is not None else a) or 'nothing'!r} isn't a number")
+            n = f"fnum({c})"
+            if op == "ne":
+                where.append(f"({n} IS NULL OR {n} <> ?)")
+                args.append(x)
+            elif op == "between":
+                where.append(f"{n} BETWEEN ? AND ?")
+                args += [min(x, y), max(x, y)]
+            else:
+                where.append(f"{n} {dict(eq='=', gt='>', gte='>=', lt='<', lte='<=')[op]} ?")
+                args.append(x)
+            continue
+        if kind == "date":
+            if not _DAY_RE.match(a) or (op == "between" and not _DAY_RE.match(b)):
+                raise ValueError("a date filter takes days as YYYY-MM-DD")
+            day = f"substr({text}, 1, 10)"
+            if op == "between":
+                where.append(f"({filled} AND {day} BETWEEN ? AND ?)")
+                args += sorted([a, b])
+            else:
+                where.append(f"({filled} AND {day} {dict(eq='=', lt='<', gt='>')[op]} ?)")
+                args.append(a)
+            continue
+        if not a:
+            raise ValueError("a text filter needs something to look for")
+        low = a.casefold()
+        if op == "contains":
+            where.append(f"cf({c}) LIKE ? ESCAPE '\\'")
+            args.append(f"%{_like(low)}%")
+        elif op == "not_contains":
+            where.append(f"({c} IS NULL OR cf({c}) NOT LIKE ? ESCAPE '\\')")
+            args.append(f"%{_like(low)}%")
+        elif op == "starts":
+            where.append(f"cf({text}) LIKE ? ESCAPE '\\'")
+            args.append(f"{_like(low)}%")
+        elif op == "eq":
+            where.append(f"cf({text}) = ?")
+            args.append(low)
+        else:  # ne
+            where.append(f"({c} IS NULL OR cf({text}) <> ?)")
+            args.append(low)
+    return where, args
+
+
+def _read_rows(t: dict, limit: int, offset: int, q: str, sort: str, desc: bool,
+               filters: list[dict] | None = None) -> dict:
     c, internal, cols = _open_table(t)
     with closing(c):
+        c.create_function("fnum", 1, _to_number, deterministic=True)
         names = [col["name"] for col in cols]
         where: list[str] = []
         args: list[Any] = []
         for term in [x for x in q.casefold().split() if x][:6]:
-            pat = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            pat = "%" + _like(term) + "%"
             where.append("(" + " OR ".join(f"cf({_q(n)}) LIKE ? ESCAPE '\\'" for n in names) + ")")
             args += [pat] * len(names)
+        if filters:
+            fw, fa = _filter_where(filters, names)
+            where += fw
+            args += fa
         w = f"WHERE {' AND '.join(where)}" if where and names else ""
         if sort in names:
             col = next(x for x in cols if x["name"] == sort)
@@ -884,14 +1017,23 @@ def _plain(v: Any) -> Any:
 @router.get("/tables/{table_id}/rows")
 async def data_rows(
     table_id: str, limit: int = 50, offset: int = 0, q: str = "", sort: str = "", dir: str = "asc",
-    user: dict = Depends(get_current_user),
+    filters: str = "", user: dict = Depends(get_current_user),
 ) -> dict:
     """The table's rows, live from the agent's datastore: searched across
-    every column, sorted by one, a page at a time."""
+    every column, narrowed by column filters (a JSON list of ``{col, op,
+    value, value2, kind}``), sorted by one, a page at a time."""
     t, _agents = await _owned(table_id, user)
     try:
+        parsed = json.loads(filters) if filters.strip() else []
+    except ValueError:
+        raise HTTPException(400, "filters must be a JSON list")
+    if not isinstance(parsed, list):
+        raise HTTPException(400, "filters must be a JSON list")
+    try:
         return await asyncio.to_thread(
-            _read_rows, t, max(1, min(limit, _MAX_PAGE)), max(0, offset), q, sort, dir == "desc")
+            _read_rows, t, max(1, min(limit, _MAX_PAGE)), max(0, offset), q, sort, dir == "desc", parsed)
+    except ValueError as e:
+        raise HTTPException(400, f"That filter can't be used: {e}")
     except sqlite3.Error as e:
         raise HTTPException(503, f"The datastore can't be read right now: {e}")
 

@@ -4,6 +4,7 @@ import { getFactoryResults, durationText, whenText, RUN_LABELS, type ResultFile,
 import { vfsApi, type FolderRef } from '../../services/vfsApi'
 import { getFileTypeGroup, isViewable, type AgentFile } from '../../services/fileTransfer'
 import { sizeText } from '../../utils/format'
+import { isSheetExt } from '../../utils/xlsx'
 import { FileGlyph } from '../context/AddData'
 import { FileViewer } from '../agents/FileViewer'
 import { CsvTable } from '../library/CsvTable'
@@ -17,7 +18,8 @@ import { Pill, errText, type PillTone } from './ui'
 
 const RUN_TONE: Record<string, PillTone> = { queued: 'zinc', running: 'violet', done: 'green', failed: 'red', cancelled: 'zinc' }
 const extOf = (name: string) => (name.includes('.') ? name.slice(name.lastIndexOf('.')).toLowerCase() : '')
-const isTable = (name: string) => ['.csv', '.tsv'].includes(extOf(name))
+/** A CSV, TSV or Excel workbook: opens as a table. */
+const isTable = (name: string) => ['.csv', '.tsv'].includes(extOf(name)) || isSheetExt(extOf(name))
 const rowsText = (n: number) => `${n.toLocaleString()} row${n === 1 ? '' : 's'}`
 
 function asFile(project: string, f: ResultFile): AgentFile {

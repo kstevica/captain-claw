@@ -129,7 +129,8 @@ export const dataLibraryApi = {
     api<LibraryState>(`/fd/data-library/scan${retryErrors ? '?retry_errors=true' : ''}`, { method: 'POST' }),
   tables: (query: DataQuery = {}) => api<DataPage>(`/fd/data-library/tables?${qs({ ...query })}`),
   table: (id: string) => api<DataTable>(`/fd/data-library/tables/${encodeURIComponent(id)}`),
-  rows: (id: string, opts: { limit?: number; offset?: number; q?: string; sort?: string; dir?: 'asc' | 'desc' }) =>
+  /** `filters`: the column filters, as JSON (columnFilters' ColumnFilter + `kind`). */
+  rows: (id: string, opts: { limit?: number; offset?: number; q?: string; sort?: string; dir?: 'asc' | 'desc'; filters?: string }) =>
     api<RowsPage>(`/fd/data-library/tables/${encodeURIComponent(id)}/rows?${qs(opts)}`),
   resummarize: (id: string) =>
     api<DataTable>(`/fd/data-library/tables/${encodeURIComponent(id)}/summarize`, { method: 'POST' }),

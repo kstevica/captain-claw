@@ -6,9 +6,10 @@ import {
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AgentFile } from '../../services/fileTransfer'
-import { getViewUrl, getDownloadUrl, formatSize, getFileTypeGroup, saveFileContent } from '../../services/fileTransfer'
+import { getViewUrl, getDownloadUrl, formatSize, getFileTypeGroup, isSheetFile, saveFileContent } from '../../services/fileTransfer'
 import { htmlFrame, isUntrustedFile, untrustedUrlTransform } from '../../utils/untrustedContent'
 import { CodeEditor } from './CodeEditor'
+import { CsvTable } from '../library/CsvTable'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 
 // File groups whose text content can be edited in place.
@@ -37,7 +38,19 @@ interface FileViewerProps {
   hasNext?: boolean
 }
 
-export function FileViewer({ file, host = '', port = 0, auth = '', urls, readOnly, onSave, startInEdit, onClose, onPrev, onNext, hasPrev, hasNext }: FileViewerProps) {
+export function FileViewer(props: FileViewerProps) {
+  const { file, host = '', port = 0, auth = '', urls, onClose } = props
+  // An Excel workbook reads as a table, a tab for each sheet (read-only).
+  if (isSheetFile(file)) {
+    return (
+      <CsvTable key={file.physical} name={file.filename} extension={file.extension} onClose={onClose}
+        urls={urls ?? { view: getViewUrl(host, port, file.physical, auth), download: getDownloadUrl(host, port, file.physical, auth) }} />
+    )
+  }
+  return <TextFileViewer {...props} />
+}
+
+function TextFileViewer({ file, host = '', port = 0, auth = '', urls, readOnly, onSave, startInEdit, onClose, onPrev, onNext, hasPrev, hasNext }: FileViewerProps) {
   const [content, setContent] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
