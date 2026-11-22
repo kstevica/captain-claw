@@ -212,7 +212,8 @@ export function RunProgress({ runId, going, stopped }: { runId: string; going: b
     <div className="mt-3 overflow-hidden rounded-2xl border border-[var(--fd-line)] bg-[var(--fd-hover)]">
       <div className="space-y-3 px-4 pb-3 pt-3.5">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-          <div className="min-w-0 flex-1">
+          {/* A basis, so a narrow drawer puts the timing chips on a line of their own instead of over the count */}
+          <div className="min-w-0 flex-[1_1_15rem]">
             {steps.length ? (
               <p className="flex min-w-0 items-baseline gap-2">
                 <span className="shrink-0 whitespace-nowrap text-sm font-semibold text-zinc-100">{done} of {steps.length} steps done</span>
