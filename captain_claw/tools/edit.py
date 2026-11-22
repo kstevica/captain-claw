@@ -155,12 +155,21 @@ class EditTool(Tool):
                 from captain_claw.vfs import project_is_readonly, split_scheme
 
                 if project_is_readonly(split_scheme(path)[0]):
+
+                    from captain_claw.vfs import readonly_reason
+
                     return ToolResult(
+
                         success=False,
+
                         error=(
-                            f"'{split_scheme(path)[0]}' is a read-only folder "
-                            "(e.g. a Google Drive mount) — it cannot be edited."
+
+                            f"'{split_scheme(path)[0]}' cannot be edited: "
+
+                            f"{readonly_reason(split_scheme(path)[0]) or 'it is read-only'}."
+
                         ),
+
                     )
 
             batch_mode = bool(edits)

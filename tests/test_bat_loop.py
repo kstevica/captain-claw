@@ -243,3 +243,30 @@ async def test_supervisor_skips_a_freshly_leased_run(store):
     await store.claim_lease(rid, pid=4242, host="other-deck")
     sup = BatSupervisor(store, BatDriver(store, attempt_runner=_runner({})))
     assert await sup.tick() == 0  # not adoptable while the lease is warm
+
+
+async def test_a_driven_run_holds_its_folder_until_it_ends(store, tmp_path, monkeypatch):
+    """While the deck drives a run its folder is marked as the run's own
+    (``vfs.run_working``); the marker goes when the run ends, and one a deck
+    left behind when it went down is swept on the next scan."""
+    from captain_claw import vfs
+    from captain_claw.flight_deck import bat_loop
+    rid = await _make_run(store, ["a"], status="running")
+    root = tmp_path / "vfs" / "owner"
+    monkeypatch.setattr(bat_loop, "_FOLDER_HOLD", lambda run, on: vfs.set_run_lock(root, f"bat-{run['id'][:8]}", on))
+    monkeypatch.setattr(bat_loop, "_FOLDER_SWEEP",
+                        lambda driven: vfs.sweep_run_locks(root.parent, {f"bat-{r[:8]}" for r in driven}))
+    mark = vfs.run_lock_at(root, f"bat-{rid[:8]}")
+    left = vfs.run_lock_at(root, "bat-gone0001")
+    vfs.set_run_lock(root, "bat-gone0001", True)
+    seen = []
+
+    async def runner(run, step):
+        seen.append(mark.is_file())
+        return {"ok": True, "output": "a-done"}
+
+    sup = BatSupervisor(store, BatDriver(store, attempt_runner=runner))
+    assert await sup.tick() == 1
+    await sup.drain(timeout=5.0)
+    assert seen == [True] and not mark.exists() and not left.exists()
+    assert (await store.get_run(rid))["status"] == "done"

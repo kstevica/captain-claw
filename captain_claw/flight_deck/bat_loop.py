@@ -371,6 +371,18 @@ def get_store() -> BatStore | None:
     return _STORE
 
 
+# A driven run's folder is its own (``vfs.run_working``): ``hold(run, on)`` marks
+# and frees it, ``sweep(driven run ids)`` frees what a deck that went down left.
+_FOLDER_HOLD: Callable[[dict, bool], None] | None = None
+_FOLDER_SWEEP: Callable[[set[str]], None] | None = None
+
+
+def set_folder_lock(hold: Callable[[dict, bool], None] | None,
+                    sweep: Callable[[set[str]], None] | None) -> None:
+    global _FOLDER_HOLD, _FOLDER_SWEEP
+    _FOLDER_HOLD, _FOLDER_SWEEP = hold, sweep
+
+
 def set_on_finish(fn: Callable[[dict], Awaitable[None]] | None) -> None:
     global _ON_FINISH
     _ON_FINISH = fn
@@ -1053,6 +1065,11 @@ class BatSupervisor:
             await self.store.expire_asks()
         except Exception as e:  # noqa: BLE001
             log.warning("bat expire_asks failed", error=str(e))
+        if _FOLDER_SWEEP is not None:  # markers a deck that went down mid-run left behind
+            try:
+                _FOLDER_SWEEP({rid for rid, t in self._running.items() if not t.done()})
+            except Exception as e:  # noqa: BLE001
+                log.warning("bat lock sweep failed", error=str(e))
         launched = 0
         for run in await self.store.adoptable_runs():
             rid = run["id"]
@@ -1071,11 +1088,25 @@ class BatSupervisor:
             launched += 1
         return launched
 
+    async def _hold_folder(self, run_id: str, on: bool) -> None:
+        """While a run is driven its folder is its own: the owner's other agents
+        read it and write nothing there (``vfs.run_working``)."""
+        if _FOLDER_HOLD is None:
+            return
+        try:
+            run = await self.store.get_run(run_id)
+            if run:
+                _FOLDER_HOLD(run, on)
+        except Exception as e:  # noqa: BLE001 — the lock never stops a run
+            log.warning("bat folder lock failed", run_id=run_id, on=on, error=str(e))
+
     async def _drive_and_release(self, run_id: str) -> None:
         status = "error"
+        await self._hold_folder(run_id, True)
         try:
             status = await self.driver.drive(run_id)
         finally:
+            await self._hold_folder(run_id, False)
             try:
                 await self.store.release_lease(run_id)
             except Exception:

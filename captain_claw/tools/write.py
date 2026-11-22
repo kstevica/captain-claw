@@ -379,11 +379,12 @@ class WriteTool(Tool):
             # cross-agent tree, bypassing per-session saved/ scoping.
             if is_vfs_path(path):
                 if project_is_readonly(split_scheme(path)[0]):
+                    from captain_claw.vfs import readonly_reason
                     return ToolResult(
                         success=False,
                         error=(
-                            f"'{split_scheme(path)[0]}' is a read-only folder "
-                            "(e.g. a Google Drive mount) — it cannot be written to."
+                            f"'{split_scheme(path)[0]}' cannot be written to: "
+                            f"{readonly_reason(split_scheme(path)[0]) or 'it is read-only'}."
                         ),
                     )
 
