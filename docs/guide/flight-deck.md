@@ -12,7 +12,7 @@ A full management dashboard for running teams of AI agents. Spawn, monitor, conf
 flight-deck        # http://0.0.0.0:25080   (alias: captain-claw-fd; add --simple-chat for a kiosk)
 ```
 
-**On this page:** [Seven orchestration modes](#seven-orchestration-modes) · [Code](#code) · [Crew](#crew) · [Forge agents](#forge-agents) · [Archetypes](#archetypes) · [Captain Swarm](#captain-swarm) · [Plan and Deep mode](#plan-and-deep-mode) · [Orchestrator / DAG mode](#orchestrator--dag-mode) · [Flows and the Observatory](#flows-and-the-observatory) · [Running the fleet](#running-the-fleet) · [The kiosk and simple layout](#the-kiosk-and-simple-layout) · [Onboarding](#onboarding) · [The Taskboard](#the-taskboard) · [The Line](#the-line) · [Custom tools](#custom-tools) · [Agents as colleagues](#agents-as-colleagues) · [Agent files](#agent-files-export-import-and-backups) · [Course](#course) · [Your own AI keys and Profile](#your-own-ai-keys-and-profile) · [Activity and audit](#activity-and-audit) · [Running a deck for a team](#running-a-deck-for-a-team) · [Updating the deck](#updating-the-deck) · [Idle agents sleep](#idle-agents-sleep)
+**On this page:** [Seven orchestration modes](#seven-orchestration-modes) · [Code](#code) · [Crew](#crew) · [Forge agents](#forge-agents) · [Archetypes](#archetypes) · [Captain Swarm](#captain-swarm) · [First Mate](#first-mate) · [Plan and Deep mode](#plan-and-deep-mode) · [Orchestrator / DAG mode](#orchestrator--dag-mode) · [Flows and the Observatory](#flows-and-the-observatory) · [Running the fleet](#running-the-fleet) · [The kiosk and simple layout](#the-kiosk-and-simple-layout) · [Onboarding](#onboarding) · [The Taskboard](#the-taskboard) · [The Line](#the-line) · [Custom tools](#custom-tools) · [Agents as colleagues](#agents-as-colleagues) · [Agent families](#agent-families) · [Agent files](#agent-files-export-import-and-backups) · [Course](#course) · [Your own AI keys and Profile](#your-own-ai-keys-and-profile) · [Activity and audit](#activity-and-audit) · [Running a deck for a team](#running-a-deck-for-a-team) · [Updating the deck](#updating-the-deck) · [Idle agents sleep](#idle-agents-sleep)
 
 ## Seven orchestration modes
 
@@ -27,7 +27,7 @@ One agent isn't always the answer — and one orchestration strategy never is. C
 
 **Step by step:** [Vatra, Basna and Council](vatra-basna-council.md), from picking the right one to reading the result. Since 0.9.1 all three are in the kiosk too, under **More → Agents as a team** (and in **Settings**), and Basna and Vatra are separate pages: the full layout has a **Vatra** entry of its own under **Multi-Agent**.
 
-The fifth mode is **💻 Code** (below) — a plan-gated, independently-reviewed engineering pipeline. The sixth is **Flight Deck** itself — spawn, monitor, and coordinate the whole crew from one dashboard. The seventh, new in 0.8.0, is **🦇 Bat** — the stubborn finisher: checkpointed steps with retries, survives restarts, and stops only when an independent, fail-closed judge says the task is done.
+The fifth mode is **💻 Code** (below) — a plan-gated, independently-reviewed engineering pipeline. The sixth is **Flight Deck** itself — spawn, monitor, and coordinate the whole crew from one dashboard. The seventh, new in 0.8.0, is **🦇 Bat** — the stubborn finisher: checkpointed steps with retries, survives restarts, and stops only when an independent, fail-closed judge says the task is done. Since 0.9.2 every [First Mate](#first-mate) run is a Bat run (or a list funnel).
 
 - **Agent Forge** — Describe a business goal in plain text. An LLM designs a specialized team with roles, tools, operating procedures, and a lead coordinator. Review, customize, and spawn the entire team in one click. Since 0.8.5 the kiosk's **[Forge agents](#forge-agents)** goes further, to a standing team with its schedules and its software.
 - **Agent Council** — Structured multi-agent deliberation. Run brainstorms, debates, reviews, or planning sessions with 2–6 agents it assembles, or the ones you pick. Each agent self-scores suitability, chooses actions (answer, challenge, refine, broaden), and responds in moderated rounds. A moderator synthesizes conclusions; all agents vote. Export as markdown minutes.
@@ -35,6 +35,14 @@ The fifth mode is **💻 Code** (below) — a plan-gated, independently-reviewed
 - **Vatra** — A collaborative team on a shared blackboard: a lead splits the work, each agent owns sections, reads what the others wrote, and improves it over review rounds; a reporter assembles the deliverable. Since 0.8.0 workers run until they're done, under an in-turn context governor, reading a rule-built run map.
 - **Code** — An agentic coding studio. A router sizes each request; big jobs run plan → your approval → build → three independent reviewers → triage → capped fix loop, each phase a git commit with diff timeline and rollback. Agents query a persistent Code Map instead of re-reading the tree; runs work on VFS folders or your own linked local repos, with per-turn token costs in chat and full process export.
 - **Bat** (0.8.0) — A durable "stubborn finisher": plans, runs checkpointed steps with retries, survives restarts, and stops only when an independent judge says the task is done — behind a hard safety floor and a start gate for email, spending and accounts. Since 0.8.6 it **finishes for real**: it pins an acceptance contract and runs the checks itself (commands and tests for admins' runs), turns a refusal into fix steps for the next round (8 rounds at most, and two rounds failing the same check stop it), asks you at a stalemate, runs independent steps in parallel (`FD_BAT_MAX_PARALLEL`, 3), and counts the whole run's spend, child runs included. **A run with no cap stops at $50** (`FD_BAT_DEFAULT_LLM_USD`, 0 for none).
+
+**Bat in 0.9.2: runs that finish their goals.** This applies to every Bat run, from the Bat page, the `bat` tool or a First Mate factory.
+
+- **It keeps going while it makes progress.** A worker step has no fixed step count or time limit any more. Progress extends it, and only a long silence (a hung model call) ends it. A context overflow is trimmed instead of ending the step.
+- **It saves as it goes and resumes.** Each step keeps its results in the run's folder and a short progress note. A step that runs again after a deck restart, a timeout or a failure starts from its note and its files, and an interruption doesn't use up its tries. A First Mate run stopped by its cap or by you goes on with **Continue**.
+- **Plans and checks.** Many items of one kind are split into batch-sized steps (up to 12). Scripts check each finished step against your rules at no token cost, and a short review corrects the run's course. Before the verdict, Captain reads the files it delivered, and a run that stops short plans only for what's missing.
+- **A run with no token cap stops at 20 million tokens** (`CLAW_BAT_TOKEN_CEILING`, 0 for none) and can be continued.
+- **Admin console → Settings → Bat**: **Steps at the same time** (3; 1 or 2 on a single local model server), **Step ceiling per worker turn** (5,000), **Quiet minutes before a step stops** (15), **Minutes one model call may take** (20, so thinking models aren't cut off) and **Workers use**: a cheaper tier does the steps while planning, the checks between steps and the reviewers stay on the planning tier. A run going now takes a change up. The `FD_BAT_MAX_PARALLEL`, `FD_BAT_STEP_CEILING`, `FD_BAT_IDLE_MINUTES`, `FD_BAT_CALL_MINUTES` and `FD_BAT_WORKER_TIER` variables only set the defaults.
 
 ## Code
 
@@ -121,6 +129,18 @@ A run has an objective: what to improve, the cases to measure it on, and what an
 
 Settings: `FD_CAPTAIN_SWARM_DISABLED`, `FD_CAPTAIN_SWARM_MAX_RUNS` (1 per person), `FD_CAPTAIN_SWARM_MAX_LANES` (4), `FD_CAPTAIN_SWARM_PER_SITE` (1), `FD_CAPTAIN_SWARM_MEASURE_PARALLEL` (1), `FD_CAPTAIN_SWARM_BROWSER` (on). Known gaps: it has run on synthetic mail and throwaway decks; a real **Carry it out** and a gain kept live on code are still to come. The design: [docs/captain-swarm-plan.md](../captain-swarm-plan.md).
 
+## First Mate
+
+New in 0.9.2, **off until an admin turns it on**. First Mate runs standing jobs, called **factories**, for one person under their own account. Each works on a charter its owner approves, is checked against goals they choose on every run, and spends from a weekly budget in tokens, with a cap per run. Every run is a [Bat](#seven-orchestration-modes) run, or a **list funnel** for lists: code searches, reads and checks, and a model judges each item once.
+
+- **Turning it on**: **Admin console → Settings → First Mate** → **On for this deck**. **Admins only** is on by default; switch it off to give First Mate to everyone signed in. **Limits** sets **Factories per person** (8) and **Runs per factory a day** (24).
+- **Where people find it**: in the kiosk, **Settings → Your agents at work → First Mate**, or **More** under the agent column. In the classic layout (`?app=classic`), **Automation → First Mate**.
+- **A factory**: **New factory**, then **Describe it** and **Draft it**, a template, or **From scratch**. Read the charter, switch its goals on or off, and **Approve and start**. Then **Run now**, or switch on **On their own** (off for everyone at first) so schedules and new mail start runs.
+- **What comes back**: a **Results** tab with the result first and a box **Worth a look before you use it**, one thread per factory on [the Line](#the-line), and a weekly report every Monday. While a factory's trust is **Asks first**, mail is rehearsed and waits for **Carry out all, once**.
+- **Agents** get the `first_mate` tool (`list`, `status`, `run`, `pause`, `resume`, `report`, `draft`). It never approves anything for you.
+
+`FD_FIRST_MATE_DISABLED=true` stops it on a deck altogether. Step by step: [First Mate](first-mate.md).
+
 ## Plan and Deep mode
 
 For when "probably right" isn't good enough: a reviewable DAG of verified steps, and frontier-quality answers via multiple rollouts + self-consistency voting + diverse-lens critics. Both are a single **Effort** choice (Standard · Deep · Plan) on the Basna page and work in Basna and Vatra alike; the full story is in [What's New in 0.6.4](whats-new.md#whats-new-in-064).
@@ -165,6 +185,8 @@ Flows are written as code or in a visual Builder, compiled from plain English, s
 
 The chat-first view your team's non-admins live in is a complete place to work.
 
+**Since 0.9.2** a browser tab opens the kiosk for people and the **Admin console** for admins, who move between the two with **Switch to user view** and **Switch to admin view**. The classic layout opens only in a tab with `?app=classic` (Payments review links need it too).
+
 **Since 0.9.1** it opens on **Today** when no chat is open: a greeting, **Waiting for you** (tasks that are your move, proposals and open questions, each with its own answer buttons), **Today’s priorities** and **Handled automatically**. The nav above the agent list reads **Today · Agents · Inbox · Tasks · People · Automations · Activity**: **Agents** is one card per agent with its picture and live state, **Inbox** is the [Line](#the-line), **Tasks** the [Taskboard](#the-taskboard), **People** everyone on your tasks (search, sort, a **Pending** filter), **Automations** the scheduled tasks. **New agent** opens the **Agent store** (**Featured**, **Add**, and **Advanced** for the old picker with **From a file** and **Forge agents**). There is no right column any more: an agent's files and tables open from **⋯ → Files & data**. Under the agent list, **Library · Data · Folders · More**; **More** holds Crew and Captain Swarm (where allowed), **Vatra**, **Basna** and **Council**, **[Anonymize](anonymization.md)** and **[Data rooms](data-rooms.md)**. An agent gets a picture with **⋯ → Picture**, and the chat box has a model picker beside the effort picker.
 
 Besides that:
@@ -173,7 +195,7 @@ Besides that:
 - a **File library** and a **Data library** that summarise everything the agents keep;
 - **Shared folders** (0.8.3): the shared VFS as a library — recent files, your folders, agent runs, what's shared with you, linked folders, and **Google Drive** and **OneDrive** folders mounted read-only — with preview, edit, rename, drag-and-drop upload, search and a `vfs:` address to hand your agents;
 - **fullscreen** on the File library, the Data library and Shared folders (0.8.3);
-- **Scheduled tasks** that deliver to chat, email or Telegram;
+- **Scheduled tasks** that deliver to chat, email or Telegram, and that [pause after 7 days away](#idle-agents-sleep) (0.9.2);
 - a **[Taskboard](#the-taskboard)** of everything the agents were asked and sent, and what needs you (0.8.4);
 - one **timeline** per agent with named topics, and a **reasoning-effort** picker;
 - **agent groups**: folders in the agent list, with a name and a colour, that fold away and still show an agent at work or a new reply. Drag an agent onto a group, or use its **⋯ → Group**; a group's own **⋯** ticks its agents, renames, recolours and orders it. **Pin** one group to the top of the list, and as many agents as you like to the top of their group. Each person has their own, on all their devices;
@@ -278,6 +300,16 @@ New in 0.9.0: an agent can hand a piece of work to another of your agents and ca
 
 Only on the owner's own turns under Flight Deck. Design: [docs/agent-colleagues-plan.md](../agent-colleagues-plan.md).
 
+## Agent families
+
+New in 0.9.2: an agent made by another agent sits under it as its **child**, and agents with the same parent are **siblings**. Run workers (Bat, Vatra, Basna, Council, Code) are never moved into a family, and no longer show as your own agents in the agent column, on Today or on the Agents page.
+
+- **The tree.** In the kiosk's agent column, children sit indented under their parent, and the arrow beside a parent folds them. To move an agent, use its **⋯ → Put under** (**None — one of your own** takes it back to the top), or hold it over another agent's row for half a second and let go. **Undo** shows for 8 seconds after a move. A family goes 3 levels deep at most, with up to 12 agents under one parent, and no loops. The Agents page shows family cards.
+- **Workers in one line.** While a parent's runs are working, it shows "Working · 3 workers" under it instead of a row per worker. For a [First Mate](#first-mate) factory the line is "<factory> · Working · 3 workers".
+- **Removing or powering off a parent** asks what happens to the agents under it. Remove: keep them (they move up a level, the default) or remove them too, with everything they keep. Power off: just the parent, or the parent and the ones under it.
+- **⋯ → Info → Family** shows where an agent sits, who made it and what for, the agents under it and its history. It opens for an agent that's off too. A clone sits under its source's parent.
+- **They know each other.** Each agent knows its parent, siblings and children, and a message from another agent says who is talking ("From X, your parent"). The `flight_deck` tool has three new actions: `report` sends the parent a report, and `ask` or `task` reach the `parent`, the `children`, the `siblings`, the whole `family`, an agent group (`group:<name>`) or one agent by name, up to 12 at once. The answers come back together. Groups need a deck with sign-in.
+
 ## Agent files: export, import and backups
 
 New in 0.9.0: any process agent you own fits in one `.captain` file, to restore later, move to another deck or hand to someone else. In the kiosk: the agent's **⋯ → Back up / export** (in the *Its place* row) and **New agent → From a file**.
@@ -357,3 +389,5 @@ New in 0.8.3, off by default. **Admin console → Settings → Agents → Put id
 - `FD_AGENT_IDLE_STOP_S` (seconds) overrides the admin setting.
 
 **Scheduled tasks on an agent that's off** (0.9.0): a sleeping agent is woken as before, one that crashed is started and stays on, and one its owner switched off is started about five minutes before the run and switched off again after, when nothing else needs it. A choice you make meanwhile wins.
+
+**Scheduled tasks pause for people who are away** (0.9.2, on by default on a deck with accounts). When someone hasn't signed in or written to their agents for 7 days, their scheduled tasks and the jobs their agents set up for themselves are paused. Nothing is deleted. Their Line gets one item, "Scheduled tasks paused (N)", and they resume each task under Scheduled tasks. Admins change the days (3 to 90) or turn it off under **Admin console → Settings → Agents → Pause scheduled tasks for people who are away**. Since 0.9.2 an admin's Scheduled tasks window lists only their own tasks and the deck's own, not everyone's.

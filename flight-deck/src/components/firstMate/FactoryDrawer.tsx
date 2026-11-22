@@ -137,8 +137,11 @@ function fieldsOf(form: Form, v: Version): DraftFields {
   }
 }
 
+/** Whether a form asks for what the draft already holds: every field runnerConfigOf saves counts,
+ *  the expert and its veto included (the veto is saved only with an expert). */
 const same = (a: Form, b: Form) => a.charter === b.charter && a.schedule.trim() === b.schedule.trim()
-  && a.runner === b.runner && (a.runner !== 'funnel' || (a.leftovers === b.leftovers && a.loosen === b.loosen && a.searches.trim() === b.searches.trim()))
+  && a.runner === b.runner && (a.runner !== 'funnel' || (a.leftovers === b.leftovers && a.loosen === b.loosen && a.searches.trim() === b.searches.trim()
+    && a.expert === b.expert && (!a.expert || a.veto === b.veto)))
   && JSON.stringify(checksOf(a.goals)) === JSON.stringify(checksOf(b.goals))
 
 export function FactoryDrawer({ factoryId, initialTab = 'charter', onClose, onChanged, onNotice }: {
