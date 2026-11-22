@@ -1,18 +1,28 @@
-"""Family → the agents: who made whom, in each agent's prompt.
+"""Family and groups → the agents: who made whom, and which of the owner's
+agent groups each agent is in, in each agent's prompt.
 
 Flight Deck writes ``family_context.md`` into a process agent's config home,
 next to ``course_context.md`` (see :mod:`course_carrier` / :mod:`tenant_profile`
 for the path and the atomic write). The agent inserts it verbatim on its
 owner's turns (``tenant_context.load_family_context``), in the cached part of
-the prompt: the block holds only who is who (names, what each is for), never
-live state, so it changes only when the family does.
+the prompt: the block holds only who is who (names, what each is for, the
+groups and who is in them), never live state, so it changes only when the
+family or the groups do.
 
-Only standing agents that have a parent or children get one; everyone else's
-file is removed (fail closed). A run's workers get none: their run tells them
-what they need.
+Standing agents that have a parent or children get "Your family"; standing
+agents of an owner with agent groups get "Your groups" (the groups they are in,
+with the others in each, and the names of the rest). Everyone else's file is
+removed (fail closed). A run's workers get none: their run tells them what
+they need.
+
+The groups are the owner's ``fd:agent-groups`` setting (the agent column's
+folders), kept here per owner (``set_groups``) because ``refresh`` is sync. Only
+a deck with sign-in keeps them; without it they live in the browser and no
+agent hears of them (as ``to='group:<name>'`` can't reach them there).
 
 When it is written: after a spawn, a move, a removal and a rename (every agent
-of that owner, unchanged files untouched), and once at FD startup.
+of that owner, unchanged files untouched), after the owner saves their groups,
+and once at FD startup (``reconcile``).
 
 Names and ``made_for`` lines come from people and agents: they are flattened
 onto one line each, quoted, and capped, so none can pass for the block's own
@@ -24,6 +34,8 @@ peer and hand-over messages.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -35,8 +47,32 @@ from captain_claw.logging import get_logger
 log = get_logger(__name__)
 
 FILE = "family_context.md"
-# Siblings listed by name before "and N more".
+# Siblings (and a group's members) listed by name before "and N more".
 MAX_LISTED = 12
+# The owner's other groups named before "and N more".
+MAX_GROUPS = 20
+GROUPS_SETTING = "fd:agent-groups"
+
+# owner → their stored agent groups (decks with sign-in only).
+_groups: dict[str, Any] = {}
+
+
+def set_groups(owner: str, raw: Any) -> None:
+    """Keep ``owner``'s agent groups as stored (a JSON string, a list, or None
+    when they were removed)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raw = None
+    if isinstance(raw, list):
+        _groups[str(owner or "")] = raw
+    else:
+        _groups.pop(str(owner or ""), None)
+
+
+def groups_for(owner: Any) -> Any:
+    return _groups.get(str(owner or ""))
 
 
 def _name(entry: dict, slug: str) -> str:
@@ -54,11 +90,54 @@ def _line(reg: dict, slug: str) -> str:
     return f"- **{_name(e, slug)}**{_for(e)}"
 
 
-def compose(reg: dict, slug: str) -> str:
-    """The block for ``slug``, or "" when it has no family (or is a worker)."""
+def compose(reg: dict, slug: str, groups: Any = None) -> str:
+    """The block for ``slug`` ("Your family", "Your groups"), or "" when it has
+    neither (or is a worker). ``groups`` is its owner's stored agent groups."""
     me = reg.get(slug)
     if not isinstance(me, dict) or fam.role_of(slug, me) != fam.STANDING:
         return ""
+    parts = [p for p in (_family(reg, slug, me), _groups_block(reg, slug, groups)) if p]
+    return "\n\n".join(parts) + "\n" if parts else ""
+
+
+def _names(reg: dict, slugs: list[str]) -> str:
+    shown = sorted((_name(reg.get(s) or {}, s) for s in slugs), key=str.lower)
+    text = ", ".join(f"**{n}**" for n in shown[:MAX_LISTED])
+    return text + (f" and {len(shown) - MAX_LISTED} more" if len(shown) > MAX_LISTED else "")
+
+
+def _groups_block(reg: dict, slug: str, groups: Any) -> str:
+    """"Your groups": the owner's agent groups ``slug`` is in, with who else is
+    in each, and the names of the others. "" when the owner has none."""
+    view = fam.groups_of(reg, slug, groups)
+    if not view:
+        return ""
+    mine = sorted((g for g in view if g["mine"]), key=lambda g: g["name"].lower())
+    other = sorted((g["name"] for g in view if not g["mine"]), key=str.lower)
+    out = ["## Your groups",
+           "Your owner sorts their agents into groups. When they say \"the group\" or \"your group\", "
+           "they mean one of these."]
+    if mine:
+        out += ["", "You are in:"]
+        for g in mine:
+            out.append(f"- **{g['name']}**, with {_names(reg, g['members'])}" if g["members"]
+                       else f"- **{g['name']}** (only you so far)")
+    else:
+        out += ["", "You are in none of them."]
+    if other:
+        label = "Your owner's other groups" if mine else "Your owner's groups"
+        listed = ", ".join(f"**{n}**" for n in other[:MAX_GROUPS])
+        more = f" and {len(other) - MAX_GROUPS} more" if len(other) > MAX_GROUPS else ""
+        out += ["", f"{label}: {listed}{more}."]
+    example = mine[0]["name"] if mine else other[0]
+    out += ["", "To ask a whole group something or give it a task, all at once: the `flight_deck` tool's `ask` "
+            f"(waits for their answers) or `task` (their results come back later), with `to` set to "
+            f"group:<name> (e.g. group:{example}). The `colleagues` tool's `list` shows the groups too."]
+    return "\n".join(out)
+
+
+def _family(reg: dict, slug: str, me: dict) -> str:
+    """"Your family": parent, siblings, children ("" when none)."""
     parent = fam.parent_of(reg, slug)
     kids = sorted(fam.children(reg, slug), key=lambda s: _name(reg.get(s) or {}, s).lower())
     if not parent and not kids:
@@ -89,7 +168,7 @@ def compose(reg: dict, slug: str) -> str:
     out += ["", "To ask them something or give them a task, all at once: the `flight_deck` tool's `ask` (waits for "
             "their answers) or `task` (their results come back later), with `to` set to parent, siblings, children "
             "or family."]
-    return "\n".join(out) + "\n"
+    return "\n".join(out)
 
 
 def relation_words(reg: dict, sender: str, receiver: str) -> str:
@@ -157,7 +236,7 @@ def refresh(owner: str | None = None, *, registry: dict | None = None) -> int:
         if not agent_dir.is_dir():
             continue
         try:
-            text = compose(reg, slug)
+            text = compose(reg, slug, groups_for(entry.get("owner")))
         except Exception as exc:  # noqa: BLE001 — fail closed: no block
             log.warning("family: couldn't compose", agent=slug, error=str(exc))
             text = ""
@@ -174,3 +253,32 @@ def refresh_quietly(owner: Any) -> None:
         refresh(str(owner or ""))
     except Exception:  # noqa: BLE001
         log.debug("family: refresh failed", exc_info=True)
+
+
+async def groups_saved(owner: str, raw: Any) -> None:
+    """The owner saved (or removed: None) their agent groups: their agents'
+    blocks follow. A deck without sign-in keeps groups in the browser: nothing
+    to do. Never raises."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    try:
+        if not _fd_auth_enabled():
+            return
+        set_groups(owner, raw)
+        await asyncio.to_thread(refresh_quietly, owner)
+    except Exception:  # noqa: BLE001
+        log.debug("family: groups refresh failed", exc_info=True)
+
+
+async def reconcile(db: Any) -> int:
+    """At FD startup: read every owner's agent groups (decks with sign-in),
+    then bring every agent's block in line. Never raises."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    try:
+        if _fd_auth_enabled() and db is not None:
+            for owner, raw in (await db.users_with_setting(GROUPS_SETTING)).items():
+                set_groups(owner, raw)
+    except Exception as exc:  # noqa: BLE001 — the family part still goes out
+        log.warning("family: couldn't read the agent groups", error=str(exc)[:200])
+    return await asyncio.to_thread(refresh)

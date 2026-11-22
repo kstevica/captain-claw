@@ -7,6 +7,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from captain_claw.flight_deck import family_carrier
 from captain_claw.flight_deck.auth import get_current_user, get_db
 
 router = APIRouter(prefix="/fd/settings", tags=["settings"])
@@ -78,6 +79,8 @@ async def put_settings(body: SettingsUpdate, user: dict = Depends(get_current_us
     _refuse_server_owned(body.settings)
     db = get_db()
     await db.set_settings(user["id"], body.settings)
+    if family_carrier.GROUPS_SETTING in body.settings:  # their agents' "Your groups"
+        await family_carrier.groups_saved(str(user["id"]), body.settings[family_carrier.GROUPS_SETTING])
     return {"ok": True, "count": len(body.settings)}
 
 
@@ -88,6 +91,8 @@ async def delete_setting(key: str, user: dict = Depends(get_current_user)):
     deleted = await db.delete_setting(user["id"], key)
     if not deleted:
         return {"ok": False, "detail": "Setting not found"}
+    if key == family_carrier.GROUPS_SETTING:
+        await family_carrier.groups_saved(str(user["id"]), None)
     return {"ok": True}
 
 

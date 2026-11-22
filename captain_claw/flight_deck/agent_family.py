@@ -28,6 +28,7 @@ the spawn lock while it changes it, and saves it.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -389,17 +390,53 @@ FANOUT_MAX = 12
 RELATIONS = ("parent", "children", "siblings", "family")
 
 
-def _member_slugs(groups: Any, name: str) -> list[str] | None:
-    """The process agents in the owner's group called ``name`` (folders only), or
-    None when there is no such group. ``groups`` is the stored ``fd:agent-groups``."""
-    want = name.strip().casefold()
+GROUP_NAME_MAX = 60
+
+
+def group_name(raw: Any) -> str:
+    """A group's name as an agent sees and writes it: one line, no markdown, capped.
+    ``group:<name>`` is matched on this form, so what an agent was shown works."""
+    return " ".join(re.sub(r"[*_`#>\[\]<]+", " ", str(raw or "")).split())[:GROUP_NAME_MAX]
+
+
+def folders(groups: Any) -> list[tuple[str, list[str]]]:
+    """The owner's agent groups (folders; roles left out) as ``(name, process
+    agent slugs)``, in stored order. ``groups`` is the stored ``fd:agent-groups``."""
+    out = []
     for g in groups if isinstance(groups, list) else []:
         if not isinstance(g, dict) or g.get("type", "group") != "group":
             continue
-        if str(g.get("name") or "").strip().casefold() == want:
+        name = group_name(g.get("name"))
+        if name:
             ids = [str(x) for x in g.get("agentIds") or []]
-            return [x[5:] for x in ids if x.startswith("proc-")]
-    return None
+            out.append((name, [x[5:] for x in ids if x.startswith("proc-")]))
+    return out
+
+
+def _member_slugs(groups: Any, name: str) -> list[str] | None:
+    """The process agents in the owner's group called ``name``, or None when
+    there is no such group."""
+    want = group_name(name).casefold()
+    return next((slugs for n, slugs in folders(groups) if n.casefold() == want), None)
+
+
+def groups_of(registry: dict, slug: str, groups: Any) -> list[dict[str, Any]]:
+    """The owner's agent groups as ``slug`` may know them: ``{name, members, mine}``,
+    ``members`` the standing agents of its owner in it other than ``slug``
+    (slugs), ``mine`` whether ``slug`` is in it. Its own groups first; [] for a
+    worker or an agent this registry doesn't hold."""
+    me = _entry(registry, slug)
+    if me is None or role_of(slug, me) != STANDING:
+        return []
+    out = []
+    for name, slugs in folders(groups):
+        members = []
+        for s in dict.fromkeys(slugs):
+            e = _entry(registry, s)
+            if s != slug and e is not None and role_of(s, e) == STANDING and _same_owner(e, me):
+                members.append(s)
+        out.append({"name": name, "members": members, "mine": slug in slugs})
+    return sorted(out, key=lambda g: not g["mine"])
 
 
 def recipients(registry: dict, slug: str, to: str, *, groups: Any = None) -> list[str]:
@@ -437,7 +474,10 @@ def recipients(registry: dict, slug: str, to: str, *, groups: Any = None) -> lis
             raise FamilyError("Agent groups live in the browser on this deck (no sign-in): ask agents by name.")
         members = _member_slugs(groups, to.split(":", 1)[1])
         if members is None:
-            raise FamilyError(f"Your owner has no agent group called {to.split(':', 1)[1].strip()!r}.", 404)
+            names = [n for n, _ in folders(groups)]
+            raise FamilyError(f"Your owner has no agent group called {to.split(':', 1)[1].strip()!r}. "
+                              + (f"Their groups: {', '.join(names)}." if names else "They have no agent groups."),
+                              404)
         out = members
     else:
         out = [s for s, e in registry.items() if isinstance(e, dict) and (s.casefold() == low
