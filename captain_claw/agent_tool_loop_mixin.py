@@ -429,6 +429,45 @@ class AgentToolLoopMixin:
                 return True
         return False
 
+    def _shell_usable(self, turn_start_idx: int) -> bool:
+        """Whether this agent can run a command now: the shell tool is there,
+        the deck doesn't reserve it for admins' agents (deck_confine), and no
+        shell call was refused this turn (a policy, a rehearsal).
+
+        The script gates ask for ``shell(...)`` only then. On a multi-user deck
+        a non-admin's agent wrote a script, said it had no shell, and the gate
+        held its finished answer for 60+ steps (cohort001, 2026-11-21)."""
+        from captain_claw import deck_confine
+
+        if deck_confine.exec_blocked("shell"):
+            return False
+        tools = getattr(self, "tools", None)
+        try:
+            if tools is not None and not tools.has_tool("shell"):
+                return False
+        except Exception:  # noqa: BLE001 - unknown is not "no"
+            pass
+        if self.session:
+            for msg in self.session.messages[turn_start_idx:]:
+                if (msg.get("role") == "tool"
+                        and str(msg.get("tool_name", "")).strip().lower() == "shell"
+                        and str(msg.get("content", "")).lstrip().startswith("Error: Tool 'shell' blocked")):
+                    return False
+        return True
+
+    def _script_gate_may_ask(self, turn_start_idx: int, script_path: str) -> bool:
+        """Ask to run a written script at most once per script per turn, and
+        only an agent that can run it (:meth:`_shell_usable`)."""
+        if not self._shell_usable(turn_start_idx):
+            return False
+        if getattr(self, "_script_gate_turn", None) != turn_start_idx:
+            self._script_gate_turn = turn_start_idx
+            self._script_gate_asked: set[str] = set()
+        if script_path in self._script_gate_asked:
+            return False
+        self._script_gate_asked.add(script_path)
+        return True
+
     def _turn_has_unexecuted_script(self, turn_start_idx: int) -> tuple[bool, str]:
         """Check if a script was written this turn but never attempted.
 

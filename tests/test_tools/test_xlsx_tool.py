@@ -1023,3 +1023,40 @@ def test_a_workbook_openpyxl_cant_read_can_still_be_edited_but_a_broken_result_c
         X.verify_saved(original, _book({"name": "S", "rows": [[1]]}).to_bytes())
     with pytest.raises(X.XlsxError, match="Not a readable"):
         X.verify_saved(b"junk", original)
+
+
+# ── Backups read as the workbook they copy (cohort001, 2026-11-19) ──────────
+#
+# An agent broke two columns of a workbook, was told "Backup: ….xlsx.<time>.bak",
+# and couldn't read it ("Not an .xlsx workbook"), so it couldn't put them back.
+
+
+def test_backup_names_are_recognised():
+    from captain_claw.tools.edit import backup_of
+
+    assert backup_of(Path("natjecaji_VZO_2026-11.xlsx.20261119T153012.bak")) == (
+        "natjecaji_VZO_2026-11.xlsx", ".xlsx")
+    assert backup_of(Path("/w/.captain-claw/backups/x/Deck.v2.PPTX.20261119T153012.bak")) == ("Deck.v2.PPTX", ".pptx")
+    assert backup_of(Path("notes.bak")) is None
+    assert backup_of(Path("budget.xlsx")) is None
+
+
+async def test_a_backup_is_read_as_the_workbook_it_copies(workspace):
+    root, kw = workspace
+    tool = XlsxTool()
+    await tool.execute(action="create", path="Budget", sheets=[{"name": "Model", "rows": [["Rent", 1000]]}], **kw)
+    saved = next(root.rglob("Budget.xlsx"))
+    edited = await tool.execute(action="edit", path=str(saved), sheet="Model",
+                                edits=[{"op": "set", "cell": "B1", "value": 1500}], **kw)
+    backup = next(line for line in edited.content.splitlines() if line.startswith("Backup: "))[len("Backup: "):]
+
+    read = await tool.execute(action="read", path=backup, **kw)
+    assert read.success, read.error
+    assert "B1 1000" in read.content          # the value before the edit
+    checked = await tool.execute(action="check", path=backup, **kw)
+    assert checked.success, checked.error
+
+    refused = await tool.execute(action="edit", path=backup, sheet="Model",
+                                 edits=[{"op": "set", "cell": "B1", "value": 1}], **kw)
+    assert not refused.success
+    assert "is a backup of Budget.xlsx" in refused.error and "action='undo'" in refused.error

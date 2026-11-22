@@ -40,7 +40,7 @@ import subprocess
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -617,6 +617,14 @@ def render_markdown(result: DocResult, display_source: str, low_bar: float) -> s
     if n_ocr:
         how.append(f"OCR on {n_ocr} ({engine_label(result)})")
     head.append("Read: " + "; ".join(how) + (f" — {result.engine_note}" if result.engine_note and n_ocr else ""))
+    if result.kind == "pdf":
+        # Which pages this text holds — not every page of the file, often. A
+        # reader (the agent the next day) otherwise takes "text layer on 7
+        # pages" for all there is.
+        got = {p.page for p in result.pages}
+        missing = [n for n in range(1, result.total_pages + 1) if n not in got]
+        head.append(f"Pages in this text: {_ranges(sorted(got)) or 'none'} of {result.total_pages}"
+                    + (f" — not in it: {_ranges(missing)}" if missing else ""))
     if result.skipped_pages:
         head.append(f"Not read (page cap): {_ranges(result.skipped_pages)}")
     out = "\n".join(head) + "\n"
@@ -642,13 +650,31 @@ def _ranges(nums: list[int]) -> str:
     return ",".join(out)
 
 
+def with_recorded_pages(result: DocResult, folder: Path) -> DocResult:
+    """*result* plus the pages an earlier call on the same file left in
+    *folder*'s record (a page read again is this call's). The record is what
+    the agent looks at later to see what it has read; each call used to
+    replace it with just its own pages."""
+    try:
+        prior = DocResult.from_json(json.loads((folder / ".ocr.json").read_text(encoding="utf-8")), result.source)
+    except (OSError, ValueError, KeyError, TypeError):
+        return result
+    if prior.sha256 != result.sha256:
+        return result
+    pages = {p.page: p for p in prior.pages}
+    pages.update({p.page: p for p in result.pages})
+    skipped = sorted(n for n in set(prior.skipped_pages) | set(result.skipped_pages) if n not in pages)
+    return replace(result, pages=[pages[n] for n in sorted(pages)], skipped_pages=skipped)
+
+
 def write_outputs(result: DocResult, folder: Path, display_source: str, low_bar: float) -> tuple[Path, Path]:
     """``<name>.md`` (the text) and hidden ``.ocr.json`` (lines, boxes,
-    confidence) in *folder*. Writes as bytes, so the files are identical on
-    every OS."""
+    confidence) in *folder*: every page read from this file so far, this call's
+    and earlier ones'. Writes as bytes, so the files are identical on every OS."""
     from captain_claw import saved_attribution
 
     folder.mkdir(parents=True, exist_ok=True)
+    result = with_recorded_pages(result, folder)
     md = folder / f"{_safe_stem(result.source.name)}.md"
     js = folder / ".ocr.json"
     for target, data in (

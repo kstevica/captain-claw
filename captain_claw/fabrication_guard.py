@@ -44,7 +44,7 @@ up its false sends as another run's confirmation.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -70,6 +70,7 @@ WHATSAPP_CLAIM = "false_whatsapp_send"  # says a WhatsApp message went out; no s
 DELEGATION_CLAIM = "false_delegation"  # says other agents did work; none was contacted
 SCHEDULE_CLAIM = "false_schedule_change"  # says a scheduled job changed; none did (or another did)
 SKIPPED_TOOLS = "scheduled_no_tools"  # a scheduled run called none of the tools its task names
+CLAIMED_FILE = "claimed_file"         # hands over a file nothing made and that doesn't exist
 
 
 # ── Tool results ─────────────────────────────────────────────────────
@@ -2240,6 +2241,87 @@ class TurnFacts:
     # A scheduled job's run (agent cron or Flight Deck's scheduler): its task
     # naming tools it then never called is a skipped run.
     scheduled: bool = False
+    # Whether a file the reply names exists among the agent's files (a name,
+    # or a path as the reply wrote it). None: no file check.
+    file_exists: Callable[[str], bool] | None = None
+
+
+# ── Files handed over that were never made ───────────────────────────
+#
+# cohort001 (2026-11-19): three replies in one evening began "Crtam primjer…"
+# ("I'm drawing an example") and named **`primjer-cma-dokumenta.png`** with no
+# tool call at all; each time the person answered "ne vidim" ("I don't see it").
+
+# What a reply hands over as a file to open: pictures, pages, documents, data.
+# (Not .md/.txt/.json/.py: those are as often files the reply talks about.)
+_DELIVERABLE_EXT = r"(?:png|jpe?g|gif|webp|svg|html?|pdf|docx|xlsx|pptx|csv|mp3|mp4|wav|zip)"
+_INLINE_CODE_RE = re.compile(r"`([^`\n]{1,240})`")
+_FENCED_RE = re.compile(r"```.*?```", re.S)
+_FILE_NAME_RE = re.compile(rf"(?i)^(?:[^\s`<>|:*?\"]+/)?[^/\\`<>|:*?\"]{{1,180}}\.{_DELIVERABLE_EXT}$")
+# The sentence says the file isn't there, or asks the person for one.
+_FILE_NOT_RE = re.compile(
+    r"(?i)\b(?:not|no|never|cannot|can't|couldn't|didn't|wasn't|isn't|failed|unable|yet|without"
+    r"|upload|attach|send\s+me|share|nije|nisu|nisam|nismo|ne\s+mogu|nemam|nema|neuspje\w*"
+    r"|još\s+ne|jos\s+ne|pošalji|posalji|priloži|prilozi|učitaj|ucitaj|ako)\b")
+
+
+def claimed_files(reply: str) -> tuple[str, ...]:
+    """The files *reply* hands over by name — in backticks, outside code
+    blocks, with a deliverable's extension, not a web address — in order, once
+    each, and not where the sentence says the file isn't there."""
+    text = _FENCED_RE.sub(" ", str(reply or ""))
+    out: dict[str, None] = {}
+    for m in _INLINE_CODE_RE.finditer(text):
+        name = m.group(1).strip()
+        if "://" in name or not _FILE_NAME_RE.match(name):
+            continue
+        before, sentence = _sentence_around(text, m.start(), m.end())
+        if _FILE_NOT_RE.search(sentence):
+            continue
+        out.setdefault(name, None)
+    return tuple(out)
+
+
+def _file_base(name: str) -> str:
+    return name.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def missing_files(reply: str, facts: "TurnFacts") -> tuple[str, ...]:
+    """Files *reply* hands over that nothing made: their names appear nowhere
+    the model was given (the request, any tool result, people's messages),
+    no tool step this turn mentions them, and no such file exists."""
+    if facts.file_exists is None or facts.known is None:
+        return ()
+    names = claimed_files(reply)
+    if not names:
+        return ()
+    given = "\n".join([facts.request or "", *facts.known]).lower()
+    turn = "\n".join(f"{step.arguments}\n{step.content}" for step in facts.turn_steps).lower()
+    out = []
+    for name in names:
+        base = _file_base(name).lower()
+        if base in given or base in turn:
+            continue
+        try:
+            if facts.file_exists(name):
+                continue
+        except Exception:  # noqa: BLE001 - unknown is not "missing"
+            continue
+        out.append(name)
+    return tuple(out)
+
+
+def claimed_file_corrective(names: Sequence[str]) -> str:
+    listed = ", ".join(f"`{n}`" for n in names)
+    one = len(names) == 1
+    return (f"Your reply hands over {listed} as made, but no tool made {'it' if one else 'them'} in "
+            f"this turn and no such file exists in your files. Make {'it' if one else 'them'} now with "
+            f"your tools and check {'it is' if one else 'they are'} there before you name "
+            f"{'it' if one else 'them'} — or say plainly that {'it is' if one else 'they are'} not made.")
+
+
+def claimed_file_backstop(names: Sequence[str]) -> str:
+    return "Note: no file named " + ", ".join(f"`{n}`" for n in names) + " was made in this turn."
 
 
 def tools_named(text: str, tools: Iterable[str]) -> tuple[str, ...]:
@@ -2532,11 +2614,13 @@ def judge_reply(raw: str, reply: str, facts: TurnFacts) -> Verdict:
     narrated = (narrated_lookups(reply, has_pasted_content(request))
                 if facts.no_tool_call and not skipped and not _HOW_TO_RE.match(request) else ())
     fabricated = () if facts.known is None else fabricated_ids(raw, facts.known, request)
+    files = missing_files(reply, facts)
     kinds = tuple(kind for kind, on in (
         (MAIL_CLAIM, mail_false), (CALENDAR_CLAIM, cal_false), (PAYMENT_CLAIM, pay_false),
         (WHATSAPP_CLAIM, wa_false), (DELEGATION_CLAIM, deleg_false),
         (SCHEDULE_CLAIM, sched_false), (SKIPPED_TOOLS, bool(skipped)),
         (NARRATED_LOOKUP, bool(narrated)), (FABRICATED_ID, bool(fabricated)),
+        (CLAIMED_FILE, bool(files)),
     ) if on)
     if not kinds:
         return Verdict(claim_lines=lines)
@@ -2593,6 +2677,11 @@ def judge_reply(raw: str, reply: str, facts: TurnFacts) -> Verdict:
         shipped = [token for token in fabricated if token in reply]
         if shipped:
             backstop.append(id_backstop(shipped))
+    if files:
+        parts.append(claimed_file_corrective(files) if not parts else
+                     f"Also: no tool made {', '.join(f'`{n}`' for n in files)} and no such file exists — "
+                     "make it now or say it isn't made.")
+        backstop.append(claimed_file_backstop(files))
     return Verdict(
         kinds=kinds, claim_lines=lines, refused=refused, calendar_refused=cal_refused,
         narrated=narrated, fabricated=fabricated, corrective=" ".join(parts),

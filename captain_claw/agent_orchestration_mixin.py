@@ -18,7 +18,7 @@ from captain_claw.agent_stuck import (
     MSG_STUCK,
     budget_partial,
 )
-from captain_claw import fabrication_guard, jev_progress, loop_guards, mail_authority, msg_origin
+from captain_claw import fabrication_guard, jev_progress, loop_guards, mail_authority, msg_origin, turn_deliverables
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
 from captain_claw.llm import Message, is_reasoning_backfill_placeholder
@@ -1381,6 +1381,9 @@ class AgentOrchestrationMixin:
             others_turn=isinstance(turn, tuple) and bool(turn) and turn[0] in ("peer", "delegated_result"),
             schedule_tools=frozenset() if held else offered & fabrication_guard.SCHEDULE_TOOLS,
             scheduled=isinstance(turn, tuple) and bool(turn) and turn[0] == "cron",
+            # A file the reply hands over: does the agent have it?
+            file_exists=(None if held or not offered
+                         else lambda name: turn_deliverables.has_file_named(self, name)),
         )
         return fabrication_guard.judge_reply(raw, text, facts)
 

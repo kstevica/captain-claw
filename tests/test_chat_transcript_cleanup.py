@@ -276,3 +276,22 @@ def test_an_english_chat_keeps_its_progress_lines():
     agent, shown = _narrating_agent("Make me the renewals table for November please.")
     assert agent._emit_narration("Starting to collect the renewals from the CRM export…") is True
     assert shown == ["Starting to collect the renewals from the CRM export…"]
+
+
+# ── Does the agent have the file a reply names? (fabrication_guard.missing_files) ──
+
+
+def test_has_file_named(world):
+    _write(world.saved / "showcase" / "s1" / "CMA-primjer.png")
+    agent = world.agent
+    assert td.has_file_named(agent, "cma-primjer.png")                       # anywhere, any case
+    assert td.has_file_named(agent, "saved/showcase/s1/CMA-primjer.png")     # workspace-relative
+    assert td.has_file_named(agent, "showcase/s1/CMA-primjer.png")           # saved-relative
+    assert not td.has_file_named(agent, "estate-iq-arhitektura.png")
+    assert not td.has_file_named(agent, "saved/showcase/s1/estate-iq-arhitektura.png")
+    # Can't tell → never "missing".
+    assert td.has_file_named(agent, "vfs:project/plan.png")
+    assert td.has_file_named(types.SimpleNamespace(tools=None), "x.png")
+    for i in range(30):
+        _write(world.saved / "output" / f"f{i}.txt")
+    assert td.has_file_named(agent, "nowhere.png", scan_limit=10)

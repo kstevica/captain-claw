@@ -465,7 +465,7 @@ class PptxTool(Tool):
         """An existing file: vfs- and Drive-aware like the extract tools, then
         the edit tool's fallbacks, then where `create` would have put it."""
         from captain_claw.tools.document_extract import _resolve_readable_file
-        from captain_claw.tools.edit import EditTool
+        from captain_claw.tools.edit import EditTool, backup_of, backup_refused
 
         found, error = await _resolve_readable_file(path, kwargs.get("_runtime_base_path"))
         if found is None:
@@ -477,6 +477,12 @@ class PptxTool(Tool):
             raise P.PptxError(error or f"File not found: {path}")
         allowed = _DECK_SUFFIXES | (_OPEN_ONLY_SUFFIXES if open_only else set())
         suffix = found.suffix.lower()
+        backup = backup_of(found)
+        if backup and backup[1] in _DECK_SUFFIXES:
+            # A backup the edits left: read as the deck it copies, never changed.
+            if open_only:
+                return found
+            raise P.PptxError(backup_refused(found, backup[0], "pptx"))
         if suffix not in allowed:
             if suffix in _OPEN_ONLY_SUFFIXES:
                 raise P.PptxError(f"{found.name} is a template or slide show. Make a deck from it: "

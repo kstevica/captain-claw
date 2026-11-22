@@ -4,6 +4,7 @@ engine, the same way every time. No language model (see captain_claw/ocr/)."""
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -131,8 +132,10 @@ class _OcrTool(Tool):
 
         body = doc.render_markdown(result, raw, settings.low_confidence)
         limit = _extract_char_limit(max_chars, tool_loop="_agent" in kwargs)
+        shown = _truncate_markdown(body, limit)
         report = self._summary(result, settings.low_confidence, md_path, json_path)
-        content = report + "\n\n" + _truncate_markdown(body, limit)
+        cut = _cut_note(result, body, shown, md_path)
+        content = report + (("\n" + cut) if cut else "") + "\n\n" + shown
         log.info("%s done", self.name, path=raw, engine=result.engine, pages=len(result.pages),
                  cached=result.cached)
         return ToolResult(success=True, content=_with_pack_header(file_path, content))
@@ -177,6 +180,36 @@ class _OcrTool(Tool):
         lines.append("Same file + same settings always gives this same text"
                      + (" (stored result reused)." if result.cached else "."))
         return "\n".join(lines)
+
+
+_PAGE_HEADING = re.compile(r"^## Page (\d+)\b", re.MULTILINE)
+
+
+def _cut_note(result: Any, body: str, shown: str, md_path: Path | None) -> str:
+    """What the returned text leaves out when max_chars cut it. The summary's
+    "53 of 80 pages read" is the pages the tool read; the model only sees what
+    is returned. A 2,000-character cut of 53 pages was reported back to the
+    person as "all pages read" (cohort001, 2026-11-19)."""
+    if len(shown) >= len(body):
+        return ""
+    from captain_claw.ocr import document as doc
+
+    where = f" in {md_path}" if md_path is not None else ""
+    if result.kind != "pdf":
+        return (f"⚠️ max_chars cut this text ({len(shown):,} of {len(body):,} characters): read the rest{where}. "
+                "Say only what you have seen.")
+    seen = [int(n) for n in _PAGE_HEADING.findall(shown)]
+    rest = [p.page for p in result.pages if p.page not in set(seen[:-1])]
+    whole = doc._ranges(seen[:-1])
+    if seen:
+        holds = (f"page(s) {whole} in full and page {seen[-1]} in part" if whole
+                 else f"only part of page {seen[-1]}")
+    else:
+        holds = "none of the pages' text"
+    again = doc._ranges(rest[:100])
+    return (f"⚠️ max_chars cut this text ({len(shown):,} of {len(body):,} characters): it holds {holds}. "
+            f"Page(s) {doc._ranges(rest)} are not in what you got: read them{where}, or call again with "
+            f"pages='{again}' and a larger max_chars. Don't say you read a page you haven't seen.")
 
 
 def _progress(cb: Any) -> Callable[[str], None] | None:
