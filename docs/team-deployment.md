@@ -330,7 +330,8 @@ Connections panel).
   Step by step: [docs/guide/web-in-your-chrome.md](guide/web-in-your-chrome.md).
 - **A browser tab opens the kiosk** for people and the **Admin console** for admins; the classic layout is
   at `?app=classic`. Tell your team before they log in.
-- **The File library keeps only what someone added.** Shared folders nobody added leave it at the next scan.
+- **Shared folders leave the File library unless someone added them**, at its next scan; agents' own files
+  are listed as before.
 - **Scheduled tasks pause for people away 7 days or more** (no sign-in, no message to their agents), with a
   Line note, 10 minutes after the deck starts. Set the days or turn it off under **Console → Settings →
   Agents**. Admins see only their own and the system's scheduled tasks.

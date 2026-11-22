@@ -13,8 +13,8 @@ that turns servers away reads the way it does for you.
 
 164 pull requests, #578 to #742. **Restart Flight Deck, then every agent, hard-refresh the browsers, and
 reload Captain for Chrome (now 0.7.2).** First Mate is off until an admin turns it on, a browser tab now
-opens the kiosk or the Admin console, the File library keeps only what someone added, and scheduled tasks
-pause for people away a week; see [Upgrading](#upgrading).
+opens the kiosk or the Admin console, shared folders stay in the File library only when someone added them,
+and scheduled tasks pause for people away a week; see [Upgrading](#upgrading).
 
 Step-by-step guides:
 **[First Mate](https://github.com/kstevica/captain-claw/blob/main/docs/guide/first-mate.md)** ·
@@ -266,8 +266,8 @@ Captain for Chrome also tells you when Flight Deck has a newer copy (**Download*
 - **Why did this happen?** on any call in **Activity** (or the console's **Audit**) replays the approval and
   guard decisions on the recorded call, with no model call, and marks what would go the other way today.
 - **Scheduled jobs that do nothing are caught.** A run that called no tool and only announced work counts as
-  "did nothing", a job pauses after 10 bad runs in a row, new jobs repeat at most every 15 minutes (20 per
-  agent), missed daily or weekly runs more than 2 hours late are skipped, and a job that reached its end
+  "did nothing", a job pauses after 10 bad runs in a row, new jobs that run the model repeat at most every 15
+  minutes (20 jobs per agent), missed daily or weekly runs more than 2 hours late are skipped, and a job that reached its end
   stops itself.
 - **Needs you means you.** It holds only what's blocked on you: a question, an approval, a Go, a decision.
   News is a report. A Bat run started from chat gets a live card with **Stop**, **Try again** and **Open**.
@@ -317,9 +317,10 @@ Captain for Chrome also tells you when Flight Deck has a newer copy (**Download*
   or a directory reads as a table, not one cell per line.
 - **One Add data panel** for factories, runs and Crew: this computer, a paste, links (paste many), agents'
   files, Flight Deck folders, a conversation.
-- **CSV and TSV files open as a table** you can sort, search and edit, up to 50,000 rows.
-- **The File library keeps only what someone added** (**Add to Library**, **Add folder to Library**); the Data
-  library still lists every folder's tables.
+- **A run's CSV and TSV files open as a table** in First Mate that you can sort, search and edit, up to 50,000
+  rows.
+- **Shared folders are in the File library only when someone adds them** (**Add to Library**, **Add folder to
+  Library**); agents' own files are listed as before, and the Data library still lists every folder's tables.
 - **Datastore** writes land in one call: `insert` names unique-key clashes and takes `on_conflict`, and
   `upsert` reports what it inserted and updated.
 - 83 built-in tools (`first_mate` and `request_secret` are new; 82 in the desktop app).
@@ -351,14 +352,14 @@ Captain for Chrome also tells you when Flight Deck has a newer copy (**Download*
    schedule until they turn it on. The first weekly report comes the Monday after.
 4. **A browser tab opens the kiosk** (or the Admin console for admins). The classic layout is at
    `?app=classic`, and Payments review links need it too.
-5. **The File library keeps only what someone added.** At its next scan, shared folders nobody added leave it;
+5. **Shared folders leave the File library unless someone added them**, at its next scan;
    **Add folder to Library** brings one back.
 6. **Scheduled tasks pause for people away 7 days or more**, on the first pass 10 minutes after the deck starts,
    with one Line note each. Change the days or turn it off first under **Console → Settings → Agents**. Admins
    stop seeing other people's scheduled tasks.
 7. **Agents' own scheduled prompts move to their own "⏰" session** on their first run. Jobs that do nothing
-   count as failures and pause after 10; new jobs repeat at most every 15 minutes, 20 per agent; existing jobs
-   keep running.
+   count as failures and pause after 10; new jobs that run the model repeat at most every 15 minutes, 20 jobs per
+   agent; existing jobs keep running.
 8. **Bat runs behave differently**: longer steps, plans up to 12 steps, checks between steps with short reviews
    (counted in the run's spend), and runs with no cap stop at 20 million tokens (`CLAW_BAT_TOKEN_CEILING`, 0 =
    off). Steps already running at the upgrade keep their old limits. Run workers leave people's agent lists.

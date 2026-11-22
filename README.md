@@ -73,7 +73,7 @@ Then ask *"Read this LinkedIn profile and summarize their experience and educati
 - **Agents as a family**: parents, children and siblings in a tree you rearrange, and agents that ask or task their whole family at once.
 - **Safer agents**: approval cards before an agent pays, sends, posts, shares or deletes; `request_secret` for passwords the agent never sees; **Its browser** with **Take control**; **Why did this happen?** on any call.
 - **Leaner agents**: tool search past 16k tokens of tool descriptions (Anthropic's own on Claude), scheduled prompts in a session of their own, and jobs that did nothing caught and paused.
-- **And:** a conversation bar and a picture viewer in the chat, **Computer User** as the fifth Featured archetype, `web_fetch` that keeps headings, lists and tables, CSV files you edit as a table, and 83 built-in tools.
+- **And:** a conversation bar and a picture viewer in the chat, **Computer User** as the fifth Featured archetype, `web_fetch` that keeps headings, lists and tables, a run's CSV files you edit as a table, and 83 built-in tools.
 
 **→ [Release notes](release-notes/RELEASE_NOTES_0.10.0.md)**
 
