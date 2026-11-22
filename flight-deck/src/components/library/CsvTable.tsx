@@ -9,7 +9,7 @@ import type { ColumnKind } from '../../services/dataLibraryApi'
 import { parseCsv, sniffSeparator, toCsv } from '../../utils/csv'
 import { isSheetExt, readXlsx } from '../../utils/xlsx'
 import { Cell, CellEditor, KindIcon, SearchBox, type Col } from './DataLibrary'
-import { filterKindOf, matchesFilter, useColumnFilters } from './columnFilters'
+import { filterKindOf, localValueStats, makeMatcher, useColumnFilters, type ColumnFilter } from './columnFilters'
 import { FilterButton, FilterChips, FilterPopover } from './ColumnFilterUI'
 
 // A CSV, TSV or Excel file as a table, the way the Data library shows a table:
@@ -157,13 +157,27 @@ export function CsvTable({ fileRef: given, path = '', urls, name, extension, onC
   const fkinds = useMemo(() => kinds.map((k) => filterKindOf(k)), [kinds])
   const terms = useMemo(() => q.toLowerCase().split(/\s+/).filter(Boolean), [q])
   const narrowed = terms.length > 0 || filt.filters.length > 0
-  const shown = useMemo(() => {
+  /** The rows the search and these filters leave (top / bottom, the average
+   *  and repeats measured over the whole column). */
+  const narrow = useCallback((filters: ColumnFilter[]) => {
     let list = terms.length
       ? rows.filter((r) => { const hay = r.cells.join(' ').toLowerCase(); return terms.every((t) => hay.includes(t)) })
       : rows
-    if (filt.filters.length) {
-      list = list.filter((r) => filt.filters.every((f) => matchesFilter(f, r.cells[Number(f.col)], fkinds[Number(f.col)] ?? 'text')))
+    if (filters.length) {
+      const tests = filters.map((f) => {
+        const i = Number(f.col)
+        const test = makeMatcher(f, fkinds[i] ?? 'text', rows.map((r) => r.cells[i]))
+        return (r: Row) => test(r.cells[i])
+      })
+      list = list.filter((r) => tests.every((t) => t(r)))
     }
+    return list
+  }, [rows, terms, fkinds])
+  /** A column's values for its filter, among the rows the other filters leave. */
+  const statsFor = (i: number) => (search: string) => Promise.resolve(
+    localValueStats(narrow(filt.filters.filter((f) => f.col !== String(i))).map((r) => r.cells[i]), fkinds[i] ?? 'text', search))
+  const shown = useMemo(() => {
+    let list = narrow(filt.filters)
     if (sort) {
       const numeric = kinds[sort.col] === 'number'
       list = [...list].sort((a, b) => {
@@ -175,7 +189,7 @@ export function CsvTable({ fileRef: given, path = '', urls, name, extension, onC
       })
     }
     return list
-  }, [rows, terms, sort, kinds, fkinds, filt.filters])
+  }, [narrow, sort, kinds, filt.filters])
   const pages = Math.max(1, Math.ceil(shown.length / PAGE))
   const at = Math.min(page, pages - 1)
   const pageRows = shown.slice(at * PAGE, at * PAGE + PAGE)
@@ -383,7 +397,7 @@ export function CsvTable({ fileRef: given, path = '', urls, name, extension, onC
       </div>
       {openMenu && menuCol >= 0 && menuCol < header.length && (
         <FilterPopover key={openMenu.col} anchor={openMenu.anchor} label={header[menuCol]} fk={fkinds[menuCol] ?? 'text'}
-          current={filt.of(openMenu.col)} onApply={(f) => { filt.apply(openMenu.col, f); setPage(0) }} onClose={() => filt.setMenu(null)} />
+          current={filt.of(openMenu.col)} loadStats={statsFor(menuCol)} onApply={(f) => { filt.apply(openMenu.col, f); setPage(0) }} onClose={() => filt.setMenu(null)} />
       )}
     </div>,
     document.body,
