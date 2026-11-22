@@ -1249,9 +1249,26 @@ def _is_temperature_unsupported_model(provider: str, model: str) -> bool:
     :data:`_TEMPERATURE_UNSUPPORTED_MODELS`) are treated the same way.
     """
     base = str(model or "").split("/")[-1].lower()
-    if "fable" in base:
+    if "fable" in base or "mythos" in base or _claude_without_sampling(base):
         return True
     return base in _TEMPERATURE_UNSUPPORTED_MODELS
+
+
+# "claude-opus-4-8", "anthropic.claude-haiku-5-5", "claude-sonnet-4-5-20250929".
+_CLAUDE_NAME_RE = re.compile(r"claude-(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(?!\d)")
+
+
+def _claude_without_sampling(base: str) -> bool:
+    """Claude models that answer a non-default ``temperature`` with a 400:
+    Opus 4.7 and later, and every model of the 5 generation (Sonnet 5 and
+    5.5, Haiku 5.5, Opus 5 and 5.5). Opus 4.6, Sonnet 4.6, Haiku 4.5 and older
+    still take it. Known up front, an agent no longer pays a failed call each
+    time it starts (a Haiku 5.5 agent did on every wake, cohort001)."""
+    m = _CLAUDE_NAME_RE.search(base)
+    if not m:
+        return False
+    family, major, minor = m.group(1), int(m.group(2)), int(m.group(3) or 0)
+    return major >= 5 or (family == "opus" and (major, minor) >= (4, 7))
 
 
 def _normalize_temperature_for_model(provider: str, model: str, temperature: float | None) -> float | None:

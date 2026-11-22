@@ -241,9 +241,10 @@ async def test_acompletion_tolerant_reraises_unrelated_error(
 
 def test_request_kwargs_omits_temperature_for_learned_model(_reset_temperature_registry):
     """Once a model is learned to reject temperature, kwargs omit it up front."""
+    # A model nothing knows about yet (Claude 4.7+ / 5 are known up front).
     provider = LiteLLMProvider(
         provider="anthropic",
-        model="claude-sonnet-5",
+        model="claude-newmodel-1",
         temperature=0.5,
         max_tokens=123,
     )
@@ -254,10 +255,26 @@ def test_request_kwargs_omits_temperature_for_learned_model(_reset_temperature_r
     )
     assert kwargs["temperature"] == 0.5  # still sent before discovery
 
-    llm_mod._remember_temperature_unsupported("anthropic/claude-sonnet-5")
+    llm_mod._remember_temperature_unsupported("anthropic/claude-newmodel-1")
 
     kwargs2 = provider._request_kwargs(
         messages=[Message(role="user", content="hello")],
         stream=False,
     )
     assert "temperature" not in kwargs2  # omitted after discovery
+
+
+
+@pytest.mark.parametrize(("model", "rejects"), [
+    ("claude-haiku-5-5", True), ("anthropic/claude-haiku-5-5", True), ("claude-sonnet-5-5", True),
+    ("claude-sonnet-5", True), ("claude-opus-5-5", True), ("claude-opus-5", True),
+    ("claude-opus-4-8", True), ("claude-opus-4-7", True), ("anthropic.claude-opus-5-5", True),
+    ("claude-fable-5-2", True), ("claude-mythos-5-2", True),
+    ("claude-opus-4-6", False), ("claude-sonnet-4-6", False), ("claude-haiku-4-5", False),
+    ("claude-sonnet-4-5-20250929", False), ("claude-3-5-sonnet-20241022", False),
+    ("deepseek-flash", False), ("gpt-5", False),
+])
+def test_claude_models_without_sampling_are_known_up_front(model, rejects, _reset_temperature_registry):
+    """Opus 4.7+ and the 5 generation 400 on a non-default temperature: known
+    before the first call, so an agent doesn't pay a failed one on every start."""
+    assert llm_mod._is_temperature_unsupported_model("anthropic", model) is rejects

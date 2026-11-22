@@ -536,3 +536,25 @@ async def test_brave_llm_context_can_be_switched_off(search_cfg, monkeypatch):
     await tool.execute(query="zagreb funicular", count=1, enrich=True)
     assert len(tool.client.calls) == 1
     assert pages.fetched == ["https://site0.example/page"]
+
+
+@pytest.mark.asyncio
+async def test_brave_llm_context_not_in_plan_is_not_asked_again(search_cfg, monkeypatch):
+    """cohort001: the key's plan has no LLM Context; every enriched search paid
+    a failed call first. After the first OPTION_NOT_IN_PLAN it isn't asked."""
+    monkeypatch.setattr(ws, "_CONTEXT_NOT_IN_PLAN", set())
+    refused = ('{"type":"ErrorResponse","error":{"status":400,"detail":"The option is not included in '
+               'the plan.","code":"OPTION_NOT_IN_PLAN"}}')
+    pages = _PageClient({"https://site0.example/page": _PageResp(_ARTICLE)})
+    tool = WebSearchTool()
+    monkeypatch.setattr(tool, "_page_client", lambda: pages)
+    tool.client = _Client(_Resp(_brave_page(0, 1)), _Resp({}, 400))
+    tool.client._responses[1].text = refused
+    first = await tool.execute(query="zagreb funicular", count=1, enrich=True)
+    assert first.success and len(tool.client.calls) == 2
+
+    tool.client = _Client(_Resp(_brave_page(0, 1)))
+    second = await tool.execute(query="zagreb funicular tickets", count=1, enrich=True)
+    assert second.success
+    assert [c["url"] for c in tool.client.calls] == ["https://api.search.brave.com/res/v1/web/search"]
+    assert pages.fetched == ["https://site0.example/page", "https://site0.example/page"]

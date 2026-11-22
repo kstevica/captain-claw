@@ -87,15 +87,17 @@ def deck(tmp_path, monkeypatch):
     return {"store": store, "agent_rows": agent_rows, "told": told, "settings": settings}
 
 
-def _task(store, owner: str, name: str, enabled: bool = True) -> dict:
-    return store.create(owner_id=owner, name=name, schedule="daily 07:30", agent_slug=f"agent-{owner}",
+def _task(store, owner: str, name: str, enabled: bool = True, schedule: str = "daily 07:30") -> dict:
+    return store.create(owner_id=owner, name=name, schedule=schedule, agent_slug=f"agent-{owner}",
                         prompt="Check the tenders", delivery_kind="agent",
                         delivery={"chat": True}, enabled=enabled)
 
 
-def _agent_job(deck, owner: str, job_id: str, text: str, enabled: int = 1) -> None:
+def _agent_job(deck, owner: str, job_id: str, text: str, enabled: int = 1,
+               schedule: dict | None = None) -> None:
     deck["agent_rows"].setdefault(f"agent-{owner}", []).append(
-        {"id": job_id, "enabled": enabled, "kind": "prompt", "payload": json.dumps({"text": text})})
+        {"id": job_id, "enabled": enabled, "kind": "prompt", "payload": json.dumps({"text": text}),
+         "schedule": json.dumps(schedule or {"type": "daily", "hour": 7, "minute": 30})})
 
 
 # ── who counts as away ────────────────────────────────────────────────
@@ -162,7 +164,7 @@ async def test_the_day_count_comes_from_the_deck(deck, monkeypatch):
     deck["settings"].config = {"scheduled_idle_pause_days": 3}
     assert await idle_pause.idle_days() == 3
     assert await idle_pause.sweep(db, now=NOW.timestamp()) == 1
-    assert "3 days" in deck["told"][0][2]
+    assert "for 4 days" in deck["told"][0][2]      # how long they have been away
 
 
 async def test_a_running_agent_is_asked_through_its_own_rest(deck, monkeypatch):
@@ -186,10 +188,10 @@ async def test_one_owner_failing_doesnt_stop_the_others(deck, monkeypatch):
     _task(deck["store"], "b", "B's task")
     real = idle_pause._pause_agent_jobs
 
-    async def boom(uid):
+    async def boom(uid, *args):
         if uid == "a":
             raise RuntimeError("agent file locked")
-        return await real(uid)
+        return await real(uid, *args)
 
     monkeypatch.setattr(idle_pause, "_pause_agent_jobs", boom)
     db = _Db([_user("a", login=9), _user("b", login=9)])
@@ -245,3 +247,42 @@ async def test_the_admin_setting_is_bounded_and_saved(monkeypatch):
     assert json.loads(db.stored) == {"scheduled_idle_pause_days": 14}
     off = await admin_routes.update_config(req(scheduled_idle_pause_days=0), admin={})
     assert off["scheduled_idle_pause_days"] == 0
+
+
+# ── A job that runs less often waits longer (cohort001, 2026-11-20) ──────────
+#
+# With the setting at 3 days, a weekly Monday scan was paused on the Thursday
+# after the Monday its owner last came to read it.
+
+
+@pytest.mark.parametrize(("schedule", "days"), [
+    ("daily 07:30", 1.0), ("weekdays 09:00", 1.0), ("every 2d", 2.0), ("every 6h", 0.25),
+    ("weekly mon 08:00", 7.0), ("weekly mon,thu 08:00", 3.5), ("in 3d", 0.0),
+    ("once 2026-12-01T09:00", 0.0), ("nonsense", 0.0), ("", 0.0),
+    ({"type": "weekly", "weekday": 0, "hour": 8, "minute": 0}, 7.0),
+    ({"type": "daily", "hour": 9, "minute": 0}, 1.0),
+    ({"type": "interval", "unit": "hours", "interval": 48}, 2.0),
+    ({"type": "interval", "unit": "minutes", "interval": 15}, 15 / 1440),
+    ({"type": "once", "target_iso": "2026-12-01T09:00:00+00:00"}, 0.0),
+])
+def test_period_days(schedule, days):
+    assert idle_pause.period_days(schedule) == pytest.approx(days)
+
+
+async def test_a_weekly_job_waits_two_of_its_weeks(deck):
+    _task(deck["store"], "vedran", "Daily check")
+    _task(deck["store"], "vedran", "Weekly scan", schedule="weekly mon 08:00")
+    _agent_job(deck, "vedran", "w1", "Competitor scan",
+               schedule={"type": "weekly", "weekday": 0, "day": "mon", "hour": 8, "minute": 0})
+    deck["settings"].config = {"scheduled_idle_pause_days": 3}
+
+    assert await idle_pause.sweep(_Db([_user("vedran", login=4)]), now=NOW.timestamp()) == 1
+    by_name = {t["name"]: t["enabled"] for t in deck["store"].list(owner_id="vedran")}
+    assert by_name == {"Daily check": 0, "Weekly scan": 1}
+    assert deck["agent_rows"]["agent-vedran"][0]["enabled"] == 1
+
+    # Two weeks away: the weekly ones go too, told in one more Line item.
+    assert await idle_pause.sweep(_Db([_user("vedran", login=14)]), now=NOW.timestamp()) == 2
+    assert not any(t["enabled"] for t in deck["store"].list(owner_id="vedran"))
+    assert deck["agent_rows"]["agent-vedran"][0]["enabled"] == 0
+    assert [t[1] for t in deck["told"]] == ["Scheduled tasks paused (1)", "Scheduled tasks paused (2)"]
