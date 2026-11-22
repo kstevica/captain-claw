@@ -788,7 +788,11 @@ class ToolsConfig(BaseModel):
     # WhatsApp there. image_vision is how an
     # agent looks at a picture (attached, downloaded, or one it saw earlier);
     # an archetype that left it out had no way to see an image at all.
-    _ALWAYS_ENABLED: frozenset[str] = frozenset({
+    # A tuple, not a set: the tools missing from an agent's list are appended
+    # in this order, and a set's order changes with every process (hash
+    # seed) — each restart reordered the tool list and the prompt, and the
+    # provider's prompt cache missed everything behind them.
+    _ALWAYS_ENABLED: tuple[str, ...] = (
         "read", "write", "edit", "personality", "botport", "playbooks",
         "browser", "datastore", "direct_api", "cron",
         "google_drive", "google_calendar", "google_mail",
@@ -843,7 +847,7 @@ class ToolsConfig(BaseModel):
         # The person's external memory (Membase, …) lives in Flight Deck and is
         # shared by all of their agents; hidden until they connect one.
         "external_memory",
-    })
+    )
 
     @model_validator(mode="after")
     def _ensure_always_enabled(self) -> "ToolsConfig":

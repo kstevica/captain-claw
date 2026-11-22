@@ -2675,32 +2675,11 @@ class AgentOrchestrationMixin:
 
             # ── LLM call ──────────────────────────────────────────
             self._set_runtime_status("thinking")
-            # Governed: fold older results before the request outgrows ~80%
-            # of the real window (one batch, then append-only again).
-            if self._governor_on():
-                self._maybe_fold_turn_context(turn_start_idx)
-            # The gate feedback rides after the build: the governed budget
-            # leaves room for it.
-            self._pending_feedback_tokens = (
-                self._count_tokens(completion_feedback)
-                if completion_feedback and not _continuing_answer else 0
-            )
-            messages = self._build_messages(
-                tool_messages_from_index=turn_start_idx,
-                query=effective_user_input,
-                planning_pipeline=planning_pipeline,
-                list_task_plan=list_task_plan,
-            )
-            # Gate feedback waits while a cut-off answer is being continued:
-            # as the last word it would turn "continue" into "rewrite".
-            if completion_feedback and not _continuing_answer:
-                messages.append(
-                    Message(
-                        role="user",
-                        content=completion_feedback,
-                    )
-                )
-
+            # Connection flags before the messages: the turn's system prompt is
+            # built (and frozen for the turn) in _build_messages and names the
+            # connected tools. Refreshed after it, a freshly started agent's
+            # first turn named none of them, the next turn's prompt differed,
+            # and the provider's prompt cache missed everything behind it.
             # Refresh Google OAuth connection flag so Google-dependent
             # tools appear/disappear in the agent's tool list the moment
             # the user connects or disconnects via Flight Deck. Cheap:
@@ -2794,6 +2773,32 @@ class AgentOrchestrationMixin:
                     await whatsapp_web_client.refresh_connected()
                 except Exception:
                     pass
+
+            # Governed: fold older results before the request outgrows ~80%
+            # of the real window (one batch, then append-only again).
+            if self._governor_on():
+                self._maybe_fold_turn_context(turn_start_idx)
+            # The gate feedback rides after the build: the governed budget
+            # leaves room for it.
+            self._pending_feedback_tokens = (
+                self._count_tokens(completion_feedback)
+                if completion_feedback and not _continuing_answer else 0
+            )
+            messages = self._build_messages(
+                tool_messages_from_index=turn_start_idx,
+                query=effective_user_input,
+                planning_pipeline=planning_pipeline,
+                list_task_plan=list_task_plan,
+            )
+            # Gate feedback waits while a cut-off answer is being continued:
+            # as the last word it would turn "continue" into "rewrite".
+            if completion_feedback and not _continuing_answer:
+                messages.append(
+                    Message(
+                        role="user",
+                        content=completion_feedback,
+                    )
+                )
 
             active_task_tool_policy = self._active_task_tool_policy_payload(planning_pipeline)
             tool_defs = self.tools.get_definitions(
