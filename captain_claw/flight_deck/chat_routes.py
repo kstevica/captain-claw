@@ -122,10 +122,13 @@ async def add_messages(
     user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    ids = await db.add_chat_messages(_store_id(session_id, user["id"]), user["id"], body.messages)
+    known: list[int] = []
+    ids = await db.add_chat_messages(_store_id(session_id, user["id"]), user["id"], body.messages, known=known)
     if not ids:
         raise HTTPException(status_code=404, detail="Chat session not found")
-    return {"ok": True, "ids": ids}
+    # `known`: healed turns the log already had (not written again) — the chat
+    # takes them back out of its window.
+    return {"ok": True, "ids": ids, **({"known": known} if known else {})}
 
 
 @router.delete("/sessions/{session_id}/messages/{row_id}")

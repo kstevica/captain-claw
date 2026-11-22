@@ -2413,14 +2413,29 @@ class FlightDeckDB:
 
     async def add_chat_messages(
         self, session_id: str, user_id: str, messages: list[dict],
+        known: list[int] | None = None,
     ) -> list[int]:
+        """Append rows to a chat log; their row ids, in order.
+
+        A turn the chat healed from the agent's replay (``"healed": true`` in
+        its metadata) that the log already holds word for word is not written
+        again: the existing row's id comes back in its place, and its index goes
+        into *known* when given. A slip in the chat's replay merge once saved
+        whole sessions a second time (cohort001: 613 of 2,403 rows). Short lines
+        ("da", "1") repeat for real, so they stay the chat's call."""
         assert self._db is not None
         sess = await self.get_chat_session(session_id, user_id)
         if not sess:
             return []
         now = _utcnow()
         ids = []
-        for msg in messages:
+        for i, msg in enumerate(messages):
+            existing = await self._logged_healed_turn(session_id, msg)
+            if existing is not None:
+                ids.append(existing)
+                if known is not None:
+                    known.append(i)
+                continue
             cur = await self._db.execute(
                 "INSERT INTO chat_messages (session_id, role, content, metadata, created_at)"
                 " VALUES (?, ?, ?, ?, ?)",
@@ -2434,6 +2449,30 @@ class FlightDeckDB:
         )
         await self._db.commit()
         return ids
+
+    _HEALED_MIN_CHARS = 40
+
+    async def _logged_healed_turn(self, session_id: str, msg: dict) -> int | None:
+        """The row id of a healed turn the log already has (add_chat_messages)."""
+        role = str(msg.get("role") or "")
+        content = str(msg.get("content") or "")
+        if role not in ("user", "assistant") or len(content) < self._HEALED_MIN_CHARS:
+            return None
+        meta = msg.get("metadata")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta or "{}")
+            except (TypeError, ValueError):
+                return None
+        if not isinstance(meta, dict) or meta.get("healed") is not True:
+            return None
+        async with self._db.execute(
+            "SELECT id FROM chat_messages WHERE session_id = ? AND role = ? AND content = ?"
+            " ORDER BY id DESC LIMIT 1",
+            (session_id, role, content),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row[0]) if row else None
 
     # ── Usage logs ───────────────────────────────────────────────────
 
