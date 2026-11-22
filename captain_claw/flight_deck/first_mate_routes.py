@@ -1116,7 +1116,9 @@ async def agent_intent(body: AgentIntentReq) -> dict:
 
 # ── the first_mate tool (an agent's turn for its owner) ─────────────────
 
-AGENT_ACTIONS = ("list", "status", "run", "pause", "resume", "report", "draft")
+AGENT_ACTIONS = ("list", "status", "runs", "run", "pause", "resume", "report", "draft")
+AGENT_RUNS_SHOWN = 8
+AGENT_FILES_SHOWN = 8
 _STATE_WORDS = {"draft": "a draft", "awaiting_charter": "waiting for your approval", "running": "running",
                 "paused": "paused", "paused_budget": "over budget", "stopped": "stopped"}
 
@@ -1218,10 +1220,53 @@ def _status_text(store: fms.FirstMateStore, card: dict[str, Any], now: datetime)
     return "\n".join(lines)
 
 
+async def _runs_text(store: fms.FirstMateStore, f: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """A factory's newest runs for its owner's agent: how each went and where
+    its files are, as ``vfs:`` paths the file tools read."""
+    from captain_claw import vfs
+    from captain_claw.flight_deck import first_mate_results as rr
+    from captain_claw.flight_deck.vfs_routes import _user_root
+    listed = store.list_runs(f["id"], limit=AGENT_RUNS_SHOWN, archived=False)
+    if not listed:
+        return f"{f['title']} hasn't run yet.", []
+    lines, out = [f"{f['title']}: its newest {len(listed)} run{'' if len(listed) == 1 else 's'}, newest first."], []
+    for run in listed:
+        got = await rr.run_results(run)
+        working = run["status"] in fms.ACTIVE_RUN
+        held = bool(got) and vfs.run_lock_at(_user_root(run["owner_id"]), got["project"]).is_file()
+        head = [str(run["created_at"])[:16].replace("T", " ") + " UTC", run["status"].replace("_", " "),
+                "a rehearsal" if run["kind"] == "rehearsal" else ""]
+        took = rr.timing_line((got or {}).get("timing"))
+        lines.append("- " + " · ".join(b for b in head if b) + (f" · {took[:1].lower() + took[1:]}" if took else ""))
+        words = str(run.get("result") or run.get("error") or "").strip()
+        if words:
+            lines.append(f"  {words[:300]}")
+        files = []
+        if got and got["total"]:
+            root = f"vfs:{got['project']}/"
+            lines.append(f"  Files in {root}" + (" (read-only while it works)" if held else "") + ":")
+            for item in (got["main"] + got["other"])[:AGENT_FILES_SHOWN]:
+                rows = item.get("rows")
+                bits = ([f"{rows:,} row{'' if rows == 1 else 's'}"] if rows is not None else []) + [rr.size_text(item["size"])]
+                lines.append(f"    {root}{item['path']} ({', '.join(bits)})")
+                files.append(root + item["path"])
+            rest = got["total"] - len(files)
+            if rest > 0:
+                lines.append(f"    and {rest} more: the vfs tool's tree shows them")
+            look = rr.worth_a_look(got)
+            if look:
+                lines.append(f"  {look}")
+        elif not working:
+            lines.append("  It left no files.")
+        out.append({"run_id": run["id"], "status": run["status"], "created_at": run["created_at"],
+                    "project": (got or {}).get("project", ""), "files": files})
+    return "\n".join(lines), out
+
+
 @router.post("/fd/first-mate/agent/tool")
 async def agent_tool(body: AgentToolReq) -> dict:
     """The ``first_mate`` tool: an agent, for its own owner, lists their
-    factories, reads one, runs, pauses or resumes it, or reads the week. It
+    factories, reads one and its runs' files, runs, pauses or resumes it, or reads the week. It
     never approves, carries out or raises trust: those are the owner's own."""
     from captain_claw.flight_deck import crew_runner
     from captain_claw.flight_deck.basna_routes import _AgentReq, _resolve_owner
@@ -1268,6 +1313,9 @@ async def agent_tool(body: AgentToolReq) -> dict:
         f = find_factory(store, owner, body.factory)
         if body.action == "status":
             return {"ok": True, "text": _status_text(store, _card(store, f, week, now), now), "id": f["id"]}
+        if body.action == "runs":
+            text, listed = await _runs_text(store, f)
+            return {"ok": True, "text": text, "id": f["id"], "runs": listed}
         if body.action == "run":
             run = await runs.start(f["id"], owner, trigger="manual", note=body.note)
             how = ("a rehearsal: nothing outside happens until you approve what it would do"

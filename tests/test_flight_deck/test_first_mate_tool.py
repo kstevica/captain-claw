@@ -4,8 +4,8 @@ Pinned here:
 
 * the route resolves the agent's owner from the deck's records and follows
   First Mate's switch and who may use it;
-* list, status, run, pause, resume and the week's report, each on the owner's
-  own factories, found by name (exact, or the only one it fits);
+* list, status, runs (with their files), run, pause, resume and the week's
+  report, each on the owner's own factories, found by name (exact, or the only one it fits);
 * it never approves, carries out or moves trust;
 * the tool refuses inside any run, wants a factory where one is needed,
   and is refused in rehearsals like the other run starters;
@@ -44,6 +44,9 @@ class FakeBat:
 
     async def append_event(self, run_id, stage, message="", **data):
         return 1
+
+    async def list_events(self, run_id, limit=500):
+        return []
 
     async def get_run(self, run_id):
         r = self.runs.get(run_id)
@@ -179,6 +182,35 @@ async def test_run_pause_resume(store, bat, owner_is, db):
     assert (await _ask("resume", factory="inbox replies"))["ok"] and store.get(f["id"])["state"] == "running"
     acts = [(e["event"], e["actor"]) for e in store.events(f["id"]) if e["event"] == "state"]
     assert acts == [("state", "owner"), ("state", "owner")]
+
+
+async def test_runs_and_where_their_files_are(store, bat, owner_is, db, tmp_path, monkeypatch):
+    """An agent reads how a factory's runs went and gets each run's files as
+    vfs: paths; a run the deck is driving shows its folder as read-only."""
+    from captain_claw import vfs
+    from captain_claw.flight_deck import server
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path / "fd-data")
+    _live(store)
+    _live(store, owner=CAROL, title="Carol's digest")
+    assert (await _ask("runs", factory="inbox"))["text"] == "Inbox replies hasn't run yet."
+    started = await _ask("run", factory="inbox")
+    run = store.get_run(started["run_id"])
+    project = f"bat-{run['child_id'][:8]}"
+    root = tmp_path / "fd-data" / "vfs" / BOB
+    (root / project / "progress").mkdir(parents=True)
+    (root / project / "replies.csv").write_text("To,Subject\na,b\nc,d\n", encoding="utf-8")
+    (root / project / "progress" / "step.md").write_text("working", encoding="utf-8")
+    vfs.set_run_lock(root, project, True)
+    got = await _ask("runs", factory="inbox")
+    assert got["ok"] and got["runs"][0]["run_id"] == run["id"]
+    assert got["runs"][0]["files"] == [f"vfs:{project}/replies.csv"]
+    assert f"Files in vfs:{project}/ (read-only while it works):" in got["text"]
+    assert f"vfs:{project}/replies.csv (2 rows, 1 KB)" in got["text"] and "step.md" not in got["text"]
+    vfs.set_run_lock(root, project, False)
+    assert "read-only" not in (await _ask("runs", factory="inbox"))["text"]
+    owner_is["owner"] = CAROL  # never another owner's
+    assert not (await _ask("runs", factory="inbox"))["ok"]
+    assert (await _ask("runs", factory="digest"))["text"] == "Carol's digest hasn't run yet."
 
 
 async def test_the_report(store, owner_is):

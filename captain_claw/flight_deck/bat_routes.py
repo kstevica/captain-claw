@@ -2527,6 +2527,20 @@ bat_loop.set_judge(_bat_judge)
 bat_loop.set_replanner(_bat_replan)
 bat_loop.set_on_finish(_bat_on_finish)
 bat_loop.set_gate_check(_gate_check)
+
+
+def _hold_folder(run: dict, on: bool) -> None:
+    from captain_claw import vfs
+    vfs.set_run_lock(_run_folder(run).parent, _project_of(run), on)
+
+
+def _sweep_folder_locks(driven: set[str]) -> None:
+    from captain_claw import vfs
+    from captain_claw.flight_deck.vfs_routes import _user_root
+    vfs.sweep_run_locks(_user_root("local").parent, {_project_of({"id": rid}) for rid in driven})
+
+
+bat_loop.set_folder_lock(_hold_folder, _sweep_folder_locks)
 human_ask.set_notifier(_notify_ask)
 
 

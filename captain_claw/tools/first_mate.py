@@ -2,7 +2,7 @@
 
 First Mate runs standing jobs ("factories") for the owner, each with a charter
 they approved (docs/first-mate-plan.md §11). Through this tool an agent, on its
-owner's turn, lists the factories, reads one, runs, pauses or resumes it, and
+owner's turn, lists the factories, reads one and its runs' files, runs, pauses or resumes it, and
 reads the week's report. It never approves what a factory would do, carries it
 out, or raises its trust: those stay the owner's own, on First Mate and the
 Line. It refuses inside any worker run and in rehearsals (rehearsal_turn).
@@ -23,8 +23,8 @@ from captain_claw.tools.registry import Tool, ToolResult
 
 log = structlog.get_logger(__name__)
 
-ACTIONS = ("list", "status", "run", "pause", "resume", "report", "draft")
-_NEEDS_FACTORY = ("status", "run", "pause", "resume")
+ACTIONS = ("list", "status", "runs", "run", "pause", "resume", "report", "draft")
+_NEEDS_FACTORY = ("status", "runs", "run", "pause", "resume")
 
 
 class FirstMateTool(Tool):
@@ -33,7 +33,9 @@ class FirstMateTool(Tool):
         "First Mate — your owner's standing jobs ('factories'), each running on a charter they approved and "
         "checked every run. Actions: 'list' (every factory with its state, trust, health, last and next run, "
         "and what waits for the owner), 'status' (factory — its charter, health, this week, trust, cases, last "
-        "run and what it would do), 'run' (factory[, note] — like pressing Run now; a factory that asks first "
+        "run and what it would do), 'runs' (factory — its newest runs: how each went and its result files as "
+        "vfs: paths you read with the file tools; a run that is still working keeps its folder read-only), "
+        "'run' (factory[, note] — like pressing Run now; a factory that asks first "
         "only rehearses), 'pause' (factory[, note as the reason]), 'resume' (factory), 'report' (week: 'last' "
         "or 'this'), 'draft' (words — set up a new factory from what the owner wants, in their words: it waits "
         "for their approval and never runs before it). Name a factory by its name; part of it is enough when "
@@ -46,7 +48,7 @@ class FirstMateTool(Tool):
         "type": "object",
         "properties": {
             "action": {"type": "string", "enum": list(ACTIONS)},
-            "factory": {"type": "string", "description": "For status, run, pause, resume: the factory's name."},
+            "factory": {"type": "string", "description": "For status, runs, run, pause, resume: the factory's name."},
             "note": {"type": "string", "description": "For run: a note for this run. For pause: why."},
             "week": {"type": "string", "enum": ["last", "this"], "description": "For report: which week."},
             "words": {"type": "string", "description": "For draft: what the owner wants the new factory to do, "

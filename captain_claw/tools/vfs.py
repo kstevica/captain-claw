@@ -187,6 +187,16 @@ class VfsTool(Tool):
                     or (action == "mv" and pack_access.is_pack_value(_as_vfs(to)))):
                 return ToolResult(success=False, error=pack_access.PACKS_READ_ONLY_MESSAGE)
 
+            # So is a read-only linked folder, and a working run's folder.
+            if action in ("mkdir", "mv", "rm"):
+                from captain_claw.vfs import readonly_reason
+                for shown in ([path, to] if action == "mv" else [path]):
+                    proj = split_scheme(_as_vfs(shown))[0]
+                    why = readonly_reason(proj)
+                    if why:
+                        return ToolResult(success=False, error=f"'{proj or default_project()}' cannot be changed: "
+                                                               f"{why.rstrip('.')}.")
+
             # Remaining actions need a resolved path.
             target = resolve_vfs_path(_as_vfs(path))
             in_pack = pack_access.pack_of_path(target) is not None if target is not None else False

@@ -316,7 +316,85 @@ def _drive_mount_root(root: Path, name: str) -> Path | None:
     return p.resolve() if (p.is_dir() and (p / _DRIVE_MANIFEST).is_file()) else None
 
 
+# A run that is working keeps its folder to itself: the deck drops a marker
+# ``<user root>/.run-locks/<project>`` while it drives the run and takes it away
+# when the run ends, stops or waits for its owner. Every other agent of that
+# owner reads the folder freely and writes nothing there until then. The run's
+# own workers (bound to a run folder by ``CLAW_VFS_PROJECT``) are not held.
+RUN_LOCKS_DIR = ".run-locks"
+RUN_WORKING_MESSAGE = ("a run is working in this folder, so it is read-only until the run ends or stops; "
+                       "read it freely and write your own files in another folder")
+
+
+def run_lock_at(root: Path, project: str) -> Path:
+    return root / RUN_LOCKS_DIR / _sanitize(project, fallback=_DEFAULT_PROJECT)
+
+
+def set_run_lock(root: Path, project: str, on: bool) -> None:
+    """Mark (or free) *project* under the user root *root* as a working run's."""
+    mark = run_lock_at(root, project)
+    try:
+        if on:
+            mark.parent.mkdir(parents=True, exist_ok=True)
+            mark.touch()
+        else:
+            mark.unlink(missing_ok=True)
+    except OSError:
+        pass  # a lock that can't be written must never stop a run
+
+
+def sweep_run_locks(base: Path, working: set[str]) -> int:
+    """Free every marker under the deck's VFS *base* whose run the deck is no
+    longer driving (a deck that went down mid-run leaves its markers behind).
+    Returns how many it freed."""
+    freed = 0
+    try:
+        marks = list(base.glob(f"*/{RUN_LOCKS_DIR}/*"))
+    except OSError:
+        return 0
+    for mark in marks:
+        if mark.name not in working:
+            try:
+                mark.unlink(missing_ok=True)
+                freed += 1
+            except OSError:
+                pass
+    return freed
+
+
+def run_working(project: str = "") -> bool:
+    """True when a working run holds *project* and this process isn't one of a
+    run's own workers."""
+    if os.environ.get("CLAW_VFS_PROJECT", "").strip():
+        return False
+    raw = project or default_project()
+    try:
+        root = user_root()
+        if run_lock_at(root, raw).is_file():
+            return True
+        canon = resolve_project_name(raw)
+        return bool(canon and run_lock_at(root, canon).is_file())
+    except (OSError, PermissionError):
+        return False
+
+
+def readonly_reason(project: str = "") -> str:
+    """Why *project* can't be written to, in words for the agent; "" when it can."""
+    if run_working(project):
+        return RUN_WORKING_MESSAGE
+    if _linked_readonly(project):
+        return "it is a read-only folder (e.g. a Google Drive mount)"
+    return ""
+
+
 def project_is_readonly(project: str = "") -> bool:
+    """True when *project* can't be written to: a linked folder mounted
+    read-only (:func:`_linked_readonly`), or a working run's folder
+    (:func:`run_working`)."""
+    return run_working(project) or _linked_readonly(project)
+
+
+def _linked_readonly(project: str = "") -> bool:
     """True when *project* is a linked folder mounted read-only (``mode: "ro"``).
 
     The write tools consult this so a read-only link — a Google Drive mount, or
