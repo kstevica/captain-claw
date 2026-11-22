@@ -3239,7 +3239,10 @@ class WebServer:
 
         ``reasoning_effort`` (off … max, or auto; optional) sets how hard a
         thinking model thinks for this call alone: Flight Deck's setup reads
-        turn it off, so the answer isn't spent on thoughts.
+        turn it off, so the answer isn't spent on thoughts. ``quiet`` runs it
+        as a housekeeping call (``reasoning.quiet_call``): thinking off where
+        the model offers "off", nothing sent where it doesn't — the deck's
+        reflection, arbiter, plans, goal progress and dispatch judge.
 
         ``defer`` (a background job that can wait: Work board triage, the
         deck's reflection and arbiter) holds the call while this agent is at
@@ -3299,8 +3302,13 @@ class WebServer:
         except (TypeError, ValueError):
             pass
 
+        effort = body.get("reasoning_effort")
+        effort_scope = (
+            reasoning.quiet_call() if str(effort or "").strip().lower() == reasoning.QUIET
+            else reasoning.call_effort(effort)
+        )
         try:
-            with reasoning.call_effort(body.get("reasoning_effort")):
+            with effort_scope:
                 resp: LLMResponse = await provider.complete(
                     messages,
                     temperature=temperature,

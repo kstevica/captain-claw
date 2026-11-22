@@ -75,6 +75,8 @@ def _env_int(name: str, default: int) -> int:
 PULSE_INTERVAL_SECONDS = max(30.0, _env_float("CONSCIOUSNESS_PULSE_SECONDS", 180.0))
 # Longest a reflection waits for its agent's run to end on a self-hosted model.
 _REFLECT_DEFER_S = 300.0
+# Output cap for a reflection: room for a model that thinks before it answers.
+REFLECT_MAX_TOKENS = 10_000
 # Minimum new messages (or any new session) before a pulse is "worth a thought".
 # Below this the beat is silent and free.
 MIN_NEW_MESSAGES = max(1, _env_int("CONSCIOUSNESS_MIN_NEW_MESSAGES", 3))
@@ -777,16 +779,20 @@ async def _reflect(
         course=_course.prompt_lines(_course.live_goals(user_id), max_chars=1200))
 
     from captain_claw.games.remote_provider import RemoteLLMProvider
-    from captain_claw.llm import Message
+    from captain_claw.llm import Message, reasoning
 
     last_err: Exception | None = None
     for agent in ranked:
         # A reflection can wait for the agent's run to end (side_calls) — a
         # shorter while than the board's: the heartbeat pulses owners one
         # after another, so a long hold would hold every owner after this one.
+        # Quiet: a thinking model with thinking on by default spent all 1500
+        # tokens thinking and cut the JSON off; the roomier cap covers a
+        # model that can't switch thinking off.
         provider = RemoteLLMProvider(
             host=agent["host"], port=agent["port"], auth=agent["auth"],
             name=agent["name"], defer_s=_REFLECT_DEFER_S,
+            reasoning_effort=reasoning.QUIET,
         )
         try:
             resp = await provider.complete(
@@ -795,7 +801,7 @@ async def _reflect(
                     Message(role="user", content=user_prompt),
                 ],
                 temperature=0.6,
-                max_tokens=1500,
+                max_tokens=REFLECT_MAX_TOKENS,
             )
             return _parse_reflection(resp.content), agent
         except Exception as exc:

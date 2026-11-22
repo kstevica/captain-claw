@@ -31,6 +31,8 @@ STEP_STATUSES = ("pending", "running", "done", "failed", "skipped")
 # How many step failures a plan may absorb (re-decomposing the remainder each
 # time) before it gives up — bounds the replan loop on an impossible step.
 _MAX_REPLANS = 2
+# Output cap for a goal's plan: room for a model that thinks before it answers.
+PLAN_MAX_TOKENS = 10_000
 
 
 def _norm_user(user_id: str | None) -> str:
@@ -208,15 +210,16 @@ async def decompose_goal(user_id: str, goal: str) -> list[dict[str, Any]]:
     )
     try:
         from captain_claw.games.remote_provider import RemoteLLMProvider
-        from captain_claw.llm import Message
+        from captain_claw.llm import Message, reasoning
         provider = RemoteLLMProvider(host=agent["host"], port=agent["port"],
-                                     auth=agent["auth"], name=agent.get("name", ""))
+                                     auth=agent["auth"], name=agent.get("name", ""),
+                                     reasoning_effort=reasoning.QUIET)
         resp = await provider.complete(
             messages=[
                 Message(role="system", content=_PLANNER_SYSTEM + "\n\nAction catalog:\n" + cat_text),
                 Message(role="user", content=f"Goal: {goal}"),
             ],
-            temperature=0.3, max_tokens=1200,
+            temperature=0.3, max_tokens=PLAN_MAX_TOKENS,
         )
     except Exception as exc:
         _log.warning("plan decomposition failed: %s", exc)

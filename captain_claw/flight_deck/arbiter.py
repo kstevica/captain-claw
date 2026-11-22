@@ -37,6 +37,8 @@ _log = logging.getLogger(__name__)
 # Action kinds the arbiter may propose (must match the ledger / later dispatch).
 _KINDS = ("nudge", "run_prompt", "basna", "materialize_schedule", "stop_run", "tool_action", "track", "factory")
 _RISKS = ("low", "normal", "high")
+# Output cap for a ranking: room for a model that thinks before it answers.
+RANK_MAX_TOKENS = 10_000
 
 _SYSTEM_PROMPT = (
     "You are the Arbiter: you turn the assistant's own reflections and standing "
@@ -731,12 +733,14 @@ async def maybe_run_arbiter(
         try:
             from captain_claw import side_calls
             from captain_claw.games.remote_provider import RemoteLLMProvider
-            from captain_claw.llm import Message
+            from captain_claw.llm import Message, reasoning
 
-            # Ranking can wait for the agent's run to end (side_calls).
+            # Ranking can wait for the agent's run to end (side_calls), and
+            # runs with thinking off where the model can switch it off.
             provider = RemoteLLMProvider(
                 host=author["host"], port=author["port"], auth=author["auth"],
                 name=author.get("name", ""), defer_s=side_calls.DEFAULT_MAX_WAIT_S,
+                reasoning_effort=reasoning.QUIET,
             )
             resp = await provider.complete(
                 messages=[
@@ -744,7 +748,7 @@ async def maybe_run_arbiter(
                     Message(role="user", content=user_prompt),
                 ],
                 temperature=0.3,
-                max_tokens=1500,
+                max_tokens=RANK_MAX_TOKENS,
             )
         except Exception as exc:
             _log.warning("arbiter: no agent could rank: %s", exc)

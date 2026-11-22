@@ -211,16 +211,19 @@ def ranker(monkeypatch, store):
     class _Provider:
         reply: list = []
         prompts: list = []
+        calls: list = []
 
         def __init__(self, **kw):
-            pass
+            self.kw = kw
 
         async def complete(self, **kw):
             msgs = kw.get("messages") or []
             _Provider.prompts.append({m.role: m.content for m in msgs})
+            _Provider.calls.append({"effort": self.kw.get("reasoning_effort"),
+                                    "max_tokens": kw.get("max_tokens")})
             return _Resp(json.dumps(_Provider.reply))
 
-    _Provider.reply, _Provider.prompts = [], []
+    _Provider.reply, _Provider.prompts, _Provider.calls = [], [], []
     monkeypatch.setattr(rp, "RemoteLLMProvider", _Provider)
 
     async def _no_runs(uid):
@@ -290,6 +293,12 @@ async def test_arbiter_prompt_pins(store, evstore, ranker, dispatched):
     line = next(ln for ln in up.splitlines() if ln.startswith("- mail.draft:"))
     assert line.endswith(" · needs the user's approval")
     assert "- mail.send:" not in up
+
+
+async def test_arbiter_ranks_with_thinking_off_and_a_10k_cap(store, evstore, ranker, dispatched):
+    _gmail_event(evstore, "m1", "t1")
+    await _run_arbiter()
+    assert ranker.calls == [{"effort": "quiet", "max_tokens": 10_000}]
 
 
 async def test_candidate_build_ignores_old_email(store, evstore, ranker, dispatched):
