@@ -395,3 +395,56 @@ def test_real_engine_reads_and_repeats(tmp_path: Path, name: str):
     assert "INVOICE" in text and "1,575.63" in text
     assert runs[1].pages[0].text == text  # the same text every time
     engines.reset_engines()
+
+
+# ── what a call leaves out (cohort001, 2026-11-19) ─────────────────────────
+#
+# ocr_pdf over pages 27-79 with max_chars=2000 said "53 of 80 pages read"; the
+# agent told the person every page was read. The next morning a 7-page call
+# replaced the saved record, and the agent read it as "only 7 of 80 read".
+
+
+@needs_pdfium
+def test_the_record_keeps_pages_from_earlier_calls(tmp_path: Path):
+    pdf = _scanned_pdf(tmp_path / "issue.pdf", [[f"page {i}"] for i in range(1, 4)])
+    choice = Choice(FakeEngine(), "eng")
+    saved = tmp_path / "saved"
+    first = doc.run_pdf(pdf, choice, doc.Settings(pages="1"), saved)
+    folder = doc.output_dir(saved, "s1", first)
+    doc.write_outputs(first, folder, "issue.pdf", 70)
+    later = doc.run_pdf(pdf, choice, doc.Settings(pages="3"), saved)
+    md, js = doc.write_outputs(later, folder, "issue.pdf", 70)
+    text = md.read_text(encoding="utf-8")
+    assert "## Page 1" in text and "## Page 3" in text and "## Page 2" not in text
+    assert "Pages in this text: 1,3 of 3 — not in it: 2" in text
+    assert [p["page"] for p in json.loads(js.read_text(encoding="utf-8"))["pages"]] == [1, 3]
+    # The call's own text names only its own pages.
+    assert "Pages in this text: 3 of 3 — not in it: 1-2" in doc.render_markdown(later, "issue.pdf", 70)
+
+
+@needs_pdfium
+def test_a_record_of_another_version_of_the_file_is_not_merged(tmp_path: Path):
+    pdf = _scanned_pdf(tmp_path / "issue.pdf", [["a"], ["b"]])
+    saved = tmp_path / "saved"
+    res = doc.run_pdf(pdf, Choice(FakeEngine(), "eng"), doc.Settings(pages="1"), saved)
+    folder = doc.output_dir(saved, "s1", res)
+    folder.mkdir(parents=True)
+    other = json.loads(json.dumps(res.to_json()))
+    other["sha256"] = "0" * 64
+    other["pages"][0]["page"] = 2
+    (folder / ".ocr.json").write_text(json.dumps(other), encoding="utf-8")
+    md, _js = doc.write_outputs(res, folder, "issue.pdf", 70)
+    assert "Pages in this text: 1 of 2 — not in it: 2" in md.read_text(encoding="utf-8")
+
+
+@needs_pdfium
+async def test_ocr_pdf_says_which_pages_max_chars_left_out(tmp_path: Path, fake_choice):
+    pdf = _scanned_pdf(tmp_path / "issue.pdf", [[f"page {i}"] for i in range(1, 6)])
+    whole = await OcrPdfTool().execute(path=str(pdf), **_kw(tmp_path))
+    assert whole.success and "max_chars cut" not in whole.content
+    cut = await OcrPdfTool().execute(path=str(pdf), pages="2-5", max_chars=420, **_kw(tmp_path))
+    assert cut.success, cut.error
+    assert "max_chars cut this text" in cut.content
+    note = next(line for line in cut.content.splitlines() if "max_chars cut" in line)
+    assert "are not in what you got" in note and "pages='" in note
+    assert "Don't say you read a page you haven't seen." in note

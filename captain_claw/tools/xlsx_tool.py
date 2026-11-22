@@ -235,7 +235,7 @@ class XlsxTool(Tool):
         """An existing file: vfs- and Drive-aware like the extract tools, then
         the edit tool's fallbacks, then where `create` would have put it."""
         from captain_claw.tools.document_extract import _resolve_readable_file
-        from captain_claw.tools.edit import EditTool
+        from captain_claw.tools.edit import EditTool, backup_of, backup_refused
 
         found, error = await _resolve_readable_file(path, kwargs.get("_runtime_base_path"))
         if found is None:
@@ -247,6 +247,12 @@ class XlsxTool(Tool):
             raise X.XlsxError(error or f"File not found: {path}")
         allowed = _WORKBOOK_SUFFIXES | (_TEMPLATE_SUFFIXES if template else set())
         suffix = found.suffix.lower()
+        backup = backup_of(found)
+        if backup and backup[1] in _WORKBOOK_SUFFIXES:
+            # A backup the edits left: read as the workbook it copies, never changed.
+            if template:
+                return found
+            raise X.XlsxError(backup_refused(found, backup[0], "xlsx"))
         if suffix not in allowed:
             if suffix in _TEMPLATE_SUFFIXES:
                 raise X.XlsxError(f"{found.name} is a template. Make a workbook from it: action=create with template.")

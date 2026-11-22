@@ -262,7 +262,7 @@ class DocxTool(Tool):
         try:
             if action == "create":
                 return await self._create(path, kwargs)
-            source = await self._source(path, kwargs)
+            source = await self._source(path, kwargs, read_only=action in ("read", "changes", "comments"))
             if action == "read":
                 return await asyncio.to_thread(self._read, source, kwargs)
             if action == "changes":
@@ -278,11 +278,12 @@ class DocxTool(Tool):
 
     # ── Paths ──────────────────────────────────────────────────────
 
-    async def _source(self, path: str, kwargs: dict[str, Any], *, template: bool = False) -> Path:
+    async def _source(self, path: str, kwargs: dict[str, Any], *, template: bool = False,
+                      read_only: bool = False) -> Path:
         """An existing file: vfs- and Drive-aware like the extract tools, then
         the edit tool's fallbacks, then where `create` would have put it."""
         from captain_claw.tools.document_extract import _resolve_readable_file
-        from captain_claw.tools.edit import EditTool
+        from captain_claw.tools.edit import EditTool, backup_of, backup_refused
 
         found, error = await _resolve_readable_file(path, kwargs.get("_runtime_base_path"))
         if found is None:
@@ -293,6 +294,12 @@ class DocxTool(Tool):
         if found is None:
             raise D.DocxError(error or f"File not found: {path}")
         allowed = _WORD_SUFFIXES | ({".dotx", ".dotm"} if template else set())
+        backup = backup_of(found)
+        if backup and backup[1] in _WORD_SUFFIXES:
+            # A backup the edits left: read as the document it copies, never changed.
+            if read_only or template:
+                return found
+            raise D.DocxError(backup_refused(found, backup[0], "docx"))
         if found.suffix.lower() not in allowed:
             hint = " Convert a legacy .doc to .docx first." if found.suffix.lower() == ".doc" else ""
             raise D.DocxError(f"Not a .docx file: {found.name}.{hint}")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 from datetime import UTC, datetime
@@ -15,6 +16,27 @@ from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, resolve_vfs_path
 
 log = get_logger(__name__)
+
+# A backup _create_backup made: "<name>.<ext>.<UTC time>.bak".
+_BACKUP_NAME = re.compile(r"^(?P<name>.+(?P<ext>\.[A-Za-z0-9]+))\.\d{8}T\d{6}\.bak$")
+
+
+def backup_of(path: Path) -> tuple[str, str] | None:
+    """For a backup this tool made, the original's file name and its
+    extension (lowercase): ("budget.xlsx", ".xlsx"). None for any other file.
+
+    The office tools read such a backup as what it is a copy of: an agent that
+    broke two columns of a workbook couldn't read the backup it was told about
+    ("Not an .xlsx workbook: ….bak") and so couldn't put them back (cohort001)."""
+    m = _BACKUP_NAME.match(Path(path).name)
+    return (m.group("name"), m.group("ext").lower()) if m else None
+
+
+def backup_refused(found: Path, original: str, tool: str) -> str:
+    """Why a backup isn't changed in place, and what to do instead."""
+    return (f"{found.name} is a backup of {original}: read it ({tool} action=read), then change "
+            f"{original} itself — or put the newest backup back with edit(path='<the {original} "
+            "you were editing>', action='undo').")
 
 _ACTIONS = (
     "replace_string",

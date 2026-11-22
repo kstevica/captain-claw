@@ -1873,3 +1873,55 @@ def test_a_crew_task_or_branch_nothing_showed_is_made_up():
     # Words and paths that only look a bit like one, and taking one back.
     assert fg.fabricated_ids("See vfs:crew/simple-webpage/report.md and crew/feature-branch.", ["nothing"]) == ()
     assert fg.fabricated_ids("I made up crew/clone-captain-claw-repository-234e91, sorry.", ["nothing"]) == ()
+
+
+# ── Files handed over that were never made (cohort001, 2026-11-19) ───────────
+
+_DRAWN = ("Crtam primjer kako CMA izgleda kao dokument — s izmišljenim podacima.\n\n"
+          "**`primjer-cma-dokumenta.png`** (+ `.html`) — A4 stranica kako izlazi iz proizvoda.\n\n"
+          "## Šest blokova\n**1. Predmet** — adresa, kvadratura.")
+
+
+def _file_facts(*, exists=(), turn=(), request="kako to izgleda", known=("earlier tool output",)):
+    return TurnFacts(request=request, turn_steps=tuple(turn), session_steps=tuple(turn),
+                     known=tuple(known), tools=frozenset({"write", "visualize"}),
+                     file_exists=lambda name: name in exists)
+
+
+def test_a_file_handed_over_that_nothing_made_is_caught():
+    v = fg.judge_reply(_DRAWN, _DRAWN, _file_facts())
+    assert v.kinds == (fg.CLAIMED_FILE,)
+    assert "`primjer-cma-dokumenta.png`" in v.corrective and "no tool made it" in v.corrective
+    assert v.backstop == "Note: no file named `primjer-cma-dokumenta.png` was made in this turn."
+
+
+def test_a_file_that_exists_or_a_tool_made_is_fine():
+    assert not fg.judge_reply(_DRAWN, _DRAWN, _file_facts(exists=("primjer-cma-dokumenta.png",))).false
+    made = ToolStep("visualize", "", {"output": "saved/showcase/s1/primjer-cma-dokumenta.png"}, "Rendered 3000×1608")
+    assert not fg.judge_reply(_DRAWN, _DRAWN, _file_facts(turn=[made])).false
+    # A name the model was given (a page it read, the person's message) is theirs, not made up.
+    assert not fg.judge_reply(_DRAWN, _DRAWN, _file_facts(known=("… primjer-cma-dokumenta.png …",))).false
+    assert not fg.judge_reply(_DRAWN, _DRAWN, _file_facts(request="ne vidim primjer-cma-dokumenta.png")).false
+
+
+def test_no_file_check_without_a_lookup():
+    facts = TurnFacts(request="x", known=("y",), tools=frozenset({"write"}))
+    assert not fg.judge_reply(_DRAWN, _DRAWN, facts).false
+
+
+@pytest.mark.parametrize("reply", [
+    "Nisam uspjela napraviti `plan.png` — nemam alat za crtanje.",
+    "I couldn't make `plan.png` here.",
+    "Pošalji mi `logo.png` pa ću ga ubaciti.",
+    "Upload `logo.png` in WordPress → Media.",
+    "```html\n<img src=\"`hero.webp`\">\n```",
+    "Slika je na `https://povedi.me/wp-content/uploads/hero.png`.",
+    "U `functions.php` dodaj ovaj red.",
+])
+def test_files_not_handed_over_are_not_claims(reply):
+    assert fg.claimed_files(reply) == ()
+
+
+def test_claimed_files_keeps_paths_and_order():
+    reply = "Evo: `saved/showcase/s1/plan.docx` i `tablica.xlsx`, pa opet `tablica.xlsx`."
+    assert fg.claimed_files(reply) == ("saved/showcase/s1/plan.docx", "tablica.xlsx")

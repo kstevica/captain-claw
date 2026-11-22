@@ -43,6 +43,37 @@ def saved_root_of(agent: Any) -> Path | None:
         return None
 
 
+def has_file_named(agent: Any, name: str, *, scan_limit: int = 20_000) -> bool:
+    """Whether the agent has the file a reply names: the path as written
+    (workspace- or saved-relative, or absolute), else a file of that name
+    anywhere under ``saved/``. True when it can't tell — no ``saved/``, a
+    vfs: or ~ path, more than *scan_limit* files to look through — so a
+    caller asking "is it missing?" never acts on a guess
+    (fabrication_guard.missing_files)."""
+    raw = str(name or "").strip().replace("\\", "/")
+    root = saved_root_of(agent)
+    if not raw or root is None or not root.is_dir() or raw.startswith(("vfs:", "~")):
+        return True
+    given = Path(raw)
+    try:
+        if given.is_absolute():
+            if given.exists():
+                return True
+        elif (root.parent / given).exists() or (root / given).exists():
+            return True
+    except OSError:
+        return True
+    wanted = given.name.lower()
+    looked = 0
+    for _dirpath, _dirs, files in os.walk(root):
+        if any(f.lower() == wanted for f in files):
+            return True
+        looked += len(files)
+        if looked > scan_limit:
+            return True
+    return False
+
+
 def turn_started_at(session: Any, turn_start_idx: int) -> float:
     """Epoch seconds the turn began: the timestamp of its first message (the
     user's), or 0.0 when unknown."""

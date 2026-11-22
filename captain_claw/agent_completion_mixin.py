@@ -219,12 +219,13 @@ class AgentCompletionMixin:
                     "datastore(action='export') — for a plain dump of tabular data (XLSX/CSV). "
                     "For JOINs: datastore(action='export', format='xlsx', "
                     "sql_query='SELECT ... FROM t1 JOIN t2 ON ...', table='output_name').\n"
-                    "3. write a Python script to scripts/ then execute it via "
-                    "shell(command='python3 <script_path>') — for non-tabular output "
-                    "(PDF, charts, custom formats). IMPORTANT: all output paths in the "
-                    "script must be relative to the workspace root (not the script's "
-                    "directory). Do NOT cd into the script directory.\n"
-                    "Do NOT just describe the file path — actually invoke the tools."
+                    + ("3. write a Python script to scripts/ then execute it via "
+                       "shell(command='python3 <script_path>') — for non-tabular output "
+                       "(PDF, charts, custom formats). IMPORTANT: all output paths in the "
+                       "script must be relative to the workspace root (not the script's "
+                       "directory). Do NOT cd into the script directory.\n"
+                       if self._shell_usable(turn_start_idx) else "")
+                    + "Do NOT just describe the file path — actually invoke the tools."
                 )
                 self._emit_tool_output(
                     "completion_gate",
@@ -244,8 +245,10 @@ class AgentCompletionMixin:
         # successfully executed, force the LLM to run it before finalizing.
         # This catches cases where the LLM writes a generation script
         # (e.g. for PDF/XLSX) but returns text without actually running it.
+        # Once per script, and only when this agent can run commands at all.
         has_unexecuted, unexecuted_path = self._turn_has_unexecuted_script(turn_start_idx)
-        if has_unexecuted and iteration < (hard_turn_iterations - 1):
+        if (has_unexecuted and iteration < (hard_turn_iterations - 1)
+                and self._script_gate_may_ask(turn_start_idx, unexecuted_path)):
             script_name = unexecuted_path.rsplit("/", 1)[-1]
             completion_feedback = (
                 f"Completion gate: script '{script_name}' was written but never executed.\n"
