@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -122,7 +123,38 @@ CREATE TABLE IF NOT EXISTS autoreply_log (
     body TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS sends_chat ON sends (chat_jid, ts);
+CREATE INDEX IF NOT EXISTS sends_wa ON sends (wa_id);
 """
+
+# What WhatsApp's receipts said about a send (added after sends; see
+# Store._migrate). ``delivery``: "" = nothing heard yet, retry = the phone asked
+# for it again (couldn't open it), error = WhatsApp turned it away, delivered,
+# read; untracked = sent before receipts were kept.
+_SEND_COLUMNS = (
+    ("delivery", "TEXT NOT NULL DEFAULT ''"),
+    ("delivered_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("read_at", "INTEGER NOT NULL DEFAULT 0"),
+    # The undelivered bell went out for this send (it never rings twice).
+    ("warned", "INTEGER NOT NULL DEFAULT 0"),
+)
+# A receipt only moves a send on, never back (a late "delivered" after "read").
+_DELIVERY_RANK = {"": 0, "untracked": 0, "retry": 1, "error": 2, "delivered": 3, "read": 4}
+
+
+def delivery_rank(kind: str) -> int:
+    return _DELIVERY_RANK.get(kind, 0)
+
+
+def strip_signature(text: str, signature: str) -> str:
+    """*text* without copies of *signature* at its end, however they're spaced
+    (a ⏎ — how a chat transcript shows a line break — counts as space). A model
+    that saw its earlier messages signed may sign its answer too; the send
+    signs once."""
+    words = str(signature or "").split()
+    if not words:
+        return text
+    tail = re.compile(r"(?:[\s⏎]*" + r"[\s⏎]+".join(map(re.escape, words)) + r")+[\s⏎]*\Z")
+    return tail.sub("", str(text or "")).rstrip()
 
 
 class ChatNotFound(LookupError):
@@ -234,6 +266,7 @@ class Store:
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.executescript(_SCHEMA)
+        self._migrate()
         self._lids: dict[str, str] = {r["lid"]: r["pn"] for r in self._db.execute("SELECT lid, pn FROM lid_map")}
         # Unsealed names, rebuilt after any write to contacts; push names already
         # stored (history repeats the sender's on every message).
@@ -243,6 +276,19 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+    def _migrate(self) -> None:
+        """Columns added after a store was first made. Sends from before
+        receipts were kept say so, rather than "not delivered"."""
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(sends)")}
+        missing = [(name, decl) for name, decl in _SEND_COLUMNS if name not in have]
+        if not missing:
+            return
+        with self._tx() as db:
+            for name, decl in missing:
+                db.execute(f"ALTER TABLE sends ADD COLUMN {name} {decl}")
+            if any(name == "delivery" for name, _ in missing):
+                db.execute("UPDATE sends SET delivery='untracked'")
 
     # ── helpers ─────────────────────────────────────────────────────
 
@@ -693,6 +739,10 @@ class Store:
         with self._lock:
             rows = self._db.execute("SELECT * FROM sends ORDER BY rowid DESC LIMIT ?",
                                     (max(1, min(int(limit or 20), 100)),)).fetchall()
+        return self._send_items(rows)
+
+    def _send_items(self, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+        with self._lock:
             titles = {r["jid"]: _text(r["name"]) for r in self._db.execute("SELECT jid, name FROM chats")}
             names = self._names()
         out = []
@@ -704,9 +754,61 @@ class Store:
                 "ts": int(r["ts"]), "chat_jid": jid,
                 "chat": titles.get(jid) or self._person(jid, names), "agent": r["agent"],
                 "status": r["status"], "error": r["error"], "text": str(body.get("t") or ""),
-                "wa_id": r["wa_id"],
+                "wa_id": r["wa_id"], "delivery": r["delivery"],
+                "delivered_at": int(r["delivered_at"]) or None, "read_at": int(r["read_at"]) or None,
             })
         return out
+
+    def mark_delivery(self, ids: list[str], kind: str, *, now: float) -> list[dict[str, Any]]:
+        """A receipt for messages this account sent: the agents' sends among
+        *ids* move on to *kind* (never back). The sends that changed, for the
+        bell and the log; a message the phone sent matches nothing."""
+        rank = _DELIVERY_RANK.get(kind)
+        ids = [i for i in dict.fromkeys(ids) if i][:200]
+        if rank is None or not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        stamp = int(now)
+        with self._lock, self._tx() as db:
+            rows = [r for r in db.execute(
+                f"SELECT * FROM sends WHERE wa_id IN ({marks}) AND status IN ('sent', 'unknown')", ids).fetchall()
+                if _DELIVERY_RANK.get(r["delivery"], 0) < rank]
+            for r in rows:
+                db.execute(
+                    "UPDATE sends SET delivery=?, status='sent',"
+                    " delivered_at=CASE WHEN ? AND delivered_at=0 THEN ? ELSE delivered_at END,"
+                    " read_at=CASE WHEN ? AND read_at=0 THEN ? ELSE read_at END WHERE rowid=?",
+                    (kind, kind in ("delivered", "read"), stamp, kind == "read", stamp, r["rowid"]))
+            changed = [r["rowid"] for r in rows]
+            rows = db.execute(f"SELECT * FROM sends WHERE rowid IN ({','.join('?' * len(changed))})",
+                              changed).fetchall() if changed else []
+        return self._send_items(rows)
+
+    def undelivered(self, *, older_than: float, since: float) -> list[dict[str, Any]]:
+        """Sends WhatsApp accepted between *since* and *older_than* that no phone
+        has confirmed yet and nobody was warned about; they're marked warned."""
+        with self._lock, self._tx() as db:
+            rows = db.execute(
+                "SELECT * FROM sends WHERE status='sent' AND wa_id != '' AND delivery IN ('', 'retry')"
+                " AND warned=0 AND ts <= ? AND ts >= ? ORDER BY rowid DESC",
+                (int(older_than), int(since))).fetchall()
+            if rows:
+                db.execute(f"UPDATE sends SET warned=1 WHERE rowid IN ({','.join('?' * len(rows))})",
+                           [r["rowid"] for r in rows])
+        return self._send_items(rows)
+
+    def deliveries(self, wa_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """What's known about these sends' delivery, by WhatsApp message id."""
+        ids = [i for i in dict.fromkeys(wa_ids) if i][:500]
+        if not ids:
+            return {}
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT ts, wa_id, delivery, delivered_at, read_at FROM sends WHERE wa_id IN ({','.join('?' * len(ids))})",
+                ids).fetchall()
+        return {r["wa_id"]: {"sent_at": int(r["ts"]), "delivery": r["delivery"],
+                             "delivered_at": int(r["delivered_at"]) or None, "read_at": int(r["read_at"]) or None}
+                for r in rows}
 
     def add_autoreply_log(self, chat_jid: str, outcome: str, details: dict[str, Any], *, now: float) -> None:
         with self._lock, self._tx() as db:
@@ -737,6 +839,11 @@ class Store:
             out.append({"id": int(r["rowid"]), "ts": int(r["ts"]), "chat_jid": jid,
                         "chat": titles.get(jid) or self._person(jid, names), "outcome": r["outcome"],
                         **(details if isinstance(details, dict) else {})})
+        # Whether each answer reached the chat, from the sends' receipts.
+        known = self.deliveries([str(e.get("sent_id") or "") for e in out])
+        for e in out:
+            if (sent := known.get(str(e.get("sent_id") or ""))) is not None:
+                e["delivery"] = sent
         return out
 
     def autoreply_config(self) -> dict[str, Any]:

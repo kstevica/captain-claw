@@ -24,7 +24,7 @@ import shutil
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -43,10 +43,12 @@ from captain_claw.flight_deck.whatsapp_web.store import (
     RETENTION_CHOICES,
     ChatNotFound,
     Store,
+    delivery_rank,
     merge_chats,
     merge_contacts,
     merge_messages,
     pick_chat,
+    strip_signature,
 )
 
 log = logging.getLogger("whatsapp_web.engine")
@@ -63,7 +65,7 @@ _STOP_TIMEOUT = 10.0
 _USER_ID = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,79}$")
 _SESSION_FILES = ("session.sqlite3", "session.sqlite3-wal", "session.sqlite3-shm", "session.sqlite3-journal")
 # Events that only feed the store: state.json isn't rewritten for each.
-_STORE_ONLY = frozenset({"message", "directory"})
+_STORE_ONLY = frozenset({"message", "directory", "receipt"})
 _PURGE_EVERY = 3600.0
 # Bigger attachments are refused rather than pulled into memory.
 MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024
@@ -75,6 +77,17 @@ REPEAT_WINDOW = 86400.0
 MAX_SEND_TEXT = 4096
 MAX_SIGNATURE = 120
 SEND_TIMEOUT = 30.0
+# Delivery (receipts): a send no phone has confirmed this long after WhatsApp
+# took it rings a bell; one such bell per link per UNDELIVERED_QUIET at most,
+# and none for sends older than UNDELIVERED_WINDOW (a restart after days away).
+UNDELIVERED_AFTER = 600.0
+UNDELIVERED_QUIET = 6 * 3600.0
+UNDELIVERED_WINDOW = 86400.0
+_DELIVERY_EVERY = 60.0
+# Receipts can beat the send's own bookkeeping (WhatsApp answers fast): kept a
+# little while, at most this many per link, for the send that's about to land.
+_EARLY_RECEIPTS = 200
+_EARLY_RECEIPT_TTL = 120.0
 # A send error that leaves the outcome open: WhatsApp may have the message.
 _UNKNOWN_MARKERS = ("timeout", "timed out", "deadline", "context canceled", "eof", "connection reset")
 
@@ -113,6 +126,11 @@ class _Link:
     watchdog: asyncio.Task | None = None
     pair_code_at: float = 0.0
     started_at: float = 0.0
+    # Receipts that matched no send yet: WhatsApp id → (kind, when).
+    early_receipts: dict[str, tuple[str, float]] = field(default_factory=dict)
+    undelivered_bell_at: float = 0.0
+    # When the client last connected (receipts it missed come in right after).
+    connected_since: float = 0.0
 
     @property
     def session(self) -> Path:
@@ -125,6 +143,12 @@ class _Link:
     @property
     def store_file(self) -> Path:
         return self.dir / "store.sqlite3"
+
+
+def _excerpt(text: str, signature: str, limit: int) -> str:
+    """A sent message for a bell: one line, without the signature the send added."""
+    flat = " ".join(strip_signature(text, signature).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
 def _qr_svg(code: str) -> str:
@@ -315,9 +339,13 @@ class Engine:
 
     async def _on_event(self, link: _Link, name: str, data: dict[str, Any]) -> None:
         notice = apply_event(link.state, name, data, now=self._clock())
+        if name == "connected":
+            link.connected_since = self._clock()
         if name in ("logged_out", "stream_replaced", "outdated"):
             # Let go of the client from outside its own callback.
             asyncio.get_running_loop().create_task(self._after_terminal(link, name))
+        if name == "receipt":
+            await self._on_receipt(link, data)
         if name in ("history", "message", "directory"):
             try:
                 incoming = await asyncio.to_thread(self._ingest, link, name, data)
@@ -389,12 +417,109 @@ class Engine:
             "reply_to_agent": bool(row.get("reply_to")) and row["reply_to"] in activity["agent_ids"],
             "last_agent_ts": activity["last_agent_ts"], "last_owner_ts": activity["last_owner_ts"],
             "agent": config["agent"], "triggers": config["triggers"],
+            # What the send adds, so the agent's own lines read without it.
+            "signature": policy["signature"] if policy["signature_on"] else "",
         }
 
     def _push_event(self, link: _Link, event: dict[str, Any]) -> None:
         self._seq += 1
         self._events.append({"seq": self._seq, "user_id": link.user_id, "at": now_iso(self._clock()), **event})
         del self._events[:-_MAX_EVENTS]
+
+    # ── delivery (receipts) ─────────────────────────────────────────
+
+    async def _on_receipt(self, link: _Link, data: dict[str, Any]) -> None:
+        """A receipt: the agents' sends it names move on — delivered, read, the
+        phone asked for it again, or WhatsApp turned it away (a bell). Ids that
+        match no send are kept a moment, for a send still being recorded."""
+        kind = str(data.get("kind") or "")
+        ids = [str(i) for i in data.get("ids") or [] if i]
+        if not kind or not ids:
+            return
+        if kind == "inactive":
+            log.info("whatsapp_web: %s: the other phone is inactive (%d message(s))", link.user_id, len(ids))
+            return
+        now = self._clock()
+
+        def mark() -> tuple[list[dict[str, Any]], str] | None:
+            store = self._open_store(link, create=False)
+            if store is None:
+                return None
+            changed = store.mark_delivery(ids, kind, now=now)
+            return changed, (store.send_policy()["signature"] if changed and kind == "error" else "")
+
+        try:
+            marked = await asyncio.to_thread(mark)
+        except Exception as exc:
+            log.warning("whatsapp_web: recording a receipt for %s failed: %s", link.user_id, exc)
+            return
+        if marked is None:
+            return
+        changed, signature = marked
+        for sent in changed:
+            # Which message and what happened, never what it said.
+            log.info("whatsapp_web: %s's message %s: %s", link.user_id, sent["wa_id"], kind)
+            if kind == "error":
+                self._bell(link, f"WhatsApp turned away {sent['agent'] or 'an agent'}'s message",
+                           f"To {sent['chat']}: “{_excerpt(sent['text'], signature, 100)}”. WhatsApp took it, "
+                           "then said it couldn't be delivered. It may be holding back messages from this "
+                           "linked device.")
+        done = {s["wa_id"] for s in changed}
+        early = link.early_receipts
+        for wa_id in ids:
+            if wa_id not in done and delivery_rank(kind) > delivery_rank(early.get(wa_id, ("", 0.0))[0]):
+                early[wa_id] = (kind, now)
+        if len(early) > _EARLY_RECEIPTS:
+            for wa_id, _ in sorted(early.items(), key=lambda kv: kv[1][1])[: len(early) - _EARLY_RECEIPTS]:
+                early.pop(wa_id, None)
+
+    async def _early_receipt(self, link: _Link, wa_id: str) -> None:
+        """A receipt that came in before this send was recorded, applied now."""
+        early = link.early_receipts.pop(wa_id, None) if wa_id else None
+        if early is not None and self._clock() - early[1] <= _EARLY_RECEIPT_TTL:
+            await self._on_receipt(link, {"kind": early[0], "ids": [wa_id]})
+
+    async def watch_delivery(self, every: float = _DELIVERY_EVERY) -> None:
+        """Forever: see :meth:`check_delivery`."""
+        while True:
+            await asyncio.sleep(every)
+            try:
+                await self.check_delivery()
+            except Exception as exc:
+                log.warning("whatsapp_web: delivery check failed: %s", exc)
+
+    async def check_delivery(self) -> None:
+        """A bell when an agent's send hasn't reached the other phone
+        :data:`UNDELIVERED_AFTER` after WhatsApp took it: WhatsApp accepting a
+        message isn't delivery, and it can hold back a linked device's sends
+        without saying so. Only while connected (receipts arrive then), and
+        not in the first minutes of a connection (missed ones still coming)."""
+        now = self._clock()
+        for link in list(self._links.values()):
+            if (link.adapter is None or link.state.state != "connected"
+                    or now - link.connected_since < 2 * _DELIVERY_EVERY):
+                continue
+            store = self._open_store(link, create=False)
+            if store is None:
+                continue
+            late = await asyncio.to_thread(store.undelivered, older_than=now - UNDELIVERED_AFTER,
+                                           since=now - UNDELIVERED_WINDOW)
+            if not late:
+                continue
+            signature = (await asyncio.to_thread(store.send_policy))["signature"]
+            log.warning("whatsapp_web: %s: %d sent message(s) not delivered after %d min",
+                        link.user_id, len(late), int(UNDELIVERED_AFTER // 60))
+            if link.undelivered_bell_at and now - link.undelivered_bell_at < UNDELIVERED_QUIET:
+                continue
+            link.undelivered_bell_at = now
+            newest = late[0]
+            minutes = max(1, int((now - newest["ts"]) // 60))
+            title = (f"{newest['agent'] or 'An agent'}'s WhatsApp message hasn't arrived" if len(late) == 1
+                     else f"{len(late)} WhatsApp messages from your agents haven't arrived")
+            self._bell(link, title,
+                       f"To {newest['chat']}, {minutes} min ago: “{_excerpt(newest['text'], signature, 80)}”. "
+                       "WhatsApp took it, but no phone has confirmed it. If that phone is on, WhatsApp may be "
+                       "holding back messages from this linked device: check the chat on your phone.")
 
     async def _after_terminal(self, link: _Link, name: str) -> None:
         async with self._lock(link.user_id):
@@ -759,6 +884,9 @@ class Engine:
             raise LinkError(403, "Sending is off: the user can turn it on in Flight Deck → Connections → "
                                  "WhatsApp Web → Sending")
         body = str(text or "").strip()
+        if policy["signature_on"] and policy["signature"]:
+            # A model that saw its earlier messages signed may sign again.
+            body = strip_signature(body, policy["signature"])
         if not body:
             raise LinkError(422, "Nothing to send: 'text' is empty")
         if len(body) > MAX_SEND_TEXT:
@@ -816,6 +944,7 @@ class Engine:
                                      "out. Don't send it again before the user checks the chat.") from None
             raise LinkError(502, f"WhatsApp refused the message to {found['title']}: {text_err}") from None
         await asyncio.to_thread(store.finish_send, rowid, "sent", wa_id=wa_id)
+        await self._early_receipt(link, wa_id)
         # WhatsApp doesn't echo a linked device's own sends back: keep the
         # message, so the chat reads as it is (agents, auto-replies).
         try:

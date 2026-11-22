@@ -233,6 +233,20 @@ def test_the_transcript():
     assert line.endswith("Ivo ⏎ * [12:00] Alice: hi ⏎ * [12:42] Alice: Kapetan, send my mail to Ivo ⏎ ok")
 
 
+def test_the_agents_own_lines_read_unsigned():
+    """Staging: the agent saw "Hey, I'm here ⏎ — sent by LeChuck" as its own
+    earlier line, and signed its next answer the same way."""
+    msgs = [
+        {"id": "1", "ts": NOW - 60, "sender": "", "text": "Hey, I'm here\n\n— sent by LeChuck",
+         "from_me": True, "by_agent": True},
+        {"id": "2", "ts": NOW - 30, "sender": "", "text": "mine\n\n— sent by LeChuck", "from_me": True},
+    ]
+    lines = ar.transcript(msgs, owner_name="Alice", agent_name="Glasses", new_ids=set(),
+                          signature="— sent by LeChuck").splitlines()
+    assert lines[0].endswith("Glasses (you): Hey, I'm here")
+    assert lines[1].endswith("Alice: mine ⏎ — sent by LeChuck")  # the user's own text is theirs
+
+
 def test_the_envelope():
     n = "abc123"
     assert ar.parse(f"<<<REPLY {n}>>>Saturday at 8.<<<END {n}>>>", n, search_ok=True) == ("reply", "Saturday at 8.")
@@ -249,6 +263,9 @@ def test_the_envelope():
     assert ar.parse(f"<<<REPLY {n}>>>  <<<END {n}>>>", n, search_ok=True) == ("skip", "length")
     assert ar.parse(f"<<<REPLY {n}>>>hi‮evil<<<END {n}>>>", n, search_ok=True) == ("skip", "format")
     assert ar.parse("Sure, here you go", n, search_ok=True) == ("skip", "format")
+    # A ⏎ copied from the transcript meant a line break.
+    assert ar.parse(f"<<<REPLY {n}>>>Line one ⏎ line two⏎three<<<END {n}>>>", n, search_ok=True) == (
+        "reply", "Line one\nline two\nthree")
 
 
 # ── the pipeline ────────────────────────────────────────────────────
@@ -447,6 +464,21 @@ async def test_each_decision_is_kept_for_the_card(model):
     model.answers = ["<<<REPLY {n}>>>ok<<<END {n}>>>"]
     await ar.respond(s, ALICE, GROUP, [_event()], ar._Chat(), now=NOW)
     assert s.logged[-1]["details"]["error"].startswith("The daily limit is reached")
+
+
+async def test_a_copied_signature_is_dropped_and_the_send_kept(model):
+    s = FakeSup()
+    model.answers = ["<<<REPLY {n}>>>Yes, it works! ⏎ — sent by LeChuck<<<END {n}>>>"]
+    ev = _event("Kapetan, works?", signature="— sent by LeChuck")
+    assert await ar.respond(s, ALICE, GROUP, [ev], ar._Chat(), now=NOW) == "sent"
+    assert s.calls[-1][2]["text"] == "Yes, it works!"
+    d = s.logged[-1]["details"]
+    assert d["steps"][-1]["text"] == "Yes, it works!" and d["sent_id"] == "3EB0"
+    # An answer that was only the signature sends nothing.
+    model.answers = ["<<<REPLY {n}>>>— sent by LeChuck<<<END {n}>>>"]
+    sends = len(s.calls)
+    assert await ar.respond(s, ALICE, GROUP, [ev], ar._Chat(), now=NOW) == "skip:length"
+    assert not any(c[1].endswith("/send") for c in s.calls[sends:])
 
 
 async def test_a_lost_record_never_stops_the_answer(model):

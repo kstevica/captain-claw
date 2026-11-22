@@ -102,10 +102,12 @@ def main() -> int:
         tmp.replace(info)
         resumed = await engine.resume_all()
         maintenance = asyncio.get_running_loop().create_task(engine.maintain())
+        delivery = asyncio.get_running_loop().create_task(engine.watch_delivery())
         log.info("WhatsApp Web service on 127.0.0.1:%d (neonize %s), %d link(s) resumed",
                  port, version or "unavailable", resumed)
         yield
         maintenance.cancel()
+        delivery.cancel()
         await engine.shutdown()
         try:
             if json.loads(info.read_text(encoding="utf-8")).get("pid") == os.getpid():
