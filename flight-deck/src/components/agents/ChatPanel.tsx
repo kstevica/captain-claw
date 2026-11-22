@@ -877,6 +877,52 @@ function ChatContent({
     inputRef.current?.focus()
   }, [session.containerId])
 
+  // Kiosk: back on the tab (or the window), the box has the focus, so the
+  // reader can type straight away. Not when they came back by clicking into
+  // the page (the click decides), were typing in another field or a menu,
+  // left text selected, or a dialog covers the chat — nor on a touch screen,
+  // where a focus raises the keyboard.
+  useEffect(() => {
+    if (!simple || touchKeyboard()) return
+    let lastPointer = -Infinity
+    let timer = 0
+    const onPointer = () => { lastPointer = performance.now() }
+    const onReturn = () => {
+      if (document.visibilityState !== 'visible') return
+      const returnedAt = performance.now()
+      window.clearTimeout(timer)
+      // A click that brought the window back lands just before or after it.
+      timer = window.setTimeout(() => {
+        const el = inputRef.current
+        if (!el || el.disabled || !document.hasFocus()) return
+        if (lastPointer > returnedAt - 300) return
+        const active = document.activeElement
+        if (active === el) return
+        if (active instanceof HTMLElement && active !== document.body && (
+          active.isContentEditable
+          || /^(INPUT|TEXTAREA|SELECT|IFRAME)$/.test(active.tagName)
+          || active.closest('[role="dialog"],[role="menu"],[role="listbox"],[aria-modal="true"]')
+        )) return
+        const sel = window.getSelection()
+        if (sel && !sel.isCollapsed) return
+        // "The chat is there": the box is on screen and nothing lies over it.
+        const r = el.getBoundingClientRect()
+        if (!r.width || !r.height) return
+        if (document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) !== el) return
+        el.focus({ preventScroll: true })
+      }, 120)
+    }
+    window.addEventListener('focus', onReturn)
+    document.addEventListener('visibilitychange', onReturn)
+    document.addEventListener('pointerdown', onPointer, true)
+    return () => {
+      window.clearTimeout(timer)
+      window.removeEventListener('focus', onReturn)
+      document.removeEventListener('visibilitychange', onReturn)
+      document.removeEventListener('pointerdown', onPointer, true)
+    }
+  }, [simple])
+
   // Handle drag-and-drop on the chat area
   const [dragOver, setDragOver] = useState(false)
 
