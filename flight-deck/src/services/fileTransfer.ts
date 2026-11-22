@@ -202,10 +202,15 @@ export function getFileTypeGroup(file: AgentFile): string {
   return 'other'
 }
 
+/** An Excel workbook the viewer shows as a table (its sheets as tabs). */
+export function isSheetFile(file: Pick<AgentFile, 'extension'>): boolean {
+  return ['.xlsx', '.xlsm'].includes(file.extension.toLowerCase())
+}
+
 /** Check if file can be viewed inline in browser */
 export function isViewable(file: AgentFile): boolean {
   const group = getFileTypeGroup(file)
-  return ['html', 'markdown', 'text', 'code', 'data', 'image', 'pdf', 'audio', 'video'].includes(group)
+  return ['html', 'markdown', 'text', 'code', 'data', 'image', 'pdf', 'audio', 'video'].includes(group) || isSheetFile(file)
 }
 
 // File groups whose text content can be edited in place (mirrors FileViewer).

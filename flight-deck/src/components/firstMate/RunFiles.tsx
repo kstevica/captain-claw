@@ -10,6 +10,7 @@ import { RunDatastorePanel } from '../basna/RunArtifacts'
 import { getFileTypeGroup, isViewable, type AgentFile } from '../../services/fileTransfer'
 import { vfsApi, type FolderHit } from '../../services/vfsApi'
 import { isUntrustedFile } from '../../utils/untrustedContent'
+import { isSheetExt } from '../../utils/xlsx'
 import { LibraryPick } from '../library/LibraryPick'
 import { NOTE_DIRS, type RunFolder } from './useRunFolder'
 
@@ -17,7 +18,8 @@ import { NOTE_DIRS, type RunFolder } from './useRunFolder'
 // it made, then the data tables it kept) and Notes (the workers' own: where each step
 // got to, what every step shares, what they kept as they read). Pick one to preview it
 // beside the list; open it in the Library's viewer (text can be changed and saved
-// back). A CSV or TSV opens as a table to sort, search and edit.
+// back). A CSV or TSV opens as a table to sort, search, filter and edit; an Excel
+// workbook as one to read, a tab for each sheet.
 
 function extOf(name: string): string {
   const i = name.lastIndexOf('.')
@@ -25,7 +27,8 @@ function extOf(name: string): string {
 }
 
 const asAgentFile = (name: string) => ({ extension: extOf(name), filename: name }) as AgentFile
-const isTable = (name: string) => ['.csv', '.tsv'].includes(extOf(name))
+/** A CSV, TSV or Excel workbook: opens as a table. */
+const isTable = (name: string) => ['.csv', '.tsv'].includes(extOf(name)) || isSheetExt(extOf(name))
 
 function toAgentFile(f: FolderHit): AgentFile {
   const group = getFileTypeGroup(asAgentFile(f.name))
@@ -138,7 +141,7 @@ function FolderPane({ folder, groups, empty, canPick }: {
                 <Table2 className="h-3.5 w-3.5" />Open as a table
               </button>
             )}
-            {canView && (
+            {canView && !isSheetExt(extOf(current.name)) && (
               <button onClick={() => open(current, isTable(current.name))} className="fd-btn-quiet inline-flex h-8 items-center gap-1.5 px-3 text-xs">
                 <Eye className="h-3.5 w-3.5" />{isTable(current.name) ? 'Open as text' : 'Open'}
               </button>

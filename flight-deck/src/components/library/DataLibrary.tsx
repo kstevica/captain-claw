@@ -2,6 +2,7 @@ import {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
   type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode,
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -22,7 +23,9 @@ import {
   Lightbulb,
   Link2,
   Loader2,
+  Maximize2,
   MessageSquare,
+  Minimize2,
   Pencil,
   Plus,
   RotateCw,
@@ -53,6 +56,8 @@ import { isFolderSourceId } from '../../services/fileLibraryApi'
 import {
   FacetGroup, FullscreenButton, Highlight, ScanStatus, SourceFacetGroup, SourceName, libraryIconBtn as iconBtn,
 } from './libraryParts'
+import { filterKindOf, useColumnFilters } from './columnFilters'
+import { FilterButton, FilterChips, FilterPopover } from './ColumnFilterUI'
 
 // ── Data library ────────────────────────────────────────────────────
 //
@@ -981,8 +986,15 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
   const [openCopy, setOpenCopy] = useState<DataRow | null>(null)
   const [editing, setEditing] = useState<Editing>(null)
   const [reload, setReload] = useState(0)
+  // The open record fills the window instead of the column beside the rows.
+  const [recordFull, setRecordFull] = useState(false)
+  const filt = useColumnFilters()
   const keepPanel = useRef(false)
   const reqId = useRef(0)
+  const typeOf = useMemo(() => Object.fromEntries((data?.columns ?? []).map((c) => [c.name, c.type])), [data?.columns])
+  /** How a column filters: by what the profile says it holds, else its stored type. */
+  const fkOf = (col: string) => filterKindOf(kinds[col], typeOf[col])
+  const filtersParam = filt.filters.length ? JSON.stringify(filt.filters.map((f) => ({ ...f, kind: fkOf(f.col) }))) : ''
 
   useEffect(() => {
     const t = setTimeout(() => { setDq(q.trim()); setOffset(0) }, q ? 250 : 0)
@@ -992,7 +1004,7 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
   useEffect(() => {
     const id = ++reqId.current
     setLoading(true)
-    dataLibraryApi.rows(tableId, { limit: ROWS_PAGE, offset, q: dq, sort: sort?.col, dir: sort?.dir })
+    dataLibraryApi.rows(tableId, { limit: ROWS_PAGE, offset, q: dq, sort: sort?.col, dir: sort?.dir, filters: filtersParam })
       .then((res) => {
         if (id !== reqId.current) return
         // The last row of the last page was deleted: the page before.
@@ -1005,7 +1017,7 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
       })
       .catch((e) => { if (id === reqId.current) setError(e instanceof Error ? e.message : String(e)) })
       .finally(() => { if (id === reqId.current) setLoading(false) })
-  }, [tableId, dq, sort, offset, version, reload])
+  }, [tableId, dq, sort, offset, version, reload, filtersParam])
 
   // Escape: an editor cancels itself; otherwise the open record (or the new
   // row) closes before anything else does.
@@ -1015,22 +1027,32 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
       if (e.key !== 'Escape') return
       if ((e.target as Element | null)?.closest?.('[data-cell-editor]')) return
       e.stopPropagation()
+      // A record filling the view gets smaller first.
+      if (recordFull) { setRecordFull(false); return }
       setPanel(null)
       setEditing(null)
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [panel])
+  }, [panel, recordFull])
   useEffect(() => {
     if (keepPanel.current) { keepPanel.current = false; return }
     setPanel(null)
     setEditing(null)
-  }, [dq, sort, offset])
+  }, [dq, sort, offset, filtersParam])
 
   const cols = data?.columns ?? []
   const rows = data?.rows ?? []
   const total = data?.total ?? 0
   const terms = useMemo(() => dq.toLowerCase().split(/\s+/).filter(Boolean), [dq])
+  const narrowed = !!dq || filt.filters.length > 0
+  const nothingMatches = filt.filters.length && dq ? 'No row matches the search and the filters.'
+    : filt.filters.length ? `No row matches ${filt.filters.length > 1 ? 'these filters' : 'that filter'}.`
+      : 'No row matches that search.'
+  const setFilter = (col: string, f: Parameters<typeof filt.apply>[1]) => { filt.apply(col, f); setOffset(0) }
+  const removeFilter = (col: string) => { filt.remove(col); setOffset(0) }
+  const clearFilters = () => { filt.clear(); setOffset(0) }
+  const menu = filt.menu
   const toggleSort = (col: string) => {
     setOffset(0)
     setSort((cur) => (!cur || cur.col !== col ? { col, dir: 'asc' } : cur.dir === 'asc' ? { col, dir: 'desc' } : null))
@@ -1147,7 +1169,8 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
   }
 
   const record = panel?.kind === 'new' ? (
-    <NewRowPanel columns={cols} kinds={kinds} notes={notes} phone={phone} onAdd={addRow} onClose={() => setPanel(null)} />
+    <NewRowPanel columns={cols} kinds={kinds} notes={notes} phone={phone} onAdd={addRow} onClose={() => setPanel(null)}
+      full={recordFull} onToggleFull={phone ? undefined : () => setRecordFull((v) => !v)} />
   ) : openRow ? (
     <RecordPanel
       key={openRow.__rowid}
@@ -1168,6 +1191,8 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
       onSave={(col, draft) => saveCell(openRow, col, draft)}
       onDoneEditing={() => setEditing(null)}
       onDelete={() => deleteRow(openRow)}
+      full={recordFull}
+      onToggleFull={phone ? undefined : () => setRecordFull((v) => !v)}
     />
   ) : null
 
@@ -1186,7 +1211,7 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
         </button>
         <span className="ml-auto shrink-0 text-xs tabular-nums text-zinc-500">
           {loading && <Loader2 className="mr-1.5 inline h-3 w-3 animate-spin" />}
-          {total ? `${fmtNum(from)}–${fmtNum(to)} of ${fmtNum(total)}${dq ? ' matching' : ''}` : dq ? 'No matching rows' : ''}
+          {total ? `${fmtNum(from)}–${fmtNum(to)} of ${fmtNum(total)}${narrowed ? ' matching' : ''}` : narrowed ? 'No matching rows' : ''}
         </span>
         <button onClick={() => setOffset((o) => Math.max(0, o - ROWS_PAGE))} disabled={offset === 0} className={pagerBtn} aria-label="Previous page" title="Previous page">
           <ChevronLeft className="h-4 w-4" />
@@ -1195,6 +1220,8 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
           <ChevronRight className="h-4 w-4" />
         </button>
       </div>
+      <FilterChips filters={filt.filters} labelOf={humanize} kindOf={fkOf}
+        onEdit={(col, anchor) => filt.setMenu({ col, anchor })} onRemove={removeFilter} onClear={clearFilters} />
       <div className="flex min-h-0 flex-1">
         <div className="min-w-0 flex-1 overflow-auto">
           {error ? (
@@ -1205,8 +1232,13 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
             <div className="flex h-full justify-center pt-12 text-zinc-500"><Loader2 className="h-5 w-5 animate-spin" /></div>
           ) : rows.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-zinc-500">
-              {dq ? 'No row matches that search.' : 'This table has no rows yet.'}
-              {!dq && cols.length > 0 && (
+              {narrowed ? nothingMatches : 'This table has no rows yet.'}
+              {filt.filters.length > 0 && (
+                <button onClick={clearFilters} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800/60">
+                  <X className="h-4 w-4" />Clear the filters
+                </button>
+              )}
+              {!narrowed && cols.length > 0 && (
                 <button onClick={newRow} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800/60">
                   <Plus className="h-4 w-4" />Add the first row
                 </button>
@@ -1233,6 +1265,7 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
                           {sorted === 'asc' ? <ChevronUp className="h-3.5 w-3.5 text-emerald-500" />
                             : sorted === 'desc' ? <ChevronDown className="h-3.5 w-3.5 text-emerald-500" />
                               : <ChevronsUpDown className="h-3 w-3 text-zinc-600" />}
+                          <FilterButton label={humanize(c.name)} active={!!filt.of(c.name)} onOpen={(anchor) => filt.setMenu({ col: c.name, anchor })} />
                         </span>
                       </th>
                     )
@@ -1288,9 +1321,18 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
             </table>
           )}
         </div>
-        {record && !phone && <div className="w-[360px] shrink-0 border-l border-zinc-800 bg-zinc-900/30">{record}</div>}
+        {record && !phone && !recordFull && <div className="w-[360px] shrink-0 border-l border-zinc-800 bg-zinc-900/30">{record}</div>}
       </div>
       {record && phone && <div className="absolute inset-0 z-20 bg-zinc-950">{record}</div>}
+      {/* Fullscreen: the record fills the window, over the library. */}
+      {record && !phone && recordFull && createPortal(
+        <div data-above-drawer role="dialog" aria-label="Row" className="fixed inset-0 z-[70] flex flex-col bg-zinc-950">{record}</div>,
+        document.body,
+      )}
+      {menu && (
+        <FilterPopover key={menu.col} anchor={menu.anchor} label={humanize(menu.col)} fk={fkOf(menu.col)}
+          current={filt.of(menu.col)} onApply={(f) => setFilter(menu.col, f)} onClose={() => filt.setMenu(null)} />
+      )}
     </div>
   )
 }
@@ -1574,9 +1616,19 @@ export function CellEditor({ col, value, compact = false, onSave, onDone }: {
 
 // ── One record ──
 
+/** Grow the open record to fill the window, or back to its column. */
+function FullButton({ full, onToggle, className }: { full: boolean; onToggle: () => void; className: string }) {
+  const label = full ? 'Exit fullscreen' : 'Show the row fullscreen'
+  return (
+    <button onClick={onToggle} className={className} title={full ? `${label} (Esc)` : 'Fullscreen'} aria-label={label} aria-pressed={full}>
+      {full ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+    </button>
+  )
+}
+
 function RecordPanel({
   row, index, columns, kinds, notes, terms, phone, hasPrev, hasNext, onPrev, onNext, onClose,
-  editingCol, onEdit, onSave, onDoneEditing, onDelete,
+  editingCol, onEdit, onSave, onDoneEditing, onDelete, full = false, onToggleFull,
 }: {
   row: DataRow
   /** Its place in the table as shown; null when an edit moved it off this page. */
@@ -1591,6 +1643,9 @@ function RecordPanel({
   onDoneEditing: () => void
   /** Resolves to why it couldn't be deleted, or '' when it's gone. */
   onDelete: () => Promise<string>
+  /** It fills the window; `onToggleFull` grows or shrinks it (none on a phone). */
+  full?: boolean
+  onToggleFull?: () => void
 }) {
   const [copied, setCopied] = useState(false)
   const [confirming, setConfirming] = useState(false)
@@ -1632,6 +1687,7 @@ function RecordPanel({
         >
           <Trash2 className="h-4 w-4" />
         </button>
+        {onToggleFull && <FullButton full={full} onToggle={onToggleFull} className={small} />}
         <button onClick={onClose} className={small} title="Close" aria-label="Close row"><X className={phone ? 'h-5 w-5' : 'h-4 w-4'} /></button>
       </div>
       {confirming && (
@@ -1656,7 +1712,8 @@ function RecordPanel({
           {deleteError && <p className="mt-1.5 text-[11px] leading-snug text-red-600 dark:text-red-400">{deleteError}</p>}
         </div>
       )}
-      <dl className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className={`min-h-0 flex-1 overflow-y-auto py-3 ${full ? 'px-6' : 'px-4'}`}>
+        <dl className={full ? 'mx-auto w-full max-w-3xl' : ''}>
         {columns.map((c) => {
           const editing = editingCol === c.name
           const label = humanize(c.name)
@@ -1700,7 +1757,8 @@ function RecordPanel({
             </div>
           )
         })}
-      </dl>
+        </dl>
+      </div>
       {!phone && (
         <div className="border-t border-zinc-800 px-4 py-2 text-[10px] leading-snug text-zinc-500">
           Click a value to change it — changes go straight to the datastore the agents use.
@@ -1711,7 +1769,7 @@ function RecordPanel({
 }
 
 /** A new row typed in by hand: every column, empty to start with. */
-function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
+function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose, full = false, onToggleFull }: {
   columns: Col[]
   kinds: Record<string, ColumnKind>
   notes: Record<string, string>
@@ -1719,6 +1777,9 @@ function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
   /** Resolves to why it couldn't be added, or '' when it's in. */
   onAdd: (values: Record<string, string>) => Promise<string>
   onClose: () => void
+  /** It fills the window; `onToggleFull` grows or shrinks it (none on a phone). */
+  full?: boolean
+  onToggleFull?: () => void
 }) {
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
@@ -1743,6 +1804,10 @@ function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
     >
       <div className="flex items-center gap-1 border-b border-zinc-800 px-3 py-2">
         <span className="flex-1 text-[11px] font-medium uppercase tracking-wider text-zinc-500">New row</span>
+        {onToggleFull && (
+          <FullButton full={full} onToggle={onToggleFull}
+            className="rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100" />
+        )}
         <button
           onClick={onClose}
           className="rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
@@ -1752,7 +1817,8 @@ function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
           <X className={phone ? 'h-5 w-5' : 'h-4 w-4'} />
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className={`min-h-0 flex-1 overflow-y-auto py-3 ${full ? 'px-6' : 'px-4'}`}>
+        <div className={full ? 'mx-auto w-full max-w-3xl' : ''}>
         {columns.map((c, i) => (
           <div key={c.name} className="border-b border-zinc-800/60 py-2.5 last:border-0">
             <span className="flex items-center gap-1.5 text-[11px]">
@@ -1771,6 +1837,7 @@ function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
             </div>
           </div>
         ))}
+        </div>
       </div>
       <div className="border-t border-zinc-800 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         {error && <p className="mb-2 text-[11px] leading-snug text-red-600 dark:text-red-400">{error}</p>}
