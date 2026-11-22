@@ -11,7 +11,8 @@
 # Usage:
 #   ./build-desktop.sh                  # slim app for this platform and CPU
 #   ./build-desktop.sh --arch x64       # slim app for another CPU (arm64|x64)
-#   ./build-desktop.sh --platform mac   # explicit platform (mac|win|linux)
+#   ./build-desktop.sh --platform win --arch x64
+#                                       # another platform (mac|win|linux): --arch required
 #   ./build-desktop.sh --full           # self-contained app (frontend + PyInstaller backend)
 #   ./build-desktop.sh --backend-only   # full: only build the Python backend
 #   ./build-desktop.sh --electron-only  # full: only package Electron (backend already built)
@@ -37,23 +38,45 @@ for arg in "$@"; do
         --backend-only)   FULL=true; BACKEND_ONLY=true ;;
         --electron-only)  FULL=true; ELECTRON_ONLY=true ;;
         --platform|--arch) :;; # value follows
+        --platform=*)     PLATFORM="${arg#--platform=}" ;;
+        --arch=*)         ARCH="${arg#--arch=}" ;;
         mac|win|linux)    PLATFORM="$arg" ;;
         arm64|x64)        ARCH="$arg" ;;
         -h|--help)
             echo "Usage: $0 [--full] [--clean] [--backend-only] [--electron-only] [--platform mac|win|linux] [--arch arm64|x64]"
             exit 0
             ;;
+        # A word this script doesn't know used to be skipped, so a mistyped
+        # CPU (amd64, x86_64) quietly built for this machine's instead.
+        *)
+            echo "Error: unknown option '$arg' (see --help)"
+            exit 1
+            ;;
     esac
 done
+case "$PLATFORM" in ""|mac|win|linux) ;; *) echo "Error: unknown platform '$PLATFORM'"; exit 1 ;; esac
+case "$ARCH" in ""|arm64|x64) ;; *) echo "Error: unknown CPU '$ARCH' (arm64 or x64)"; exit 1 ;; esac
+
+case "$(uname -s)" in
+    Darwin*)  HOST_PLATFORM="mac" ;;
+    Linux*)   HOST_PLATFORM="linux" ;;
+    MINGW*|MSYS*|CYGWIN*)  HOST_PLATFORM="win" ;;
+    *)        HOST_PLATFORM="" ;;
+esac
 
 # Auto-detect platform if not specified
 if [[ -z "$PLATFORM" ]]; then
-    case "$(uname -s)" in
-        Darwin*)  PLATFORM="mac" ;;
-        Linux*)   PLATFORM="linux" ;;
-        MINGW*|MSYS*|CYGWIN*)  PLATFORM="win" ;;
-        *)        echo "Unknown platform: $(uname -s)"; exit 1 ;;
-    esac
+    if [[ -z "$HOST_PLATFORM" ]]; then echo "Unknown platform: $(uname -s)"; exit 1; fi
+    PLATFORM="$HOST_PLATFORM"
+fi
+
+# Built for this machine, its CPU is the default. Built for another platform
+# there is no safe default: an Apple-silicon Mac makes an ARM64 Windows
+# installer, which installs nothing on the x64 PCs most people have (0.9.1
+# shipped one). (--full can't cross-build at all: PyInstaller builds for here.)
+if [[ -z "$ARCH" && "$PLATFORM" != "$HOST_PLATFORM" ]]; then
+    echo "Error: building for $PLATFORM on ${HOST_PLATFORM:-$(uname -s)}: give --arch x64 or --arch arm64."
+    exit 1
 fi
 
 echo "========================================="
@@ -168,8 +191,9 @@ if $FULL; then
     echo "  Backend binary: $BACKEND_DIR/$EXE_NAME"
     echo "  Flight Deck binary: $BACKEND_DIR/$FD_EXE_NAME"
 else
-    # The slim shell is JavaScript only: any CPU, this machine's by default.
-    # runtime.js installs the backend built for the CPU it runs on.
+    # The slim shell is JavaScript only: any CPU, this machine's by default
+    # (another platform needs --arch, checked above). runtime.js installs the
+    # backend built for the CPU it runs on.
     BACKEND_ARCH="${ARCH:-$(uname -m)}"
 fi
 
@@ -205,6 +229,46 @@ case "$PLATFORM" in
 esac
 
 cd "$SCRIPT_DIR"
+
+# ── Step 4b: Check the CPU the app was built for ─────────────────
+# Read it from the packaged executable, not from the flags: 0.9.1's "x64"
+# Windows installer carried an ARM64 app, and on x64 PCs it unpacked nothing
+# and still exited 0. Every build host is little-endian, which od relies on.
+first_match() { for f in "$@"; do if [[ -e "$f" ]]; then echo "$f"; return 0; fi; done; }
+
+WANT_ARCH="${ARCH_FLAG#--}"
+FOUND_ARCH=""
+case "$PLATFORM" in
+    mac)    # Mach-O: the CPU type follows the 4-byte magic.
+        APP_EXE="$(first_match dist/desktop/mac*/Captain.app/Contents/MacOS/Captain)"
+        [[ -n "$APP_EXE" ]] && FOUND_ARCH="$(od -An -tx4 -j4 -N4 "$APP_EXE" | tr -d ' ')"
+        ;;
+    win)    # PE: 0x3c holds the offset of "PE\0\0"; the machine type follows it.
+        APP_EXE="$(first_match dist/desktop/win*-unpacked/Captain.exe)"
+        if [[ -n "$APP_EXE" ]]; then
+            PE_AT="$(od -An -tu4 -j60 -N4 "$APP_EXE" | tr -d ' ')"
+            FOUND_ARCH="$(od -An -tx2 -j$((PE_AT + 4)) -N2 "$APP_EXE" | tr -d ' ')"
+        fi
+        ;;
+    linux)  # ELF: e_machine at 18.
+        APP_EXE="$(first_match dist/desktop/linux*-unpacked/captain-claw)"
+        [[ -n "$APP_EXE" ]] && FOUND_ARCH="$(od -An -tx2 -j18 -N2 "$APP_EXE" | tr -d ' ')"
+        ;;
+esac
+case "$FOUND_ARCH" in
+    01000007|8664|003e) FOUND_ARCH="x64" ;;
+    0100000c|aa64|00b7) FOUND_ARCH="arm64" ;;
+esac
+
+if [[ -z "$APP_EXE" ]]; then
+    echo "Error: no packaged app in dist/desktop/ to read its CPU from"
+    exit 1
+fi
+if [[ "$FOUND_ARCH" != "$WANT_ARCH" ]]; then
+    echo "Error: $APP_EXE is built for ${FOUND_ARCH:-an unknown CPU}, not $WANT_ARCH"
+    exit 1
+fi
+echo "  Checked: $APP_EXE is $FOUND_ARCH"
 
 # ── Step 5: Recompress the disk image (macOS) ────────────────────
 # electron-builder writes zlib (UDZO) images: Electron alone is 110 MB that way,
