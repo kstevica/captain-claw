@@ -7,14 +7,16 @@ Video guides: **[the complete Captain guide](https://www.youtube.com/watch?v=Veh
 | Guide | What's inside |
 |---|---|
 | **[Getting started](getting-started.md)** | Install and the launchers, a deck for a team, a voice device on your desk, Docker, configuration |
-| **[Flight Deck](flight-deck.md)** | The command center: seven orchestration modes, Code, Crew, Forge agents, Plan and Deep mode, Flows, the kiosk, Onboarding, the Taskboard, activity and audit, running and updating a deck for a team |
+| **[Flight Deck](flight-deck.md)** | The command center: seven orchestration modes, Code, Crew, Forge agents, Plan and Deep mode, Flows, the kiosk, Onboarding, the Taskboard, agent families, activity and audit, running and updating a deck for a team |
 | **[BotPort, MCP and agent links](botport-and-mcp.md)** | Flight Decks that work together, Flight Deck as an MCP server for Claude, MCP servers for your agents, connecting your own systems |
 | **[Devices and channels](devices-and-channels.md)** | StopWatch, PaperColor, StickS3 and Waveshare, the smart-glasses HUD, WhatsApp (and your own WhatsApp), Telegram, notifications, Captain for Chrome and Captain for Mac, agents in your inbox |
 | **[Memory and cognition](memory.md)** | Six memory layers, the context engine, dreaming, the Brain Graph |
 | **[Anonymization](anonymization.md)** | Names, companies, addresses and numbers out before a model sees them, back when the answer comes home: the trusted model, the Anonymize page, files and folders, the privacy gate for your agents, Captain for Chrome, vaults and their history |
 | **[Data rooms](data-rooms.md)** | A deal's data room anonymized into one vault for Claude: adding files, the run, review and **Same party?**, release, the Captain Data Rooms connector, results restored on the deck |
 | **[Vatra, Basna and Council](vatra-basna-council.md)** | Your agents as a team, step by step: which one to pick, starting a run in the kiosk or the full layout, reading the result, continuing and stopping |
-| **[Inside an agent](agents.md)** | Every supported model, the 81 built-in tools, safety guards, the agent web UI |
+| **[First Mate](first-mate.md)** | Standing jobs that run for you: turning it on, drafting and approving a charter, goals, runs, budget, results, list funnels, trust and the Line |
+| **[Web searches and pages in your Chrome](web-in-your-chrome.md)** | Your agents' searches on Google or Bing in your Chrome, and pages read signed in as you: LinkedIn, X and sites that turn a server away |
+| **[Inside an agent](agents.md)** | Every supported model, the 83 built-in tools, safety guards, the agent web UI |
 | **[Architecture](architecture.md)** | Where each component lives in the code |
 | **[What's new](whats-new.md)** | Every release, newest first |
 

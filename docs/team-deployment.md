@@ -309,6 +309,39 @@ Connections panel).
 - **Course**: deck goals are set by admins and read by everyone, including members of shared agents.
   Their horizons, caps and suggestion limits are on **Console → Settings → Course**.
 
+## What 0.10.0 changes for a team deck
+
+- **First Mate** is off until an admin turns it on (**Console → Settings → First Mate → On for this deck**),
+  and then for admins only until **Admins only** is switched off. **Limits** caps factories per person (8)
+  and runs per factory a day (24). Each person's factories are theirs alone: admins don't see them and
+  act-as is ignored. Factory runs spend each person's own tier set within their **Weekly budget** (25M
+  tokens by default, or no limit), and nothing runs on a schedule until the person turns on **On their
+  own**. Mail goes out only after the person carries out a rehearsal, until a factory earns more trust.
+  Improvement runs stay with admins. `FD_FIRST_MATE_DISABLED=true` stops the supervisor altogether.
+  Step by step: [docs/guide/first-mate.md](guide/first-mate.md).
+- **Bat runs cost differently.** Steps run longer (they stop on a long silence, not a clock), plans have up
+  to 12 steps, and each step gets a short review that counts toward the run's spend. Runs with no cap stop
+  at 20M tokens (`CLAW_BAT_TOKEN_CEILING`). **Console → Settings → Bat** sets **Steps at the same time**
+  (1–2 for one local model server), **Workers use** (a cheaper tier for the bulk) and the time limits.
+- **Web searches and pages in a person's Chrome** are opt-in per person (**Profile → Personal**) and need
+  Captain for Chrome 0.7.2. They run only on the owner's own turns, never a member's turn on a shared agent,
+  and refuse private and intranet addresses. An agent is kept out with `tools.web_search.via_chrome: false`
+  or `tools.web_fetch.via_chrome: false`. Searches through Chrome don't use the deck's search API key.
+  Step by step: [docs/guide/web-in-your-chrome.md](guide/web-in-your-chrome.md).
+- **A browser tab opens the kiosk** for people and the **Admin console** for admins; the classic layout is
+  at `?app=classic`. Tell your team before they log in.
+- **The File library keeps only what someone added.** Shared folders nobody added leave it at the next scan.
+- **Scheduled tasks pause for people away 7 days or more** (no sign-in, no message to their agents), with a
+  Line note, 10 minutes after the deck starts. Set the days or turn it off under **Console → Settings →
+  Agents**. Admins see only their own and the system's scheduled tasks.
+- **Approvals** (**Admin console → Settings → Approvals**) can hold an agent's paying, sending, posting,
+  sharing, deleting or storing a password for a person's OK. Every kind is **Don't ask** until you change it.
+- **Team models stay put**: a non-admin's agent on the team's key or published tiers can't switch models;
+  people on their own keys can.
+- **Run workers** no longer show in people's agent lists, and agents made by agents sit under their parent.
+- Flight Deck writes a rotating log at `<FD_DATA_DIR>/logs/flight_deck.log` (`FD_LOG_FILE` moves it or turns
+  it off). Back up `first_mate.db` and `browser-recordings/` with the rest of the data folder.
+
 ## What 0.9.1 changes for a team deck
 
 - **Anonymization** works for everyone with code alone. For bare names, an admin sets a **trusted model**

@@ -160,16 +160,16 @@ the search tabs.
 ## Your agents' web pages, read in this browser
 
 Your agents' `web_fetch` can read pages here, signed in as you — so LinkedIn,
-Facebook and other sites that turn Flight Deck away (a sign-in wall, a bot
+X, Facebook and other sites that turn Flight Deck away (a sign-in wall, a bot
 check, LinkedIn's 999) open for them. Turn it on in Flight Deck → **Profile →
 Web pages**: *only pages that turn Flight Deck away*, or *every page*, and
 optionally only for the sites you list (`linkedin.com` covers its
-subdomains). It needs **Work on every site**; without it, the panel offers
+subdomains; list `x.com` and `twitter.com` both, since links use either). It needs **Work on every site**; without it, the panel offers
 **Allow**.
 
 Each page opens in a background tab — never in front, in a collapsed
-**Captain · reading** group — and once it has settled (and scrolled a little
-for what loads lazily), it goes back to the agent without scripts and styles,
+**Captain · reading** group — and once it has finished drawing (and been
+scrolled through, up to eight screens, for what loads as you scroll), it goes back to the agent without scripts and styles,
 and the tab closes. Never Flight Deck's own pages, addresses on your own
 network or this computer, or anything but http(s). An agent you stopped in
 the panel reads nothing here. Turn it off in Settings → Web pages.

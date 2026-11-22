@@ -8,7 +8,7 @@ Where each part of Captain Claw lives in the code.
 |---|---|
 | Agent (14-mixin composition) | `captain_claw/agent.py` |
 | LLM providers | `captain_claw/llm/` |
-| 81 tools + registry | `captain_claw/tools/` |
+| 83 tools + registry (tool search: `captain_claw/tool_search.py`) | `captain_claw/tools/` |
 | Flight Deck (FastAPI + React) | `captain_claw/flight_deck/` |
 | Device bridge (StickS3 / StopWatch / PaperColor / Waveshare, `/device/ws`) + OTA store + backgrounds | `captain_claw/flight_deck/device_bridge.py`, `device_firmware.py`, `device_backgrounds.py` |
 | Device firmware (PlatformIO, every device) | `firmware/device/` |
@@ -28,6 +28,14 @@ Where each part of Captain Claw lives in the code.
 | Taskboard (sweeps, turn ingest, triage, next steps, threads, hand-over, proof; agent-side turn register) | `captain_claw/flight_deck/taskboard*.py`, `flight-deck/src/components/taskboard/`; `captain_claw/turn_register.py` |
 | Confinement on sign-in decks | `captain_claw/deck_confine.py` |
 | Your own AI keys | `captain_claw/flight_deck/byok.py` |
+| First Mate (store, supervisor loop, runs, events, drafting, trust, checks, Line posts, weekly report, routes) | `captain_claw/flight_deck/first_mate_*.py`, `flight-deck/src/pages/FirstMatePage.tsx`, `flight-deck/src/components/firstMate/`; agent tool `captain_claw/tools/first_mate.py` |
+| Bat (store, loop, judge, nested runs, course checks) | `captain_claw/flight_deck/bat_*.py` |
+| List funnel (engine, extraction, expert agent, test sets) | `captain_claw/flight_deck/funnel.py`, `funnel_extract.py`, `funnel_expert.py`, `funnel_eval.py` |
+| Web searches and pages in the person's Chrome (deck side; agent side; extension) | `captain_claw/flight_deck/browser_search.py`, `browser_fetch.py`; `captain_claw/tools/web_chrome.py`, `web_blocked.py`; `browser-extension/chrome/search.js`, `pages.js`, `lib/settle.js` |
+| Recordings in Captain for Chrome | `captain_claw/flight_deck/browser_recordings.py`; `browser-extension/chrome/recorder.js`, `recorder-page.js` |
+| Agent families | `captain_claw/flight_deck/agent_family.py`, `family_carrier.py` |
+| Approvals, secret entry, "Why did this happen?" | `captain_claw/flight_deck/approvals.py`, `approval_routes.py`, `agent_secret.py`, `why.py`; `captain_claw/tools/request_secret.py`, `browser_live.py` |
+| Nudges to phones; scheduled-task pause for people away | `captain_claw/flight_deck/phone_gate.py`; `idle_pause.py` |
 | Profile researcher | `captain_claw/flight_deck/profile_sources.py`, `profile_research.py`, `profile_routes.py` |
 | Pictures in replies | `captain_claw/reply_images.py` |
 | HTML to page and PNG (`visualize` tool) | `captain_claw/tools/visualize.py` |
