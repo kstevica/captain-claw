@@ -26,6 +26,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import secrets
 import time
 from typing import Any
@@ -133,6 +134,10 @@ _K_CLIENT_SECRET = "google_oauth:client_secret"
 _K_PROJECT_ID = "google_oauth:project_id"
 _K_LOCATION = "google_oauth:location"
 _K_SCOPES = "google_oauth:scopes"
+# A browser API key for the Google Picker ("Pick files from Google Drive"):
+# under the per-file Drive scope the agent opens only files the app created or
+# the person picked there. Not a secret (it lives in the page), but admin-set.
+_K_PICKER_KEY = "google_oauth:picker_api_key"
 _K_TOKENS = "google_oauth:tokens"
 _K_USER = "google_oauth:user"
 # Legacy / reserved — kept for backwards compatibility when reading
@@ -573,6 +578,8 @@ class GoogleConfigUpdate(BaseModel):
     # items added/removed. Unknown or duplicate entries are silently
     # dropped server-side. ``None`` leaves the stored list unchanged.
     scopes: list[str] | None = None
+    # The Google Picker's browser API key; "" removes it, None leaves it.
+    picker_api_key: str | None = None
 
 
 # ── status / config endpoints ───────────────────────────────────────
@@ -668,6 +675,7 @@ async def google_config_get(
         "default_scopes": list(DEFAULT_SCOPES),
         "scope_catalog": SCOPE_CATALOG,
         "redirect_uri": _redirect_uri(request),
+        "picker_api_key_set": bool((await db.get_system_setting(_K_PICKER_KEY)) or ""),
     }
 
 
@@ -706,6 +714,7 @@ async def google_config_post(
         await db.set_system_setting(_K_CLIENT_SECRET, "")
         await db.set_system_setting(_K_PROJECT_ID, "")
         await db.set_system_setting(_K_SCOPES, "")
+        await db.set_system_setting(_K_PICKER_KEY, "")
         await _clear_all_oauth_state(db)
         return {"ok": True, "cleared": True}
 
@@ -734,6 +743,10 @@ async def google_config_post(
         await db.set_system_setting(_K_PROJECT_ID, project_id)
     if location is not None:
         await db.set_system_setting(_K_LOCATION, location)
+    if body.picker_api_key is not None:
+        # Changes no one's connection: the picker only adds files to what the
+        # per-file scope already reaches.
+        await db.set_system_setting(_K_PICKER_KEY, body.picker_api_key.strip())
 
     scopes_changed = False
     if body.scopes is not None:
@@ -750,6 +763,62 @@ async def google_config_post(
         await _clear_all_oauth_state(db)
 
     return {"ok": True, "mode": "custom", "scopes_changed": scopes_changed}
+
+
+_PROJECT_NUMBER_RE = re.compile(r"^(\d{6,})-")
+_DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+_DRIVE_ALL_SCOPES = frozenset({"https://www.googleapis.com/auth/drive",
+                               "https://www.googleapis.com/auth/drive.readonly"})
+
+
+@router.get("/picker")
+async def google_picker_config(
+    _user: dict = Depends(get_current_user),
+) -> dict[str, Any]:
+    """What the page needs to show the Google Picker ("Pick files from Google
+    Drive"), for this user. With the per-file Drive scope an agent opens only
+    files the app made or the person picked; a pasted link to their own
+    Sheet otherwise 404s. No token comes from here: the page asks Google for
+    a file-only one itself (Google Identity Services, same OAuth client), so
+    the stored token — which may also reach Gmail and Calendar — never goes
+    to the browser.
+
+    ``ready`` false comes with ``reason``: ``not_configured``, ``not_connected``,
+    ``no_drive_scope``, ``full_drive`` (the agent opens any file already),
+    ``no_api_key`` (an admin adds the Picker's browser key), ``no_app_id``.
+    """
+    db = get_db()
+    uid = _effective_owner(_user)
+    eff = await _effective_oauth(db)
+
+    def out(reason: str = "", **extra: Any) -> dict[str, Any]:
+        return {"ready": not reason, "reason": reason, **extra}
+
+    if not eff:
+        return out("not_configured")
+    tokens = await _load_tokens(db, uid)
+    if not (tokens and tokens.refresh_token):
+        return out("not_connected")
+    granted = set(tokens.scope.split()) if tokens.scope else set()
+    if granted & _DRIVE_ALL_SCOPES:
+        return out("full_drive")
+    if _DRIVE_FILE_SCOPE not in granted:
+        return out("no_drive_scope")
+    api_key = ((await db.get_system_setting(_K_PICKER_KEY)) or "").strip()
+    if not api_key:
+        return out("no_api_key")
+    client_id = str(eff.get("client_id") or "")
+    m = _PROJECT_NUMBER_RE.match(client_id)
+    if not m:
+        return out("no_app_id")
+    user = await _load_user(db, uid) or {}
+    return out(
+        client_id=client_id,
+        app_id=m.group(1),          # the Cloud project number: the client id's prefix
+        api_key=api_key,
+        scope=_DRIVE_FILE_SCOPE,
+        login_hint=str(user.get("email") or ""),
+    )
 
 
 # ── login / callback / logout ───────────────────────────────────────

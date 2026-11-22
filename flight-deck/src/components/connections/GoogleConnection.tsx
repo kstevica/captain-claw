@@ -24,6 +24,7 @@ import {
 import { useAuthStore } from '../../stores/authStore'
 import { AgenticSignatureField, normalizeSignature } from './AgenticSignatureField'
 import GmailAutoReplySection from './GmailAutoReplySection'
+import GoogleDrivePickerSection from './GoogleDrivePickerSection'
 
 const RECENT_SENDS = 10
 
@@ -82,6 +83,7 @@ export default function GoogleConnection() {
   const [projectId, setProjectId] = useState('')
   const [location, setLocation] = useState('')
   const [scopes, setScopes] = useState<string[]>([])
+  const [pickerKey, setPickerKey] = useState('')
   const [saving, setSaving] = useState(false)
   const [revealSecret, setRevealSecret] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
@@ -113,6 +115,8 @@ export default function GoogleConnection() {
     if (clientSecret) patch.client_secret = clientSecret
     if (projectId !== (config?.project_id || '')) patch.project_id = projectId
     if (location !== (config?.location || '')) patch.location = location
+    // The Picker's key changes no one's connection: no confirm needed for it.
+    if (pickerKey.trim()) patch.picker_api_key = pickerKey.trim()
     const prevScopes = new Set(config?.scopes || [])
     const nextScopes = new Set(scopes)
     const scopesChanged =
@@ -131,6 +135,13 @@ export default function GoogleConnection() {
     setSaving(true)
     await saveConfig(patch)
     setClientSecret('')
+    setPickerKey('')
+    setSaving(false)
+  }
+
+  const removePickerKey = async () => {
+    setSaving(true)
+    await saveConfig({ picker_api_key: '' })
     setSaving(false)
   }
 
@@ -173,6 +184,7 @@ export default function GoogleConnection() {
     clientSecret.trim() !== '' ||
     (projectId.trim() !== (config?.project_id || '').trim()) ||
     (location.trim() !== (config?.location || '').trim()) ||
+    pickerKey.trim() !== '' ||
     scopesDirty
 
   if (unavailable) {
@@ -432,6 +444,10 @@ export default function GoogleConnection() {
             switch, once they're on. */}
         {connected && <GmailAutoReplySection />}
 
+        {/* Single Drive files for the agents (per-file Drive scope) — the
+            user's own, so it shows in the kiosk Connections dialog too. */}
+        {connected && <GoogleDrivePickerSection canManageClient={canManageClient} />}
+
         {/* Credentials form — deck-wide OAuth client, admins only (the save
             endpoint is require_admin; non-admins would only get 403s). */}
         {canManageClient && (
@@ -522,6 +538,38 @@ export default function GoogleConnection() {
                 placeholder="us-central1"
                 className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 font-mono focus:border-violet-500 focus:outline-none"
               />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-zinc-400 mb-1">
+              Picker API key <span className="text-zinc-600">(Pick files from Google Drive)</span>
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={pickerKey}
+                onChange={(e) => setPickerKey(e.target.value)}
+                placeholder={config?.picker_api_key_set ? 'Saved — type a new key to replace it' : 'AIza…'}
+                className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 font-mono focus:border-violet-500 focus:outline-none"
+              />
+              {config?.picker_api_key_set && (
+                <button
+                  onClick={removePickerKey}
+                  disabled={saving}
+                  className="text-xs text-zinc-400 hover:text-zinc-200 disabled:opacity-50"
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+            <div className="text-[11px] text-zinc-500 mt-1 leading-relaxed">
+              With per-file Drive access, agents open only files they made or the person picks. To let
+              people pick: enable the Google Picker API in this client's Cloud project, create a browser
+              API key for it, and add this deck's address
+              (<code className="text-zinc-400">{typeof window !== 'undefined' ? window.location.origin : ''}</code>)
+              to the OAuth client's Authorized JavaScript origins. A key with website restrictions also
+              needs <code className="text-zinc-400">https://docs.google.com/*</code>.
             </div>
           </div>
 
