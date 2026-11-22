@@ -170,7 +170,7 @@ def test_token_cap_from_the_version_else_the_owner(store):
 # ── start ──────────────────────────────────────────────────────────────
 
 async def test_start_creates_a_bat_run(store, bat):
-    f = _live(store)
+    f = _live(store, runner="bat")
     run = await runs.start(f["id"], BOB, note="Short this week.", watch=False)
     assert run["status"] == "running" and run["runner"] == "bat"
     b = bat.runs[run["child_id"]]

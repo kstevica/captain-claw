@@ -58,6 +58,9 @@ RUNNERS = ("bat", "funnel", "vatra", "basna", "code", "crew", "flow", "plan")
 # Runners whose runs are Bat runs (the list funnel is a Bat engine): their results,
 # timing, caps and progress are read from Bat.
 BAT_RUNNERS = ("bat", "funnel")
+# What a new factory runs on when nothing says otherwise: the list funnel. A run whose
+# result turns out not to be a list is planned as a Bat run anyway (funnel.plan).
+DEFAULT_RUNNER = "funnel"
 FUNNEL_LEFTOVERS = ("agent", "none")
 FUNNEL_LOOSEN = ("short", "never")  # rows on a looser reading of soft rules, when a group runs short
 STATES = ("draft", "awaiting_charter", "running", "paused", "paused_budget", "stopped", "retired")
@@ -286,8 +289,15 @@ def _sized(field: str, value: Any) -> str:
     return raw
 
 
+def runner_named_by(runner_config: Any) -> str:
+    """The runner a new factory gets when none is named: the one its settings are
+    plainly for (Bat's own: how its workers are made, its steps), else the default."""
+    cfg = runner_config if isinstance(runner_config, dict) else {}
+    return "bat" if any(k in cfg for k in ("worker_mode", "steps")) else DEFAULT_RUNNER
+
+
 def check_runner(runner: Any) -> str:
-    runner = _text("runner", runner or "bat", 20)
+    runner = _text("runner", runner or DEFAULT_RUNNER, 20)
     if runner not in RUNNERS:
         raise FirstMateError(f"runner must be one of: {', '.join(RUNNERS)}")
     return runner
@@ -904,7 +914,7 @@ class FirstMateStore:
 
     # ── factories and versions ─────────────────────────────────────────
 
-    def create(self, owner_id: str, *, title: str, charter: str, runner: str = "bat",
+    def create(self, owner_id: str, *, title: str, charter: str, runner: str = "",
                runner_config: Any = None, triggers: Any = None, grants: Any = None,
                budget: Any = None, checks: Any = None, goal_id: str = "", template: str = "",
                share: int = 1, priority: int = 3, note: str = "",
@@ -912,6 +922,7 @@ class FirstMateStore:
         """A new factory in ``draft`` with version 1 as its open draft."""
         owner = norm_user(owner_id)
         title = _text("title", title, TITLE_MAX, required=True)
+        runner = runner or runner_named_by(runner_config)
         content = _checked_content({"charter": charter, "runner": runner, "runner_config": runner_config,
                                     "triggers": triggers, "grants": grants, "budget": budget,
                                     "checks": checks})

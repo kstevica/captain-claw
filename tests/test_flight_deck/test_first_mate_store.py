@@ -52,8 +52,11 @@ def test_create_starts_as_a_draft_with_normalized_fields(store):
     assert f["state"] == "draft" and f["version"] == 0 and f["draft_version"] == 1
     assert f["live"] is None and f["trust"] == "propose"
     d = f["draft"]
-    assert d["status"] == "draft" and d["runner"] == "bat"
-    assert d["runner_config"] == {"worker_mode": "plain", "steps": []}
+    assert d["status"] == "draft" and d["runner"] == "funnel"  # the list funnel, when nothing says otherwise
+    assert d["runner_config"] == {"leftovers": "agent", "loosen": "short"}
+    # settings that are plainly Bat's name Bat; a runner named is the runner
+    assert _make(store, title="B", runner_config={"worker_mode": "plain"})["draft"]["runner"] == "bat"
+    assert _make(store, title="C", runner="bat")["draft"]["runner_config"] == {"worker_mode": "plain", "steps": []}
     assert d["grants"] == fm.DEFAULT_GRANTS
     assert d["checks"] == fm.DEFAULT_CHECKS
     assert d["budget"] == {"run_tokens": None}
@@ -286,7 +289,7 @@ def test_runs_only_after_approval_and_one_at_a_time(store):
     f = _live(store)
     run = store.start_run(f["id"], trigger="manual")
     assert run["status"] == "queued" and run["version"] == 1
-    assert run["version_sha"] == f["live"]["sha"] and run["runner"] == "bat"
+    assert run["version_sha"] == f["live"]["sha"] and run["runner"] == "funnel"
     with pytest.raises(fm.FirstMateError, match="already has a run going"):
         store.start_run(f["id"])
     store.mark_running(run["id"], "bat_abc123")

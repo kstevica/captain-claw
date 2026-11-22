@@ -220,10 +220,10 @@ export function SchedulePicker({ value, onChange }: { value: string; onChange: (
 export type HowItRuns = 'bat' | 'funnel'
 
 const HOW: { value: HowItRuns; label: string; icon: typeof Bot; hint: string }[] = [
+  { value: 'funnel', label: 'List funnel', icon: Filter,
+    hint: 'The usual way. Code searches, reads and checks; a model judges each item once. Far fewer tokens for lists, files you give it included.' },
   { value: 'bat', label: 'Agents', icon: Bot,
     hint: 'Workers search and reason in long turns. For research, documents, anything that isn’t a list.' },
-  { value: 'funnel', label: 'List funnel', icon: Filter,
-    hint: 'Code searches, reads and checks; a model judges each item once. Far fewer tokens for lists, files you give it included.' },
 ]
 
 /** How a factory's runs do the work: Bat's agents, or the list funnel (with or without
