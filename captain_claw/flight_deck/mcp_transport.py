@@ -44,7 +44,7 @@ import itertools
 import json
 import os
 import shutil
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -85,6 +85,22 @@ class Transport(abc.ABC):
     #: Called for every JSON-RPC notification (no-id message) from the
     #: server. Stays ``None`` when the manager hasn't wired a handler.
     on_notification: Callable[[dict[str, Any]], None] | None = None
+
+    #: Answers a request the server sends us (a message with ``method`` and
+    #: ``id``, e.g. ``elicitation/create``): returns the JSON-RPC ``result``
+    #: or raises :class:`MCPRequestError`. ``ping`` is answered without it.
+    #: Only the stdio transport reads requests from the server so far.
+    on_request: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None
+
+    #: The MCP revision offered in ``initialize``.
+    protocol_version = "2025-03-26"
+
+    def client_capabilities(self) -> dict[str, Any]:
+        """The client capabilities for ``initialize``: only what this
+        transport can serve — a server's requests for a capability must be
+        able to reach us and be answered. HTTP reads a call's response in
+        one piece, so a request inside it would never be answered: none."""
+        return {}
 
     @abc.abstractmethod
     async def request(
@@ -133,6 +149,48 @@ def _rpc_notification(method: str, params: dict[str, Any] | None) -> dict[str, A
     if params is not None:
         msg["params"] = params
     return msg
+
+
+def _rpc_error(id_: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}}
+
+
+def _request_key(id_: Any) -> str:
+    """A server's request id (a string or a number) as a dict key."""
+    return json.dumps(id_)
+
+
+# Requests from one server we answer at the same time, at most (each open
+# elicitation is one); more are refused at once.
+_MAX_SERVER_REQUESTS = 32
+
+
+class MCPRequestError(Exception):
+    """A JSON-RPC error to answer a server's request with."""
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+METHOD_NOT_FOUND = -32601
+INVALID_PARAMS = -32602
+
+
+async def answer_server_request(
+    msg: dict[str, Any],
+    handler: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None,
+) -> dict[str, Any]:
+    """The ``result`` for a request the server sent: ``ping`` here, anything
+    else from *handler*; with no handler, "method not found" (we declared
+    no capability that would make a server send it)."""
+    method = str(msg.get("method") or "")
+    if method == "ping":
+        return {}
+    if handler is None:
+        raise MCPRequestError(METHOD_NOT_FOUND, f"Method not found: {method}")
+    return await handler(msg)
 
 
 # ── HTTP transport ──────────────────────────────────────────────────
@@ -454,10 +512,23 @@ class StdioTransport(Transport):
         self._id_counter = itertools.count(1)
         self._spawn_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
+        # Requests the server sent us that we're still answering, by id
+        # (see _request_key), and fire-and-forget writes in flight.
+        self._server_requests: dict[str, asyncio.Task[None]] = {}
+        self._background: set[asyncio.Task[Any]] = set()
         # Set when the reader detects the child has exited.  Used to
         # fail any future request immediately rather than blocking on
         # an unresponsive write.
         self._dead = False
+
+    # Elicitation came with this revision; on stdio nothing else in it
+    # changes what we send or read.
+    protocol_version = "2025-06-18"
+
+    def client_capabilities(self) -> dict[str, Any]:
+        # Form-mode elicitation only: the server asks the person a few plain
+        # fields. (URL mode, which sends them to a page, isn't offered.)
+        return {"elicitation": {"form": {}}} if self.on_request is not None else {}
 
     @property
     def command(self) -> str:
@@ -535,6 +606,7 @@ class StdioTransport(Transport):
             self._stderr_task.cancel()
         self._reader_task = None
         self._stderr_task = None
+        self._cancel_server_requests()
         # Fail any still-pending requests so callers don't hang.
         for fut in list(self._pending.values()):
             if not fut.done():
@@ -602,13 +674,20 @@ class StdioTransport(Transport):
                     continue
                 if not isinstance(msg, dict):
                     continue
-                # Notifications (no id) are ignored for now; Phase 2.3
-                # will hook into ``notifications/tools/list_changed``.
                 msg_id = msg.get("id")
                 if msg_id is None:
                     self._handle_notification(msg)
                     continue
-                fut = self._pending.pop(int(msg_id), None)
+                if msg.get("method"):
+                    # A request from the server (ping, elicitation/create…),
+                    # never a response to one of ours: answered on its own task.
+                    self._start_server_request(msg)
+                    continue
+                try:
+                    key = int(msg_id)
+                except (TypeError, ValueError):
+                    continue  # not one of our ids (ours are ints)
+                fut = self._pending.pop(key, None)
                 if fut is None or fut.done():
                     continue
                 if "error" in msg:
@@ -630,6 +709,7 @@ class StdioTransport(Transport):
             log.warning("MCP stdio reader crashed", error=str(exc))
         finally:
             self._dead = True
+            self._cancel_server_requests()
             # Wake up anyone still waiting.
             for fut in list(self._pending.values()):
                 if not fut.done():
@@ -688,6 +768,15 @@ class StdioTransport(Transport):
                         )
             return
 
+        if method == "notifications/cancelled":
+            # The server gave up on one of ITS requests to us (an
+            # elicitation whose tool call ended): stop answering it.
+            params = msg.get("params") or {}
+            if isinstance(params, dict) and "requestId" in params:
+                task = self._server_requests.get(_request_key(params.get("requestId")))
+                if task is not None and not task.done():
+                    task.cancel()
+
         cb = self.on_notification
         if cb is not None:
             try:
@@ -698,6 +787,67 @@ class StdioTransport(Transport):
                     command=self.command,
                     exc_info=True,
                 )
+
+    # ── requests from the server ─────────────────────────────────────
+
+    def _start_server_request(self, msg: dict[str, Any]) -> None:
+        """Answer a server→client request on a task of its own, so a slow
+        answer (a person deciding on an elicitation) never holds up the
+        reader. A repeated id while the first is still open is ignored."""
+        key = _request_key(msg.get("id"))
+        if key in self._server_requests:
+            return
+        if len(self._server_requests) >= _MAX_SERVER_REQUESTS:
+            self._spawn(self._write_message(_rpc_error(
+                msg.get("id"), -32603, "Too many requests from this server are waiting")))
+            return
+        task = asyncio.create_task(
+            self._answer_server_request(msg),
+            name=f"mcp-stdio-server-request[{self.command}]",
+        )
+        self._server_requests[key] = task
+        task.add_done_callback(lambda _t, k=key: self._server_requests.pop(k, None))
+
+    async def _answer_server_request(self, msg: dict[str, Any]) -> None:
+        msg_id = msg.get("id")
+        reply: dict[str, Any] | None
+        try:
+            result = await answer_server_request(msg, self.on_request)
+            reply = {"jsonrpc": "2.0", "id": msg_id, "result": result}
+        except MCPRequestError as exc:
+            reply = _rpc_error(msg_id, exc.code, exc.message)
+        except asyncio.CancelledError:
+            # The server cancelled it, or the child went away: by the spec
+            # nothing is sent back for a cancelled request.
+            return
+        except Exception as exc:  # noqa: BLE001 — a broken handler answers with an error
+            log.warning("MCP stdio: answering a server request failed",
+                        method=str(msg.get("method") or ""), error=str(exc))
+            reply = _rpc_error(msg_id, -32603, "The client couldn't answer this request")
+        await self._write_message(reply)
+
+    async def _write_message(self, message: dict[str, Any]) -> None:
+        proc = self._proc
+        if proc is None or self._dead or proc.stdin is None or proc.stdin.is_closing():
+            return
+        try:
+            data = (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
+            async with self._write_lock:
+                proc.stdin.write(data)
+                await proc.stdin.drain()
+        except Exception:
+            log.debug("MCP stdio: write failed", exc_info=True)
+
+    def _spawn(self, coro: Any) -> None:
+        task = asyncio.create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    def _cancel_server_requests(self) -> None:
+        for task in list(self._server_requests.values()):
+            if not task.done():
+                task.cancel()
+        self._server_requests.clear()
 
     # ── public RPC ───────────────────────────────────────────────────
 
@@ -740,6 +890,15 @@ class StdioTransport(Transport):
             raise MCPTransportError(f"stdio write failed: {exc}") from exc
         try:
             return await fut
+        except asyncio.CancelledError:
+            # Nobody waits for it any more (the agent's turn was stopped):
+            # tell the server, so it stops the work and any question it opened.
+            if self._pending.pop(msg_id, None) is not None:
+                self._spawn(self._write_message(_rpc_notification(
+                    "notifications/cancelled",
+                    {"requestId": msg_id, "reason": "The client stopped waiting"},
+                )))
+            raise
         finally:
             if progress_token:
                 self._progress_handlers.pop(progress_token, None)

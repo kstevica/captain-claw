@@ -76,6 +76,9 @@ GRANT_AWARE_PATHS = frozenset({
     "/fd/asks/agent/secret",
     # Approval cards go to the member whose turn it is (approval_routes.GRANT_AWARE).
     "/fd/approvals/agent", "/fd/approvals/agent/follow", "/fd/approvals/agent/cancel",
+    # An MCP server's questions during a tool call go to the member whose turn
+    # it is (mcp_routes.GRANT_AWARE).
+    "/fd/mcp/agent/calls",
 })  # exact match on the path with root_path removed, rstrip("/")
 
 NO_TURN_DETAIL = "No active shared-agent turn for this request"

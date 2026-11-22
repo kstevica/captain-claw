@@ -4,6 +4,7 @@ import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { formatSize } from '../../services/fileTransfer'
 import { htmlFrame, untrustedUrlTransform } from '../../utils/untrustedContent'
+import { isSheetExt, readXlsx } from '../../utils/xlsx'
 
 // ── A small preview of the selected file ──
 //
@@ -33,6 +34,8 @@ const AUTO_IMAGE_BYTES = 15 * 1024 * 1024
 const SECRET_EXTS = new Set(['.env'])
 const TABLE_ROWS = 8
 const TABLE_COLS = 6
+/** A workbook is read whole for its preview: bigger than this, Open reads it. */
+const SHEET_PREVIEW_BYTES = 8 * 1024 * 1024
 
 /** The groups FilePreview reads as text (getFileTypeGroup's names). */
 const TEXT_GROUPS = new Set(['text', 'code', 'data', 'markdown', 'html'])
@@ -47,6 +50,14 @@ type TextState =
 // by id and change time, so an edited file is read again).
 const textCache = new Map<string, { text: string; cut: boolean } | 'binary'>()
 const TEXT_CACHE_MAX = 40
+
+type SheetState =
+  | { state: 'loading' }
+  | { state: 'ready'; name: string; rows: string[][]; cut: boolean; sheets: number }
+  | { state: 'error'; why: string }
+
+// The first rows of a workbook's first sheet, kept the same way.
+const sheetCache = new Map<string, SheetState>()
 
 async function readStart(url: string, limit: number, signal: AbortSignal): Promise<{ text: string; cut: boolean } | 'binary'> {
   const res = await fetch(url, { signal, credentials: 'include', cache: 'no-cache' })
@@ -222,6 +233,31 @@ export function FilePreview({ group, extension, size, url, freshUrl, thumbUrl, c
     return hit === undefined ? { state: 'loading' } : hit === 'binary' ? { state: 'binary' } : { state: 'ready', ...hit }
   })
   const reading = isText && (!secret || asked)
+  const workbook = isSheetExt(ext)
+  const [sheet, setSheet] = useState<SheetState>(() => sheetCache.get(cacheKey) ?? { state: 'loading' })
+  const sheetTooBig = workbook && size > SHEET_PREVIEW_BYTES
+
+  useEffect(() => {
+    if (!workbook || sheetTooBig || sheetCache.has(cacheKey)) return
+    const ctl = new AbortController()
+    fetch(freshUrl(), { signal: ctl.signal, credentials: 'include', cache: 'no-cache' })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`${res.status}`)
+        const wb = await readXlsx(await res.arrayBuffer(), { maxRows: TABLE_ROWS + 1, maxSheets: 1 })
+        const first = wb.sheets[0]
+        return { state: 'ready', name: first.name, rows: first.rows, cut: first.cut, sheets: wb.total } as SheetState
+      })
+      .catch((e) => ({ state: 'error', why: e instanceof Error ? e.message : '' }) as SheetState)
+      .then((r) => {
+        if (ctl.signal.aborted) return
+        sheetCache.set(cacheKey, r)
+        if (sheetCache.size > TEXT_CACHE_MAX) sheetCache.delete(sheetCache.keys().next().value as string)
+        setSheet(r)
+      })
+    return () => ctl.abort()
+    // freshUrl is made anew on every render; it only matters when this runs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workbook, sheetTooBig, cacheKey])
 
   // The URL changes with every token refresh; the version (cacheKey) doesn't.
   useEffect(() => {
@@ -319,6 +355,24 @@ export function FilePreview({ group, extension, size, url, freshUrl, thumbUrl, c
       </button>
     )
     caption = 'The first page'
+  } else if (workbook) {
+    if (sheetTooBig) {
+      body = <Empty text="This workbook is too big to preview." hint={canOpen ? 'Open shows it as a table.' : undefined} />
+    } else if (sheet.state === 'loading') {
+      body = <div className="flex items-center justify-center py-8"><Loader2 className="h-4 w-4 animate-spin text-zinc-500" /></div>
+    } else if (sheet.state === 'error') {
+      body = <Empty text="Couldn't read the workbook for a preview." hint={sheet.why || undefined} />
+    } else if (!sheet.rows.length) {
+      body = <Empty text="Its first sheet is empty." hint={sheet.sheets > 1 && canOpen ? 'Open shows the other sheets.' : undefined} />
+    } else {
+      const cols = Math.max(0, ...sheet.rows.map((r) => r.length))
+      body = <TablePreview rows={sheet.rows} />
+      caption = [
+        sheet.cut ? `The first ${Math.max(0, sheet.rows.length - 1)} rows` : '',
+        cols > TABLE_COLS ? `${TABLE_COLS} of ${cols} columns` : '',
+        sheet.sheets > 1 ? `sheet “${sheet.name}” of ${sheet.sheets}` : '',
+      ].filter(Boolean).join(' · ')
+    }
   } else if (isText) {
     if (text.state === 'loading') {
       body = <div className="flex items-center justify-center py-8"><Loader2 className="h-4 w-4 animate-spin text-zinc-500" /></div>
@@ -373,7 +427,7 @@ export function FilePreview({ group, extension, size, url, freshUrl, thumbUrl, c
       <div className="mb-1.5 flex items-baseline gap-2">
         <span className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Preview</span>
         {caption && <span className="text-[11px] text-zinc-600">{caption.charAt(0).toUpperCase() + caption.slice(1)}</span>}
-        {canOpen && ((isText && text.state === 'ready') || (group === 'pdf' && !failed)) && (
+        {canOpen && ((isText && text.state === 'ready') || (group === 'pdf' && !failed) || (workbook && (sheet.state === 'ready' || sheetTooBig))) && (
           <button type="button" onClick={open} className="ml-auto text-[11px] text-violet-600 hover:underline dark:text-violet-400">
             Open
           </button>

@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +64,14 @@ class MCPProxyConnector:
     a connection pool.
     """
 
-    def __init__(self, server_name: str, fd_client: FDClient | None = None) -> None:
+    def __init__(self, server_name: str, fd_client: FDClient | None = None,
+                 calls_client: FDClient | None = None) -> None:
         self.name = server_name
         self._fd = fd_client or FDClient()
+        # Tool calls are followed in requests of up to ~30 s on Flight
+        # Deck's side (a call may wait for the person), so they get their
+        # own, longer timeout.
+        self._calls = calls_client or FDClient(timeout=_CALL_HTTP_TIMEOUT)
 
     async def discover_tools(self) -> list[dict[str, Any]]:
         resp = await self._fd.get(f"/fd/mcp/{self.name}/tools")
@@ -78,39 +84,124 @@ class MCPProxyConnector:
         tools = body.get("tools", []) if isinstance(body, dict) else []
         return list(tools)
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
-        resp = await self._fd.post(
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any], *, agent: Any = None,
+                        session_id: str = "", stream: Any = None) -> str:
+        """Call *tool_name* through Flight Deck and return its text. The
+        call is for the person this turn is for: if the server asks them
+        something first, Flight Deck puts it on their card and this waits
+        (saying so on *stream*); stopping the turn cancels the call."""
+        body = await self._call_followed(tool_name, arguments, agent=agent, session_id=session_id,
+                                         stream=stream)
+        return _result_text(body)
+
+    async def _call_once(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        """One request for the whole call: a Flight Deck from before
+        followed calls."""
+        resp = await self._calls.post(
             f"/fd/mcp/{self.name}/call",
             json={"tool": tool_name, "arguments": arguments},
         )
-        if resp.status_code != 200:
-            raise RuntimeError(
-                f"FD /fd/mcp/{self.name}/call returned {resp.status_code}: "
-                f"{resp.text[:200]}"
-            )
-        body = resp.json()
-        result = (body or {}).get("result") if isinstance(body, dict) else None
-        if not isinstance(result, dict):
-            return json.dumps(body)
+        return _body_or_raise(resp, f"/fd/mcp/{self.name}/call")
 
-        content = result.get("content", [])
-        is_error = result.get("isError", False)
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict):
-                btype = block.get("type")
-                if btype == "text":
-                    parts.append(block.get("text", ""))
-                elif btype == "image":
-                    parts.append(f"[image: {block.get('mimeType', 'unknown')}]")
-                else:
-                    parts.append(json.dumps(block))
-            elif isinstance(block, str):
-                parts.append(block)
-        text = "\n".join(parts) if parts else json.dumps(result)
-        if is_error:
-            raise RuntimeError(f"MCP tool error: {text}")
-        return text
+    async def _call_followed(self, tool_name: str, arguments: dict[str, Any], *, agent: Any,
+                             session_id: str, stream: Any) -> dict[str, Any]:
+        from captain_claw import speaker
+
+        headers: dict[str, str] = {}
+        params: dict[str, str] = {}
+        nobody = False
+        try:
+            headers = speaker.grant_headers()
+            params = speaker.grant_params()
+        except speaker.SpeakerGrantMissing:
+            # A member's turn without its grant: the call runs, but a
+            # question from the server can't reach them, so it's cancelled.
+            nobody = True
+        call_id = "xm_" + secrets.token_hex(8)
+        payload = {"server": self.name, "tool": tool_name, "arguments": arguments,
+                   "origin": _turn_origin(agent), "session_id": session_id or "",
+                   "nobody": nobody, "wait": 20, "call_id": call_id}
+        finished = False
+        try:
+            resp = await self._calls.post("/fd/mcp/agent/calls", json=payload, headers=headers, params=params)
+            if _route_missing(resp):
+                finished = True
+                return await self._call_once(tool_name, arguments)
+            told = False
+            while True:
+                body = _body_or_raise(resp, "/fd/mcp/agent/calls")
+                if not body.get("pending"):
+                    finished = True
+                    return body
+                if body.get("asking") and not told and callable(stream):
+                    told = True
+                    try:
+                        stream(WAITING_NOTE.format(server=self.name))
+                    except Exception:  # noqa: BLE001
+                        pass
+                resp = await self._calls.post("/fd/mcp/agent/calls/follow", json={"id": call_id, "wait": 25})
+        finally:
+            if not finished:  # the turn was stopped (or the line failed): stop the call
+                try:
+                    await self._calls.post("/fd/mcp/agent/calls/cancel", json={"id": call_id})
+                except BaseException:  # noqa: BLE001 — best effort while unwinding
+                    pass
+
+
+_CALL_HTTP_TIMEOUT = 45.0  # each request waits at most 30 s on Flight Deck's side
+WAITING_NOTE = "Waiting for your answer in Flight Deck: {server} asks you before it goes on…\n"
+
+
+def _turn_origin(agent: Any) -> str:
+    origin = getattr(agent, "_turn_source", None)
+    return str(origin[0]) if isinstance(origin, tuple) and origin else ""
+
+
+def _route_missing(resp: Any) -> bool:
+    """A Flight Deck from before followed calls doesn't have the route."""
+    if resp.status_code not in (404, 405):
+        return False
+    try:
+        detail = resp.json().get("detail")
+    except Exception:  # noqa: BLE001
+        return True
+    return detail in ("Not Found", "Method Not Allowed")
+
+
+def _body_or_raise(resp: Any, path: str) -> dict[str, Any]:
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail") or resp.text
+        except Exception:  # noqa: BLE001
+            detail = resp.text
+        raise RuntimeError(f"FD {path} returned {resp.status_code}: {str(detail)[:300]}")
+    body = resp.json()
+    return body if isinstance(body, dict) else {"result": body}
+
+
+def _result_text(body: dict[str, Any]) -> str:
+    result = (body or {}).get("result") if isinstance(body, dict) else None
+    if not isinstance(result, dict):
+        return json.dumps(body)
+
+    content = result.get("content", [])
+    is_error = result.get("isError", False)
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict):
+            btype = block.get("type")
+            if btype == "text":
+                parts.append(block.get("text", ""))
+            elif btype == "image":
+                parts.append(f"[image: {block.get('mimeType', 'unknown')}]")
+            else:
+                parts.append(json.dumps(block))
+        elif isinstance(block, str):
+            parts.append(block)
+    text = "\n".join(parts) if parts else json.dumps(result)
+    if is_error:
+        raise RuntimeError(f"MCP tool error: {text}")
+    return text
 
 
 # ── proxy tool ──────────────────────────────────────────────────────
@@ -178,7 +269,10 @@ class MCPProxyTool(Tool):
         # name (``mcp_<server>_<tool>``), so the prefix added nothing.
         self.description = mcp_description or mcp_tool_name
         self.parameters = mcp_input_schema or {"type": "object", "properties": {}}
-        self.timeout_seconds = 60.0
+        # Flight Deck bounds the call itself (it stops one that goes quiet,
+        # mcp_calls.QUIET_LIMIT_S), and a call may wait for the person's
+        # answer on a card (mcp_elicitation.WAIT_S): this is only a backstop.
+        self.timeout_seconds = 3_700.0
         self._mcp_tool_name = mcp_tool_name
         self._server_name = server_name
         self._connector = connector
@@ -223,7 +317,9 @@ class MCPProxyTool(Tool):
                     if isinstance(value, str) and value.strip() == "":
                         continue
                 clean_args[key] = value
-            text = await self._connector.call_tool(self._mcp_tool_name, clean_args)
+            text = await self._connector.call_tool(
+                self._mcp_tool_name, clean_args, agent=kwargs.get("_agent"),
+                session_id=str(kwargs.get("_session_id") or ""), stream=kwargs.get("_stream_callback"))
             return ToolResult(success=True, content=text)
         except Exception as exc:
             log.error(

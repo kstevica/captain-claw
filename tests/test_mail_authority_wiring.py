@@ -363,7 +363,7 @@ class _Connector:
     def __init__(self):
         self.calls: list = []
 
-    async def call_tool(self, name, args):
+    async def call_tool(self, name, args, **_turn):
         self.calls.append((name, args))
         return "done"
 

@@ -2,6 +2,7 @@ import {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
   type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode,
 } from 'react'
+import { createPortal } from 'react-dom'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -22,7 +23,9 @@ import {
   Lightbulb,
   Link2,
   Loader2,
+  Maximize2,
   MessageSquare,
+  Minimize2,
   Pencil,
   Plus,
   RotateCw,
@@ -53,6 +56,8 @@ import { isFolderSourceId } from '../../services/fileLibraryApi'
 import {
   FacetGroup, FullscreenButton, Highlight, ScanStatus, SourceFacetGroup, SourceName, libraryIconBtn as iconBtn,
 } from './libraryParts'
+import { filterKindOf, useColumnFilters } from './columnFilters'
+import { FilterButton, FilterChips, FilterPopover } from './ColumnFilterUI'
 
 // ── Data library ────────────────────────────────────────────────────
 //
@@ -740,6 +745,7 @@ function TableView({ item, terms, phone, onBack, onClose, onChanged, onRescan, o
       notes={t.column_notes}
       phone={phone}
       version={`${item.row_count}:${item.updated_at}:${nonce}`}
+      title={t.title || humanize(t.table_name)}
       onTableChanged={onChanged}
     />
   )
@@ -958,8 +964,10 @@ export type Col = { name: string; type: string }
 type Panel = { kind: 'row'; id: number } | { kind: 'new' } | null
 type Editing = { id: number; col: string; where: 'grid' | 'panel' } | null
 
-function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
+function DataGrid({ tableId, kinds, notes, phone, version, title, onTableChanged }: {
   tableId: string
+  /** The table's name as people read it (the fullscreen record says it). */
+  title: string
   kinds: Record<string, ColumnKind>
   notes: Record<string, string>
   phone: boolean
@@ -981,8 +989,20 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
   const [openCopy, setOpenCopy] = useState<DataRow | null>(null)
   const [editing, setEditing] = useState<Editing>(null)
   const [reload, setReload] = useState(0)
+  // The open record fills the window instead of the column beside the rows.
+  const [recordFull, setRecordFull] = useState(false)
+  const filt = useColumnFilters()
   const keepPanel = useRef(false)
   const reqId = useRef(0)
+  const typeOf = useMemo(() => Object.fromEntries((data?.columns ?? []).map((c) => [c.name, c.type])), [data?.columns])
+  /** How a column filters: by what the profile says it holds, else its stored type. */
+  const fkOf = (col: string) => filterKindOf(kinds[col], typeOf[col])
+  const filtersJson = (fs: typeof filt.filters) => (fs.length ? JSON.stringify(fs.map((f) => ({ ...f, kind: fkOf(f.col) }))) : '')
+  const filtersParam = filtersJson(filt.filters)
+  /** A column's values for its filter, among the rows the search and the other filters leave. */
+  const statsFor = (col: string) => (search: string) => dataLibraryApi.values(tableId, {
+    col, kind: fkOf(col), q: dq, search, filters: filtersJson(filt.filters.filter((f) => f.col !== col)),
+  })
 
   useEffect(() => {
     const t = setTimeout(() => { setDq(q.trim()); setOffset(0) }, q ? 250 : 0)
@@ -992,7 +1012,7 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
   useEffect(() => {
     const id = ++reqId.current
     setLoading(true)
-    dataLibraryApi.rows(tableId, { limit: ROWS_PAGE, offset, q: dq, sort: sort?.col, dir: sort?.dir })
+    dataLibraryApi.rows(tableId, { limit: ROWS_PAGE, offset, q: dq, sort: sort?.col, dir: sort?.dir, filters: filtersParam })
       .then((res) => {
         if (id !== reqId.current) return
         // The last row of the last page was deleted: the page before.
@@ -1005,7 +1025,7 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
       })
       .catch((e) => { if (id === reqId.current) setError(e instanceof Error ? e.message : String(e)) })
       .finally(() => { if (id === reqId.current) setLoading(false) })
-  }, [tableId, dq, sort, offset, version, reload])
+  }, [tableId, dq, sort, offset, version, reload, filtersParam])
 
   // Escape: an editor cancels itself; otherwise the open record (or the new
   // row) closes before anything else does.
@@ -1015,22 +1035,32 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
       if (e.key !== 'Escape') return
       if ((e.target as Element | null)?.closest?.('[data-cell-editor]')) return
       e.stopPropagation()
+      // A record filling the view gets smaller first.
+      if (recordFull) { setRecordFull(false); return }
       setPanel(null)
       setEditing(null)
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [panel])
+  }, [panel, recordFull])
   useEffect(() => {
     if (keepPanel.current) { keepPanel.current = false; return }
     setPanel(null)
     setEditing(null)
-  }, [dq, sort, offset])
+  }, [dq, sort, offset, filtersParam])
 
   const cols = data?.columns ?? []
   const rows = data?.rows ?? []
   const total = data?.total ?? 0
   const terms = useMemo(() => dq.toLowerCase().split(/\s+/).filter(Boolean), [dq])
+  const narrowed = !!dq || filt.filters.length > 0
+  const nothingMatches = filt.filters.length && dq ? 'No row matches the search and the filters.'
+    : filt.filters.length ? `No row matches ${filt.filters.length > 1 ? 'these filters' : 'that filter'}.`
+      : 'No row matches that search.'
+  const setFilter = (col: string, f: Parameters<typeof filt.apply>[1]) => { filt.apply(col, f); setOffset(0) }
+  const removeFilter = (col: string) => { filt.remove(col); setOffset(0) }
+  const clearFilters = () => { filt.clear(); setOffset(0) }
+  const menu = filt.menu
   const toggleSort = (col: string) => {
     setOffset(0)
     setSort((cur) => (!cur || cur.col !== col ? { col, dir: 'asc' } : cur.dir === 'asc' ? { col, dir: 'desc' } : null))
@@ -1147,7 +1177,8 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
   }
 
   const record = panel?.kind === 'new' ? (
-    <NewRowPanel columns={cols} kinds={kinds} notes={notes} phone={phone} onAdd={addRow} onClose={() => setPanel(null)} />
+    <NewRowPanel columns={cols} kinds={kinds} notes={notes} phone={phone} onAdd={addRow} onClose={() => setPanel(null)}
+      full={recordFull} onToggleFull={phone ? undefined : () => setRecordFull((v) => !v)} tableTitle={title} />
   ) : openRow ? (
     <RecordPanel
       key={openRow.__rowid}
@@ -1168,6 +1199,10 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
       onSave={(col, draft) => saveCell(openRow, col, draft)}
       onDoneEditing={() => setEditing(null)}
       onDelete={() => deleteRow(openRow)}
+      full={recordFull}
+      onToggleFull={phone ? undefined : () => setRecordFull((v) => !v)}
+      tableTitle={title}
+      total={total}
     />
   ) : null
 
@@ -1186,7 +1221,7 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
         </button>
         <span className="ml-auto shrink-0 text-xs tabular-nums text-zinc-500">
           {loading && <Loader2 className="mr-1.5 inline h-3 w-3 animate-spin" />}
-          {total ? `${fmtNum(from)}–${fmtNum(to)} of ${fmtNum(total)}${dq ? ' matching' : ''}` : dq ? 'No matching rows' : ''}
+          {total ? `${fmtNum(from)}–${fmtNum(to)} of ${fmtNum(total)}${narrowed ? ' matching' : ''}` : narrowed ? 'No matching rows' : ''}
         </span>
         <button onClick={() => setOffset((o) => Math.max(0, o - ROWS_PAGE))} disabled={offset === 0} className={pagerBtn} aria-label="Previous page" title="Previous page">
           <ChevronLeft className="h-4 w-4" />
@@ -1195,6 +1230,8 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
           <ChevronRight className="h-4 w-4" />
         </button>
       </div>
+      <FilterChips filters={filt.filters} labelOf={humanize} kindOf={fkOf}
+        onEdit={(col, anchor) => filt.setMenu({ col, anchor })} onRemove={removeFilter} onClear={clearFilters} />
       <div className="flex min-h-0 flex-1">
         <div className="min-w-0 flex-1 overflow-auto">
           {error ? (
@@ -1205,8 +1242,13 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
             <div className="flex h-full justify-center pt-12 text-zinc-500"><Loader2 className="h-5 w-5 animate-spin" /></div>
           ) : rows.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-zinc-500">
-              {dq ? 'No row matches that search.' : 'This table has no rows yet.'}
-              {!dq && cols.length > 0 && (
+              {narrowed ? nothingMatches : 'This table has no rows yet.'}
+              {filt.filters.length > 0 && (
+                <button onClick={clearFilters} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800/60">
+                  <X className="h-4 w-4" />Clear the filters
+                </button>
+              )}
+              {!narrowed && cols.length > 0 && (
                 <button onClick={newRow} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800/60">
                   <Plus className="h-4 w-4" />Add the first row
                 </button>
@@ -1233,6 +1275,7 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
                           {sorted === 'asc' ? <ChevronUp className="h-3.5 w-3.5 text-emerald-500" />
                             : sorted === 'desc' ? <ChevronDown className="h-3.5 w-3.5 text-emerald-500" />
                               : <ChevronsUpDown className="h-3 w-3 text-zinc-600" />}
+                          <FilterButton label={humanize(c.name)} active={!!filt.of(c.name)} onOpen={(anchor) => filt.setMenu({ col: c.name, anchor })} />
                         </span>
                       </th>
                     )
@@ -1288,9 +1331,18 @@ function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
             </table>
           )}
         </div>
-        {record && !phone && <div className="w-[360px] shrink-0 border-l border-zinc-800 bg-zinc-900/30">{record}</div>}
+        {record && !phone && !recordFull && <div className="w-[360px] shrink-0 border-l border-zinc-800 bg-zinc-900/30">{record}</div>}
       </div>
       {record && phone && <div className="absolute inset-0 z-20 bg-zinc-950">{record}</div>}
+      {/* Fullscreen: the record fills the window, over the library. */}
+      {record && !phone && recordFull && createPortal(
+        <div data-above-drawer role="dialog" aria-label="Row" className="fixed inset-0 z-[70] flex flex-col bg-zinc-950">{record}</div>,
+        document.body,
+      )}
+      {menu && (
+        <FilterPopover key={menu.col} anchor={menu.anchor} label={humanize(menu.col)} fk={fkOf(menu.col)}
+          current={filt.of(menu.col)} loadStats={statsFor(menu.col)} onApply={(f) => setFilter(menu.col, f)} onClose={() => filt.setMenu(null)} />
+      )}
     </div>
   )
 }
@@ -1341,7 +1393,9 @@ export function Cell({ value, kind, type, terms, full = false }: {
 // ── Editing a value ──
 
 const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/
-const editInput = 'w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500/70 focus:outline-none'
+const editInputSmall = 'w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500/70 focus:outline-none'
+/** The same, roomier: the fullscreen record's. */
+const editInputLarge = 'w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3.5 py-2.5 text-lg text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500/70 focus:outline-none focus:ring-4 focus:ring-emerald-500/10'
 
 /** A stored value as an editor holds it: plain text and numbers, yes / no. */
 function toDraft(v: unknown, type: string): string {
@@ -1363,7 +1417,7 @@ function editHint(type: string): string {
 
 /** The input for one column's type. Enter saves (⌘/Ctrl+Enter in JSON,
  *  where Enter is a new line); empty is no value. */
-function FieldInput({ col, value, onChange, onSubmit, onPick, autoFocus = false }: {
+function FieldInput({ col, value, onChange, onSubmit, onPick, autoFocus = false, large = false }: {
   col: Col
   value: string
   onChange: (v: string) => void
@@ -1371,15 +1425,18 @@ function FieldInput({ col, value, onChange, onSubmit, onPick, autoFocus = false 
   /** Yes / No / Empty picked: save it at once (one cell), when given. */
   onPick?: (v: string) => void
   autoFocus?: boolean
+  /** Roomier, bigger text (the fullscreen record). */
+  large?: boolean
 }) {
+  const editInput = large ? editInputLarge : editInputSmall
   const area = useRef<HTMLTextAreaElement>(null)
   // A text box grows with what it holds, up to a point.
   useLayoutEffect(() => {
     const el = area.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(260, el.scrollHeight + 2)}px`
-  }, [value])
+    el.style.height = `${Math.min(large ? 480 : 260, el.scrollHeight + 2)}px`
+  }, [value, large])
   const caretToEnd = (e: { currentTarget: HTMLInputElement | HTMLTextAreaElement }) => {
     const el = e.currentTarget
     if (el.type === 'date') return
@@ -1407,7 +1464,7 @@ function FieldInput({ col, value, onChange, onSubmit, onPick, autoFocus = false 
             autoFocus={autoFocus && (value === v || (!known && i === 0))}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => (onPick ? onPick(v) : onChange(v))}
-            className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${value === v
+            className={`border transition-colors ${large ? 'rounded-lg px-4 py-1.5 text-sm' : 'rounded-md px-2.5 py-1 text-xs'} ${value === v
               ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
               : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
           >
@@ -1479,7 +1536,7 @@ function FieldInput({ col, value, onChange, onSubmit, onPick, autoFocus = false 
       autoFocus={autoFocus}
       spellCheck={!json}
       aria-label={label}
-      className={`${editInput} block resize-none leading-snug ${json ? 'font-mono text-xs' : ''}`}
+      className={`${editInput} block resize-none ${large ? 'leading-relaxed' : 'leading-snug'} ${json ? `font-mono ${large ? 'text-sm' : 'text-xs'}` : ''}`}
     />
   )
 }
@@ -1487,10 +1544,12 @@ function FieldInput({ col, value, onChange, onSubmit, onPick, autoFocus = false 
 /** One cell being changed: saves on Enter, on Save or when you click away
  *  (only when it changed); Esc or Cancel leaves it as it was. A value that
  *  doesn't fit stays open with the reason. */
-export function CellEditor({ col, value, compact = false, onSave, onDone }: {
+export function CellEditor({ col, value, compact = false, large = false, onSave, onDone }: {
   col: Col
   value: unknown
   compact?: boolean
+  /** Roomier, bigger text (the fullscreen record). */
+  large?: boolean
   /** Resolves to why it couldn't be saved, or '' when it's done. */
   onSave: (draft: string) => Promise<string>
   onDone: () => void
@@ -1521,7 +1580,7 @@ export function CellEditor({ col, value, compact = false, onSave, onDone }: {
     else onDone()
   }
 
-  const small = 'rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50'
+  const small = `font-medium transition-colors disabled:opacity-50 ${large ? 'rounded-lg px-3.5 py-1.5 text-sm' : 'rounded-md px-2.5 py-1 text-xs'}`
   return (
     <div
       ref={root}
@@ -1542,9 +1601,10 @@ export function CellEditor({ col, value, compact = false, onSave, onDone }: {
         onSubmit={() => void commit()}
         onPick={(v) => { setDraft(v); void commit(v) }}
         autoFocus
+        large={large}
       />
-      {error && <p className="mt-1.5 text-[11px] leading-snug text-red-600 dark:text-red-400">{error}</p>}
-      <div className="mt-1.5 flex items-center gap-1.5">
+      {error && <p className={`mt-1.5 leading-snug text-red-600 dark:text-red-400 ${large ? 'text-sm' : 'text-[11px]'}`}>{error}</p>}
+      <div className={`flex items-center gap-1.5 ${large ? 'mt-2.5' : 'mt-1.5'}`}>
         {col.type !== 'boolean' && (
           <button
             type="button"
@@ -1566,7 +1626,7 @@ export function CellEditor({ col, value, compact = false, onSave, onDone }: {
           Cancel
         </button>
         {col.type === 'boolean' && saving && <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-500" />}
-        {!compact && <span className="ml-auto truncate text-[10px] text-zinc-500">{editHint(col.type)}</span>}
+        {!compact && <span className={`ml-auto truncate text-zinc-500 ${large ? 'text-xs' : 'text-[10px]'}`}>{editHint(col.type)}</span>}
       </div>
     </div>
   )
@@ -1574,9 +1634,74 @@ export function CellEditor({ col, value, compact = false, onSave, onDone }: {
 
 // ── One record ──
 
+/** Grow the open record to fill the window, or back to its column. */
+function FullButton({ full, onToggle, className }: { full: boolean; onToggle: () => void; className: string }) {
+  const label = full ? 'Exit fullscreen' : 'Show the row fullscreen'
+  return (
+    <button onClick={onToggle} className={className} title={full ? `${label} (Esc)` : 'Fullscreen'} aria-label={label} aria-pressed={full}>
+      {full ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+    </button>
+  )
+}
+
+/** A value long enough to want a whole row of the fullscreen record's grid. */
+function isLong(v: unknown, type: string): boolean {
+  if (type === 'json') return true
+  const s = v === null || v === undefined ? '' : String(v)
+  return s.length > 70 || s.includes('\n')
+}
+
+/** What the fullscreen record is called: its name or title column, else its
+ *  first text that reads like a name. */
+function recordTitle(row: DataRow, columns: Col[]): string {
+  const named = columns.find((c) => /^(name|title|full_?name|company|label)$/i.test(c.name))
+  const pick = (c?: Col) => (c && row[c.name] != null && String(row[c.name]).trim() ? String(row[c.name]).trim() : '')
+  if (pick(named)) return pick(named)
+  for (const c of columns) {
+    const v = pick(c)
+    if (v && c.type === 'text' && v.length <= 80 && !URL_RE.test(v) && !EMAIL_RE.test(v)) return v
+  }
+  return ''
+}
+
+/** The fullscreen record's header: what it is, then its buttons. */
+function FullHeader({ kicker, title, children }: { kicker: string; title: string; children: ReactNode }) {
+  return (
+    <div className="shrink-0 border-b border-[var(--fd-line)] bg-[var(--fd-surface)]">
+      <div className="mx-auto flex w-full max-w-5xl items-center gap-4 px-6 py-5 wide:px-10">
+        <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+          <Table2 className="h-6 w-6" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-xs font-medium uppercase tracking-wider text-zinc-500">{kicker}</p>
+          <h2 className="truncate text-2xl font-semibold tracking-tight text-zinc-100" title={title}>{title}</h2>
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5">{children}</div>
+      </div>
+    </div>
+  )
+}
+
+/** Yes or no, as a pill (the fullscreen record). */
+function YesNo({ value }: { value: unknown }) {
+  const s = String(value).trim().toLowerCase()
+  const yes = value === true || value === 1 || ['1', 'true', 'yes'].includes(s)
+  return yes ? (
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-3 py-1 text-base font-medium text-emerald-700 dark:text-emerald-300">
+      <Check className="h-4 w-4" />Yes
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-800/70 px-3 py-1 text-base font-medium text-zinc-400">
+      <X className="h-4 w-4" />No
+    </span>
+  )
+}
+
+const fullBtn = 'flex h-10 w-10 items-center justify-center rounded-full border border-[var(--fd-line)] bg-[var(--fd-surface-raised)] text-zinc-400 transition-colors hover:border-zinc-700 hover:text-zinc-100 disabled:opacity-30 disabled:hover:border-[var(--fd-line)] disabled:hover:text-zinc-400'
+
 function RecordPanel({
   row, index, columns, kinds, notes, terms, phone, hasPrev, hasNext, onPrev, onNext, onClose,
-  editingCol, onEdit, onSave, onDoneEditing, onDelete,
+  editingCol, onEdit, onSave, onDoneEditing, onDelete, full = false, onToggleFull, tableTitle = '', total = 0,
 }: {
   row: DataRow
   /** Its place in the table as shown; null when an edit moved it off this page. */
@@ -1591,6 +1716,12 @@ function RecordPanel({
   onDoneEditing: () => void
   /** Resolves to why it couldn't be deleted, or '' when it's gone. */
   onDelete: () => Promise<string>
+  /** It fills the window; `onToggleFull` grows or shrinks it (none on a phone). */
+  full?: boolean
+  onToggleFull?: () => void
+  /** The table's name and row count, for the fullscreen record's header. */
+  tableTitle?: string
+  total?: number
 }) {
   const [copied, setCopied] = useState(false)
   const [confirming, setConfirming] = useState(false)
@@ -1613,6 +1744,104 @@ function RecordPanel({
     if (why) setDeleteError(why)
   }
   const small = 'rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-30'
+
+  if (full && onToggleFull) {
+    const where = index === null ? 'Row' : `Row ${fmtNum(index)}${total ? ` of ${fmtNum(total)}` : ''}`
+    return (
+      <div className="flex h-full flex-col bg-[var(--fd-shell)]">
+        <FullHeader kicker={[tableTitle, where].filter(Boolean).join(' · ')} title={recordTitle(row, columns) || where}>
+          <div className="mr-1.5 flex overflow-hidden rounded-full border border-[var(--fd-line)] bg-[var(--fd-surface-raised)]">
+            <button onClick={onPrev} disabled={!hasPrev} title="Previous row" aria-label="Previous row"
+              className="flex h-10 w-10 items-center justify-center text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent">
+              <ChevronUp className="h-[18px] w-[18px]" />
+            </button>
+            <span className="w-px bg-[var(--fd-line)]" />
+            <button onClick={onNext} disabled={!hasNext} title="Next row" aria-label="Next row"
+              className="flex h-10 w-10 items-center justify-center text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent">
+              <ChevronDown className="h-[18px] w-[18px]" />
+            </button>
+          </div>
+          <button onClick={copy} className={fullBtn} title="Copy the row as JSON" aria-label="Copy the row">
+            {copied ? <Check className="h-[18px] w-[18px] text-emerald-500" /> : <Copy className="h-[18px] w-[18px]" />}
+          </button>
+          <button onClick={() => { setConfirming(true); setDeleteError('') }} className={`${fullBtn} hover:text-red-600 dark:hover:text-red-400`}
+            title="Delete this row" aria-label="Delete this row">
+            <Trash2 className="h-[18px] w-[18px]" />
+          </button>
+          <FullButton full onToggle={onToggleFull} className={fullBtn} />
+          <button onClick={onClose} className={fullBtn} title="Close" aria-label="Close row"><X className="h-[18px] w-[18px]" /></button>
+        </FullHeader>
+        {confirming && (
+          <div className="shrink-0 border-b border-red-500/30 bg-red-500/5">
+            <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-3 px-6 py-3 wide:px-10">
+              <span className="flex-1 text-sm text-red-700 dark:text-red-300">Delete this row? It can't be undone.</span>
+              {deleteError && <span className="w-full text-xs text-red-600 dark:text-red-400">{deleteError}</span>}
+              <button onClick={remove} disabled={deleting}
+                className="flex items-center gap-1.5 rounded-full bg-red-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:opacity-50">
+                {deleting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}Delete
+              </button>
+              <button onClick={() => setConfirming(false)} disabled={deleting}
+                className="rounded-full px-4 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <dl className="mx-auto grid w-full max-w-5xl grid-cols-1 gap-4 px-6 py-8 wide:grid-cols-2 wide:px-10">
+            {columns.map((c) => {
+              const editing = editingCol === c.name
+              const label = humanize(c.name)
+              const v = row[c.name]
+              const blank = v === null || v === undefined || v === ''
+              return (
+                <div key={c.name}
+                  className={`group rounded-[var(--fd-radius-card)] border bg-[var(--fd-surface-raised)] p-5 transition-colors ${editing
+                    ? 'border-emerald-500/50 ring-4 ring-emerald-500/10' : 'border-[var(--fd-line)] hover:border-zinc-700'} ${isLong(v, c.type) ? 'wide:col-span-2' : ''}`}>
+                  <dt>
+                    <span className="flex items-center gap-2">
+                      <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-zinc-800/70">
+                        <KindIcon kind={kinds[c.name]} className="h-3.5 w-3.5" />
+                      </span>
+                      <span className="text-sm font-semibold text-zinc-300">{label}</span>
+                      {!editing && (
+                        <button onClick={() => onEdit(c.name)} title={`Change ${label}`} aria-label={`Change ${label}`}
+                          className="ml-auto rounded-full p-1.5 text-zinc-500 opacity-0 transition-opacity hover:bg-zinc-800 hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100">
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </span>
+                    {notes[c.name] && <span className="mt-1.5 block text-[13px] leading-snug text-zinc-500">{notes[c.name]}</span>}
+                  </dt>
+                  <dd className="mt-3 break-words text-lg leading-relaxed text-zinc-100">
+                    {editing ? (
+                      <CellEditor col={c} value={v} large onSave={(draft) => onSave(c.name, draft)} onDone={onDoneEditing} />
+                    ) : (
+                      <div
+                        onClick={() => { if (!window.getSelection()?.toString()) onEdit(c.name) }}
+                        className="-mx-2 cursor-text rounded-lg px-2 py-1 transition-colors hover:bg-zinc-800/50"
+                        title="Click to change"
+                      >
+                        {blank
+                          ? <span className="text-base italic text-zinc-500">Empty — click to add</span>
+                          : c.type === 'boolean' || kinds[c.name] === 'boolean'
+                            ? <YesNo value={v} />
+                            : <Cell value={v} kind={kinds[c.name]} type={c.type} terms={terms} full />}
+                      </div>
+                    )}
+                  </dd>
+                </div>
+              )
+            })}
+          </dl>
+          <p className="pb-8 text-center text-xs text-zinc-500">
+            Click a value to change it — changes go straight to the datastore the agents use. Esc leaves fullscreen.
+          </p>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-1 border-b border-zinc-800 px-3 py-2">
@@ -1632,6 +1861,7 @@ function RecordPanel({
         >
           <Trash2 className="h-4 w-4" />
         </button>
+        {onToggleFull && <FullButton full={full} onToggle={onToggleFull} className={small} />}
         <button onClick={onClose} className={small} title="Close" aria-label="Close row"><X className={phone ? 'h-5 w-5' : 'h-4 w-4'} /></button>
       </div>
       {confirming && (
@@ -1656,7 +1886,8 @@ function RecordPanel({
           {deleteError && <p className="mt-1.5 text-[11px] leading-snug text-red-600 dark:text-red-400">{deleteError}</p>}
         </div>
       )}
-      <dl className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className={`min-h-0 flex-1 overflow-y-auto py-3 ${full ? 'px-6' : 'px-4'}`}>
+        <dl className={full ? 'mx-auto w-full max-w-3xl' : ''}>
         {columns.map((c) => {
           const editing = editingCol === c.name
           const label = humanize(c.name)
@@ -1700,7 +1931,8 @@ function RecordPanel({
             </div>
           )
         })}
-      </dl>
+        </dl>
+      </div>
       {!phone && (
         <div className="border-t border-zinc-800 px-4 py-2 text-[10px] leading-snug text-zinc-500">
           Click a value to change it — changes go straight to the datastore the agents use.
@@ -1711,7 +1943,7 @@ function RecordPanel({
 }
 
 /** A new row typed in by hand: every column, empty to start with. */
-function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
+function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose, full = false, onToggleFull, tableTitle = '' }: {
   columns: Col[]
   kinds: Record<string, ColumnKind>
   notes: Record<string, string>
@@ -1719,6 +1951,11 @@ function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
   /** Resolves to why it couldn't be added, or '' when it's in. */
   onAdd: (values: Record<string, string>) => Promise<string>
   onClose: () => void
+  /** It fills the window; `onToggleFull` grows or shrinks it (none on a phone). */
+  full?: boolean
+  onToggleFull?: () => void
+  /** The table's name, for the fullscreen form's header. */
+  tableTitle?: string
 }) {
   const [draft, setDraft] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
@@ -1731,6 +1968,59 @@ function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
     setSaving(false)
     if (why) setError(why)
   }
+
+  if (full && onToggleFull) {
+    return (
+      <div
+        data-cell-editor
+        className="flex h-full flex-col bg-[var(--fd-shell)]"
+        onKeyDown={(e) => {
+          if (e.key !== 'Escape') return
+          e.stopPropagation()
+          // Out of fullscreen first, as the open row does.
+          onToggleFull()
+        }}
+      >
+        <FullHeader kicker={tableTitle ? `${tableTitle} · a row typed in by hand` : 'A row typed in by hand'} title="New row">
+          <FullButton full onToggle={onToggleFull} className={fullBtn} />
+          <button onClick={onClose} className={fullBtn} title="Close" aria-label="Close new row"><X className="h-[18px] w-[18px]" /></button>
+        </FullHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-auto grid w-full max-w-5xl grid-cols-1 gap-4 px-6 py-8 wide:grid-cols-2 wide:px-10">
+            {columns.map((c, i) => (
+              <label key={c.name} className={`block rounded-[var(--fd-radius-card)] border border-[var(--fd-line)] bg-[var(--fd-surface-raised)] p-5 transition-colors focus-within:border-emerald-500/50 focus-within:ring-4 focus-within:ring-emerald-500/10 ${c.type === 'json' ? 'wide:col-span-2' : ''}`}>
+                <span className="flex items-center gap-2">
+                  <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-zinc-800/70">
+                    <KindIcon kind={kinds[c.name]} className="h-3.5 w-3.5" />
+                  </span>
+                  <span className="text-sm font-semibold text-zinc-300">{humanize(c.name)}</span>
+                </span>
+                {notes[c.name] && <span className="mt-1.5 block text-[13px] leading-snug text-zinc-500">{notes[c.name]}</span>}
+                <span className="mt-3 block">
+                  <FieldInput col={c} value={draft[c.name] ?? ''} large autoFocus={i === 0}
+                    onChange={(v) => setDraft((d) => ({ ...d, [c.name]: v }))} onSubmit={() => void submit()} />
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="shrink-0 border-t border-[var(--fd-line)] bg-[var(--fd-surface)]">
+          <div className="mx-auto flex w-full max-w-5xl items-center gap-3 px-6 py-4 wide:px-10">
+            {error && <p className="flex-1 text-sm leading-snug text-red-600 dark:text-red-400">{error}</p>}
+            {!error && <span className="flex-1 text-xs text-zinc-500">Empty fields stay empty</span>}
+            <button onClick={onClose} disabled={saving} className="rounded-full px-4 py-2 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+              Cancel
+            </button>
+            <button onClick={() => void submit()} disabled={saving}
+              className="flex items-center gap-1.5 rounded-full bg-emerald-600 px-5 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-50">
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}Add row
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       data-cell-editor
@@ -1743,6 +2033,10 @@ function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
     >
       <div className="flex items-center gap-1 border-b border-zinc-800 px-3 py-2">
         <span className="flex-1 text-[11px] font-medium uppercase tracking-wider text-zinc-500">New row</span>
+        {onToggleFull && (
+          <FullButton full={full} onToggle={onToggleFull}
+            className="rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100" />
+        )}
         <button
           onClick={onClose}
           className="rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
@@ -1752,7 +2046,8 @@ function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
           <X className={phone ? 'h-5 w-5' : 'h-4 w-4'} />
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div className={`min-h-0 flex-1 overflow-y-auto py-3 ${full ? 'px-6' : 'px-4'}`}>
+        <div className={full ? 'mx-auto w-full max-w-3xl' : ''}>
         {columns.map((c, i) => (
           <div key={c.name} className="border-b border-zinc-800/60 py-2.5 last:border-0">
             <span className="flex items-center gap-1.5 text-[11px]">
@@ -1771,6 +2066,7 @@ function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
             </div>
           </div>
         ))}
+        </div>
       </div>
       <div className="border-t border-zinc-800 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         {error && <p className="mb-2 text-[11px] leading-snug text-red-600 dark:text-red-400">{error}</p>}

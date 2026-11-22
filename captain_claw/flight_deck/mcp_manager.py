@@ -26,12 +26,15 @@ tools on the same server.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 from typing import Any, Callable
 
-from captain_claw.flight_deck import mcp_client_oauth, mcp_events, mcp_storage
+from captain_claw.flight_deck import mcp_client_oauth, mcp_elicitation, mcp_events, mcp_storage
 from captain_claw.flight_deck.mcp_transport import (
+    METHOD_NOT_FOUND,
     HttpTransport,
+    MCPRequestError,
     MCPTransportError,
     Transport,
     build_transport,
@@ -47,7 +50,7 @@ log = get_logger(__name__)
 _TOOLS_TTL_SECONDS = 30.0
 
 # Same token we send to the upstream MCP server identifying ourselves.
-_MCP_PROTOCOL_VERSION = "2025-03-26"
+# (The MCP revision we offer is the transport's: ``Transport.protocol_version``.)
 _CLIENT_NAME = "captain-claw-flight-deck"
 
 
@@ -72,6 +75,12 @@ class _ServerState:
         # Bind ``self`` explicitly because the transport stores the
         # callback by reference.
         self.transport.on_notification = self._on_upstream_notification
+        # Requests the server sends us (an elicitation: it asks the person
+        # before it goes on), answered for whoever its tool calls are for.
+        self.transport.on_request = self._on_upstream_request
+        # Tool calls in flight → whom each is for (None: nobody we can ask).
+        self.calls: dict[int, mcp_elicitation.Asker | None] = {}
+        self.call_ids = itertools.count(1)
 
     def _on_upstream_notification(self, msg: dict[str, Any]) -> None:
         method = str(msg.get("method") or "")
@@ -81,6 +90,13 @@ class _ServerState:
             self.tools = []
             self.tools_loaded_at = 0.0
             mcp_events.publish_tools_changed(self.name)
+
+    async def _on_upstream_request(self, msg: dict[str, Any]) -> dict[str, Any]:
+        method = str(msg.get("method") or "")
+        if method == "elicitation/create":
+            return await mcp_elicitation.handle(
+                self.name, msg.get("params"), list(self.calls.values()))
+        raise MCPRequestError(METHOD_NOT_FOUND, f"Method not found: {method}")
 
     @property
     def name(self) -> str:
@@ -182,8 +198,8 @@ class MCPManager:
                 result = await state.transport.request(
                     "initialize",
                     {
-                        "protocolVersion": _MCP_PROTOCOL_VERSION,
-                        "capabilities": {},
+                        "protocolVersion": state.transport.protocol_version,
+                        "capabilities": state.transport.client_capabilities(),
                         "clientInfo": {
                             "name": _CLIENT_NAME,
                             "version": "0.4.23",
@@ -247,11 +263,18 @@ class MCPManager:
         arguments: dict[str, Any] | None = None,
         *,
         on_progress: Callable[[dict[str, Any]], None] | None = None,
+        asker: mcp_elicitation.Asker | None = None,
     ) -> dict[str, Any]:
+        """Call *tool_name*. *asker* is the person the call is for: if the
+        server asks something while it runs (an elicitation), the question
+        goes to them on a card; without one, the server's questions are
+        cancelled (nobody we may ask)."""
         state = await self._state_for(name)
         if not state.record.get("enabled", True):
             raise MCPServerError(f"MCP server '{name}' is disabled")
         await self._initialize(state)
+        key = next(state.call_ids)
+        state.calls[key] = asker
         try:
             result = await state.transport.request(
                 "tools/call",
@@ -267,6 +290,10 @@ class MCPManager:
             if state.last_status_code in (400, 401, 404):
                 state.reset_session()
             raise MCPServerError(str(exc)) from exc
+        finally:
+            state.calls.pop(key, None)
+            if asker is not None:
+                await mcp_elicitation.call_ended(asker)
         return result if isinstance(result, dict) else {"result": result}
 
     async def probe_record(self, record: dict[str, Any]) -> dict[str, Any]:

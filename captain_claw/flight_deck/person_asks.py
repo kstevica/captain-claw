@@ -125,12 +125,38 @@ def check_questions(raw: Any) -> list[dict[str, Any]]:
             item["kind"] = "secret"
         elif q.get("confirm"):
             item["kind"] = "confirm"
+        elif q.get("number"):
+            item["kind"] = "number"
+            item["integer"] = bool(q.get("integer"))
+            for key in ("min_value", "max_value"):
+                bound = q.get(key)
+                if bound is None:
+                    continue
+                if not is_number(bound):
+                    raise AskError(f"Question {i}: '{key}' must be a number.")
+                item[key] = bound
+            if "min_value" in item and "max_value" in item and item["min_value"] > item["max_value"]:
+                raise AskError(f"Question {i}: 'min_value' is above 'max_value'.")
         else:
             item["kind"] = "text"
             lines = q.get("lines", 1)
             if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= MAX_LINES:
                 raise AskError(f"Question {i}: 'lines' is 1–{MAX_LINES}.")
             item["lines"] = lines
+            for key in ("min_length", "max_length"):
+                n = q.get(key)
+                if n is None:
+                    continue
+                if isinstance(n, bool) or not isinstance(n, int) or not 0 <= n <= MAX_ANSWER:
+                    raise AskError(f"Question {i}: '{key}' is 0–{MAX_ANSWER}.")
+                item[key] = n
+            if item.get("min_length", 0) > item.get("max_length", MAX_ANSWER):
+                raise AskError(f"Question {i}: 'min_length' is above 'max_length'.")
+            fmt = q.get("format")
+            if fmt is not None:
+                if fmt not in TEXT_FORMATS:
+                    raise AskError(f"Question {i}: 'format' is one of {', '.join(TEXT_FORMATS)}.")
+                item["format"] = fmt
         if q.get("default") is not None and item["kind"] != "secret":
             try:
                 item["default"] = _one_answer(item, q["default"])
@@ -153,6 +179,27 @@ def _one_answer(q: dict[str, Any], value: Any) -> Any:
             raise AskError(f"“{q['question']}” takes text of at most {MAX_ANSWER} characters.")
         if not value.strip() and not q.get("optional"):
             raise AskError(f"“{q['question']}” needs an answer.")
+        if value.strip():
+            _check_text(q, value)
+        return value
+    if kind == "number":
+        if isinstance(value, str):
+            try:
+                value = float(value.strip()) if value.strip() else None
+            except ValueError:
+                value = None
+            if isinstance(value, float) and value.is_integer() and q.get("integer"):
+                value = int(value)
+        if not is_number(value) or value != value or value in (float("inf"), float("-inf")):
+            raise AskError(f"“{q['question']}” takes a number.")
+        if q.get("integer"):
+            if isinstance(value, float) and not value.is_integer():
+                raise AskError(f"“{q['question']}” takes a whole number.")
+            value = int(value)
+        if "min_value" in q and value < q["min_value"]:
+            raise AskError(f"“{q['question']}”: at least {q['min_value']}.")
+        if "max_value" in q and value > q["max_value"]:
+            raise AskError(f"“{q['question']}”: at most {q['max_value']}.")
         return value
     if kind == "choice":
         if value not in q["choices"]:
@@ -167,6 +214,34 @@ def _one_answer(q: dict[str, Any], value: Any) -> Any:
     if not isinstance(value, bool):
         raise AskError(f"“{q['question']}”: answer yes or no.")
     return value
+
+
+def is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:\S+$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATE_TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$")
+_FORMATS = {
+    "email": (_EMAIL_RE, "an email address"),
+    "uri": (_URI_RE, "a web address (https://…)"),
+    "date": (_DATE_RE, "a date (YYYY-MM-DD)"),
+    "date-time": (_DATE_TIME_RE, "a date and time (YYYY-MM-DDTHH:MM)"),
+}
+TEXT_FORMATS = tuple(_FORMATS)
+
+
+def _check_text(q: dict[str, Any], value: str) -> None:
+    """A text answer's length and format, when the question sets them."""
+    if "min_length" in q and len(value) < q["min_length"]:
+        raise AskError(f"“{q['question']}” needs at least {q['min_length']} characters.")
+    if "max_length" in q and len(value) > q["max_length"]:
+        raise AskError(f"“{q['question']}” takes at most {q['max_length']} characters.")
+    fmt = _FORMATS.get(str(q.get("format") or ""))
+    if fmt is not None and not fmt[0].match(value.strip()):
+        raise AskError(f"“{q['question']}” takes {fmt[1]}.")
 
 
 def check_answers(questions: list[dict[str, Any]], answers: Any) -> dict[str, Any]:
@@ -196,14 +271,17 @@ class Ask:
     questions: list[dict[str, Any]]
     created: float
     deadline: float           # time.time()
-    source: str = "tool"      # "tool" (a custom tool), "agent" (ask_user) or "approval"
+    # "tool" (a custom tool), "agent" (ask_user), "approval" (approvals.py) or
+    # "mcp" (an MCP server asks while a tool call runs: mcp_elicitation.py)
+    source: str = "tool"
     asker: str = ""           # the agent's slug, for a secret it may release later
     state: str = "open"       # open | answered | declined | expired | closed
     answers: dict[str, Any] = field(default_factory=dict)
     event: asyncio.Event = field(default_factory=asyncio.Event)
     # The bell's line for it (title, body); default "<title> asks you something".
     ring: tuple[str, str] | None = None
-    # An approval card's facts for the dialog (approvals.py): kind, what it does.
+    # An approval card's facts for the dialog (approvals.py): kind, what it
+    # does; an MCP server's question (mcp_elicitation.py): server, message.
     detail: dict[str, Any] = field(default_factory=dict)
 
     def view(self) -> dict[str, Any]:

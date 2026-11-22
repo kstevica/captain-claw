@@ -18,6 +18,12 @@ Two audiences hit these endpoints:
    themselves; that gives FD a single chokepoint for OAuth,
    rate-limiting and observability. An agent reaches only its owner's
    servers and the deck-wide ones, then the server's allowlist.
+   Agents now call tools through ``/fd/mcp/agent/calls`` (start, then
+   ``/follow`` in short requests, ``/cancel`` when the turn stops:
+   :mod:`mcp_calls`), saying whom the call is for, so a server that asks
+   the person first gets its question onto their card
+   (:mod:`mcp_elicitation`). The old one-request ``/call`` stays for
+   agents from before; its server's questions are cancelled.
 
 3. **The sign-in popup** (``/fd/mcp/oauth/*``) — for a server with
    ``auth: "oauth"``, the browser leg of the MCP authorization flow:
@@ -45,11 +51,13 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
+from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck import google_oauth_routes as _g
-from captain_claw.flight_deck import mcp_client_oauth, mcp_events, mcp_storage
+from captain_claw.flight_deck import mcp_calls, mcp_client_oauth, mcp_events, mcp_storage
 from captain_claw.flight_deck.agent_identity import AgentCaller, require_agent_caller
 from captain_claw.flight_deck.auth import get_current_user
+from captain_claw.flight_deck.mcp_elicitation import Asker
 from captain_claw.flight_deck.mcp_manager import MCPServerError, get_manager
 from captain_claw.logging import get_logger
 
@@ -711,6 +719,104 @@ async def proxy_tool_call(
     return {"server": name, "tool": tool_name, "result": result}
 
 
+# ── agent-facing: a followed call, for whoever the turn is for ──────
+
+# The route a member's turn reaches with its grant (speaker_grants.GRANT_AWARE_PATHS):
+# the server's questions go to the member whose turn it is.
+GRANT_AWARE = frozenset({"/fd/mcp/agent/calls"})
+
+
+class AgentCallBody(BaseModel):
+    server: str = Field(..., min_length=1, max_length=200)
+    tool: str = Field(..., min_length=1, max_length=256)
+    arguments: dict = Field(default_factory=dict)
+    # The turn's source (turn_source.py): a run nobody attends can't be asked.
+    origin: str = Field("", max_length=60)
+    session_id: str = Field("", max_length=200)
+    # A member's turn without a grant: the call runs, but nobody can be asked.
+    nobody: bool = False
+    wait: float = Field(20, ge=0, le=30)
+    call_id: str = Field(..., pattern=r"^xm_[0-9a-f]{16}$")
+
+
+class AgentFollowBody(BaseModel):
+    id: str = Field(..., max_length=40)
+    wait: float = Field(25, ge=0, le=30)
+
+
+async def _asker_for(request: Request, body: AgentCallBody) -> Asker | None:
+    """The person this call is for: the member whose turn it is (by its
+    grant), else the agent's owner; None when there's nobody to ask."""
+    if body.nobody:
+        return None
+    from captain_claw.flight_deck import speaker_grants
+    from captain_claw.flight_deck.agent_names import display_name
+    from captain_claw.flight_deck.ask_routes import _runner
+
+    try:
+        runner = await _runner(request)
+    except HTTPException:
+        if speaker_grants.member_request(request):
+            raise  # a member's turn never falls back to the owner
+        return None  # an agent with no owner on record: nobody to ask
+    try:
+        name = await display_name(runner.agent, runner.user_id)
+    except Exception:  # noqa: BLE001 — the card still names the server
+        name = ""
+    return Asker(user_id=runner.user_id, agent=runner.agent, agent_name=name or runner.agent,
+                 origin=body.origin, session_id=body.session_id)
+
+
+async def _followed(run: mcp_calls.Run, wait: float) -> dict[str, Any]:
+    try:
+        out = await mcp_calls.follow(run, wait)
+    except (MCPServerError, mcp_calls.CallError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001 — the upstream call's own failure
+        raise HTTPException(status_code=502, detail=str(exc) or type(exc).__name__)
+    if "result" in out:
+        return {"server": run.server, "tool": run.tool, "result": out["result"]}
+    return out
+
+
+@router.post("/agent/calls")
+async def agent_call(body: AgentCallBody, request: Request) -> dict[str, Any]:
+    """Start a tool call for the person this turn is for: its result, or
+    ``{"pending": id, "asking": bool}`` to follow."""
+    caller = _authorize_agent_call(request)
+    record = mcp_storage.get_server(body.server)
+    if not _agent_may_use(record, caller):
+        raise HTTPException(status_code=404, detail=f"No MCP server named '{body.server}'")
+    asker = await _asker_for(request, body)
+    try:
+        run = mcp_calls.start(call_id=body.call_id, caller=(caller.slug, caller.owner), server=body.server,
+                              tool=body.tool, arguments=body.arguments, asker=asker,
+                              call=get_manager().call_tool)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return await _followed(run, body.wait)
+
+
+@router.post("/agent/calls/follow")
+async def agent_call_follow(body: AgentFollowBody, request: Request) -> dict[str, Any]:
+    caller = _authorize_agent_call(request)
+    try:
+        run = mcp_calls.get(body.id, (caller.slug, caller.owner))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="There's no such call (it ended a while ago).") from None
+    return await _followed(run, body.wait)
+
+
+@router.post("/agent/calls/cancel")
+async def agent_call_cancel(body: AgentFollowBody, request: Request) -> dict[str, Any]:
+    caller = _authorize_agent_call(request)
+    try:
+        run = mcp_calls.get(body.id, (caller.slug, caller.owner))
+    except KeyError:
+        return {"cancelled": False}
+    return {"cancelled": mcp_calls.cancel(run)}
+
+
 # ── user-facing: tool list + call for the agent-app runtime ─────────
 
 
@@ -741,7 +847,8 @@ async def user_tool_call(
     """User-authed counterpart of ``/{name}/call``. Lets the app
     runtime in the browser invoke MCP tools as the logged-in user
     (no agent slug, no shared secret) — on their own servers and the
-    deck-wide ones only."""
+    deck-wide ones only. A question the server asks meanwhile goes to
+    that user's card."""
     _usable_server(name, user)
     tool_name = str(payload.get("tool") or payload.get("name") or "").strip()
     if not tool_name:
@@ -749,8 +856,10 @@ async def user_tool_call(
     arguments = payload.get("arguments") or {}
     if not isinstance(arguments, dict):
         raise HTTPException(status_code=400, detail="arguments must be an object")
+    uid = str(user.get("id") or "")
+    asker = Asker(user_id=uid, origin="web") if uid else None
     try:
-        result = await get_manager().call_tool(name, tool_name, arguments)
+        result = await get_manager().call_tool(name, tool_name, arguments, asker=asker)
     except MCPServerError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return {"server": name, "tool": tool_name, "result": result}
