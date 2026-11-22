@@ -51,6 +51,7 @@ from captain_claw.flight_deck.endpoints import same_endpoint as _same_endpoint
 from captain_claw.flight_deck import deck_update
 from captain_claw.flight_deck import proc_compat
 from captain_claw.flight_deck import origin_guard
+from captain_claw.flight_deck import path_guard
 from captain_claw.flight_deck import agent_ws_quiet
 from captain_claw.flight_deck import docker_probe
 from captain_claw.flight_deck import tenant_profile
@@ -1904,6 +1905,9 @@ app.add_middleware(speaker_grants.GrantGuardMiddleware)
 # hardening middleware — and WebSockets, which neither of those covers, pass
 # through it too.
 app.add_middleware(origin_guard.BrowserGuardMiddleware)
+# No path climbs with ".." (path_guard): outermost of all, so no route — the
+# SPA catch-all served any file the deck could read — ever sees one.
+app.add_middleware(path_guard.PathTraversalGuard)
 
 
 # Log validation errors with full detail for debugging
@@ -12197,8 +12201,9 @@ if STATIC_DIR.is_dir():
                 return override
             # Depends on the User-Agent and fd_ui: a cached copy is always revalidated.
             return FileResponse(STATIC_DIR / "index.html", headers=HUD_ROOT_HEADERS)
-        file = STATIC_DIR / path
-        if file.is_file():
+        # Only files inside static/: "../" climbed out of it to the deck's .env.
+        file = path_guard.inside(STATIC_DIR, path)
+        if file is not None and file.is_file():
             return FileResponse(file)
         return FileResponse(STATIC_DIR / "index.html")
 
