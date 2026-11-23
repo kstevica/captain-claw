@@ -1,0 +1,977 @@
+category: home
+playbooks:
+  # ── Jobs ──────────────────────────────────────────────────────────────
+
+  - id: linkedin.job_search
+    title: Find jobs on LinkedIn
+    says:
+      - Find remote product designer jobs posted this week.
+      - Any data analyst openings in Berlin on LinkedIn?
+      - Show me backend engineer jobs in Amsterdam from the last 24 hours.
+      - What senior marketing roles are hiring near me?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [linkedin.com/jobs]
+    inputs:
+      role: {label: Role or keywords, kind: text}
+      place: {label: Where, kind: place, default: "", hint: "A city or country; empty for anywhere"}
+      posted: {label: Posted within, kind: choice, options: [any time, past 24 hours, past week, past month], default: any time}
+      workplace: {label: Workplace, kind: choice, options: [any, remote, hybrid, on-site], default: any}
+    open: https://www.linkedin.com/jobs/search/?keywords={role}&location={place}
+    steps:
+      - kind: do
+        text: Set the "Date posted" filter to {posted} and the "Remote" filter to {workplace}, unless they are "any".
+      - kind: do
+        text: Add any other filter the person named (experience level, job type, Easy Apply) from "All filters".
+      - kind: do
+        text: If a sign-in wall covers the list, read what shows and say the rest needs sign-in.
+    read:
+      jobs: The first ten results, each with title, company, location, workplace type, posted date and link
+      count: How many results LinkedIn says match
+      salary: Pay ranges where a listing shows one
+    answer: "{count} matches. Top ones: {jobs}"
+    needs: [location]
+    tags: [jobs, job-search]
+
+  - id: indeed.job_search
+    title: Find jobs on Indeed
+    says:
+      - Search Indeed for warehouse jobs near Leeds.
+      - Find part-time barista jobs in Toronto.
+      - Any nursing jobs in Austin paying over 80k?
+      - Look on Indeed for remote customer support jobs from the last 3 days.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [indeed.com]
+    inputs:
+      role: {label: Job title or keywords, kind: text}
+      place: {label: Where, kind: place, hint: "City, postcode or 'remote'"}
+      posted: {label: Posted within, kind: choice, options: [any time, last 24 hours, last 3 days, last 7 days, last 14 days], default: any time}
+      pay: {label: Minimum pay, kind: text, default: ""}
+    open: https://www.indeed.com/jobs?q={role}&l={place}
+    steps:
+      - kind: do
+        text: If {place} is outside the US, run the same search on that country's Indeed (uk.indeed.com, ca.indeed.com, de.indeed.com, in.indeed.com and so on); Indeed often redirects by itself.
+      - kind: do
+        text: Use the filter chips for "Date posted" ({posted}), "Pay" ({pay}), job type and remote as the person asked; skip filters left empty.
+    read:
+      jobs: The first ten listings, each with title, company, location, pay if shown, job type and how long ago it was posted
+      count: The number of jobs Indeed reports
+      sponsored: Which of those are sponsored
+    answer: "{count} jobs. Best matches: {jobs}"
+    tags: [jobs, job-search]
+
+  - id: linkedin.saved_jobs
+    title: My saved jobs on LinkedIn
+    says:
+      - What jobs have I saved on LinkedIn?
+      - Which of my saved jobs are still open?
+      - Did I already apply to that design job I saved?
+    kind: look
+    where: chrome
+    region: global
+    sites: [linkedin.com]
+    open: https://www.linkedin.com/my-items/saved-jobs/
+    steps:
+      - kind: do
+        text: Go through the Saved, In progress, Applied and Archived tabs (newer LinkedIn calls this page the job tracker).
+      - kind: do
+        text: Open any job the person asked about and check whether it still accepts applications.
+    read:
+      saved: Each saved job with title, company, location and when it was posted
+      applied: Jobs marked applied, with the date and any status LinkedIn shows (viewed, not selected)
+      closed: Saved jobs that say "No longer accepting applications"
+    answer: "Saved: {saved}. Applied: {applied}. Closed: {closed}."
+    tags: [jobs]
+
+  - id: linkedin.recruiter_messages
+    title: Recruiter messages on LinkedIn
+    says:
+      - Have any recruiters messaged me on LinkedIn?
+      - Summarize my unread LinkedIn messages about jobs.
+      - Any new job offers in my LinkedIn inbox?
+    kind: look
+    where: chrome
+    region: global
+    sites: [linkedin.com/messaging]
+    inputs:
+      since: {label: Since, kind: date, default: "", hint: "Empty for the last two weeks"}
+    open: https://www.linkedin.com/messaging/
+    steps:
+      - kind: do
+        text: Check the Focused and Other tabs and InMail; open the conversations from recruiters or hiring managers since {since}.
+      - kind: do
+        text: Only read; reply to nothing and archive nothing.
+    read:
+      messages: Each recruiter message with the sender's company, the job offered, location or remote, pay if stated and the date
+      asks: What each one wants (a call, a CV, salary expectations) and any deadline
+      unanswered: Which ones the person has not replied to
+    answer: "{messages}. Waiting on you: {unanswered}."
+    tags: [jobs, recruiters, messages]
+
+  - id: linkedin.reply_recruiter
+    title: Reply to a recruiter on LinkedIn
+    says:
+      - Tell the recruiter from that fintech I'm interested and ask for the salary range.
+      - Politely decline the recruiter's message about the sales role.
+      - Reply to the latest LinkedIn recruiter that I'm free for a call next week.
+    kind: act
+    where: chrome
+    region: global
+    sites: [linkedin.com/messaging]
+    inputs:
+      who: {label: Which conversation, kind: text, hint: "The recruiter's company or the job, e.g. 'the fintech recruiter'"}
+      reply: {label: What to say, kind: text, hint: "Interested, not interested, ask about pay, offer times"}
+    open: https://www.linkedin.com/messaging/
+    steps:
+      - kind: do
+        text: Find the conversation that matches {who}; if more than one fits, ask which.
+      - kind: do
+        text: Read the thread, then draft a short, friendly reply in the person's voice that says {reply}, in the thread's language. Take free slots from the calendar if times are needed.
+      - kind: type
+        target: {role: textbox, name: Write a message}
+        value: The drafted reply
+      - kind: do
+        text: Leave the reply in the box for the person to read and send.
+    read:
+      thread: Who the recruiter works for, the role and what they last asked
+      draft: The reply as typed
+    stop: Send
+    needs: [calendar, memory]
+    tags: [jobs, recruiters, messages]
+
+  - id: linkedin.job_application
+    title: Fill in a job application
+    says:
+      - Apply to the product analyst job I saved on LinkedIn.
+      - Fill in the Easy Apply form for that job, but let me check it first.
+      - Help me apply for this role and tailor the answers to my CV.
+      - Get my application on the Greenhouse form ready for review.
+    kind: act
+    where: chrome
+    region: global
+    sites: [linkedin.com, greenhouse.io, lever.co, myworkdayjobs.com, ashbyhq.com, smartrecruiters.com]
+    inputs:
+      job: {label: Which job, kind: text, hint: "Title and company, or the job's link"}
+      cv: {label: CV to use, kind: file, default: the CV already on LinkedIn}
+    open: https://www.linkedin.com/my-items/saved-jobs/
+    steps:
+      - kind: do
+        text: Open {job} from the saved jobs, from the link given, or by searching LinkedIn Jobs for it.
+      - kind: do
+        text: Read the job description and note the must-have skills and the questions the form asks.
+      - kind: click
+        target: {role: button, name: Easy Apply}
+        note: Or "Apply", which leads to the company's own form (Greenhouse, Lever, Workday, Ashby and so on).
+      - kind: do
+        text: Fill each page from the person's profile, CV and memory. Tailor free-text answers and any cover letter to this job, using only experience the person really has.
+      - kind: do
+        text: Ask for anything not known (salary expectation, notice period, work permit, start date) when the form gets there; never guess these.
+      - kind: do
+        text: If the site wants a new account or a password, stop there and hand over to the person.
+      - kind: do
+        text: Go through "Next" and "Review" to the last page and leave it open.
+    read:
+      position: Title, company and location of the job
+      answers: Each question and the answer filled in
+      attached: Which CV file is attached
+      gaps: Required fields left empty for the person
+    stop: Submit application
+    needs: [files, memory]
+    tags: [jobs, application]
+
+  # ── Cooking and meals ─────────────────────────────────────────────────
+
+  - id: allrecipes.recipe_from_fridge
+    title: A recipe from what's in the fridge
+    says:
+      - I have chicken, spinach and feta. What can I cook?
+      - What can I make with eggs, leftover rice and peas?
+      - Find a dinner that uses up half a cabbage and some sausages.
+      - Something vegetarian with courgettes and tomatoes?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [allrecipes.com]
+    inputs:
+      ingredients: {label: What you have, kind: text, hint: "The main two or three ingredients work best"}
+      diet: {label: Diet or limits, kind: text, default: "", hint: "Vegetarian, no nuts, under 30 minutes"}
+    open: https://www.allrecipes.com/search?q={ingredients}
+    steps:
+      - kind: do
+        text: Keep recipes that use mostly what the person has and fit {diet}; prefer ones rated 4 stars or more with many ratings.
+      - kind: do
+        text: Open the best three and note what each needs beyond the listed ingredients, pantry staples aside.
+    read:
+      options: Three recipes, each with name, rating and number of ratings, total time and link
+      missing: For each, the ingredients the person would still need
+      pick: The best fit's name, why it fits, and its ingredients and steps in short
+    answer: "Best fit: {pick}. Also good: {options}. Still to buy: {missing}."
+    needs: [memory]
+    tags: [recipes, cooking]
+
+  - id: bbcgoodfood.scale_recipe
+    title: Scale a recipe and convert its units
+    says:
+      - Make the lasagne recipe for 10 people instead of 4.
+      - Halve this banana bread recipe and give it in grams.
+      - Convert this recipe's cups and ounces to metric.
+      - How much of everything do I need for a chilli for 12?
+    kind: look
+    where: any
+    region: global
+    sites: [bbcgoodfood.com]
+    inputs:
+      dish: {label: Dish or recipe link, kind: text}
+      servings: {label: Servings wanted, kind: number}
+      units: {label: Units, kind: choice, options: [metric, US cups and ounces, as written], default: metric}
+    open: https://www.bbcgoodfood.com/search?q={dish}
+    steps:
+      - kind: do
+        text: If the person gave a link to a recipe on any site, open that instead; otherwise open the best-rated matching recipe.
+      - kind: do
+        text: Note how many servings the recipe is written for and every ingredient amount.
+      - kind: do
+        text: Multiply each amount by servings wanted over servings written, convert to {units} and round to kitchen-friendly amounts (whole eggs, half-teaspoon steps). Keep the oven temperature; flag tin size and cooking time if they would change.
+    read:
+      recipe: The recipe's name, link and the servings it is written for
+      ingredients: Every ingredient with its scaled, converted amount
+      notes: Tin size, timing or method changes the new amount needs
+    answer: "{recipe}, scaled to {servings}: {ingredients}. {notes}"
+    tags: [recipes, cooking, conversion]
+
+  - id: bbcgoodfood.week_meal_plan
+    title: Plan a week of dinners with a shopping list
+    says:
+      - Plan five dinners for this week and give me a shopping list.
+      - Make me a vegetarian meal plan for the week for two people.
+      - I need quick weeknight dinners for a family of four, under 30 minutes each.
+    kind: look
+    where: any
+    region: global
+    sites: [bbcgoodfood.com]
+    inputs:
+      nights: {label: Dinners, kind: number, default: 5}
+      people: {label: People, kind: number, default: 2}
+      diet: {label: Diet or style, kind: text, default: "", hint: "Vegetarian, low-carb, kid-friendly"}
+      max_minutes: {label: Most minutes per dinner, kind: number, default: 45}
+    open: https://www.bbcgoodfood.com/search?q={diet}+dinner
+    steps:
+      - kind: do
+        text: Pick {nights} well-rated recipes that take at most {max_minutes} minutes; vary the main protein or vegetable and reuse fresh ingredients across nights to cut waste.
+      - kind: do
+        text: Leave out anything the person dislikes or can't eat, as memory says.
+      - kind: do
+        text: Open each pick, scale it to {people} and merge the ingredients into one list grouped by aisle; list pantry staples apart.
+    read:
+      plan: One dinner per night with its time and link
+      shopping_list: The combined, scaled ingredients grouped by aisle
+      staples: Pantry staples assumed to be at home
+    answer: "{plan}. Shopping list: {shopping_list}."
+    needs: [memory]
+    tags: [meal-planning, recipes, groceries]
+
+  - id: nytcooking.recipe_box
+    title: Find a recipe I saved on NYT Cooking
+    says:
+      - Pull up the soup recipe I saved on NYT Cooking.
+      - What's in my NYT Cooking recipe box?
+      - Find the pasta I saved last month and tell me what to buy.
+    kind: look
+    where: chrome
+    region: global
+    sites: [cooking.nytimes.com]
+    inputs:
+      query: {label: Which recipe, kind: text, default: "", hint: "A word from its name or an ingredient; empty lists the box"}
+    open: https://cooking.nytimes.com/recipe-box
+    steps:
+      - kind: do
+        text: Look through the saved recipes and folders, or use the box's search, for {query}.
+      - kind: do
+        text: Open the match and read it; if the person isn't signed in or has no subscription, say so.
+    read:
+      saved: Recipes in the box, or in the folder asked about, newest first
+      recipe: The matching recipe's name, time, yield and link
+      ingredients: Its ingredient list
+      method: Its method, in short
+    answer: "{recipe}. You need: {ingredients}."
+    tags: [recipes, cooking]
+
+  # ── Food delivery ─────────────────────────────────────────────────────
+
+  - id: ubereats.order_status
+    title: Where's my Uber Eats order
+    says:
+      - Where's my Uber Eats order?
+      - How long until my food gets here?
+      - Has the courier picked up my grocery order yet?
+    kind: look
+    where: chrome
+    region: global
+    sites: [ubereats.com]
+    open: https://www.ubereats.com/orders
+    steps:
+      - kind: do
+        text: Open the order in progress at the top; if none is active, read the most recent one.
+    read:
+      status: The current stage (preparing, picked up, on the way, delivered)
+      eta: The arrival time or window shown
+      courier: The courier's first name and vehicle as shown, and how far away
+      order: The restaurant or store and the items
+    answer: "{status}, arriving {eta}. {courier}"
+    tags: [food-delivery, order-status]
+
+  - id: wolt.order_status
+    title: Where's my Wolt order
+    says:
+      - Where's my Wolt order?
+      - When does my Wolt delivery arrive?
+      - Did Wolt deliver my groceries yet?
+    kind: look
+    where: chrome
+    region: global
+    sites: [wolt.com]
+    open: https://wolt.com/
+    steps:
+      - kind: do
+        text: Open the active order from the banner at the top; if there is none, open the profile menu, then Order history.
+    read:
+      status: The order's stage (received, being prepared, on the way, delivered)
+      eta: The estimated arrival time
+      venue: The restaurant or store
+      items: What was ordered and the total
+    answer: "{status} from {venue}, arriving {eta}."
+    tags: [food-delivery, order-status]
+
+  - id: doordash.reorder
+    title: Reorder a past DoorDash order
+    says:
+      - Reorder my usual from DoorDash.
+      - Order the same Thai food as last Friday.
+      - Get my last DoorDash order ready again for me to confirm.
+    kind: act
+    where: chrome
+    region: global
+    sites: [doordash.com]
+    inputs:
+      which: {label: Which order, kind: text, default: the most recent, hint: "A restaurant or a day"}
+    open: https://www.doordash.com/orders
+    steps:
+      - kind: do
+        text: Find {which} in Orders and open it.
+      - kind: click
+        target: {role: button, name: Reorder}
+      - kind: do
+        text: Check every item is still available; tell the person about anything missing instead of picking a substitute.
+      - kind: do
+        text: Go to checkout. Leave the saved address, payment method and tip as they are; change nothing about payment.
+    read:
+      items: The items in the cart and their prices
+      total: The total with fees, tip and taxes
+      address: The delivery address shown
+      eta: The estimated delivery time
+    stop: Place Order
+    tags: [food-delivery, reorder]
+
+  # ── Home services and hosting ─────────────────────────────────────────
+
+  - id: taskrabbit.book_tasker
+    title: Book a Tasker for a home job
+    says:
+      - Find someone on TaskRabbit to assemble an IKEA wardrobe on Saturday.
+      - Get a handyman to mount my TV this week.
+      - Book help moving a sofa up two flights on Sunday morning.
+    kind: act
+    where: chrome
+    region: global
+    sites: [taskrabbit.com]
+    inputs:
+      task: {label: What needs doing, kind: text}
+      when: {label: When, kind: text, hint: "A day and a time window"}
+      address: {label: Address, kind: place, default: home}
+      details: {label: Details, kind: text, default: "", hint: "Size, tools, parking, stairs"}
+    open: https://www.taskrabbit.com/
+    steps:
+      - kind: type
+        target: {role: combobox, name: "What do you need help with?"}
+        value: "{task}"
+      - kind: do
+        text: Pick the matching category, enter {address}, the task size and {details}, and continue to the Taskers.
+      - kind: do
+        text: Compare the top three on rating, similar tasks done, hourly rate and availability for {when}.
+      - kind: do
+        text: Select the best fit and the slot closest to {when}, then continue to the review page. Add no card; if none is saved, stop and say so.
+    read:
+      tasker: The chosen Tasker with rating, reviews and tasks done
+      rate: Hourly rate, minimum hours and fees shown
+      slot: Date and time picked
+      others: The two runners-up with rate and rating
+    stop: Confirm and chat
+    needs: [memory]
+    tags: [home-services, booking]
+
+  - id: airbnb.host_calendar
+    title: My Airbnb hosting calendar
+    says:
+      - Who's checking in to my Airbnb this week?
+      - Which nights are still free in December?
+      - Do I have back-to-back turnovers coming up?
+      - How much will I earn from bookings this month?
+    kind: look
+    where: chrome
+    region: global
+    sites: [airbnb.com]
+    inputs:
+      listing: {label: Listing, kind: text, default: all listings}
+      period: {label: Period, kind: text, default: next 30 days}
+    open: https://www.airbnb.com/multicalendar
+    steps:
+      - kind: do
+        text: Scroll the calendar across {period} for {listing}; note each booking and every open or blocked night.
+      - kind: open
+        url: https://www.airbnb.com/hosting/reservations
+        note: For guest counts and payouts of the upcoming stays.
+    read:
+      arrivals: Check-ins in the period, each with date, listing, guest count and nights
+      departures: Check-outs, flagging same-day turnovers
+      open_nights: Nights still open, with the nightly price shown
+      blocked: Nights the host blocked
+      payouts: Expected payouts for the period
+    answer: "Arrivals: {arrivals}. Turnovers: {departures}. Open nights: {open_nights}."
+    tags: [hosting, short-term-rental, calendar]
+
+  # ── Car ───────────────────────────────────────────────────────────────
+
+  - id: web.vehicle_recall
+    title: Check my car for open recalls
+    says:
+      - Does my car have any open recalls?
+      - Check my VIN for safety recalls on the maker's site.
+      - Is there a recall on my 2019 Golf?
+    kind: look
+    where: prefer_chrome
+    region: global
+    inputs:
+      recall_site: {label: Maker's recall check page, kind: url, ask: agent, hint: "The maker's own recall lookup for the person's country, on its official domain (usually Owners, then Recalls); never a paid VIN-report site"}
+      vin: {label: VIN, kind: text, hint: "17 characters, on the registration document or at the base of the windscreen"}
+    open: "{recall_site}"
+    steps:
+      - kind: do
+        text: Check the page is the maker's own recall lookup; if it is a general owners page, open its Recalls link.
+      - kind: type
+        target: {role: textbox, name: VIN}
+        value: "{vin}"
+      - kind: do
+        text: Run the lookup and open each recall it finds.
+    read:
+      recalls: Each recall with its number, what is wrong and the risk
+      remedy: The fix and whether parts are available
+      status: Whether each is still open or already done on this car
+    answer: "{recalls}. Fix: {remedy}. Status: {status}."
+    needs: [memory]
+    tags: [car, recall, safety]
+
+  - id: evdatabase.ev_range
+    title: An electric car's real range and charging
+    says:
+      - What's the real-world range of a Kia EV3?
+      - How fast does a Tesla Model Y charge from 10 to 80%?
+      - Compare the winter range of the ID.4 and the Skoda Enyaq.
+    kind: look
+    where: any
+    region: eu
+    sites: [ev-database.org]
+    inputs:
+      model: {label: Car model, kind: text, hint: "With battery or trim if known; two models to compare"}
+    open: https://ev-database.org/
+    steps:
+      - kind: do
+        text: Search for {model} and open the matching car; if there are several battery or drive versions, read the one named or list them.
+    read:
+      range: Real-range estimate, with the cold-weather and mild-weather figures
+      battery: Usable battery capacity in kWh
+      efficiency: Energy use in Wh/km
+      charging: Top DC charging power and the 10–80% charging time
+      price: Price in the country shown, if listed
+    answer: "{model}: {range}; {battery} usable; charging {charging}."
+    tags: [car, ev, specs]
+
+  # ── Health (read and summarize only) ──────────────────────────────────
+
+  - id: mayoclinic.condition_info
+    title: What a health condition is and its symptoms
+    says:
+      - What are the symptoms of shingles?
+      - What causes plantar fasciitis and how is it treated?
+      - When should I see a doctor for a migraine?
+      - Tell me about gout from a reliable source.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [mayoclinic.org]
+    inputs:
+      condition: {label: Condition or symptom, kind: text}
+    open: https://www.mayoclinic.org/search/search-results?q={condition}
+    steps:
+      - kind: do
+        text: Open the matching Diseases & Conditions page and read "Symptoms & causes", then "Diagnosis & treatment".
+      - kind: do
+        text: Summarize only what the page says; don't diagnose the person or suggest doses.
+    read:
+      overview: What the condition is, in two sentences
+      symptoms: Its main symptoms
+      causes: Causes and risk factors
+      see_doctor: When Mayo Clinic says to see a doctor or get emergency care
+      treatment: The usual treatments it lists
+      link: The page's address
+    answer: "{overview} Symptoms: {symptoms}. See a doctor if: {see_doctor}. (Mayo Clinic, {link}. General information, not medical advice.)"
+    tags: [health, conditions]
+
+  - id: medlineplus.medication_info
+    title: What a medicine is for and its side effects
+    says:
+      - What is metformin used for?
+      - What are the side effects of ibuprofen?
+      - Should I take amoxicillin with food?
+      - What should I avoid while taking sertraline?
+    kind: look
+    where: any
+    region: global
+    sites: [medlineplus.gov, nlm.nih.gov]
+    inputs:
+      drug: {label: Medicine, kind: text, hint: "Generic or brand name"}
+    open: https://vsearch.nlm.nih.gov/vivisimo/cgi-bin/query-meta?v%3Aproject=medlineplus&v%3Asources=medlineplus-bundle&query={drug}
+    steps:
+      - kind: do
+        text: Open the result under medlineplus.gov/druginfo for this medicine (the generic name's page if a brand was given).
+      - kind: do
+        text: Summarize only what the page says; give no advice on the person's own dose.
+    read:
+      uses: Why it is prescribed
+      how_to_take: How it is usually taken (with food, time of day), as the page says
+      side_effects: Common side effects
+      serious: Side effects the page says need a doctor right away
+      precautions: What to tell the doctor and what to avoid (alcohol, other medicines, pregnancy)
+      link: The page's address
+    answer: "{drug}: {uses}. Common side effects: {side_effects}. Get help right away if: {serious}. (MedlinePlus, {link}. Not medical advice; ask a pharmacist or doctor.)"
+    tags: [health, medicine]
+
+  - id: drugs.interaction_check
+    title: Check medicines for interactions
+    says:
+      - Can I take ibuprofen with my blood pressure pills?
+      - Do sertraline and tramadol interact?
+      - Check my medicines for interactions.
+      - Is it OK to drink alcohol on metronidazole?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [drugs.com]
+    inputs:
+      drugs: {label: Medicines, kind: text, hint: "Comma-separated; supplements count too"}
+    open: https://www.drugs.com/drug_interactions.html
+    steps:
+      - kind: type
+        target: {role: combobox, name: Enter a drug name}
+        value: Each medicine in {drugs}, one at a time, picking it from the suggestions and pressing "Add"
+      - kind: click
+        target: {role: button, name: Check Interactions}
+      - kind: do
+        text: Read every interaction listed, the food and alcohol section and any duplication warning; use the consumer wording, not the professional one.
+    read:
+      interactions: Each pair that interacts, with its severity (major, moderate, minor) and what may happen
+      food_alcohol: Food, alcohol or lifestyle interactions
+      duplication: Therapeutic duplication warnings
+      no_interaction: Pairs with no interaction found
+    answer: "{interactions}. Food and alcohol: {food_alcohol}. (Drugs.com. Not medical advice; check with a pharmacist or doctor before changing anything.)"
+    needs: [memory]
+    tags: [health, medicine, interactions]
+
+  - id: web.prescription_status
+    title: Is my prescription ready
+    says:
+      - Is my prescription ready to pick up?
+      - Check the status of my refill at the pharmacy.
+      - How many refills do I have left on my inhaler?
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      pharmacy_site: {label: Pharmacy site, kind: url, ask: agent, hint: "The person's pharmacy, its own prescriptions or account page; from memory, else ask"}
+    open: "{pharmacy_site}"
+    steps:
+      - kind: do
+        text: Go to the Prescriptions or pharmacy account page.
+      - kind: do
+        text: If it asks to sign in, stop and ask the person to sign in themselves; never type a password.
+      - kind: do
+        text: Only read; request no refill and change no pickup or delivery setting.
+    read:
+      prescriptions: Each prescription with the medicine, its status (ready, in progress, waiting on the doctor) and ready date
+      refills: Refills left and when each runs out
+      pickup: Pickup store or delivery, and its hours
+    answer: "{prescriptions}. Refills left: {refills}."
+    needs: [memory]
+    tags: [health, pharmacy]
+
+  # ── Pets ──────────────────────────────────────────────────────────────
+
+  - id: aspca.pet_toxicity
+    title: Is this plant or food safe for my pet
+    says:
+      - Is a monstera toxic to cats?
+      - My dog ate some grapes. Is that dangerous?
+      - Are lilies safe in a house with a cat?
+      - Which houseplants are safe for dogs?
+    kind: look
+    where: any
+    region: global
+    sites: [aspca.org]
+    inputs:
+      item: {label: Plant or food, kind: text}
+      animal: {label: Pet, kind: choice, options: [dog, cat, horse]}
+    open: https://www.aspca.org/pet-care/aspca-poison-control/toxic-and-non-toxic-plants
+    steps:
+      - kind: do
+        text: Filter the list to the {animal} and find {item}; it may be listed under another common name or its Latin name.
+      - kind: open
+        url: https://www.aspca.org/pet-care/aspca-poison-control/people-foods-avoid-feeding-your-pets
+        note: When {item} is a food, not a plant.
+    read:
+      verdict: Whether ASPCA lists it as toxic or non-toxic to that animal
+      signs: The clinical signs it lists
+      toxic_part: The toxic principle or part of the plant, if given
+    answer: "{item}: {verdict} for a {animal} (ASPCA). Signs: {signs}. If your pet ate some, call your vet or a pet poison helpline now."
+    tags: [pets, safety, plants]
+
+  - id: merckvetmanual.pet_symptoms
+    title: What a pet's symptom could mean
+    says:
+      - My cat keeps sneezing. What could it be?
+      - Why is my dog drinking so much water?
+      - Is it serious if a rabbit stops eating?
+      - What is kennel cough and how is it treated?
+    kind: look
+    where: any
+    region: global
+    sites: [merckvetmanual.com, msdvetmanual.com]
+    inputs:
+      animal: {label: Pet, kind: choice, options: [dog, cat, rabbit, horse, bird, other]}
+      symptom: {label: Symptom or condition, kind: text}
+    open: https://www.merckvetmanual.com/searchresults?query={symptom}+{animal}
+    steps:
+      - kind: do
+        text: Prefer results from the owner sections (Dog Owners, Cat Owners and so on) over the pages for vets; open the best one.
+      - kind: do
+        text: Summarize only what the manual says; don't diagnose the pet.
+    read:
+      causes: Common causes it lists
+      urgent: Signs that mean see a vet now
+      vet_care: What a vet usually does to find and treat it
+      home_care: Any home care it mentions
+      link: The page's address
+    answer: "Possible causes: {causes}. See a vet now if: {urgent}. (Merck Veterinary Manual, {link}. Not a substitute for your vet.)"
+    tags: [pets, health]
+
+  - id: petfinder.adopt_search
+    title: Pets up for adoption nearby
+    says:
+      - Find dogs for adoption near me that are good with kids.
+      - Any senior cats up for adoption around Denver?
+      - Show me small puppies at shelters within 25 miles.
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [petfinder.com]
+    inputs:
+      animal: {label: Animal, kind: choice, options: [dogs, cats, rabbits, other], default: dogs}
+      place: {label: Near, kind: place, default: home, hint: "City or ZIP code"}
+      wishes: {label: Must-haves, kind: text, default: "", hint: "Age, size, good with kids or cats"}
+    open: https://www.petfinder.com/
+    steps:
+      - kind: do
+        text: Search for {animal} near {place}, then set the filters for {wishes} (age, size, good with, distance).
+      - kind: do
+        text: Open the best five matches to read their notes.
+    read:
+      matches: Five animals, each with name, breed, age, sex, size, distance, shelter and link
+      notes: What the shelter says about temperament and needs
+      process: How to apply or meet them, as each listing says
+    answer: "{matches}"
+    needs: [location]
+    tags: [pets, adoption]
+
+  # ── Around the house ──────────────────────────────────────────────────
+
+  - id: web.kids_calendar
+    title: School or club calendar dates
+    says:
+      - When is the next school holiday?
+      - Is there school on Monday?
+      - When's my daughter's next football match?
+      - What time is swim practice this week?
+      - When does the autumn term end?
+    kind: look
+    where: prefer_chrome
+    region: global
+    inputs:
+      calendar_site: {label: School or club calendar page, kind: url, ask: agent, hint: "The school's or club's own calendar, term dates or fixtures page; from memory, else ask"}
+      question: {label: What to find, kind: text, default: the next few dates}
+    open: "{calendar_site}"
+    steps:
+      - kind: do
+        text: If the page is the home page, open its calendar, term dates or fixtures page.
+      - kind: do
+        text: If the calendar is a PDF or an embedded Google calendar, read it there; if it needs a parent login, ask the person to sign in.
+      - kind: do
+        text: Answer {question}; check the dates are for the current school year or season.
+    read:
+      events: The next dated events (holidays, closures, matches, practices) with times and place
+      changes: Cancellations, time changes or notices posted recently
+      source: The page or file the dates came from
+    answer: "{events}. Changes: {changes}."
+    needs: [memory, calendar]
+    tags: [school, kids, calendar, sports]
+
+  - id: web.bin_collection
+    title: Bin and recycling collection days
+    says:
+      - When is the recycling collected this week?
+      - Which bin goes out tomorrow?
+      - When's the next glass collection on my street?
+      - Which bin does a pizza box go in?
+    kind: look
+    where: prefer_chrome
+    region: global
+    inputs:
+      council_site: {label: Council or waste company page, kind: url, ask: agent, hint: "Its own collection-days page; from memory, else ask"}
+      street: {label: Street, kind: text, ask: agent, hint: "Typed on that page only; from memory if known"}
+      item: {label: Item to sort, kind: text, default: ""}
+    open: "{council_site}"
+    steps:
+      - kind: do
+        text: Find the collection calendar or lookup, in the local language if need be.
+      - kind: type
+        target: {role: textbox, name: Street or address}
+        value: "{street}"
+        note: Skip it if the calendar is a PDF by area.
+      - kind: do
+        text: If {item} was given, look it up in the page's sorting guide or A–Z list.
+    read:
+      next: The next collection for each bin (general, recycling, paper, glass, organic or garden) with its day
+      changes: Holiday changes or missed-collection notices
+      sorting: Which bin the item goes in, if asked
+    answer: "{next}. {changes} {sorting}"
+    needs: [memory, location]
+    tags: [home, recycling, waste]
+
+  - id: web.energy_usage
+    title: My electricity or gas usage
+    says:
+      - How much electricity did we use this month?
+      - Is our energy use up compared to last year?
+      - When is the next energy bill, and roughly how much?
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      utility_site: {label: Energy supplier site, kind: url, ask: agent, hint: "The supplier's own account or usage page; from memory, else ask"}
+      period: {label: Period, kind: text, default: this billing period}
+    open: "{utility_site}"
+    steps:
+      - kind: do
+        text: Go to the account's usage or consumption page.
+      - kind: do
+        text: If it asks to sign in, stop and ask the person to sign in themselves; never type a password.
+      - kind: do
+        text: Read the usage for {period} and the same period last year; change no tariff, reading or payment.
+    read:
+      usage: Electricity (kWh) and gas (kWh or m³) used in the period
+      compared: Change against the previous period and the same period last year
+      cost: Cost so far or the estimated bill, and the next bill date
+      tariff: Current tariff and unit rates
+    answer: "{usage} ({compared}). Next bill: {cost}."
+    needs: [memory]
+    tags: [home, energy, utilities]
+
+  - id: smartthings.device_status
+    title: Smart-home devices at a glance
+    says:
+      - Did I leave any lights on at home?
+      - Is the front door locked?
+      - What's the temperature in the living room?
+      - Are any of my sensors offline or low on battery?
+    kind: look
+    where: chrome
+    region: global
+    sites: [my.smartthings.com]
+    inputs:
+      device: {label: Device or room, kind: text, default: everything}
+    open: https://my.smartthings.com/
+    steps:
+      - kind: do
+        text: Pick the home (location) if there are several, then go through the rooms and devices for {device}.
+      - kind: do
+        text: Only read; switch, lock or unlock nothing.
+    read:
+      switched_on: Lights, plugs and appliances that are on
+      locks: Each lock and door or window sensor, and its state
+      climate: Temperatures and thermostat settings
+      problems: Devices offline or low on battery
+    answer: "On: {switched_on}. Locks and doors: {locks}. {climate}. Needs attention: {problems}."
+    tags: [smart-home, home]
+
+  - id: ring.doorbell_events
+    title: Who came to the door
+    says:
+      - Did anyone ring the doorbell today?
+      - Was there motion at the front door while I was out?
+      - When did the courier come by?
+    kind: look
+    where: chrome
+    region: global
+    sites: [ring.com]
+    inputs:
+      since: {label: Since, kind: text, default: today}
+      device: {label: Camera or doorbell, kind: text, default: all devices}
+    open: https://account.ring.com/account/activity-history
+    steps:
+      - kind: do
+        text: Filter the event history to {device} and look back to {since}; use the person-detected label where it shows.
+      - kind: do
+        text: Only read the list; download, share or delete no video.
+    read:
+      rings: Doorbell presses with time and device
+      motion: Motion or person alerts with time and device
+      last: The most recent event and what kind it was
+    answer: "Rings: {rings}. Motion: {motion}. Last: {last}."
+    tags: [smart-home, security, doorbell]
+
+  - id: speedtest.run_test
+    title: Test my internet speed
+    says:
+      - How fast is my internet right now?
+      - Run a speed test.
+      - Am I getting the speed I pay for?
+      - Is it the Wi-Fi or the provider that's slow?
+    kind: look
+    where: chrome
+    region: global
+    sites: [speedtest.net]
+    inputs:
+      plan_speed: {label: Speed you pay for, kind: text, default: "", hint: "e.g. 500 Mbps down"}
+    open: https://www.speedtest.net/
+    steps:
+      - kind: do
+        text: Decline non-essential cookies if a banner shows. The test must run in the person's own Chrome to measure their connection.
+      - kind: click
+        note: The big round GO button in the middle of the page.
+      - kind: do
+        text: Wait until download and upload both finish (30 to 60 seconds) before reading; compare with {plan_speed} if given.
+    read:
+      download: Download speed in Mbps
+      upload: Upload speed in Mbps
+      ping: Ping and jitter in ms
+      isp: The provider and test server shown
+      result_link: The result's link
+    answer: "Down {download}, up {upload}, ping {ping}, via {isp}."
+    tags: [internet, home]
+
+  # ── Learning and reading ──────────────────────────────────────────────
+
+  - id: coursera.course_search
+    title: Find an online course
+    says:
+      - Find a good online course on machine learning.
+      - Is there a free Python course with a certificate?
+      - Compare beginner project management courses on Coursera and edX.
+      - What's a good course to learn data visualization?
+    kind: look
+    where: any
+    region: global
+    sites: [coursera.org, edx.org]
+    inputs:
+      topic: {label: Topic, kind: text}
+      level: {label: Level, kind: choice, options: [any, beginner, intermediate, advanced], default: any}
+    open: https://www.coursera.org/search?query={topic}
+    steps:
+      - kind: do
+        text: Filter to {level} unless it is "any", and note the top five by rating and number of reviews.
+      - kind: open
+        url: https://www.edx.org/search?q={topic}
+      - kind: do
+        text: Note the top three there too, then compare them all.
+    read:
+      courses: The best options with title, provider or university, rating and reviews, length and level
+      cost: Free to audit, price or subscription, and whether the certificate costs extra
+      pick: The best fit for the person and why
+    answer: "Best fit: {pick}. Others: {courses}. Cost: {cost}."
+    tags: [learning, courses]
+
+  - id: coursera.my_deadlines
+    title: My course progress and deadlines
+    says:
+      - What's due this week on Coursera?
+      - How far am I in my Coursera course?
+      - Am I behind on any of my online courses?
+    kind: look
+    where: chrome
+    region: global
+    sites: [coursera.org]
+    open: https://www.coursera.org/my-learning
+    steps:
+      - kind: do
+        text: For each course in progress, open it and read the progress and the next deadlines.
+    read:
+      courses: Each course in progress with percent done
+      due: Assignments and quizzes due in the next seven days, with dates
+      overdue: Anything overdue, and whether Coursera offers to reset deadlines
+    answer: "Due soon: {due}. Overdue: {overdue}. Progress: {courses}."
+    tags: [learning, courses, deadlines]
+
+  - id: duolingo.streak
+    title: My Duolingo streak
+    says:
+      - Did I do my Duolingo today?
+      - How long is my Duolingo streak?
+      - Where am I in the Duolingo league this week?
+    kind: look
+    where: chrome
+    region: global
+    sites: [duolingo.com]
+    open: https://www.duolingo.com/learn
+    steps:
+      - kind: do
+        text: Read the streak and daily-goal panels; open Leaderboards for the league.
+    read:
+      streak: Streak length in days and whether today's lesson is done
+      goal: Today's XP against the daily goal
+      league: Current league and rank this week
+      freezes: Streak freezes equipped
+    answer: "{streak}. Today: {goal}. League: {league}."
+    tags: [learning, languages]
+
+  - id: libby.loans
+    title: My library loans and holds in Libby
+    says:
+      - When are my library books due?
+      - Is my hold ready in Libby?
+      - How long until I get the audiobook I'm waiting for?
+    kind: look
+    where: chrome
+    region: global
+    sites: [libbyapp.com]
+    open: https://libbyapp.com/shelf
+    steps:
+      - kind: do
+        text: Read the loans and the holds on the shelf, for every library card linked.
+      - kind: do
+        text: Only read; return, renew or borrow nothing.
+    read:
+      loans: Each loan with title, format (ebook, audiobook, magazine) and days left
+      ready: Holds ready to borrow and when they expire
+      waiting: Other holds with place in line and estimated wait
+    answer: "Due: {loans}. Ready now: {ready}. Waiting: {waiting}."
+    tags: [library, books, reading]

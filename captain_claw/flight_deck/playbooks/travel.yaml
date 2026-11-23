@@ -1,0 +1,1393 @@
+category: travel
+playbooks:
+  # ── Directions and road trips ──────────────────────────────────────────
+
+  - id: maps.travel_time
+    title: How long from A to B
+    says:
+      - How long does it take to get from Zagreb to Split?
+      - How far is the airport from here by car right now?
+      - How long by train from Vienna to Graz?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/maps]
+    inputs:
+      origin: {label: From, kind: place, hint: "An address, a place name, or 'here' for the person's location"}
+      destination: {label: To, kind: place}
+      mode: {label: How, kind: choice, options: [driving, transit, walking, bicycling], default: driving}
+      depart_at: {label: Leaving at, kind: time, required: false, ask: agent}
+    open: https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}&travelmode={mode}
+    steps:
+      - kind: do
+        text: If depart_at was given, open the "Leave now" menu, pick "Depart at" and set {depart_at} before reading.
+    read:
+      duration: The fastest route's time, with traffic as Maps shows it
+      distance: That route's distance
+      route: The road or line it takes
+      alternatives: The other routes Maps offers, each with its time
+    answer: "{duration} by {mode} via {route} ({distance})."
+    needs: [location]
+    tags: [directions, traffic, commute]
+
+  - id: maps.multi_stop_route
+    title: Road trip with stops on the way
+    says:
+      - Plan a drive from Munich to Rome via Innsbruck and Verona.
+      - How long is Zagreb to Plitvice to Zadar to Split by car?
+      - Map a route from Ljubljana with stops at Lake Bled and Bohinj.
+      - What's the total driving time if we stop in Lyon on the way to Barcelona?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/maps]
+    inputs:
+      origin: {label: Start, kind: place}
+      destination: {label: End, kind: place}
+      stops: {label: Stops on the way, kind: text, hint: "Places in visiting order, separated by |, e.g. Innsbruck|Verona"}
+      mode: {label: How, kind: choice, options: [driving, walking, bicycling], default: driving}
+    open: https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}&waypoints={stops}&travelmode={mode}
+    steps:
+      - kind: do
+        text: Check every stop landed on the right place (not a same-named town elsewhere); fix any wrong one in its box.
+      - kind: do
+        text: Open the route's "Details" to read the time and distance of each leg.
+    read:
+      total_time: Total driving time for the whole trip, without breaks
+      total_distance: Total distance
+      legs: Each leg (from → to) with its time and distance
+      tolls: Whether Maps says the route has tolls or crosses borders
+    answer: "{total_time} in all ({total_distance}). Legs: {legs}."
+    tags: [directions, road-trip]
+
+  - id: maps.transit_journey
+    title: Which bus or train to take
+    says:
+      - Which bus do I take from Lisbon airport to Rossio?
+      - How do I get to the Louvre from Gare du Nord by metro?
+      - When's the next train from Schiphol to Amsterdam Centraal?
+      - I need to be at the Colosseum by 9, which tram should I catch?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/maps]
+    inputs:
+      origin: {label: From, kind: place, hint: "A stop, an address, or 'here'"}
+      destination: {label: To, kind: place}
+      when: {label: Leave or arrive at, kind: text, default: now, hint: "now, 'depart 08:15' or 'arrive by 09:00'"}
+    open: https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}&travelmode=transit
+    steps:
+      - kind: do
+        text: Unless {when} is now, open the "Leave now" menu, choose "Depart at" or "Arrive by" and set the date and time.
+      - kind: do
+        text: Open the first suggested trip to see each leg, the stops and the walking parts.
+    read:
+      departure: When and from which stop or platform the first vehicle leaves
+      lines: The lines taken, in order (bus, tram, metro or train numbers and their direction)
+      transfers: Where to change, and how many changes
+      arrival: Arrival time at the destination
+      duration: Total trip time, walking included
+      fare: The fare if Maps shows one
+    answer: "Take {lines} from {departure}; arrive {arrival} ({duration})."
+    needs: [location]
+    tags: [transit, directions, public-transport]
+
+  - id: rome2rio.ways_to_get_there
+    title: Every way to get from A to B
+    says:
+      - What's the best way to get from Lisbon airport into the city?
+      - How do I get from Florence to Cinque Terre without a car?
+      - Is it better to fly or take the train from Madrid to Barcelona?
+      - Cheapest way from Split to Dubrovnik?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [rome2rio.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+    open: https://www.rome2rio.com/
+    steps:
+      - kind: type
+        target: {role: combobox, name: From}
+        value: "{origin}"
+      - kind: type
+        target: {role: combobox, name: To}
+        value: "{destination}"
+      - kind: key
+        key: Enter
+      - kind: do
+        text: Read the list of options; open the top two to see their operators and how often they run.
+    read:
+      options: Each way listed (train, bus, flight, ferry, drive, taxi) with its time and price range
+      fastest: The fastest option and its time
+      cheapest: The cheapest option and its price
+      operators: Who runs the best options and how often they go
+    answer: "Fastest: {fastest}. Cheapest: {cheapest}."
+    tags: [directions, transit, comparison]
+
+  - id: tollguru.toll_cost
+    title: Tolls and fuel cost for a drive
+    says:
+      - How much are the tolls from Boston to Washington DC?
+      - What will tolls and fuel cost driving from Paris to Nice?
+      - Is there a toll-free way from Chicago to Indianapolis?
+    kind: look
+    where: any
+    region: global
+    sites: [tollguru.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      vehicle: {label: Vehicle, kind: choice, options: [car, motorcycle, car with trailer, rv, truck], default: car}
+    open: https://tollguru.com/toll-calculator
+    steps:
+      - kind: do
+        text: If the trip is outside the US, switch to the matching calculator from the site's menu (Europe, Canada, Mexico, India, Australia, France, Germany, Italy…).
+      - kind: do
+        text: Enter {origin} and {destination}, set the vehicle to {vehicle}, and calculate.
+      - kind: do
+        text: Compare the routes offered, including the cheapest one without tolls if shown.
+    read:
+      tolls: Total toll cost for the suggested route, by payment type if shown (tag vs cash or plate)
+      fuel: Estimated fuel cost
+      toll_roads: The toll roads, bridges or tunnels on the way
+      toll_free: The toll-free route's extra time and distance, if there is one
+    answer: "Tolls about {tolls}, fuel about {fuel}. Toll-free option: {toll_free}."
+    tags: [tolls, driving, road-trip]
+
+  - id: tolls.vignette_rules
+    title: Do I need a vignette in a country
+    says:
+      - Do I need a vignette to drive through Austria?
+      - How much is the Slovenian motorway vignette?
+      - What tolls do I pay driving through Switzerland to Italy?
+      - Where do I buy the Czech e-vignette?
+    kind: look
+    where: any
+    region: eu
+    sites: [tolls.eu]
+    inputs:
+      country: {label: Country, kind: text, hint: "English name in lowercase, hyphens for spaces, e.g. austria, czechia, bosnia-and-herzegovina"}
+      vehicle: {label: Vehicle, kind: choice, options: [car, motorcycle, camper, car with trailer], default: car}
+    open: https://www.tolls.eu/{country}
+    steps:
+      - kind: do
+        text: If the route crosses several countries, open each country's page in turn (https://www.tolls.eu/ lists them).
+    read:
+      system: Whether the country uses a vignette, distance tolls, or both
+      prices: The vignette options (days, months, year) and prices for a {vehicle}
+      where_to_buy: The official place to buy it, and a warning if resellers add fees
+      extra_tolls: Tunnels, passes or bridges charged on top
+      fines: The fine for driving without one, if given
+    answer: "{system}. {prices}. Buy at {where_to_buy}."
+    tags: [tolls, vignette, driving]
+
+  # ── Trains, buses, ferries ─────────────────────────────────────────────
+
+  - id: trainline.train_search
+    title: Train times and fares across Europe
+    says:
+      - Find trains from Paris to Amsterdam next Friday morning.
+      - How much is a train from Milan to Rome on 12 May?
+      - Cheapest train from London to Edinburgh this weekend?
+    kind: look
+    where: any
+    region: eu
+    sites: [thetrainline.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+      time: {label: Around, kind: time, default: "08:00"}
+      travellers: {label: Travellers, kind: number, default: 1}
+    open: https://www.thetrainline.com/
+    steps:
+      - kind: type
+        target: {role: combobox, name: From}
+        value: "{origin}"
+      - kind: type
+        target: {role: combobox, name: To}
+        value: "{destination}"
+      - kind: do
+        text: Set the date to {date} leaving after {time}, set {travellers} passengers, and press "Search".
+      - kind: do
+        text: Scroll the results from {time} onwards; note the cheapest and the fastest.
+    read:
+      trains: The departures around {time} with times, changes and price
+      cheapest: The cheapest train and its fare
+      fastest: The fastest train and its duration
+      operator: Which rail company runs them
+    answer: "Cheapest {cheapest}; fastest {fastest}."
+    tags: [train, rail, europe]
+
+  - id: omio.trip_search
+    title: Train, bus or plane, compared
+    says:
+      - Compare train, bus and flight from Berlin to Prague.
+      - What's cheapest from Munich to Venice, bus or train?
+      - How can I get from Vienna to Budapest on Saturday?
+    kind: look
+    where: prefer_chrome
+    region: eu
+    sites: [omio.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+      travellers: {label: Travellers, kind: number, default: 1}
+    open: https://www.omio.com/
+    steps:
+      - kind: type
+        target: {role: combobox, name: From}
+        value: "{origin}"
+      - kind: type
+        target: {role: combobox, name: To}
+        value: "{destination}"
+      - kind: do
+        text: Set one way on {date} for {travellers} passengers and search.
+      - kind: do
+        text: Look at the Train, Bus and Flight tabs in turn.
+    read:
+      by_train: Cheapest and fastest train, with times and price
+      by_bus: Cheapest and fastest bus, with times and price
+      by_plane: Cheapest flight with times and price, if any
+      best: Which mode wins on price and which on time
+    answer: "Train {by_train}; bus {by_bus}; plane {by_plane}."
+    tags: [train, bus, comparison]
+
+  - id: flixbus.bus_search
+    title: FlixBus rides and prices
+    says:
+      - Is there a FlixBus from Zagreb to Ljubljana tomorrow?
+      - How much is the bus from Prague to Vienna on Sunday?
+      - Find a night bus from Berlin to Amsterdam.
+    kind: look
+    where: any
+    region: global
+    sites: [flixbus.com, global.flixbus.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+      travellers: {label: Travellers, kind: number, default: 1}
+    open: https://www.flixbus.com/
+    steps:
+      - kind: type
+        target: {role: combobox, name: From}
+        value: "{origin}"
+      - kind: type
+        target: {role: combobox, name: To}
+        value: "{destination}"
+      - kind: do
+        text: Set the date to {date}, set {travellers} adults, and press "Search".
+    read:
+      rides: The rides that day with departure and arrival times, stops, duration and transfers
+      cheapest: The cheapest ride and its price
+      seats_left: Any "few seats left" warnings
+    answer: "{cheapest}. All rides: {rides}."
+    tags: [bus, coach]
+
+  - id: flixbus.book_ride
+    title: Book a FlixBus ride up to payment
+    says:
+      - Book me the FlixBus from Munich to Prague on Friday morning.
+      - Get two bus tickets from Milan to Venice for Saturday.
+      - Reserve the evening FlixBus from Brussels to Paris.
+    kind: act
+    where: chrome
+    region: global
+    sites: [flixbus.com, shop.flixbus.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+      time: {label: Around, kind: time, default: "09:00"}
+      travellers: {label: Travellers, kind: number, default: 1}
+    open: https://www.flixbus.com/
+    steps:
+      - kind: do
+        text: Search {origin} to {destination} on {date} for {travellers} adults.
+      - kind: do
+        text: Pick the ride closest to {time}; if two are close, take the cheaper and say so. Press "Continue".
+      - kind: do
+        text: Decline paid extras (seat reservation, extra bags, flexibility) unless the person asked for them.
+      - kind: do
+        text: Fill in passenger names and contact details from what the agent knows; ask for anything missing.
+      - kind: do
+        text: Stop at the payment step and show the ride and total.
+    read:
+      ride: The chosen ride's times, stations and duration
+      total: The total price shown before payment
+      conditions: Change and cancellation rules for this fare
+    stop: Continue to payment
+    needs: [memory]
+    tags: [bus, coach, booking]
+
+  - id: eurostar.train_search
+    title: Eurostar times and fares
+    says:
+      - Eurostar from London to Paris on Friday, what's cheapest?
+      - How much is the Eurostar to Brussels next week?
+      - What time is the first Eurostar from Amsterdam to London on Monday?
+    kind: look
+    where: any
+    region: eu
+    sites: [eurostar.com]
+    inputs:
+      origin: {label: From, kind: place, hint: "e.g. London St Pancras, Paris Gare du Nord, Brussels-Midi, Amsterdam Centraal"}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+      travellers: {label: Travellers, kind: number, default: 1}
+    open: https://www.eurostar.com/
+    steps:
+      - kind: do
+        text: Pick {origin} and {destination}, one way on {date}, {travellers} adults, and search.
+      - kind: do
+        text: Read each departure's price for every class (Standard, Plus, Premier).
+    read:
+      trains: The departures with times and the price per class
+      cheapest: The cheapest departure and its class and price
+      check_in: How early Eurostar asks travellers to arrive at the station
+    answer: "Cheapest: {cheapest}. Arrive {check_in} before."
+    tags: [train, rail, eurostar]
+
+  - id: interrail.timetable
+    title: Interrail train times and reservations
+    says:
+      - Do I need a seat reservation on the Paris to Barcelona train with my Interrail pass?
+      - Interrail train times from Vienna to Venice on Tuesday.
+      - Which trains from Munich to Zurich are covered by my Eurail pass without a reservation?
+    kind: look
+    where: any
+    region: eu
+    sites: [interrail.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+    open: https://www.interrail.com/en-int/plan-your-trip/interrail-timetable
+    steps:
+      - kind: do
+        text: Enter {origin}, {destination} and {date} in the timetable and search.
+      - kind: do
+        text: For each connection, open its details to see whether a reservation is required or optional.
+    read:
+      connections: The trains that day with times, changes and duration
+      reservation: Which trains need a seat reservation and its fee, and which need none
+      pass_valid: Any train or operator not covered by the pass
+    answer: "{connections}. Reservations: {reservation}."
+    tags: [train, rail, interrail, pass]
+
+  - id: seat61.train_route_guide
+    title: How to do a journey by train (Seat 61)
+    says:
+      - How do I get from London to Rome by train?
+      - Is there a sleeper train from Vienna to Venice?
+      - Best way to go by train from Zagreb to Istanbul?
+      - Where do I book cheap tickets for trains in Italy?
+    kind: look
+    where: any
+    region: global
+    sites: [seat61.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+    open: https://www.seat61.com/
+    steps:
+      - kind: do
+        text: From the home page's destination list, open the page for the country of {destination}.
+      - kind: do
+        text: Find the section on getting there from {origin}, or from the nearest hub the page covers.
+    read:
+      best_route: The recommended train route, with changes and any sleeper
+      journey_time: How long it takes door to door
+      where_to_book: Which operator or site sells the cheapest tickets, and when booking opens
+      fares: The typical fares quoted
+      tips: Any warnings (reservations, strikes, engineering work, which side to sit)
+    answer: "{best_route}, about {journey_time}. Book via {where_to_book}."
+    tags: [train, rail, guide]
+
+  - id: directferries.ferry_search
+    title: Ferry times and prices for a crossing
+    says:
+      - Ferry from Dover to Calais on Saturday with a car.
+      - When's the ferry from Split to Ancona and how much?
+      - How much is the ferry from Barcelona to Mallorca for two?
+    kind: look
+    where: any
+    region: global
+    sites: [directferries.com]
+    inputs:
+      origin: {label: From port, kind: place}
+      destination: {label: To port, kind: place}
+      date: {label: Date, kind: date}
+      travellers: {label: Passengers, kind: number, default: 1}
+      vehicle: {label: Vehicle, kind: choice, options: [none, car, motorhome, motorcycle, bicycle], default: none}
+    open: https://www.directferries.com/
+    steps:
+      - kind: do
+        text: Choose the route {origin} to {destination}, one way on {date}, {travellers} passengers and vehicle {vehicle}, then get quotes.
+      - kind: do
+        text: Read every sailing offered that day.
+    read:
+      sailings: The sailings with operator, departure and arrival times and duration
+      cheapest: The cheapest sailing and its total price
+      vehicle_price: What the vehicle adds, if one was chosen
+    answer: "{cheapest}. Other sailings: {sailings}."
+    tags: [ferry, boat]
+
+  - id: ferryhopper.island_hopping
+    title: Island-hopping ferry plan
+    says:
+      - Plan ferries Athens to Paros, then Naxos, then Santorini in June.
+      - Can I get from Split to Hvar and then Korčula by ferry the same week?
+      - Ferry connections between Mykonos and Milos?
+    kind: look
+    where: any
+    region: eu
+    sites: [ferryhopper.com]
+    inputs:
+      legs: {label: Legs, kind: text, hint: "Each leg with its date, e.g. Piraeus→Paros 10 Jun; Paros→Naxos 13 Jun"}
+      travellers: {label: Passengers, kind: number, default: 1}
+    open: https://www.ferryhopper.com/en/
+    steps:
+      - kind: do
+        text: Choose a multi-trip search and add one trip per leg in {legs}, each with its date, for {travellers} passengers; search.
+      - kind: do
+        text: If a leg has no direct ferry, look at the indirect connections Ferryhopper suggests.
+    read:
+      legs: For each leg, the sailings that day with operator, times and price
+      connections: Legs with no direct ferry and the suggested change
+      total: The cheapest total across all legs
+    answer: "{legs}. Cheapest total {total}."
+    tags: [ferry, islands, boat]
+
+  # ── Flights ────────────────────────────────────────────────────────────
+
+  - id: googleflights.flight_search
+    title: Find flights on a date
+    says:
+      - Find flights from Zagreb to Lisbon on 2 March.
+      - What's the cheapest nonstop from London to New York next Friday?
+      - Flights to Barcelona from Vienna, back a week later?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/travel/flights]
+    inputs:
+      origin: {label: From, kind: place, hint: "City or airport code, e.g. ZAG"}
+      destination: {label: To, kind: place}
+      date: {label: Departure, kind: date}
+      return_date: {label: Return, kind: date, required: false, ask: before}
+      travellers: {label: Travellers, kind: number, default: 1}
+      cabin: {label: Class, kind: choice, options: [economy, premium economy, business, first], default: economy}
+    open: https://www.google.com/travel/flights?q=Flights%20to%20{destination}%20from%20{origin}%20on%20{date}
+    steps:
+      - kind: do
+        text: If return_date was given, switch to Round trip and set the return to {return_date}; otherwise keep One way.
+      - kind: do
+        text: Set {travellers} passengers and {cabin} if they differ, then read the "Best" and "Cheapest" tabs.
+    read:
+      best: Google's top pick with airline, times, stops and price
+      cheapest: The cheapest flight with airline, times, stops and price
+      nonstop: The cheapest nonstop, if any
+      price_level: Google's note on whether prices are low, typical or high
+      bags: Whether a carry-on bag is included on the cheapest fare
+    answer: "Best: {best}. Cheapest: {cheapest}. Prices are {price_level}."
+    tags: [flights, airfare]
+
+  - id: googleflights.cheapest_dates
+    title: Cheapest days to fly
+    says:
+      - Which day next month is cheapest to fly to Lisbon?
+      - Is it cheaper to fly to Paris a day earlier?
+      - Find the cheapest dates for a week in Barcelona around 10 May.
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/travel/flights]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      around: {label: Around date, kind: date}
+      nights: {label: Nights, kind: number, default: 7, hint: "0 for one way"}
+    open: https://www.google.com/travel/flights?q=Flights%20to%20{destination}%20from%20{origin}%20on%20{around}
+    steps:
+      - kind: do
+        text: For a round trip set the return {nights} nights after {around}; for 0 nights keep One way.
+      - kind: do
+        text: Open "Date grid" (round trip) or "Price graph" (one way) and scan the days around {around}.
+    read:
+      cheapest_dates: The cheapest departure (and return) dates and price
+      chosen_price: The price on the dates asked for
+      saving: How much moving the dates saves
+    answer: "Cheapest is {cheapest_dates}, saving {saving} against {chosen_price}."
+    tags: [flights, airfare, flexible-dates]
+
+  - id: skyscanner.cheapest_month
+    title: Cheapest month to fly
+    says:
+      - When's the cheapest month to fly to Tokyo?
+      - Cheapest time this spring to fly London to Lisbon?
+      - Which month are flights to Bali cheapest from Amsterdam?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [skyscanner.net, skyscanner.com]
+    inputs:
+      origin: {label: From, kind: text, hint: "Airport or city code, lowercase, e.g. lond, ams, zag"}
+      destination: {label: To, kind: text, hint: "Airport or city code, e.g. tyoa, lis, dps"}
+      months: {label: Which months, kind: text, default: next 12 months}
+    open: https://www.skyscanner.net/transport/flights/{origin}/{destination}/
+    steps:
+      - kind: do
+        text: In the date picker choose "Whole month" and then "Cheapest month" (or step through {months}).
+      - kind: do
+        text: Note the lowest price for each month, then open the cheapest month's calendar.
+    read:
+      cheapest_month: The cheapest month and its lowest price
+      by_month: The lowest price for each month shown
+      cheapest_dates: The cheapest dates inside that month
+      airlines: Airlines on the cheapest options, and whether they are direct
+    answer: "{cheapest_month}; best dates {cheapest_dates}."
+    tags: [flights, airfare, flexible-dates]
+
+  - id: skyscanner.everywhere
+    title: Where can I fly cheaply from here
+    says:
+      - Where can I fly cheaply from Vienna in May?
+      - Cheapest weekend getaway from London next month?
+      - Show me the cheapest destinations from Zagreb this summer.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [skyscanner.net, skyscanner.com]
+    inputs:
+      origin: {label: From, kind: text, hint: "Airport or city code, lowercase, e.g. vie, lond, zag"}
+      when: {label: When, kind: text, default: cheapest month}
+    open: https://www.skyscanner.net/transport/flights-from/{origin}/
+    steps:
+      - kind: do
+        text: Set the destination to "Everywhere" and the dates to {when}; sort by cheapest.
+    read:
+      destinations: The ten cheapest countries or cities with their lowest price
+      top_pick: The cheapest destination, its dates and airline
+      direct: Which of them have direct flights
+    answer: "Cheapest: {top_pick}. Others: {destinations}."
+    tags: [flights, inspiration, airfare]
+
+  - id: expedia.flight_hotel_package
+    title: Flight and hotel package price
+    says:
+      - How much is a flight plus hotel package to Cancún for a week?
+      - Price a package to Rome with hotel for two in June.
+      - Is a flight and hotel bundle to Lisbon cheaper than booking separately?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [expedia.com]
+    inputs:
+      origin: {label: Leaving from, kind: place}
+      destination: {label: Going to, kind: place}
+      checkin: {label: Depart, kind: date}
+      checkout: {label: Return, kind: date}
+      adults: {label: Adults, kind: number, default: 2}
+    open: https://www.expedia.com/Vacation-Packages
+    steps:
+      - kind: do
+        text: Choose "Flight + Hotel"; fill in {origin}, {destination}, {checkin} to {checkout} and {adults} adults; search.
+      - kind: do
+        text: Sort hotels by price and open the cheapest well-rated one (8+/10) to see its package total with flights.
+    read:
+      package: Cheapest well-rated package total, and per person
+      hotel: The hotel, its rating and area
+      flights: The flights included, times and stops
+      saving: The saving Expedia claims against booking separately
+    answer: "{package} with {hotel}; flights {flights}."
+    tags: [flights, hotels, package]
+
+  # ── Flight status, check-in, rules ─────────────────────────────────────
+
+  - id: flightaware.flight_status
+    title: Is my flight on time
+    says:
+      - Is BA123 on time?
+      - When does LH1411 land?
+      - What gate does my flight EZY8361 leave from?
+      - Is the flight from Frankfurt to Zagreb delayed today?
+    kind: look
+    where: any
+    region: global
+    sites: [flightaware.com]
+    inputs:
+      flight: {label: Flight number, kind: text, hint: "Airline code and number with no space, e.g. BA123"}
+      date: {label: Date, kind: date, default: today}
+    open: https://www.flightaware.com/live/flight/{flight}
+    steps:
+      - kind: do
+        text: If the page lists several days, pick the flight for {date}.
+    read:
+      status: Scheduled, delayed, departed, landed or cancelled, and by how much
+      departure: Scheduled and actual or estimated departure, terminal and gate
+      arrival: Scheduled and estimated arrival, terminal and gate
+      aircraft: The aircraft type
+    answer: "{flight}: {status}. Departs {departure}, arrives {arrival}."
+    tags: [flights, flight-status, delays]
+
+  - id: flightaware.airport_delays
+    title: Delays and cancellations at an airport
+    says:
+      - Are there delays at Frankfurt airport right now?
+      - How bad are cancellations at Heathrow today?
+      - What's leaving from Zagreb airport in the next hour?
+    kind: look
+    where: any
+    region: global
+    sites: [flightaware.com]
+    inputs:
+      airport: {label: Airport, kind: text, hint: "IATA or ICAO code, e.g. FRA or EDDF"}
+    open: https://www.flightaware.com/live/airport/{airport}
+    steps:
+      - kind: do
+        text: Read the Departures board (and Arrivals if asked), counting delayed and cancelled flights.
+      - kind: open
+        url: https://www.flightaware.com/live/cancelled/today
+        note: Find the airport's row for today's total cancellations and delays.
+    read:
+      departures: The next departures with their status
+      delays: How many flights are delayed or cancelled today
+      notices: Any delay, ground-stop or weather notice shown
+      weather: Current weather at the airport
+    answer: "{delays}. {notices}"
+    tags: [flights, delays, airport]
+
+  - id: flightradar24.inbound_aircraft
+    title: Is the plane for my flight running late
+    says:
+      - Is the plane for my flight late coming in?
+      - Where is the aircraft for EZY8361 right now?
+      - Has the inbound plane for LH1411 left yet?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [flightradar24.com]
+    inputs:
+      flight: {label: Flight number, kind: text, hint: "e.g. ezy8361, lowercase, no space"}
+    open: https://www.flightradar24.com/data/flights/{flight}
+    steps:
+      - kind: do
+        text: In the flight history find today's {flight} and note its aircraft registration.
+      - kind: do
+        text: Open that registration's page and find the leg it flies just before {flight}.
+    read:
+      aircraft: The aircraft type and registration
+      inbound: The previous leg's flight number, origin, and status or estimated arrival
+      turnaround: Whether the inbound's arrival leaves normal time before {flight} is due out
+    answer: "Inbound {inbound}; {turnaround}."
+    tags: [flights, delays, tracking]
+
+  - id: europa.flight_delay_rights
+    title: What I'm owed for a delayed or cancelled flight (EU)
+    says:
+      - My flight was 4 hours late, am I owed compensation?
+      - Ryanair cancelled my flight, what are my rights?
+      - I missed my connection because of a delay, what can I claim?
+    kind: look
+    where: any
+    region: eu
+    sites: [europa.eu/youreurope]
+    inputs:
+      what: {label: What happened, kind: choice, options: [delay, cancellation, denied boarding, missed connection]}
+      route: {label: Flight route, kind: text, hint: "From and to, e.g. Zagreb to Lisbon"}
+      hours_late: {label: Hours late at arrival, kind: number, required: false, ask: before}
+    open: https://europa.eu/youreurope/citizens/travel/passenger-rights/air/index_en.htm
+    steps:
+      - kind: do
+        text: Open the section for a {what} and read the conditions and amounts.
+      - kind: do
+        text: Estimate the flight distance of {route} and pick the distance band the page uses.
+    read:
+      compensation: The amount for this distance band and delay, as the page states it
+      conditions: When the rules apply (EU departure or EU airline) and the extraordinary-circumstances exception
+      care: Meals, hotel, rerouting or refund the airline must offer
+      how_to_claim: How to claim from the airline and where to complain if refused
+    answer: "{compensation}, if {conditions}. Also: {care}."
+    tags: [flights, delays, rights, compensation]
+
+  - id: ryanair.check_in
+    title: Check in for a Ryanair flight
+    says:
+      - Check me in for my Ryanair flight.
+      - Do the online check-in for my Ryanair booking.
+      - Get my Ryanair boarding pass ready.
+    kind: act
+    where: chrome
+    region: global
+    sites: [ryanair.com]
+    inputs:
+      booking_ref: {label: Booking reference, kind: text, hint: "The reservation number from the confirmation email"}
+      email: {label: Email on the booking, kind: text}
+    open: https://www.ryanair.com/gb/en/check-in
+    steps:
+      - kind: do
+        text: If a sign-in or verification step appears, hand the page to the person; never type a password or code.
+      - kind: do
+        text: Retrieve the booking with {booking_ref} and {email}, then choose to check in every passenger on it.
+      - kind: do
+        text: Decline every paid extra (seats, bags, priority, insurance); take the free random seat unless told otherwise.
+      - kind: do
+        text: If passport or ID-card details are asked for, stop and let the person type them.
+      - kind: do
+        text: Stop on the last page with the "Check in" button and show what will be checked in.
+    read:
+      flight: Flight number, date and departure time
+      passengers: The passengers being checked in
+      seat: The seats, or that free seats are assigned at check-in
+      opens: When check-in opens, if it is not open yet
+      basket: Anything in the basket with a price (there should be none)
+    stop: Check in
+    needs: [mail, memory]
+    tags: [flights, check-in, ryanair]
+
+  - id: easyjet.check_in
+    title: Check in for an easyJet flight
+    says:
+      - Check me in for my easyJet flight to Paris.
+      - Do online check-in for my easyJet booking.
+      - Get my easyJet boarding passes for tomorrow.
+    kind: act
+    where: chrome
+    region: global
+    sites: [easyjet.com]
+    inputs:
+      booking_ref: {label: Booking reference, kind: text, hint: "Starts with K or E, from the confirmation email"}
+      surname: {label: Surname on the booking, kind: text}
+    open: https://www.easyjet.com/en/manage/my-bookings
+    steps:
+      - kind: do
+        text: If the person is not signed in, find the booking with {booking_ref} and {surname}; if a password is asked, hand the page over.
+      - kind: do
+        text: Choose "Check in" for the flight and select every passenger.
+      - kind: do
+        text: Skip paid seats, bags and extras unless the person asked for them.
+      - kind: do
+        text: If passport or ID-card details are asked for, stop and let the person type them.
+      - kind: do
+        text: Stop on the page with the final "Check in" button.
+    read:
+      flight: Flight number, date and departure time
+      passengers: The passengers being checked in
+      opens: When check-in opens, if it is not open yet
+      bags: Bags included on the booking
+    stop: Check in
+    needs: [mail, memory]
+    tags: [flights, check-in, easyjet]
+
+  - id: google.airline_bag_rules
+    title: An airline's baggage and seat rules
+    says:
+      - What's Ryanair's cabin bag size?
+      - How much luggage can I take on Lufthansa economy?
+      - Does an easyJet ticket include a checked bag?
+      - Is seat selection free on KLM?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com]
+    inputs:
+      airline: {label: Airline, kind: text}
+      fare: {label: Fare or class, kind: text, default: cheapest economy}
+    open: https://www.google.com/search?q={airline}%20baggage%20allowance
+    steps:
+      - kind: do
+        text: Open the result on the airline's own website, not a blog or travel agent.
+      - kind: do
+        text: Find the rules for the {fare} fare; if the person asked about seats, open the airline's seat selection page too.
+    read:
+      personal_item: The free under-seat bag size and weight
+      cabin_bag: Whether a cabin bag is included on the {fare} fare, and its size and weight
+      checked_bag: Whether a checked bag is included, its weight, or what it costs to add
+      seat_choice: Whether choosing a seat is free on that fare, and when free seats are given
+      source: The airline page the rules come from
+    answer: "{airline} {fare}: {personal_item}; cabin bag {cabin_bag}; checked {checked_bag}."
+    tags: [flights, baggage, seats]
+
+  - id: prioritypass.lounge_finder
+    title: Lounges I can use at an airport
+    says:
+      - Which lounges can I use at Frankfurt with Priority Pass?
+      - Is there a lounge in Lisbon airport's Terminal 1?
+      - What lounges are airside at Heathrow Terminal 5?
+    kind: look
+    where: any
+    region: global
+    sites: [prioritypass.com]
+    inputs:
+      airport: {label: Airport, kind: text}
+      terminal: {label: Terminal, kind: text, default: any}
+    open: https://www.prioritypass.com/lounges
+    steps:
+      - kind: do
+        text: Search {airport} in the lounge finder and open each lounge in terminal {terminal}.
+    read:
+      lounges: Each lounge with its terminal, airside or landside, and opening hours
+      conditions: Time limits, guest fees, dress code and "access not guaranteed" notes
+      other_perks: Restaurant credits or other experiences offered instead of a lounge
+    answer: "{lounges}. Note: {conditions}."
+    tags: [airport, lounge]
+
+  # ── Airport parking ────────────────────────────────────────────────────
+
+  - id: parkos.airport_parking
+    title: Airport parking in Europe compared
+    says:
+      - Cheapest parking at Amsterdam Schiphol for a week?
+      - Compare parking at Munich airport from Friday to Sunday.
+      - Find parking with a shuttle at Barcelona airport.
+    kind: look
+    where: any
+    region: eu
+    sites: [parkos.com, parkos.co.uk, parkos.de, parkos.nl]
+    inputs:
+      airport: {label: Airport, kind: text}
+      from_date: {label: Drop-off, kind: date}
+      to_date: {label: Pick-up, kind: date}
+    open: https://parkos.com/
+    steps:
+      - kind: do
+        text: Pick {airport} (the site may move to that country's Parkos site), set {from_date} to {to_date} with times, and compare.
+      - kind: do
+        text: Sort by price; note which are on-airport, shuttle, or valet.
+    read:
+      cheapest: The cheapest option, its type (shuttle, valet, on-airport) and total
+      closest: The closest or on-airport option and its total
+      rating: Customer ratings of the top options
+      cancellation: Free-cancellation terms
+    answer: "Cheapest {cheapest}; closest {closest}."
+    tags: [airport, parking]
+
+  - id: spothero.airport_parking
+    title: Airport parking in the US
+    says:
+      - Cheapest parking near JFK for 5 days?
+      - Find airport parking at LAX with a free shuttle.
+      - How much is parking at O'Hare next weekend?
+    kind: look
+    where: any
+    region: us
+    sites: [spothero.com]
+    inputs:
+      airport: {label: Airport, kind: text}
+      from_date: {label: Drop-off, kind: date}
+      to_date: {label: Pick-up, kind: date}
+    open: https://spothero.com/airport-parking
+    steps:
+      - kind: do
+        text: Choose {airport}, set {from_date} to {to_date} with times, and search.
+      - kind: do
+        text: Sort by price and check each top lot's shuttle details.
+    read:
+      cheapest: The cheapest lot, its total, and distance or shuttle time
+      shuttle: Shuttle frequency and hours for the top lots
+      rating: Ratings of the top lots
+    answer: "{cheapest}. Shuttle: {shuttle}."
+    tags: [airport, parking]
+
+  # ── Hotels and stays ───────────────────────────────────────────────────
+
+  - id: booking.hotel_search
+    title: Find a hotel for my dates
+    says:
+      - Find a hotel in Lisbon for 2–5 March for two.
+      - Hotels near the Sagrada Família under €150 a night?
+      - Best-rated hotel in Kyoto with free cancellation next weekend?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [booking.com]
+    inputs:
+      place: {label: Where, kind: place}
+      checkin: {label: Check-in, kind: date}
+      checkout: {label: Check-out, kind: date}
+      adults: {label: Adults, kind: number, default: 2}
+      rooms: {label: Rooms, kind: number, default: 1}
+      wants: {label: Must have, kind: text, default: "", hint: "e.g. free cancellation, breakfast, under 150 a night, 8+ rating"}
+    open: https://www.booking.com/searchresults.html?ss={place}&checkin={checkin}&checkout={checkout}&group_adults={adults}&no_rooms={rooms}&group_children=0
+    steps:
+      - kind: do
+        text: Apply the filters that match {wants}, then sort by what was asked (price, review score, distance).
+    read:
+      top: The three best matches with name, review score, area and total price for the stay
+      cheapest: The cheapest acceptable option and its total
+      free_cancellation: Which of them cancel free, and until when
+    answer: "Top picks: {top}."
+    tags: [hotels, accommodation]
+
+  - id: booking.reserve
+    title: Reserve a hotel room up to final details
+    says:
+      - Book the Hotel Avenida Palace in Lisbon for 2–5 March.
+      - Reserve that hotel for us, cheapest room with free cancellation.
+      - Book two nights at the Ibis near Munich station.
+    kind: act
+    where: chrome
+    region: global
+    sites: [booking.com, secure.booking.com]
+    inputs:
+      hotel: {label: Hotel, kind: text}
+      checkin: {label: Check-in, kind: date}
+      checkout: {label: Check-out, kind: date}
+      adults: {label: Adults, kind: number, default: 2}
+      room: {label: Room, kind: text, default: cheapest with free cancellation}
+    open: https://www.booking.com/searchresults.html?ss={hotel}&checkin={checkin}&checkout={checkout}&group_adults={adults}&no_rooms=1&group_children=0
+    steps:
+      - kind: do
+        text: Open the property that matches {hotel}; if none clearly matches, list the closest ones and ask.
+      - kind: do
+        text: Choose the room that fits "{room}", select 1, and press "I'll reserve".
+      - kind: do
+        text: Fill in guest details from what the agent knows; ask for anything missing. Leave extras and add-ons off.
+      - kind: do
+        text: Stop before the final details (payment) page and show the summary.
+    read:
+      room: The room and rate chosen
+      total: Total price with taxes and fees
+      cancellation: Free-cancellation deadline, or that it is non-refundable
+      pay_when: Whether it is paid now or at the property
+    stop: "Next: Final details"
+    needs: [memory]
+    tags: [hotels, booking, reservation]
+
+  - id: booking.my_reservation
+    title: Details of my Booking.com stay
+    says:
+      - What time can I check in at my hotel in Rome?
+      - Until when can I cancel my Booking.com hotel for free?
+      - What's the address of the hotel I booked for Vienna?
+    kind: look
+    where: chrome
+    region: global
+    sites: [secure.booking.com, booking.com]
+    inputs:
+      stay: {label: Which stay, kind: text, default: next upcoming}
+    open: https://secure.booking.com/mytrips.html
+    steps:
+      - kind: do
+        text: If asked to sign in, hand the page to the person to sign in themselves.
+      - kind: do
+        text: Open the {stay} trip and its booking details.
+    read:
+      property: Property name and address
+      dates: Check-in and check-out dates and the check-in time window
+      free_cancel_until: Free-cancellation deadline, or non-refundable
+      payment: Paid already or due at the property, and how much
+      contact: The property's phone or message option
+    answer: "{property}: {dates}. Free cancellation until {free_cancel_until}."
+    tags: [hotels, my-trips]
+
+  - id: airbnb.stay_search
+    title: Find a place to stay on Airbnb
+    says:
+      - Find an Airbnb in Lisbon for four people, 2–9 March.
+      - Whole apartment in Barcelona with two bedrooms next month?
+      - Cabin near Lake Bled for a weekend in June?
+    kind: look
+    where: any
+    region: global
+    sites: [airbnb.com]
+    inputs:
+      place: {label: Where, kind: place}
+      checkin: {label: Check-in, kind: date}
+      checkout: {label: Check-out, kind: date}
+      adults: {label: Guests, kind: number, default: 2}
+      wants: {label: Must have, kind: text, default: "", hint: "e.g. entire place, 2 bedrooms, washer, under 120 a night"}
+    open: https://www.airbnb.com/s/{place}/homes?checkin={checkin}&checkout={checkout}&adults={adults}
+    steps:
+      - kind: do
+        text: Apply filters for {wants} and turn on showing the total price, so fees are included.
+      - kind: do
+        text: Open the three best matches to check their rating, cancellation policy and exact area.
+    read:
+      top: Three best listings with type, rating, area and total price for the stay
+      cheapest: The cheapest acceptable listing and its total
+      cancellation: Each one's cancellation policy
+    answer: "Top picks: {top}."
+    tags: [accommodation, rental]
+
+  - id: googlehotels.compare_prices
+    title: Where a hotel is cheapest to book
+    says:
+      - Where's the Hotel Adlon cheapest to book for 3–5 April?
+      - Is it cheaper to book the Hilton Vienna directly or through a site?
+      - Compare prices for the Ritz Madrid next weekend.
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/travel]
+    inputs:
+      hotel: {label: Hotel, kind: text, hint: "Hotel name and city"}
+      checkin: {label: Check-in, kind: date}
+      checkout: {label: Check-out, kind: date}
+      adults: {label: Guests, kind: number, default: 2}
+    open: https://www.google.com/travel/search?q={hotel}
+    steps:
+      - kind: do
+        text: Open the hotel, set {checkin} to {checkout} and {adults} guests, and go to its "Prices" tab.
+    read:
+      lowest: The lowest total and which site offers it
+      official: The hotel's own website price
+      offers: The other sites and their totals
+      free_cancellation: Which offers include free cancellation
+    answer: "Cheapest {lowest}; direct {official}."
+    tags: [hotels, comparison]
+
+  # ── Car rental ─────────────────────────────────────────────────────────
+
+  - id: rentalcars.car_search
+    title: Rent a car (Rentalcars)
+    says:
+      - Find a rental car at Lisbon airport for 2–9 March.
+      - Cheapest automatic car hire in Malaga next week?
+      - How much is a car rental in Split for five days?
+    kind: look
+    where: any
+    region: global
+    sites: [rentalcars.com]
+    inputs:
+      location: {label: Pick-up, kind: place}
+      pickup: {label: Pick-up date, kind: date}
+      dropoff: {label: Drop-off date, kind: date}
+      car: {label: Car, kind: text, default: any, hint: "e.g. automatic, SUV, 7 seats"}
+    open: https://www.rentalcars.com/
+    steps:
+      - kind: do
+        text: Enter {location}, {pickup} to {dropoff} with times; if asked, give the driver's age from what the agent knows.
+      - kind: do
+        text: Search, filter for {car}, and sort by price.
+    read:
+      cheapest: The cheapest suitable car with supplier and total
+      recommended: A well-rated option (supplier rating 8+) and its total
+      fuel_policy: Fuel policy of those offers (full to full or not)
+      deposit: Deposit and excess amounts shown
+      pickup_point: In-terminal desk or shuttle to the supplier
+    answer: "Cheapest {cheapest}; well-rated {recommended}."
+    needs: [memory]
+    tags: [car-rental, driving]
+
+  - id: kayak.car_search
+    title: Rent a car (Kayak)
+    says:
+      - Compare car rentals at Denver airport for next week.
+      - Cheapest rental car in Reykjavik for 4 days?
+      - What do Hertz and Avis charge at Nice airport in June?
+    kind: look
+    where: any
+    region: global
+    sites: [kayak.com]
+    inputs:
+      location: {label: Pick-up, kind: place, hint: "City or airport code, e.g. DEN"}
+      pickup: {label: Pick-up date, kind: date}
+      dropoff: {label: Drop-off date, kind: date}
+    open: https://www.kayak.com/cars/{location}/{pickup}/{dropoff}
+    steps:
+      - kind: do
+        text: Sort by cheapest; note the car class tabs (small, medium, SUV, van) for their lowest prices.
+    read:
+      cheapest: The cheapest car with company, class and total
+      by_class: Lowest price per car class
+      pickup_point: Whether the cheapest is in the terminal or needs a shuttle
+      free_cancellation: Whether it cancels free
+    answer: "Cheapest {cheapest}. By class: {by_class}."
+    tags: [car-rental, driving]
+
+  # ── Entry rules, advisories ────────────────────────────────────────────
+
+  - id: iatatravelcentre.entry_requirements
+    title: Visa, passport and health rules for a trip
+    says:
+      - Do I need a visa for Turkey with a Croatian passport?
+      - What do I need to enter Japan as an Indian citizen?
+      - Can I transit through Doha without a visa?
+      - How long must my passport be valid to visit Thailand?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [iatatravelcentre.com]
+    inputs:
+      nationality: {label: Passport, kind: text}
+      destination: {label: Going to, kind: text}
+      transit: {label: Transit country, kind: text, default: none}
+    open: https://www.iatatravelcentre.com/
+    steps:
+      - kind: do
+        text: Fill in nationality {nationality}, destination {destination}, and transit {transit}; run the check.
+    read:
+      visa: Whether a visa, e-visa, visa on arrival or travel authorisation is needed, and for how long one may stay
+      passport: Passport validity and blank-page rules
+      transit: Transit rules for {transit}, if any
+      health: Required vaccinations or health documents
+    answer: "{visa}. Passport: {passport}."
+    tags: [visa, entry, passport]
+
+  - id: govuk.travel_advice
+    title: Is it safe to travel to a country (UK advice)
+    says:
+      - Is it safe to travel to Egypt right now?
+      - What does the UK Foreign Office say about Mexico?
+      - Any travel warnings for Thailand?
+    kind: look
+    where: any
+    region: global
+    sites: [gov.uk/foreign-travel-advice]
+    inputs:
+      country: {label: Country, kind: text, hint: "As gov.uk writes it, lowercase with hyphens, e.g. egypt, south-korea"}
+    open: https://www.gov.uk/foreign-travel-advice/{country}
+    steps:
+      - kind: do
+        text: Read the summary, then the "Warnings and insurance" and "Safety and security" sections.
+    read:
+      advisory: Whether the FCDO advises against all or all-but-essential travel, and to which areas
+      risks: Main safety risks (terrorism, crime, unrest, natural hazards)
+      entry: Entry rules for British passport holders, from "Entry requirements"
+      updated: When the advice was last updated
+    answer: "{advisory}. Risks: {risks}. (Updated {updated}.)"
+    tags: [safety, advisory, entry]
+
+  - id: statedept.travel_advisory
+    title: US travel advisory level for a country
+    says:
+      - What's the US travel advisory for Colombia?
+      - What level is the State Department warning for Jamaica?
+      - Is there a US travel warning for Israel?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [travel.state.gov]
+    inputs:
+      country: {label: Country, kind: text}
+    open: https://travel.state.gov/content/travel/en/traveladvisories/traveladvisories.html
+    steps:
+      - kind: do
+        text: Find {country} in the advisory list and open its advisory.
+    read:
+      level: The advisory level (1 to 4) and its label
+      reasons: The risk indicators given (crime, terrorism, unrest, health, kidnapping…)
+      areas: Regions with a higher level or "do not travel"
+      updated: Date of the advisory
+    answer: "{country}: {level} ({reasons}). Higher-risk areas: {areas}."
+    tags: [safety, advisory]
+
+  - id: govuk.check_uk_visa
+    title: Do I need a visa or ETA for the UK
+    says:
+      - Do I need a visa to visit London on a US passport?
+      - Do I need an ETA to travel to the UK?
+      - Can I change planes at Heathrow without a visa on an Indian passport?
+    kind: look
+    where: any
+    region: global
+    sites: [gov.uk]
+    inputs:
+      nationality: {label: Passport, kind: text}
+      purpose: {label: Purpose, kind: choice, options: [tourism, business, transit, study, work], default: tourism}
+    open: https://www.gov.uk/check-uk-visa
+    steps:
+      - kind: do
+        text: Press "Start now" and answer with {nationality}, {purpose} and the stay length; read the result page.
+    read:
+      needs: Visa, electronic travel authorisation (ETA), or nothing
+      how_to_apply: Where to apply and the official cost
+      notes: Any exceptions (airside transit, residence permits) on the result page
+    answer: "{needs}. {how_to_apply}"
+    tags: [visa, entry, uk]
+
+  - id: europa.schengen_days
+    title: Days left in the Schengen 90/180 rule
+    says:
+      - How many days do I have left in Schengen?
+      - If I enter Spain on 1 June, how long can I stay under the 90-day rule?
+      - Am I over my 90 days in Europe?
+    kind: look
+    where: any
+    region: eu
+    sites: [home-affairs.ec.europa.eu, ec.europa.eu]
+    inputs:
+      stays: {label: Past stays, kind: text, hint: "Each entry and exit date in the last 180 days, e.g. 2027-01-03 to 2027-01-20"}
+      check_date: {label: Date to check, kind: date, default: today}
+    open: https://home-affairs.ec.europa.eu/policies/schengen/schengen-visas/short-stay-calculator_en
+    steps:
+      - kind: do
+        text: Open the calculator (it may open in a new tab), choose the check or planning mode, and enter each stay from {stays}.
+      - kind: do
+        text: Set the date to check to {check_date} and calculate.
+    read:
+      days_used: Days used in the 180 days before {check_date}
+      days_left: Days still allowed
+      latest_exit: The last day one may stay if entering on {check_date}
+    answer: "{days_used} days used, {days_left} left; stay until {latest_exit} at the latest."
+    needs: [memory]
+    tags: [visa, schengen, entry]
+
+  # ── EV, rideshare, weather, time ───────────────────────────────────────
+
+  - id: plugshare.chargers_near
+    title: EV chargers near a place
+    says:
+      - Where can I charge my car near our hotel in Salzburg?
+      - Any fast chargers near Florence that take CCS?
+      - Tesla Superchargers near Lyon?
+    kind: look
+    where: any
+    region: global
+    sites: [plugshare.com]
+    inputs:
+      place: {label: Near, kind: place}
+      plug: {label: Plug, kind: choice, options: [CCS, Type 2, CHAdeMO, Tesla NACS, any], default: any}
+      min_kw: {label: At least kW, kind: number, default: 50}
+    open: https://www.plugshare.com/
+    steps:
+      - kind: do
+        text: Search {place} on the map; filter plugs to {plug} and power to at least {min_kw} kW.
+      - kind: do
+        text: Open the closest few stations to read their details and recent check-ins.
+    read:
+      chargers: Closest stations with network, power, plug types and number of stalls
+      price: Price per kWh or session where shown
+      reliability: Recent check-ins (worked, broken, waited)
+    answer: "{chargers}."
+    tags: [ev, charging]
+
+  - id: abrp.ev_route_plan
+    title: EV road trip with charging stops
+    says:
+      - Plan charging stops from Munich to Rome in my Model 3.
+      - How many charging stops from Zagreb to Paris in an ID.4?
+      - How long will it take to drive Vienna to Berlin in my Kia EV6, with charging?
+    kind: look
+    where: any
+    region: global
+    sites: [abetterrouteplanner.com]
+    inputs:
+      car: {label: Car model, kind: text, hint: "Make, model, battery and year, e.g. Tesla Model 3 Long Range 2024"}
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      start_charge: {label: Starting charge %, kind: number, default: 80}
+    open: https://abetterrouteplanner.com/
+    steps:
+      - kind: do
+        text: Choose the car {car}, set the starting charge to {start_charge}%, enter {origin} and {destination}, and plan.
+    read:
+      stops: Each charging stop with charger name, arrival charge and minutes charging
+      total_time: Total trip time, driving plus charging
+      arrival_charge: Battery level on arrival
+    answer: "{total_time} with stops at {stops}."
+    tags: [ev, charging, road-trip]
+
+  - id: uber.fare_estimate
+    title: What an Uber would cost
+    says:
+      - How much is an Uber from JFK to Times Square?
+      - What does an Uber from Heathrow to Paddington cost?
+      - Estimate a ride from Lisbon airport to Alfama.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [uber.com]
+    inputs:
+      origin: {label: Pick-up, kind: place}
+      destination: {label: Drop-off, kind: place}
+    open: https://www.uber.com/global/en/price-estimate/
+    steps:
+      - kind: do
+        text: Enter {origin} and {destination} and see prices; if sign-in is required, hand the page to the person.
+    read:
+      options: Each ride type (UberX, Comfort, XL…) with its price range
+      surge: Any note that prices are higher than usual
+      duration: Estimated trip time
+    answer: "{options} ({duration})."
+    tags: [rideshare, taxi]
+
+  - id: timeanddate.packing_weather
+    title: Weather at my destination, for packing
+    says:
+      - What's the weather going to be in Lisbon next week?
+      - What should I pack for Tokyo in April?
+      - Will it rain in London while I'm there, 3–6 May?
+    kind: look
+    where: any
+    region: global
+    sites: [timeanddate.com]
+    inputs:
+      country: {label: Country, kind: text, hint: "As timeanddate writes it, e.g. portugal, usa, uk, japan"}
+      city: {label: City, kind: text, hint: "Lowercase with hyphens, e.g. lisbon, new-york"}
+      dates: {label: Trip dates, kind: text}
+    open: https://www.timeanddate.com/weather/{country}/{city}/ext
+    steps:
+      - kind: do
+        text: If the page is not found, search the city at https://www.timeanddate.com/weather/ and open its 14-day forecast.
+      - kind: do
+        text: If {dates} start more than 14 days out, open the city's "Climate" tab and read that month's averages instead.
+    read:
+      forecast: Daily highs, lows and conditions for the trip dates (or the month's averages)
+      rain: Chance of rain or snow on those days
+      wind_uv: Wind and UV worth packing for
+    answer: "{forecast}. Rain: {rain}."
+    tags: [weather, packing]
+
+  - id: timeanddate.destination_time
+    title: Time and time difference at my destination
+    says:
+      - What time is it in Tokyo now?
+      - How many hours ahead is New York from here?
+      - When do the clocks change in Sydney?
+    kind: look
+    where: any
+    region: global
+    sites: [timeanddate.com]
+    inputs:
+      country: {label: Country, kind: text, hint: "As timeanddate writes it, e.g. japan, usa, uk"}
+      city: {label: City, kind: text, hint: "Lowercase with hyphens, e.g. tokyo, new-york"}
+    open: https://www.timeanddate.com/worldclock/{country}/{city}
+    steps:
+      - kind: do
+        text: If the page is not found, search the city at https://www.timeanddate.com/worldclock/ and open it.
+    read:
+      local_time: Current local time and date there
+      zone: Time zone name and UTC offset
+      difference: Difference from the person's own time zone
+      dst: The next daylight-saving change, if any
+    answer: "It's {local_time} there ({zone}), {difference}."
+    needs: [location]
+    tags: [time-zone, clock]
+
+  - id: squaremouth.compare_insurance
+    title: Compare travel insurance quotes
+    says:
+      - Compare travel insurance for a two-week trip to Japan.
+      - How much is trip insurance for a $4,000 vacation to Italy?
+      - Which travel insurance has the best medical cover for Mexico?
+    kind: look
+    where: any
+    region: us
+    sites: [squaremouth.com]
+    inputs:
+      destination: {label: Destination, kind: text}
+      start: {label: Departure, kind: date}
+      end: {label: Return, kind: date}
+      trip_cost: {label: Trip cost per person, kind: number}
+      ages: {label: Travellers' ages, kind: text}
+      state: {label: State of residence, kind: text}
+    open: https://www.squaremouth.com/
+    steps:
+      - kind: do
+        text: Fill in the trip details and get quotes; if it asks for an email or account to show them, stop and tell the person.
+      - kind: do
+        text: Sort by price, then open the three best-rated plans' coverage details. Never start a purchase.
+    read:
+      cheapest: The cheapest plan, provider and price
+      best_rated: The best-rated plan in a fair price range
+      medical: Emergency medical and evacuation limits of those plans
+      cancellation: Trip cancellation cover and any "cancel for any reason" option
+    answer: "Cheapest {cheapest}; best-rated {best_rated}."
+    tags: [insurance, comparison]

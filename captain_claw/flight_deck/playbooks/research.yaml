@@ -1,0 +1,1299 @@
+category: research
+playbooks:
+  # ── People and meetings ──────────────────────────────────────────────
+
+  - id: linkedin.person_brief
+    title: Brief me on a person before a meeting
+    says:
+      - Brief me on the person I'm meeting at 2 pm.
+      - Who is our new client contact at Siemens? Check their LinkedIn.
+      - Give me a quick background on the CFO I'm meeting tomorrow.
+      - What should I know about the investor I'm calling later?
+    kind: look
+    where: chrome
+    region: global
+    sites: [linkedin.com, google.com]
+    inputs:
+      name: {label: Person's name, kind: text}
+      company: {label: Their company, kind: text, default: "", hint: "Narrows the search when the name is common"}
+      purpose: {label: What the meeting is about, kind: text, required: false, ask: agent}
+    open: https://www.linkedin.com/search/results/people/?keywords={name}%20{company}
+    steps:
+      - kind: do
+        text: Open the profile whose current company and location fit; if two or more fit, ask which one.
+      - kind: do
+        text: Read the headline, About, Experience and Education, then the last few posts under Activity.
+      - kind: open
+        url: https://www.google.com/search?q={name}%20{company}
+        note: Talks, interviews, articles and press quotes from the last two years.
+      - kind: do
+        text: Keep to professional facts; leave out family, home, health and personal social accounts.
+    read:
+      headline: Their current title and company
+      tenure: How long in the current role and at the company
+      previous_roles: The two or three roles before, with years
+      education: Schools and degrees listed
+      location: City or region on the profile
+      common_ground: Mutual connections, shared employers or schools with the person
+      recent_activity: What they posted or reshared lately, a line each
+      web_mentions: Talks, interviews or news that mention them in their work role
+      talking_points: Two or three openers tied to what the meeting is about
+    answer: "{headline}, {tenure} in the role. Before: {previous_roles}. Lately: {recent_activity}"
+    tags: [meeting-prep, people, linkedin]
+
+  - id: calendar.meeting_briefs
+    title: Brief me on everyone I'm meeting
+    says:
+      - Brief me on everyone I'm meeting tomorrow.
+      - Who are the outside people on my calendar this week?
+      - Prep me for tomorrow's meetings — who are they and what do their companies do?
+    kind: look
+    where: chrome
+    region: global
+    sites: [calendar.google.com, linkedin.com]
+    inputs:
+      day: {label: Which day, kind: date, required: false, ask: agent, hint: "Tomorrow unless the person says otherwise"}
+      only_external: {label: Only people outside my company, kind: flag, default: true}
+    open: https://calendar.google.com/calendar/r/day
+    steps:
+      - kind: do
+        text: Go to {day}; open each meeting and note its time, title and guest list.
+      - kind: do
+        text: If only_external, drop guests on the person's own email domain, rooms and group addresses.
+      - kind: do
+        text: For each guest left, search LinkedIn people with their name and company (from the email domain) and read the matching profile's headline and tenure.
+      - kind: do
+        text: For each company, take one line on what it does from its website or LinkedIn page.
+    read:
+      meetings: Each meeting's time and title
+      people: Each guest's name, title, company, time in role and one useful fact
+      companies: One line per company on what it does and its size
+      unmatched: Guests who could not be matched with confidence
+    needs: [calendar]
+    tags: [meeting-prep, calendar, people]
+
+  # ── Companies ────────────────────────────────────────────────────────
+
+  - id: web.company_brief
+    title: Brief me on a company
+    says:
+      - Give me a one-page brief on Datadog.
+      - What does Celonis do and how big are they?
+      - I have a call with Personio next week, what should I know about them?
+      - Who runs Wise, how big is it, and what's been in the news?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com, linkedin.com]
+    inputs:
+      company: {label: Company, kind: text}
+    open: https://www.google.com/search?q={company}
+    steps:
+      - kind: do
+        text: Open the company's own website (not ads or directories) and read the home and About pages.
+      - kind: open
+        url: https://www.linkedin.com/search/results/companies/?keywords={company}
+        note: Open the matching company page; read industry, size, headquarters and the last few posts.
+      - kind: open
+        url: https://www.google.com/search?q={company}&tbm=nws&tbs=qdr:m
+        note: News from the last month.
+    read:
+      what_they_do: What they sell and to whom, in two sentences
+      founded: Year founded
+      headquarters: Head office city and country
+      size: Employee range from LinkedIn, plus revenue if public
+      leadership: CEO and founders as the site or LinkedIn lists them
+      customers: Named customers or the segments they target
+      ownership: Public with ticker, owned by a group, or VC-backed
+      recent_news: The top three headlines of the last month, with date and outlet
+    answer: "{company}: {what_they_do} HQ {headquarters}, {size}. News: {recent_news}"
+    tags: [company, brief, due-diligence]
+
+  - id: crunchbase.funding
+    title: How much funding a startup has raised
+    says:
+      - How much has Mistral AI raised so far?
+      - Who invested in Notion and when was their last round?
+      - Pull the funding history for this startup from Crunchbase.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [crunchbase.com]
+    inputs:
+      company: {label: Company, kind: text}
+    open: https://www.crunchbase.com/
+    steps:
+      - kind: type
+        note: The search box at the top of the page
+        value: "{company}"
+      - kind: do
+        text: Open the organization whose website matches; then its Financials section.
+      - kind: do
+        text: If a sign-up wall hides part of the page, read only what is visible and say so.
+    read:
+      total_funding: Total funding amount
+      last_round: Last round's type, amount, date and lead investors
+      rounds: Earlier rounds with date and amount
+      investors: The best-known investors listed
+      acquisitions: Companies it bought, or who bought it
+      headcount: Employee range shown
+      similar: Similar companies Crunchbase lists
+    answer: "{company} has raised {total_funding}; last round {last_round}."
+    tags: [company, funding, startups]
+
+  - id: opencorporates.entities
+    title: Find a company's legal entities across countries
+    says:
+      - Which legal entities does Siemens have registered around the world?
+      - Find the registered company behind this brand and its company number.
+      - Is Unilever's Dutch entity still active?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [opencorporates.com]
+    inputs:
+      company: {label: Company name, kind: text}
+      country: {label: Country, kind: text, required: false, ask: agent}
+    open: https://opencorporates.com/companies?q={company}
+    steps:
+      - kind: do
+        text: If a country was named, filter by its jurisdiction on the left; otherwise note how many matches each jurisdiction has.
+      - kind: do
+        text: Open the main entity, or each one the person asks about, and read its registry page.
+    read:
+      entities: Each match's name, jurisdiction, company number, status and incorporation date
+      registered_address: The main entity's registered address
+      officers: Directors and officers listed, with roles
+      source: Which official registry the data came from and when it was last updated
+    tags: [company, registry, entities]
+
+  - id: sec.annual_report
+    title: Highlights of a company's latest 10-K
+    says:
+      - What did Nvidia's latest 10-K say about revenue and risks?
+      - Pull the key numbers from Apple's last annual report.
+      - How many employees does Coca-Cola report in its 10-K?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [sec.gov]
+    inputs:
+      company: {label: Company, kind: text}
+    open: https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company={company}&type=10-K
+    steps:
+      - kind: do
+        text: If a list of companies comes up, open the one that matches (check state and industry); ask if unsure.
+      - kind: do
+        text: Open the newest 10-K, then its main document (not the exhibits).
+      - kind: do
+        text: Read Item 1 Business, the Item 1A risk headings, Item 7 MD&A and the income statement in Item 8.
+    read:
+      fiscal_year: The fiscal year the report covers
+      revenue: Total revenue and its change from the year before
+      net_income: Net income and its change
+      segments: Revenue by segment or region
+      employees: Headcount stated in Item 1
+      top_risks: The three to five headline risk factors
+      outlook: What MD&A says about trends and the year ahead
+      filing_link: Link to the filing
+    answer: "{company} FY{fiscal_year}: revenue {revenue}, net income {net_income}. Top risks: {top_risks}"
+    tags: [sec, filings, annual-report]
+
+  - id: sec.recent_filings
+    title: What a public company filed lately
+    says:
+      - Has Boeing filed any 8-Ks this month?
+      - What did Tesla report to the SEC lately?
+      - Show me Microsoft's latest quarterly filing.
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [sec.gov]
+    inputs:
+      company: {label: Company, kind: text}
+      form: {label: Filing type, kind: choice, options: [8-K, 10-Q, DEF 14A, S-1], default: 8-K}
+    open: https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company={company}&type={form}
+    steps:
+      - kind: do
+        text: If a list of companies comes up, open the one that matches.
+      - kind: do
+        text: Open the newest five filings; for an 8-K read the item numbers and the attached press release headline.
+    read:
+      filings: Each filing's date, form and one line on what it says
+      material: Anything material — leadership change, deal, guidance, restatement
+      links: Links to the filings read
+    answer: "Latest {form} filings for {company}: {filings}"
+    tags: [sec, filings]
+
+  - id: wikipedia.quick_facts
+    title: Quick facts from Wikipedia
+    says:
+      - When was Bosch founded and how many people work there?
+      - What's the population of Lagos?
+      - Give me the key facts about the Treaty of Lisbon.
+      - Who owns Ray-Ban?
+    kind: look
+    where: any
+    region: global
+    sites: [en.wikipedia.org]
+    inputs:
+      topic: {label: Topic, kind: text}
+      question: {label: What to find out, kind: text, required: false, ask: agent}
+    open: https://en.wikipedia.org/wiki/Special:Search?search={topic}
+    steps:
+      - kind: do
+        text: If search results or a disambiguation page come up, open the article that matches.
+      - kind: do
+        text: Read the infobox and the lead; for the question asked, find the section that answers it.
+    read:
+      summary: The lead in two sentences
+      facts: Key infobox facts, each with its year
+      answer_text: The sentence that answers the question, with its footnote source
+      article: The article's title and link
+    tags: [facts, encyclopedia]
+
+  # ── Pricing and vendors ──────────────────────────────────────────────
+
+  - id: web.pricing_table
+    title: Turn a pricing page into a table
+    says:
+      - What does Intercom cost? Put their plans in a table.
+      - Grab our competitor's pricing page as a table.
+      - What's on each of Figma's plans?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com]
+    inputs:
+      product: {label: Product, kind: text}
+      billing: {label: Billing, kind: choice, options: [monthly, annual], default: monthly}
+    open: https://www.google.com/search?q={product}%20pricing
+    steps:
+      - kind: do
+        text: Open the official pricing page on the vendor's own domain, not a review site.
+      - kind: do
+        text: Set the billing toggle to {billing} if there is one; expand "Compare all features".
+      - kind: do
+        text: Note the currency and whether prices are per user, per seat, per use or flat.
+    read:
+      plans: Each plan's name, price, unit and billing
+      limits: Each plan's main limits — users, usage, storage
+      differences: What each plan adds over the one below
+      free_option: Free plan or trial, and how long
+      enterprise: Whether the top tier is "contact sales"
+      page_url: The pricing page's link
+    answer: "{product} ({billing}): {plans}"
+    tags: [pricing, competitors, table]
+
+  - id: web.compare_vendors
+    title: Compare several vendors' pricing
+    says:
+      - Compare Asana, Monday and ClickUp pricing for a 15-person team.
+      - Which is cheapest for 10 agents — Zendesk, Freshdesk or Help Scout?
+      - Put HubSpot, Pipedrive and Zoho CRM pricing side by side.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com]
+    inputs:
+      vendors: {label: Vendors, kind: text, hint: "Two to six names, comma separated"}
+      seats: {label: Team size, kind: number, default: 10}
+      must_have: {label: Must-have features, kind: text, default: ""}
+    open: https://www.google.com/
+    steps:
+      - kind: do
+        text: For each of {vendors}, search "<vendor> pricing" and open its official pricing page.
+      - kind: do
+        text: Read all on the same billing basis, and work out the monthly cost for {seats} users on the cheapest plan that has {must_have}.
+      - kind: do
+        text: Note what changes the math — minimum seats, add-ons, usage fees, annual-only prices.
+    read:
+      table: One row per vendor — plan picked, list price, unit, monthly cost for the team
+      cheapest: The cheapest vendor and plan that meets the needs
+      caveats: Minimum seats, add-on fees, annual-only discounts
+      sources: Each pricing page's link
+    answer: "Cheapest for {seats} users: {cheapest}. Watch for: {caveats}"
+    tags: [pricing, vendors, comparison]
+
+  - id: web.similar_companies
+    title: Find companies similar to one
+    says:
+      - Who are Gong's main competitors?
+      - Find companies like Deel.
+      - What are the alternatives to Airtable?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com]
+    inputs:
+      company: {label: Company or product, kind: text}
+      count: {label: How many, kind: number, default: 8}
+    open: https://www.google.com/search?q={company}%20competitors%20alternatives
+    steps:
+      - kind: do
+        text: Collect names from comparison pages, the vendor's own "vs" pages and G2 or Capterra alternatives lists; skip listicles that copy each other.
+      - kind: do
+        text: Open the top {count} candidates' sites and note what each sells and to whom.
+    read:
+      companies: Each one's name, website, what it does and how it differs
+      closest: The two or three most direct competitors
+      segments: How the field splits — by size, price or focus
+    answer: "Closest to {company}: {closest}."
+    tags: [competitors, market-map]
+
+  - id: web.contact_page
+    title: Find a company's contact or press page
+    says:
+      - How do I reach Spotify's press team?
+      - Find the sales contact for Atlassian.
+      - What's the support email for Canva?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com]
+    inputs:
+      company: {label: Company, kind: text}
+      purpose: {label: Which contact, kind: choice, options: [general, press, sales, support, partnerships, investors], default: general}
+    open: https://www.google.com/search?q={company}%20{purpose}%20contact
+    steps:
+      - kind: do
+        text: Open the company's own Contact, Press or Newsroom page; skip directories and data brokers.
+      - kind: do
+        text: Check the site footer too ("Contact", "Press", "Media", "Investors"); take only contact points the company publishes.
+    read:
+      email: The published address for that purpose
+      phone: The published phone number
+      form: Link to the contact form when there is no email
+      address: Head office address
+      page_url: The page it came from
+    answer: "{company} ({purpose}): {email} {phone} — {page_url}"
+    tags: [contact, press, company]
+
+  # ── Websites and domains ─────────────────────────────────────────────
+
+  - id: builtwith.tech_stack
+    title: What a website is built with
+    says:
+      - What tech stack does allbirds.com use?
+      - Is this competitor's site on Shopify or WooCommerce?
+      - Which analytics and CRM tools does hubspot.com run?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [builtwith.com, wappalyzer.com]
+    inputs:
+      domain: {label: Website, kind: text, hint: "Just the domain, like example.com"}
+    open: https://builtwith.com/{domain}
+    steps:
+      - kind: do
+        text: Read the technology groups — analytics, CMS, frameworks, hosting, payments, marketing.
+      - kind: open
+        url: https://www.wappalyzer.com/lookup/{domain}/
+        note: A second opinion, or the fallback when BuiltWith shows little; free results may be partial.
+    read:
+      cms: CMS or site builder
+      frameworks: Front-end and back-end frameworks
+      analytics: Analytics and tag managers
+      hosting: Host and CDN
+      commerce: E-commerce platform and payment providers
+      marketing: Email, chat, CRM and ad pixels
+    answer: "{domain} runs on {cms} / {frameworks}, hosted on {hosting}; analytics: {analytics}."
+    tags: [tech-stack, website, competitors]
+
+  - id: icann.domain_lookup
+    title: Who registered a domain and when it expires
+    says:
+      - Who owns the domain acme-widgets.com?
+      - When does example.org expire?
+      - How old is this website's domain?
+    kind: look
+    where: any
+    region: global
+    sites: [lookup.icann.org]
+    inputs:
+      domain: {label: Domain, kind: text}
+    open: https://lookup.icann.org/en/lookup?name={domain}
+    steps:
+      - kind: do
+        text: Wait for the registration data to load; where the registry redacts fields, say "redacted" rather than guess.
+    read:
+      registrar: The registrar
+      created: Creation date
+      expires: Expiry date
+      updated: Last updated date
+      status: Domain status codes
+      registrant: Registrant organization or country, if shown
+      name_servers: Name servers
+    answer: "{domain}: registered {created} via {registrar}, expires {expires}. Registrant: {registrant}."
+    tags: [domain, whois, rdap]
+
+  - id: wayback.old_version
+    title: See how a page looked in the past
+    says:
+      - What did Stripe's homepage look like in 2015?
+      - When was this page first archived?
+      - Show me our competitor's pricing page from a year ago.
+    kind: look
+    where: any
+    region: global
+    sites: [web.archive.org]
+    inputs:
+      page: {label: Page, kind: text, hint: "A domain or a full address"}
+      when: {label: Around when, kind: date, required: false, hint: "Empty for the first capture"}
+    open: https://web.archive.org/web/*/{page}
+    steps:
+      - kind: do
+        text: Read the capture count and the first and last capture dates above the calendar.
+      - kind: do
+        text: Pick the year and day nearest {when} (or the first capture) and open that snapshot.
+    read:
+      captures: How many times the page was archived
+      first_capture: Date of the first capture
+      snapshot_date: Date of the snapshot opened
+      snapshot_url: Its link
+      what_it_shows: Headline, offer, prices or claims on that version
+    answer: "Archived {captures} times since {first_capture}. On {snapshot_date}: {what_it_shows} ({snapshot_url})"
+    tags: [archive, history, website]
+
+  - id: wayback.what_changed
+    title: What changed on a page since a date
+    says:
+      - What has changed on Notion's pricing page since January?
+      - Did our competitor change their homepage claims since last quarter?
+      - Compare this terms-of-service page with the version from 2023.
+    kind: look
+    where: any
+    region: global
+    sites: [web.archive.org]
+    inputs:
+      page: {label: Page, kind: text, hint: "A full address"}
+      since: {label: Since, kind: date}
+    open: https://web.archive.org/web/*/{page}
+    steps:
+      - kind: do
+        text: Open the capture nearest {since}; note its headline, sections, prices and claims.
+      - kind: do
+        text: Open the live page (or the latest capture if the live one is walled) and read the same parts.
+      - kind: do
+        text: Compare them section by section; the Wayback "Changes" view can highlight text differences between two captures.
+    read:
+      then: The old capture's date and what it said
+      added: What is new
+      removed: What is gone
+      changed: Prices, plan names, numbers or claims that differ
+      old_url: Link to the old capture
+    answer: "Since {since}: added {added}; removed {removed}; changed {changed}."
+    tags: [archive, changes, competitors]
+
+  # ── Papers and patents ───────────────────────────────────────────────
+
+  - id: scholar.papers_on_topic
+    title: Key papers on a topic
+    says:
+      - Find the most cited papers on retrieval-augmented generation.
+      - What's the research on four-day work weeks and productivity?
+      - Papers on perovskite solar cell stability since 2022.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [scholar.google.com]
+    inputs:
+      topic: {label: Topic, kind: text}
+      since_year: {label: From year, kind: number, default: ""}
+    open: https://scholar.google.com/scholar?q={topic}&as_ylo={since_year}
+    steps:
+      - kind: do
+        text: Read the first page of results; open a "[PDF]" link only when the snippet doesn't say what the paper found.
+    read:
+      papers: Top ten — title, authors, year, venue, citation count
+      most_cited: The most cited of them
+      recent: The most relevant from the last two years
+      pdf_links: Free full-text links shown
+    answer: "Most cited: {most_cited}. Recent: {recent}."
+    tags: [papers, academic, literature]
+
+  - id: scholar.cited_by
+    title: Who cites a paper
+    says:
+      - Who has cited "Attention Is All You Need" recently?
+      - How many citations does this paper have, and what built on it?
+      - Find newer work that cites this study.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [scholar.google.com]
+    inputs:
+      paper: {label: Paper title, kind: text}
+    open: https://scholar.google.com/scholar?q={paper}
+    steps:
+      - kind: do
+        text: Find the result whose title and authors match.
+      - kind: click
+        target: {role: link, name: Cited by}
+        note: The "Cited by N" link under that result
+      - kind: do
+        text: Pick a recent year range on the left to see the newest citing work.
+    read:
+      citations: Total citation count
+      newest_citing: The five newest citing papers, with year and venue
+      most_cited_citing: The most cited papers that cite it
+      themes: What the citing work uses it for, from titles and snippets
+    answer: "Cited {citations} times. Newest: {newest_citing}."
+    tags: [papers, citations, academic]
+
+  - id: semanticscholar.paper_summary
+    title: What a paper is about, in short
+    says:
+      - Give me the TL;DR of the paper "Denoising Diffusion Probabilistic Models".
+      - What's this paper about and how influential is it?
+      - Is there a free PDF of this study?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [semanticscholar.org]
+    inputs:
+      paper: {label: Paper title, kind: text}
+    open: https://www.semanticscholar.org/search?q={paper}
+    steps:
+      - kind: do
+        text: Open the matching paper; read its TLDR, abstract and citation panel.
+    read:
+      tldr: The one-line TLDR
+      authors_year: Authors, year and venue
+      citations: Citation count and highly influential citations
+      key_references: The main papers it builds on
+      pdf: Open-access PDF link, if any
+    answer: "{tldr} ({authors_year}; {citations} citations)."
+    tags: [papers, summary, academic]
+
+  - id: arxiv.latest_papers
+    title: Newest arXiv papers on a topic
+    says:
+      - What's new on arXiv about speculative decoding?
+      - Latest preprints on quantum error correction.
+      - Any new papers this week on robot manipulation?
+    kind: look
+    where: any
+    region: global
+    sites: [arxiv.org]
+    inputs:
+      topic: {label: Topic, kind: text}
+      count: {label: How many, kind: number, default: 10}
+    open: https://arxiv.org/search/?query={topic}&searchtype=all&order=-announced_date_first
+    steps:
+      - kind: do
+        text: Read the newest {count} results; open the abstract page of any whose title is unclear.
+    read:
+      papers: Each paper's title, authors, date, arXiv ID and category
+      gist: One line per paper on what it does
+      links: The abstract page links
+    tags: [papers, preprints, arxiv]
+
+  - id: pubmed.search_studies
+    title: What studies say on a health topic
+    says:
+      - What do studies say about intermittent fasting and blood pressure?
+      - Find recent reviews on vitamin D and depression.
+      - Any clinical trials on GLP-1 drugs and alcohol use?
+    kind: look
+    where: any
+    region: global
+    sites: [pubmed.ncbi.nlm.nih.gov]
+    inputs:
+      topic: {label: Topic, kind: text}
+      study_type: {label: Kind of study, kind: choice, options: [any, review, clinical trial, meta-analysis], default: any}
+    open: https://pubmed.ncbi.nlm.nih.gov/?term={topic}
+    steps:
+      - kind: do
+        text: Unless study_type is any, tick it under Article type; for the latest work set Sort by to Most recent.
+      - kind: do
+        text: Read the top ten abstracts' conclusions; report what studies found, not medical advice.
+    read:
+      studies: Top ten — title, journal, year, study type
+      findings: One line from each abstract's conclusion
+      reviews: Systematic reviews or meta-analyses on the first page
+      free_full_text: Which have free full text
+    tags: [health, studies, medical-research]
+
+  - id: patents.prior_art
+    title: Search patents for prior art
+    says:
+      - Are there patents on a foldable bike helmet?
+      - Search prior art for wireless charging through furniture.
+      - Who holds patents on solid-state battery separators?
+    kind: look
+    where: any
+    region: global
+    sites: [patents.google.com]
+    inputs:
+      idea: {label: The invention in keywords, kind: text}
+      before: {label: Filed before, kind: date, required: false, ask: agent}
+    open: https://patents.google.com/?q={idea}
+    steps:
+      - kind: do
+        text: If a date was given, set the Before filter to priority date {before}.
+      - kind: do
+        text: Read the top ten; open the three closest and read the abstract and first claim.
+      - kind: do
+        text: Try two rephrasings with synonyms, since patents use odd terms. Say this is a search, not a legal opinion.
+    read:
+      patents: Close matches — number, title, assignee, priority date, status
+      closest: The three nearest and what their first claim covers
+      assignees: Companies holding most of the hits
+      classes: CPC classes that keep coming up
+    tags: [patents, prior-art, ip]
+
+  # ── Video ────────────────────────────────────────────────────────────
+
+  - id: youtube.video_summary
+    title: Summarize a YouTube video from its transcript
+    says:
+      - Summarize this YouTube video for me.
+      - What are the key points of that 2-hour podcast episode on YouTube?
+      - Give me timestamps for the main topics in this talk.
+    kind: look
+    where: any
+    region: global
+    sites: [youtube.com]
+    inputs:
+      video: {label: Video link or title, kind: text}
+    open: https://www.youtube.com/results?search_query={video}
+    steps:
+      - kind: do
+        text: If {video} is a link, open it directly; otherwise open the result that matches.
+      - kind: do
+        text: Expand the description, click "Show transcript" and read the whole transcript with its timestamps.
+      - kind: do
+        text: If there is no transcript, say so and summarize from the description and chapters only.
+    read:
+      title_channel: Title, channel, upload date and length
+      summary: Five to seven bullet points
+      timestamps: Key moments as mm:ss with a line each
+      claims: Specific numbers, names or claims made
+    tags: [video, transcript, summary]
+
+  - id: youtube.find_moment
+    title: Find where a video talks about something
+    says:
+      - Where in this video do they talk about pricing?
+      - At what minute does he explain the setup?
+      - Jump me to the part about battery life in this review.
+    kind: look
+    where: any
+    region: global
+    sites: [youtube.com]
+    inputs:
+      video: {label: Video link or title, kind: text}
+      topic: {label: What to find, kind: text}
+    open: https://www.youtube.com/results?search_query={video}
+    steps:
+      - kind: do
+        text: If {video} is a link, open it directly; otherwise open the result that matches.
+      - kind: do
+        text: Click "Show transcript" and scan it for {topic} and close wordings; note each timestamp where it comes up.
+    read:
+      moments: Each timestamp and what is said there
+      best_link: The video link with &t= set to the best moment
+    answer: "{topic} comes up at {moments}. Jump in: {best_link}"
+    tags: [video, transcript, timestamps]
+
+  # ── Opinion and coverage ─────────────────────────────────────────────
+
+  - id: googlenews.coverage_report
+    title: Press coverage of a topic, with links
+    says:
+      - Who covered our competitor's launch last week?
+      - Pull together the press coverage of the Nvidia earnings this week, with links.
+      - How did the media cover the EU AI Act vote — which outlets, what angle?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com]
+    inputs:
+      topic: {label: Topic or company, kind: text}
+      period: {label: How far back, kind: choice, options: [d, w, m, y], default: w, hint: "d past day, w past week, m past month, y past year"}
+    open: https://www.google.com/search?q={topic}&tbm=nws&tbs=qdr:{period}
+    steps:
+      - kind: do
+        text: Read the first two pages; group stories about the same event and keep the original report over rewrites.
+    read:
+      coverage: One row per article — outlet, headline, date, link
+      storylines: The two to four angles most outlets take
+      top_outlets: The biggest outlets that covered it
+      tone: Overall tone — positive, critical or mixed — with an example
+    answer: "{storylines} Tone: {tone}."
+    tags: [news, press, monitoring]
+
+  - id: reddit.opinions
+    title: What Reddit thinks of a product or topic
+    says:
+      - What does Reddit think of the Framework laptop?
+      - Are people on Reddit happy with Hetzner?
+      - Reddit opinions on Obsidian versus Notion.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [reddit.com]
+    inputs:
+      topic: {label: Product or topic, kind: text}
+      period: {label: From the last, kind: choice, options: [month, year, all], default: year}
+    open: https://www.reddit.com/search/?q={topic}&t={period}
+    steps:
+      - kind: do
+        text: Open the five or six most-commented threads that are really about {topic}; skip promoted posts.
+      - kind: do
+        text: Read the top comments in each, noting the subreddit and how upvoted they are.
+    read:
+      verdict: The overall feeling in one sentence
+      pros: Praise that comes up again and again
+      cons: Complaints that come up again and again
+      alternatives: What people recommend instead
+      threads: Links to the threads read, with subreddit and date
+    answer: "Reddit on {topic}: {verdict} Likes: {pros}. Gripes: {cons}."
+    tags: [opinions, reddit, sentiment]
+
+  - id: hn.discussion
+    title: What Hacker News said about a link
+    says:
+      - What did Hacker News say about this article?
+      - Was our launch discussed on HN?
+      - Find the HN thread about the SQLite announcement.
+    kind: look
+    where: any
+    region: global
+    sites: [hn.algolia.com, news.ycombinator.com]
+    inputs:
+      link: {label: Link or title, kind: text}
+    open: https://hn.algolia.com/?query={link}&type=story&sort=byPopularity
+    steps:
+      - kind: do
+        text: Open the matching story's comments page on news.ycombinator.com; if there are several submissions, take the most-commented one.
+      - kind: do
+        text: Read the top-level comments in order, following long sub-threads one level down.
+    read:
+      story: Title, points, comment count and date
+      consensus: What most commenters think
+      criticisms: The main pushback
+      insights: Facts, links or first-hand experience commenters add
+      thread_link: Link to the discussion
+    answer: "HN ({story}): {consensus} Main pushback: {criticisms}"
+    tags: [opinions, hacker-news, tech]
+
+  - id: factcheck.claim
+    title: Fact-check a claim
+    says:
+      - Is it true that we only use 10% of our brains?
+      - Fact-check this quote that's going around.
+      - Did that politician really say this?
+    kind: look
+    where: any
+    region: global
+    sites: [toolbox.google.com/factcheck, snopes.com, politifact.com, fullfact.org]
+    inputs:
+      claim: {label: The claim, kind: text, hint: "The key words of the claim, not the whole post"}
+    open: https://toolbox.google.com/factcheck/explorer/search/{claim};hl=en
+    steps:
+      - kind: do
+        text: Read the fact checks listed — publisher, rating, date — and open the two closest.
+      - kind: open
+        url: https://www.snopes.com/search/?q={claim}
+        note: If nothing close turns up; then PolitiFact for US politics or Full Fact for the UK.
+    read:
+      verdict: The rating given (true, false, misleading, unproven) and by whom
+      checks: Each fact check's publisher, rating, date and link
+      context: What is true and what isn't in the claim
+      origin: Where the claim started, if they say
+    answer: "{verdict}. {context}"
+    tags: [fact-check, claims, misinformation]
+
+  # ── Reviews ──────────────────────────────────────────────────────────
+
+  - id: g2.software_reviews
+    title: What reviewers say about business software
+    says:
+      - What do G2 reviews say about Salesforce Service Cloud?
+      - Is Monday.com well rated by teams our size?
+      - Pros and cons of Rippling from user reviews.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [g2.com, capterra.com]
+    inputs:
+      product: {label: Software, kind: text}
+    open: https://www.g2.com/search?query={product}
+    steps:
+      - kind: do
+        text: Open the product's page and its Reviews; read the stars, review count and the pros-and-cons summary.
+      - kind: do
+        text: Sort to the newest and read ten reviews, noting each reviewer's company size and role.
+      - kind: open
+        url: https://www.capterra.com/
+        note: Search for the product there and read its rating and review count as a second view.
+    read:
+      g2_rating: G2 stars and review count
+      capterra_rating: Capterra stars and review count
+      pros: Praise that recurs
+      cons: Complaints that recur
+      best_fit: Company sizes or industries where reviewers are happiest
+      alternatives: Top alternatives the sites list
+    answer: "{product}: {g2_rating} on G2, {capterra_rating} on Capterra. Pros: {pros}. Cons: {cons}."
+    tags: [reviews, software, b2b]
+
+  - id: trustpilot.company_reviews
+    title: A company's Trustpilot reviews
+    says:
+      - What's the Trustpilot score for Revolut?
+      - Is this online shop trustworthy? Check its reviews.
+      - What are customers complaining about at Wise lately?
+      - Can I trust this store before I order?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [trustpilot.com]
+    inputs:
+      domain: {label: Company website, kind: text, hint: "The company's domain, like example.com"}
+    open: https://www.trustpilot.com/review/{domain}
+    steps:
+      - kind: do
+        text: If there is no profile at that address, search Trustpilot for the company name and open its profile.
+      - kind: do
+        text: Read the TrustScore, review count and star split, then the 20 newest reviews and whether the company replies.
+    read:
+      trustscore: The TrustScore
+      reviews: Total review count
+      split: Share of 5-star and 1-star reviews
+      recent_themes: What recent reviewers praise and complain about
+      replies: Whether and how the company answers bad reviews
+      warnings: Any notices Trustpilot shows on the profile
+    answer: "{domain}: TrustScore {trustscore} from {reviews} reviews. Lately: {recent_themes}"
+    tags: [reviews, consumer, trust]
+
+  - id: glassdoor.employer_reviews
+    title: What employees say about a company
+    says:
+      - What's it like to work at SAP according to Glassdoor?
+      - How do employees rate Klarna's management?
+      - What does Glassdoor say about pay for engineers at Spotify?
+      - What are interviews like at Spotify?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [glassdoor.com]
+    inputs:
+      company: {label: Company, kind: text}
+      role: {label: A role to check pay for, kind: text, required: false, ask: agent}
+    open: https://www.glassdoor.com/Search/results.htm?keyword={company}
+    steps:
+      - kind: do
+        text: Open the company's profile, then Reviews; if a sign-in wall covers them, read only what is visible and say so.
+      - kind: do
+        text: Read the overall rating, recommend share, CEO approval and sub-ratings, then the ten newest reviews.
+      - kind: do
+        text: If a role was given, open Salaries and read the range for {role}.
+    read:
+      rating: Overall rating out of 5
+      recommend: Share who would recommend it to a friend
+      ceo_approval: CEO approval
+      subratings: Culture, work-life balance, pay, career and management ratings
+      pros: Praise that recurs
+      cons: Complaints that recur
+      salary: Pay range for the role, if asked
+      interviews: What candidates say about the interview process and its difficulty
+    answer: "{company} on Glassdoor: {rating}/5, {recommend} would recommend. Pros: {pros}. Cons: {cons}."
+    tags: [employer, reviews, jobs]
+
+  - id: appstores.app_reviews
+    title: How an app is rated in the app stores
+    says:
+      - How is the Duolingo app rated?
+      - What are people complaining about in the latest Revolut app reviews?
+      - Compare App Store and Google Play ratings for Strava.
+    kind: look
+    where: any
+    region: global
+    sites: [play.google.com, apps.apple.com]
+    inputs:
+      app: {label: App, kind: text}
+    open: https://play.google.com/store/search?q={app}&c=apps
+    steps:
+      - kind: do
+        text: Open the matching app; read its rating, rating count, downloads and last update, then the newest reviews under "See all reviews".
+      - kind: open
+        url: https://apps.apple.com/us/iphone/search?term={app}
+        note: Open the same app; read its rating, count, latest version date and recent reviews.
+    read:
+      play_rating: Google Play stars, rating count and downloads
+      ios_rating: App Store stars and rating count
+      last_updated: Latest update date on each store
+      complaints: What recent reviews complain about
+      praise: What recent reviews like
+      developer_replies: Whether the developer answers reviews
+    answer: "{app}: {play_rating} on Google Play, {ios_rating} on the App Store. Complaints: {complaints}."
+    tags: [apps, reviews, mobile]
+
+  - id: producthunt.launches
+    title: Product Hunt launches in a space
+    says:
+      - What's launched on Product Hunt for AI meeting notes?
+      - How did Raycast do on Product Hunt?
+      - Find recent Product Hunt launches like Linear.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [producthunt.com]
+    inputs:
+      topic: {label: Product or space, kind: text}
+    open: https://www.producthunt.com/search?q={topic}
+    steps:
+      - kind: do
+        text: Open the launch pages of the five most relevant products.
+      - kind: do
+        text: For each, note upvotes, launch date, day rank if shown and the main points in the top comments.
+    read:
+      launches: Each launch's name, tagline, date, upvotes and day rank
+      comment_themes: What commenters praise or question
+      links: Each product's website
+    tags: [launches, startups, products]
+
+  # ── Code and packages ────────────────────────────────────────────────
+
+  - id: github.repo_health
+    title: Is an open-source project healthy
+    says:
+      - Is the fastapi repo still actively maintained?
+      - How healthy is the htmx project on GitHub?
+      - When was the last commit to this library, and how many open issues?
+    kind: look
+    where: any
+    region: global
+    sites: [github.com]
+    inputs:
+      project: {label: Project, kind: text, hint: "A name or owner/repo"}
+    open: https://github.com/search?q={project}&type=repositories
+    steps:
+      - kind: do
+        text: Open the repository that matches (right owner, most stars).
+      - kind: do
+        text: Read stars, license, latest release and the date of the last commit on the default branch.
+      - kind: do
+        text: Open Issues and Pull requests; note open counts and how recently maintainers replied.
+    read:
+      stars: Stars and forks
+      last_commit: Date of the last commit
+      latest_release: Latest release version and date
+      open_issues: Open issue count
+      open_prs: Open pull request count
+      maintainer_activity: How quickly recent issues got a maintainer reply
+      license: License
+      verdict: Healthy, slowing or abandoned, with the reason
+    answer: "{project}: {stars}, last commit {last_commit}, {open_issues} open issues. {verdict}"
+    tags: [open-source, github, due-diligence]
+
+  - id: npm.package_info
+    title: An npm package's version and downloads
+    says:
+      - How many weekly downloads does zod have?
+      - What's the latest version of next on npm?
+      - Is the request package deprecated?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [npmjs.com]
+    inputs:
+      package: {label: Package name, kind: text}
+    open: https://www.npmjs.com/package/{package}
+    steps:
+      - kind: do
+        text: If the page is not found, search npm for the name and open the right package.
+    read:
+      version: Latest version and when it was published
+      weekly_downloads: Weekly downloads
+      license: License
+      types: Whether it ships TypeScript types
+      dependencies: Number of dependencies
+      repository: Repository link
+      deprecated: Any deprecation notice
+    answer: "{package} {version}: {weekly_downloads} weekly downloads, {license}."
+    tags: [packages, npm, javascript]
+
+  - id: pypi.package_info
+    title: A Python package's version and downloads
+    says:
+      - What's the latest version of pandas?
+      - How many downloads does httpx get a month?
+      - Which Python versions does pydantic support?
+    kind: look
+    where: any
+    region: global
+    sites: [pypi.org, pypistats.org]
+    inputs:
+      package: {label: Package name, kind: text}
+    open: https://pypi.org/project/{package}/
+    steps:
+      - kind: do
+        text: Read the latest version, release date, supported Python versions (classifiers), license and project links; check Release history for cadence.
+      - kind: open
+        url: https://pypistats.org/packages/{package}
+        note: Downloads for the last day, week and month.
+    read:
+      version: Latest version
+      released: Its release date
+      python: Supported Python versions
+      license: License
+      downloads: Downloads last month and last week
+      cadence: How regularly it has been released lately
+    answer: "{package} {version} ({released}): {downloads} downloads, Python {python}."
+    tags: [packages, pypi, python]
+
+  # ── Statistics and data ──────────────────────────────────────────────
+
+  - id: owid.trend_data
+    title: A long-run trend across countries
+    says:
+      - How has life expectancy in India changed since 1950?
+      - Compare CO2 emissions per person in Germany, France and Poland.
+      - Show the share of electricity from solar worldwide over time.
+    kind: look
+    where: any
+    region: global
+    sites: [ourworldindata.org]
+    inputs:
+      topic: {label: Measure, kind: text}
+      countries: {label: Countries, kind: text, default: World}
+    open: https://ourworldindata.org/search?q={topic}
+    steps:
+      - kind: do
+        text: Open the chart that best matches.
+      - kind: do
+        text: Add {countries} with "Edit countries and regions", switch to the Table tab and read the values.
+    read:
+      chart: The chart's title and link
+      values: Latest value per country, with year
+      trend: How it has moved over the last 10 to 20 years
+      source: The underlying data source
+    answer: "{chart}: {values}. {trend} (source: {source})."
+    tags: [statistics, data, trends]
+
+  - id: worldbank.country_indicator
+    title: A country's economic indicator
+    says:
+      - What's Vietnam's GDP per capita?
+      - Inflation in Argentina over the last ten years.
+      - What share of Kenya's population has electricity?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [data.worldbank.org]
+    inputs:
+      indicator: {label: Indicator, kind: text, hint: "e.g. GDP per capita, inflation, population"}
+      country: {label: Country, kind: text}
+    open: https://data.worldbank.org/
+    steps:
+      - kind: type
+        note: The search box on the home page
+        value: "{indicator} {country}"
+      - kind: key
+        key: Enter
+      - kind: do
+        text: Open the indicator page for {country}; read the latest value and the last ten years.
+    read:
+      latest: The latest value and its year
+      series: Values for the last ten years
+      peers: How it compares with the region or income group shown
+      source: Indicator code and source note
+    answer: "{country}, {indicator}: {latest}. Last ten years: {series}."
+    tags: [statistics, economy, countries]
+
+  - id: eurostat.compare_eu
+    title: Compare EU countries on a statistic
+    says:
+      - Unemployment rates across EU countries, latest figures.
+      - How does Croatia's average electricity price compare with the EU?
+      - Which EU countries have the highest share of renewables?
+    kind: look
+    where: any
+    region: eu
+    sites: [ec.europa.eu/eurostat]
+    inputs:
+      topic: {label: Statistic, kind: text}
+      countries: {label: Countries, kind: text, default: all EU countries}
+    open: https://ec.europa.eu/eurostat/web/main/search/-/search/dataset?text={topic}
+    steps:
+      - kind: do
+        text: Open the best-matching dataset in the Data Browser (the main table over detailed breakdowns).
+      - kind: do
+        text: Pick the latest period and {countries}; read the values with their unit.
+    read:
+      dataset: Dataset name and code
+      period: The period read
+      values: Value per country, with unit
+      eu_average: The EU figure for the same period
+      flags: Estimates, breaks in series or provisional marks
+    answer: "{dataset}, {period}: {values}; EU {eu_average}."
+    tags: [statistics, eu, data]
+
+  - id: statista.statistic
+    title: Find a market statistic
+    says:
+      - How big is the global pet food market?
+      - How many people use Spotify worldwide?
+      - Find a stat on e-bike sales in Europe.
+    kind: look
+    where: any
+    region: global
+    sites: [statista.com]
+    inputs:
+      topic: {label: What to find, kind: text}
+    open: https://www.statista.com/serp?q={topic}
+    steps:
+      - kind: do
+        text: Open the newest statistic whose title matches.
+      - kind: do
+        text: Read the free part — headline figure, description, source and release date; don't try to unlock premium data.
+    read:
+      statistic: The statistic's title
+      figure: Headline number and year
+      original_source: The original publisher Statista names
+      release_date: Release date
+      paywalled: Whether the full data needs an account
+    answer: "{figure} ({statistic}; source: {original_source}, {release_date})."
+    tags: [statistics, market-size]
+
+  - id: googletrends.interest
+    title: Is interest in something rising
+    says:
+      - Is interest in pickleball still growing?
+      - Compare search interest in Claude, ChatGPT and Gemini over the last year.
+      - Where in Germany do people search most for heat pumps?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [trends.google.com]
+    inputs:
+      terms: {label: Search terms, kind: text, hint: "Up to five, comma separated"}
+      period: {label: Period, kind: choice, options: [now 7-d, today 3-m, today 12-m, today 5-y], default: today 12-m}
+      geo: {label: Country code, kind: text, default: "", hint: "Two letters like US or DE; empty for worldwide"}
+    open: https://trends.google.com/trends/explore?q={terms}&date={period}&geo={geo}
+    read:
+      trend: Rising, falling or flat, with the peak date
+      comparison: Relative interest between the terms, if several
+      regions: Top regions by interest
+      rising_queries: Rising related searches
+    answer: "{terms}: {trend}. {comparison}"
+    tags: [trends, search-interest, market]
+
+  # ── Language ─────────────────────────────────────────────────────────
+
+  - id: googletranslate.page
+    title: Translate a web page
+    says:
+      - Translate this German article into English.
+      - What does this Japanese product page say?
+      - Read me this French press release in English.
+    kind: look
+    where: any
+    region: global
+    sites: [translate.google.com, translate.goog]
+    inputs:
+      url: {label: Page address, kind: url}
+      language: {label: Into, kind: text, default: en, hint: "Language code: en, de, fr, es, hr…"}
+    open: https://translate.google.com/translate?sl=auto&tl={language}&u={url}
+    steps:
+      - kind: do
+        text: If the translated page won't load (some sites block it), open the page itself and translate its main text in Google Translate.
+    read:
+      title: The translated title
+      text: The translated main text, or the parts asked for
+      untranslated: Anything left in the original — images, PDFs, embedded text
+    tags: [translate, language]
+
+  - id: deepl.translate_text
+    title: Translate a piece of text
+    says:
+      - Translate this email into formal German.
+      - How do you say "we'll get back to you next week" in Spanish?
+      - Put this paragraph into natural English.
+    kind: look
+    where: any
+    region: global
+    sites: [deepl.com]
+    inputs:
+      text: {label: Text, kind: text}
+      language: {label: Into, kind: text, default: English}
+      tone: {label: Formality, kind: choice, options: [default, formal, informal], default: default}
+    open: https://www.deepl.com/translator
+    steps:
+      - kind: do
+        text: Leave the source on Detect language and set the target to {language}.
+      - kind: type
+        note: The source text box
+        value: "{text}"
+      - kind: do
+        text: Unless tone is default, switch Formal or Informal where the language offers it.
+    read:
+      translation: The translated text
+      detected: The source language detected
+      alternatives: Other renderings DeepL offers for key phrases
+    answer: "{translation}"
+    tags: [translate, language, writing]
+
+  - id: cambridge.define
+    title: What a word means
+    says:
+      - What does "obsequious" mean?
+      - Define "fiduciary" with an example.
+      - What's another word for "important"?
+      - How do you pronounce "quinoa"?
+    kind: look
+    where: any
+    region: global
+    sites: [dictionary.cambridge.org, thesaurus.com]
+    inputs:
+      word: {label: Word or phrase, kind: text}
+    open: https://dictionary.cambridge.org/dictionary/english/{word}
+    steps:
+      - kind: do
+        text: If the word isn't found, use the search box and open the closest entry.
+      - kind: open
+        url: https://www.thesaurus.com/browse/{word}
+        note: Only when synonyms or antonyms were asked for.
+    read:
+      meanings: Each sense with its part of speech and definition
+      examples: An example sentence for the main sense
+      pronunciation: UK and US pronunciation
+      synonyms: Synonyms, strongest first, if asked
+      antonyms: Antonyms, if asked
+    answer: "{word}: {meanings} e.g. {examples}"
+    tags: [dictionary, thesaurus, language]
+
+  # ── Lead lists ───────────────────────────────────────────────────────
+
+  - id: maps.lead_list
+    title: List local businesses of a kind in a city
+    says:
+      - Make me a list of dental clinics in Ljubljana with ratings and websites.
+      - Find 30 coworking spaces in Lisbon with their contact details.
+      - Which architecture firms in Munich are rated above 4.5?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/maps]
+    inputs:
+      category: {label: Kind of business, kind: text}
+      city: {label: City, kind: place}
+      count: {label: How many, kind: number, default: 20}
+      min_rating: {label: Minimum rating, kind: number, default: 0}
+    open: https://www.google.com/maps/search/{category}%20in%20{city}
+    steps:
+      - kind: do
+        text: Scroll the results list until {count} places are loaded; skip sponsored ones.
+      - kind: do
+        text: Open each place and read name, rating, review count, website, phone and address.
+      - kind: do
+        text: Leave out places rated under {min_rating}; mark any that are closed.
+    read:
+      businesses: A table — name, rating, reviews, website, phone, address
+      no_website: Places with no website listed
+      found: How many places matched
+    needs: [files]
+    tags: [leads, local, prospecting]

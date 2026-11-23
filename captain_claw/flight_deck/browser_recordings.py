@@ -638,6 +638,40 @@ async def _follow(run: Any, turn: dict, host: str, port: int, auth: str, browser
         })
 
 
+def as_playbook(rec: dict) -> dict[str, Any]:
+    """A recording in the web playbooks' shape (flight_deck/web_playbooks.py),
+    for the agent's web_playbook tool: its id stays the recording's (``rec_…``,
+    never a seed id), the values asked before a run are its inputs, by step id,
+    and its steps come in words from :func:`playbook_words`."""
+    inputs: dict[str, dict[str, Any]] = {}
+    for ask in asks(rec):
+        spec: dict[str, Any] = {"label": one_line(ask["label"], 60) or "Value", "kind": "text",
+                                "required": True, "ask": ASK_BEFORE}
+        options = [one_line(o, 120) for o in ask.get("options") or [] if one_line(o, 120)]
+        if len(options) >= 2:
+            spec.update(kind="choice", options=options)
+        if ask.get("was"):
+            spec["hint"] = f"When it was recorded: {one_line(ask['was'], 120)}"
+        inputs[ask["id"]] = spec
+    about = one_line(rec.get("about"), 160)
+    return {"id": rec["id"], "title": rec["name"], "category": "mine", "says": [about or rec["name"]],
+            "kind": "recording", "where": "recording", "region": "global",
+            "sites": [rec["site"]] if rec.get("site") else [], "inputs": inputs, "open": rec.get("start_url", ""),
+            "steps": [], "read": {}, "answer": "", "stop": "", "needs": [], "tags": [],
+            "about": rec.get("about", ""), "step_count": len(rec["steps"])}
+
+
+def playbook_words(rec: dict, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A recording's steps in words, with this run's values for the ones asked
+    before it — what a run from the panel writes out, for the agent's tool."""
+    given = {str(k): one_line(v, MAX_VALUE_CHARS) for k, v in (inputs or {}).items() if isinstance(v, (str, int, float))}
+    lines: list[str] = []
+    shown = rec["steps"][:STEPS_IN_TURN]
+    for n, step in enumerate(shown, 1):
+        lines += step_lines(step, n, given.get(step["id"]) if ask_mode(step) == ASK_BEFORE else None)
+    return {"lines": lines, "more": len(rec["steps"]) - len(shown), "about": rec.get("about", "")}
+
+
 def _summary(rec: dict) -> dict[str, Any]:
     return {"id": rec["id"], "name": rec["name"], "about": rec.get("about", ""), "site": rec.get("site", ""),
             "start_url": rec.get("start_url", ""), "steps": len(rec["steps"]), "asks": asks(rec),

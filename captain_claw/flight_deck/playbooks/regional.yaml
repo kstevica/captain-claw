@@ -1,0 +1,1480 @@
+category: regional
+playbooks:
+
+  # ── United States ──────────────────────────────────────────────────────────
+
+  - id: usps.track_package
+    title: Where is my USPS package
+    says:
+      - Where is my USPS package?
+      - Track this USPS tracking number for me.
+      - When will my USPS parcel arrive?
+      - Has my certified mail been delivered?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [tools.usps.com]
+    inputs:
+      tracking: {label: USPS tracking number, kind: text, hint: "Digits (and letters for international), spaces removed"}
+    open: https://tools.usps.com/go/TrackConfirmAction?tLabels={tracking}
+    read:
+      status: The latest status headline (Delivered, In Transit, Out for Delivery, Alert)
+      last_event: The newest tracking event with its place and time
+      expected: Expected delivery day or window, if shown
+    answer: "{status}. Latest: {last_event}. Expected: {expected}."
+    tags: [parcel, tracking, post]
+
+  - id: amtrak.train_times
+    title: Amtrak trains and fares between two stations
+    says:
+      - What Amtrak trains go from New York to Washington on Friday?
+      - How much is the Amtrak from Boston to New York tomorrow morning?
+      - When's the last train from Philadelphia to New York tonight?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [amtrak.com]
+    inputs:
+      origin: {label: From station, kind: place}
+      destination: {label: To station, kind: place}
+      date: {label: Date, kind: date}
+      time: {label: Around, kind: time, required: false, ask: agent}
+    open: https://www.amtrak.com/home
+    steps:
+      - kind: do
+        text: Type {origin} in From and {destination} in To, picking each station from the suggestions.
+      - kind: do
+        text: Choose one-way, set the date {date}, one adult, and press "Find Trains".
+      - kind: do
+        text: If a time was given, focus on the trains around {time}.
+    read:
+      trains: Each train's departure and arrival time, name (Acela, Northeast Regional...) and duration
+      cheapest: The lowest coach fare and which train it is on
+      sold_out: Trains shown as sold out
+    tags: [train, rail, tickets]
+
+  - id: zillow.home_search
+    title: Homes for sale or rent on Zillow
+    says:
+      - What houses are for sale in Austin under $500k?
+      - Show me 2-bedroom rentals in Denver on Zillow.
+      - What's on the market in my zip code right now?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [zillow.com]
+    inputs:
+      area: {label: "City, neighborhood or ZIP", kind: place}
+      listing: {label: For, kind: choice, options: [sale, rent], default: sale}
+      max_price: {label: Max price (USD), kind: number, required: false, ask: agent}
+      beds: {label: Min bedrooms, kind: number, required: false, ask: agent}
+    open: https://www.zillow.com/
+    steps:
+      - kind: do
+        text: Type {area} in the search box and press Enter.
+      - kind: do
+        text: Switch the listing type to "For Sale" or "For Rent" to match {listing}; set the price up to {max_price} and beds {beds}+ if given.
+      - kind: do
+        text: Sort by Newest.
+    read:
+      count: How many homes match
+      listings: The first 5–8 homes with price, beds, baths, square feet, address and days on Zillow
+    needs: [memory]
+    tags: [real-estate, homes, rent]
+
+  - id: zillow.zestimate
+    title: What a house is worth (Zestimate)
+    says:
+      - What's the Zestimate for this address?
+      - How much is my house worth on Zillow?
+      - What would this place rent for, according to Zillow?
+      - When did this house last sell and for how much?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [zillow.com]
+    inputs:
+      address: {label: Street address, kind: place}
+    open: https://www.zillow.com/
+    steps:
+      - kind: do
+        text: Type {address} in the search box and press Enter; if a list appears, open the home that matches.
+    read:
+      zestimate: The Zestimate and its range
+      rent_zestimate: The Rent Zestimate
+      last_sold: Last sale price and date
+      facts: Beds, baths, square feet and year built
+      status: Whether it is for sale, for rent or off market
+    answer: "Zestimate {zestimate}; rent estimate {rent_zestimate}. Last sold {last_sold}."
+    needs: [memory]
+    tags: [real-estate, valuation]
+
+  - id: recreation.campsite_availability
+    title: Free campsites on Recreation.gov
+    says:
+      - Are there any campsites free at Upper Pines in Yosemite next weekend?
+      - Check Recreation.gov availability for Moraine Park, July 10 to 12.
+      - Is there a campsite open near the Grand Canyon on Friday?
+    kind: look
+    where: any
+    region: us
+    sites: [recreation.gov]
+    inputs:
+      campground: {label: Campground or park, kind: text}
+      arrive: {label: Arriving, kind: date}
+      leave: {label: Leaving, kind: date}
+    open: https://www.recreation.gov/search?q={campground}
+    steps:
+      - kind: do
+        text: Open the campground (not a permit, tour or day-use pass) that best matches {campground}.
+      - kind: do
+        text: Open its availability view and set the dates {arrive} to {leave}.
+      - kind: do
+        text: If nothing is free, note when the booking window for those dates opens, as the page states it.
+    read:
+      name: The campground's name and the park or forest it is in
+      free_sites: Sites free for every night, with site number, loop and type (tent, RV, group)
+      price: Nightly fee
+      release: When reservations open, if nothing is free
+    tags: [camping, national-park, outdoors]
+
+  - id: nps.park_alerts
+    title: Alerts and closures at a US national park
+    says:
+      - Are there any closures in Yosemite right now?
+      - Is Going-to-the-Sun Road open in Glacier?
+      - Any alerts for Zion this week?
+      - Do I need a reservation to drive into Arches?
+    kind: look
+    where: any
+    region: us
+    sites: [nps.gov]
+    inputs:
+      park: {label: Park, kind: text}
+      park_code: {label: NPS park code, kind: text, ask: agent, hint: "The four-letter code in nps.gov links, e.g. yose (Yosemite), grca (Grand Canyon), glac (Glacier), arch (Arches)"}
+    open: https://www.nps.gov/{park_code}/planyourvisit/conditions.htm
+    steps:
+      - kind: do
+        text: If the page is not found, search nps.gov for {park} and open its "Current Conditions" or "Alerts" page.
+    read:
+      alerts: Each current alert with its title and what it affects
+      closures: Roads, trails and campgrounds closed
+      hazards: Fire, smoke, flooding or weather warnings
+      reservations: Timed-entry or vehicle reservations in effect
+    tags: [national-park, closures, outdoors]
+
+  - id: uscis.case_status
+    title: USCIS case status by receipt number
+    says:
+      - What's the status of my USCIS case?
+      - Check my USCIS receipt number.
+      - Has my green card application moved?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [egov.uscis.gov]
+    inputs:
+      receipt: {label: Receipt number, kind: text, hint: "13 characters: three letters (EAC, IOE, LIN, MSC, SRC, WAC...) then ten digits"}
+    open: https://egov.uscis.gov/
+    steps:
+      - kind: do
+        text: Type {receipt} in "Enter a Receipt Number" and press "Check Status".
+      - kind: do
+        text: If a robot check appears, hand it to the person and wait.
+    read:
+      status: The case status headline
+      detail: The paragraph under it, with the date of the last action
+      form: The form type it names (I-485, I-765, I-130...)
+    answer: "{status}: {detail}"
+    needs: [memory]
+    tags: [immigration, government]
+
+  - id: tsa.what_can_i_bring
+    title: Can I take this through US airport security
+    says:
+      - Can I bring a power bank in my carry-on?
+      - Is peanut butter allowed through TSA?
+      - Can I pack a pocket knife in checked luggage?
+    kind: look
+    where: any
+    region: us
+    sites: [tsa.gov]
+    inputs:
+      item: {label: Item, kind: text}
+    open: https://www.tsa.gov/travel/security-screening/whatcanibring/all
+    steps:
+      - kind: do
+        text: Type {item} in the "What Can I Bring?" search, press Enter and open the closest item.
+    read:
+      carry_on: Allowed in carry-on bags, with any limits
+      checked: Allowed in checked bags, with any limits
+      notes: TSA's notes for it (3-1-1 liquids, battery limits, officer's final say)
+    answer: "{item}: carry-on {carry_on}; checked {checked}. {notes}"
+    tags: [airport, security, flying]
+
+  # ── United Kingdom ─────────────────────────────────────────────────────────
+
+  - id: nationalrail.live_departures
+    title: Live train departures from a UK station
+    says:
+      - When's the next train from Euston to Manchester?
+      - Is my 17:32 from Waterloo on time?
+      - Live departures from Leeds, please.
+      - Are trains from Brighton to London running?
+    kind: look
+    where: any
+    region: gb
+    sites: [nationalrail.co.uk]
+    inputs:
+      from_crs: {label: From station code, kind: text, ask: agent, hint: "Three-letter CRS code the agent works out from the station name, e.g. EUS London Euston, MAN Manchester Piccadilly, LDS Leeds"}
+      to_crs: {label: Going to (station code), kind: text, default: "", hint: "Leave empty for every departure"}
+    open: https://www.nationalrail.co.uk/live-trains/departures/{from_crs}/{to_crs}
+    steps:
+      - kind: do
+        text: If the page is not found, the code is wrong; correct it from the station name and open it again.
+    read:
+      departures: The next departures with scheduled time, expected time (On time, Delayed, Cancelled), platform and destination
+      disruption: Any disruption notice at the top of the board
+    tags: [train, rail, live]
+
+  - id: nationalrail.journey_planner
+    title: Plan a UK train journey with times and fares
+    says:
+      - How much is a train from London to Edinburgh next Saturday?
+      - What's the cheapest train from Bristol to Cardiff tomorrow morning?
+      - Trains from Oxford to Birmingham arriving by 10 on Monday?
+    kind: look
+    where: any
+    region: gb
+    sites: [nationalrail.co.uk]
+    inputs:
+      origin: {label: From station, kind: place}
+      destination: {label: To station, kind: place}
+      date: {label: Date, kind: date}
+      time: {label: Time, kind: time, default: "09:00"}
+      timing: {label: Time is, kind: choice, options: [depart after, arrive by], default: depart after}
+      railcard: {label: Railcard, kind: text, default: none}
+    open: https://www.nationalrail.co.uk/journey-planner/
+    steps:
+      - kind: do
+        text: Enter {origin} as From and {destination} as To, picking each station from the suggestions.
+      - kind: do
+        text: Set {date}, "{timing}" {time}, one adult and the railcard ({railcard}) if any; press "Get times & tickets".
+      - kind: do
+        text: Use "Later trains" if fewer than three options show.
+    read:
+      journeys: Each option's departure and arrival time, duration and changes
+      cheapest: The cheapest fare and its ticket type (Advance, Off-Peak, Anytime)
+      operator: The train company for each option
+    tags: [train, rail, tickets]
+
+  - id: tfl.journey_planner
+    title: Plan a London journey with TfL
+    says:
+      - How do I get from King's Cross to Canary Wharf by Tube?
+      - Fastest way from Heathrow to Paddington?
+      - Step-free route from Waterloo to the British Museum?
+    kind: look
+    where: any
+    region: gb
+    sites: [tfl.gov.uk]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      when: {label: Leaving, kind: text, default: now, hint: "now, or a day and time"}
+      step_free: {label: Step-free only, kind: flag, default: false}
+    open: https://tfl.gov.uk/plan-a-journey/
+    steps:
+      - kind: do
+        text: Type {origin} in From and {destination} in To, picking each from the suggestions.
+      - kind: do
+        text: If leaving is not now, open "Change time" and set {when}; for step-free, choose it under the accessibility options.
+      - kind: do
+        text: Press "Plan my journey".
+    read:
+      fastest: The fastest route with total time and lines used (Tube, Elizabeth line, bus, walking)
+      legs: Each leg with its line and where to change
+      fare: The pay-as-you-go fare, if shown
+      disruptions: Disruption warnings on the route
+    tags: [transit, london, directions]
+
+  - id: tfl.line_status
+    title: Is the Tube running (TfL line status)
+    says:
+      - Is the Northern line running OK?
+      - Any delays on the Tube right now?
+      - Is the Elizabeth line part-closed this weekend?
+    kind: look
+    where: any
+    region: gb
+    sites: [tfl.gov.uk]
+    inputs:
+      line: {label: Line, kind: text, default: all lines}
+      when: {label: When, kind: choice, options: [now, this weekend], default: now}
+    open: https://tfl.gov.uk/tube-dlr-overground/status/
+    steps:
+      - kind: do
+        text: If {when} is "this weekend", switch the status view to the weekend.
+    read:
+      status: Each line's status (Good service, Minor delays, Part closure...), or just the asked line's
+      details: Reason and affected section for any line not on good service
+    tags: [transit, london, disruption]
+
+  - id: royalmail.track_parcel
+    title: Track a Royal Mail item
+    says:
+      - Where's my Royal Mail parcel?
+      - Track my Royal Mail Special Delivery.
+      - Has my signed-for letter arrived?
+    kind: look
+    where: prefer_chrome
+    region: gb
+    sites: [royalmail.com]
+    inputs:
+      tracking: {label: Tracking or reference number, kind: text, hint: "Usually two letters, nine digits and GB"}
+    open: https://www.royalmail.com/track-your-item
+    steps:
+      - kind: do
+        text: Reject non-essential cookies, type {tracking} in the tracking box and press "Track".
+    read:
+      status: The latest status
+      events: Tracking events with dates and places
+      delivered_to: Who signed for it or where it was left, if delivered
+    answer: "{status}."
+    tags: [parcel, tracking, post]
+
+  - id: rightmove.property_search
+    title: Homes to buy or rent on Rightmove
+    says:
+      - What 2-bed flats are to rent in Clapham under £2,000?
+      - Show me houses for sale in Bath on Rightmove.
+      - What's on the market near my postcode?
+    kind: look
+    where: any
+    region: gb
+    sites: [rightmove.co.uk]
+    inputs:
+      area: {label: "Area, town or postcode", kind: place}
+      listing: {label: To, kind: choice, options: [buy, rent], default: buy}
+      max_price: {label: Max price (GBP), kind: number, required: false, ask: agent}
+      beds: {label: Min bedrooms, kind: number, required: false, ask: agent}
+    open: https://www.rightmove.co.uk/
+    steps:
+      - kind: do
+        text: Type {area} in the search box, pick the suggestion, and press "For sale" or "To rent" to match {listing}.
+      - kind: do
+        text: Set the max price {max_price} and min bedrooms {beds} if given, then search.
+      - kind: do
+        text: Sort by "Newest listed".
+    read:
+      count: How many properties match
+      listings: The first 5–8 with price, bedrooms, type, address and date added or reduced
+    needs: [memory]
+    tags: [real-estate, homes, rent]
+
+  - id: dvsa.mot_history
+    title: MOT history of a UK vehicle
+    says:
+      - When is the MOT due on my car?
+      - Check the MOT history of this car before I buy it.
+      - Did this van pass its last MOT?
+    kind: look
+    where: prefer_chrome
+    region: gb
+    sites: [check-mot.service.gov.uk]
+    inputs:
+      reg: {label: Registration number, kind: text}
+    open: https://www.check-mot.service.gov.uk/
+    steps:
+      - kind: do
+        text: Type {reg} as the registration number and continue; check the make shown matches the vehicle meant.
+    read:
+      vehicle: Make, model, colour and fuel type
+      expires: MOT expiry date
+      last_test: Last test date, result and mileage
+      defects: Failures and advisories from recent tests
+      mileage: Mileage at each test, noting any drop
+    needs: [memory]
+    tags: [car, mot, vehicle]
+
+  - id: dvla.vehicle_tax
+    title: Is this vehicle taxed (DVLA check)
+    says:
+      - Is my car taxed?
+      - When does the road tax run out on this registration?
+      - Is this car SORN?
+    kind: look
+    where: any
+    region: gb
+    sites: [vehicleenquiry.service.gov.uk]
+    inputs:
+      reg: {label: Registration number, kind: text}
+    open: https://vehicleenquiry.service.gov.uk/
+    steps:
+      - kind: do
+        text: Type {reg}, continue, and answer "Yes" when it asks if the vehicle shown is the right one.
+    read:
+      tax: Taxed, Untaxed or SORN, with the tax due date
+      mot: MOT valid until
+      details: Make, colour, year of manufacture and CO2 emissions
+    answer: "Tax: {tax}. MOT: {mot}."
+    needs: [memory]
+    tags: [car, tax, vehicle]
+
+  - id: companieshouse.company_lookup
+    title: Look up a UK company on Companies House
+    says:
+      - Is this company still trading?
+      - Who are the directors of this UK company?
+      - When are the accounts due for company 01234567?
+      - What's the registered office of Tesco PLC?
+    kind: look
+    where: any
+    region: gb
+    sites: [find-and-update.company-information.service.gov.uk]
+    inputs:
+      company: {label: Company name or number, kind: text}
+    open: https://find-and-update.company-information.service.gov.uk/search/companies?q={company}
+    steps:
+      - kind: do
+        text: Open the result that matches; if several do, prefer the active one and say which you chose.
+      - kind: do
+        text: Read the Overview, then the "People" tab for officers and "Filing history" for recent filings.
+    read:
+      status: Company status (Active, Dissolved, Liquidation...) and company number
+      incorporated: Incorporation date and company type
+      address: Registered office address
+      business: Nature of business (SIC codes)
+      due: Next accounts and confirmation statement due dates
+      officers: Current directors and secretary with appointment dates
+      psc: Persons with significant control
+    tags: [company, register, due-diligence]
+
+  - id: nhs.condition_info
+    title: NHS advice on a condition or symptom
+    says:
+      - What does the NHS say about chickenpox?
+      - When should I see a GP about a sore throat?
+      - What are the symptoms of shingles?
+    kind: look
+    where: any
+    region: gb
+    sites: [nhs.uk]
+    inputs:
+      condition: {label: Condition or symptom, kind: text}
+    open: https://www.nhs.uk/search/results?q={condition}
+    steps:
+      - kind: do
+        text: Open the Health A to Z page that matches {condition}, not news or service listings.
+    read:
+      symptoms: The main symptoms listed
+      self_care: What you can do yourself
+      see_gp: When to see a GP or use NHS 111
+      urgent: When to call 999 or go to A&E
+    tags: [health, nhs]
+
+  # ── Germany ────────────────────────────────────────────────────────────────
+
+  - id: db.connections
+    title: Deutsche Bahn connections, delays and prices
+    says:
+      - Wann fährt der nächste Zug von Berlin nach Hamburg?
+      - What trains go from Munich to Frankfurt tomorrow morning?
+      - Is the ICE from Cologne to Berlin delayed?
+      - How much is a Sparpreis from Stuttgart to Berlin on Friday?
+    kind: look
+    where: any
+    region: de
+    sites: [bahn.de]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date, required: false, ask: agent, hint: "Today if not given"}
+      time: {label: Time, kind: time, required: false, ask: agent, hint: "Now if not given"}
+    open: https://www.bahn.de/buchung/fahrplan/suche
+    steps:
+      - kind: do
+        text: Decline optional cookies. Type {origin} in "Von" and {destination} in "Nach", picking each station from the list.
+      - kind: do
+        text: Set the date {date} and time {time} (today and now if not given) and press "Suchen".
+      - kind: do
+        text: Use "Spätere Verbindungen" until at least four connections show.
+    read:
+      connections: Each connection's departure, arrival, duration, changes and train types (ICE, IC, RE)
+      delays: Real-time delays, cancellations and their reasons
+      price: The cheapest price per connection (Sparpreis, Flexpreis), if shown
+    tags: [train, rail, tickets]
+
+  - id: immoscout24.property_search
+    title: Flats and houses on ImmobilienScout24
+    says:
+      - Find 2-room flats to rent in Leipzig under 900 euros.
+      - Wohnung mieten in München Schwabing, was gibt es?
+      - Houses for sale near Hamburg on ImmoScout.
+    kind: look
+    where: prefer_chrome
+    region: de
+    sites: [immobilienscout24.de]
+    inputs:
+      area: {label: City or district, kind: place}
+      listing: {label: To, kind: choice, options: [rent, buy], default: rent}
+      type: {label: Type, kind: choice, options: [flat, house], default: flat}
+      max_price: {label: Max price (EUR), kind: number, required: false, ask: agent}
+      rooms: {label: Min rooms, kind: number, required: false, ask: agent}
+    open: https://www.immobilienscout24.de/
+    steps:
+      - kind: do
+        text: Decline optional cookies. Choose "Mieten" or "Kaufen" for {listing} and "Wohnung" or "Haus" for {type}.
+      - kind: do
+        text: Type {area} in the location field, pick the suggestion and search.
+      - kind: do
+        text: Set "Preis bis" {max_price} and "Zimmer ab" {rooms} if given; sort by newest.
+    read:
+      count: Number of results
+      listings: The first 5–8 with price (Kaltmiete or Kaufpreis), rooms, m², district and listing date
+    tags: [real-estate, rent, flat]
+
+  - id: mobilede.car_search
+    title: Used cars on mobile.de
+    says:
+      - Find a used VW Golf under 15,000 euros on mobile.de.
+      - What does a 2019 BMW 320d cost in Germany?
+      - Gebrauchter Tesla Model 3 unter 30.000 Euro?
+    kind: look
+    where: prefer_chrome
+    region: de
+    sites: [mobile.de]
+    inputs:
+      make: {label: Make, kind: text}
+      model: {label: Model, kind: text}
+      max_price: {label: Max price (EUR), kind: number, required: false, ask: agent}
+      year_from: {label: First registered from (year), kind: number, required: false, ask: agent}
+      max_km: {label: Max mileage (km), kind: number, required: false, ask: agent}
+    open: https://www.mobile.de/
+    steps:
+      - kind: do
+        text: Decline optional cookies. In the quick search pick {make} and {model}; set "Preis bis" {max_price}, "Erstzulassung ab" {year_from} and "Kilometer bis" {max_km} if given.
+      - kind: do
+        text: Press the results button ("... Angebote"), then sort by price ascending.
+    read:
+      count: Number of offers
+      listings: The first 5–8 with price, first registration, mileage, power, fuel, dealer or private, and location
+      price_rating: mobile.de's price rating for each (Sehr guter Preis, Guter Preis, Fairer Preis...)
+    tags: [car, used, classifieds]
+
+  - id: dhlpaket.track_parcel
+    title: Track a DHL Paket or Deutsche Post item in Germany
+    says:
+      - Wo ist mein DHL Paket?
+      - Track my German DHL parcel.
+      - Is my Einschreiben delivered yet?
+      - When will my DHL package arrive at the Packstation?
+    kind: look
+    where: any
+    region: de
+    sites: [dhl.de]
+    inputs:
+      tracking: {label: Sendungsnummer, kind: text, hint: "Often 12 or 20 digits, or starts with JJD; Einschreiben start with letters"}
+    open: https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode={tracking}
+    steps:
+      - kind: do
+        text: Decline optional cookies. If details need the recipient's postcode, ask the person for it.
+    read:
+      status: The current status and the step on the progress bar
+      events: Recent events with date, time and place
+      eta: Expected delivery day or time window
+      pickup: The Packstation, Filiale or neighbour it went to, if not delivered at the door
+    answer: "{status}. Expected: {eta}."
+    tags: [parcel, tracking, post]
+
+  - id: northdata.company_lookup
+    title: German company facts on North Data
+    says:
+      - Who runs this GmbH?
+      - What's the revenue of this German company?
+      - Find the Handelsregister entry for this company.
+      - Is this German company in insolvency?
+    kind: look
+    where: any
+    region: de
+    sites: [northdata.de]
+    inputs:
+      company: {label: Company name, kind: text}
+      city: {label: City, kind: text, required: false, ask: agent}
+    open: https://www.northdata.de/search?query={company}
+    steps:
+      - kind: do
+        text: Open the result that matches (use {city} to tell same-named companies apart) and say which one you chose.
+    read:
+      register: Register court and number (e.g. Amtsgericht München HRB 12345) and legal form
+      status: Active, in liquidation or insolvency, with dates
+      address: Registered address
+      management: Current Geschäftsführer or Vorstand
+      financials: Latest published revenue, balance-sheet total, earnings and employees, with the year
+      history: Latest Handelsregister announcements
+    tags: [company, register, due-diligence]
+
+  - id: berlin.buergeramt_appointment
+    title: Book a Berlin Bürgeramt appointment
+    says:
+      - Get me a Bürgeramt appointment for my Anmeldung in Berlin.
+      - Find the earliest Termin to register my address in Berlin.
+      - Book a Berlin appointment to apply for a new Personalausweis.
+    kind: act
+    where: chrome
+    region: de
+    sites: [service.berlin.de]
+    inputs:
+      service: {label: Service, kind: text, default: Wohnung anmelden, hint: "e.g. Wohnung anmelden, Personalausweis beantragen, Reisepass beantragen"}
+      district: {label: Preferred Bürgeramt or district, kind: text, default: anywhere in Berlin}
+      earliest: {label: Not before, kind: date, required: false, ask: agent}
+    open: https://service.berlin.de/dienstleistungen/
+    steps:
+      - kind: do
+        text: Search for {service}, open its page and note the documents it says to bring.
+      - kind: do
+        text: Press "Termin berlinweit suchen" (or choose Bürgerämter in {district}) and look for bookable days from {earliest}.
+      - kind: do
+        text: If no day is bookable, say so and stop; offer to look again later.
+      - kind: do
+        text: If a robot check or "too many requests" page appears, hand it to the person.
+      - kind: do
+        text: Pick the earliest suitable slot, then fill in the name and email the person gives; ask for anything missing and never type an ID or tax number.
+    read:
+      slot: Date, time and Bürgeramt address of the chosen slot
+      bring: Documents to bring, as the service page lists them
+    stop: Termin eintragen
+    needs: [memory]
+    tags: [appointment, government, berlin]
+
+  # ── France ─────────────────────────────────────────────────────────────────
+
+  - id: sncf.train_times
+    title: French trains and fares on SNCF Connect
+    says:
+      - Quels trains pour Lyon demain matin ?
+      - How much is a TGV from Paris to Marseille on Friday?
+      - Trains from Bordeaux to Toulouse this evening?
+    kind: look
+    where: prefer_chrome
+    region: fr
+    sites: [sncf-connect.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+      time: {label: From about, kind: time, required: false, ask: agent}
+      card: {label: Discount card, kind: text, default: none, hint: "Carte Avantage, Carte Liberté..."}
+    open: https://www.sncf-connect.com/
+    steps:
+      - kind: do
+        text: Refuse optional cookies ("Continuer sans accepter"). Type {origin} as departure and {destination} as arrival, picking from the list.
+      - kind: do
+        text: Set the date {date} and time {time}, one adult, the discount card ({card}) if any, and search.
+    read:
+      trains: Each train's departure and arrival time, duration, changes and type (TGV INOUI, OUIGO, TER, Intercités)
+      cheapest: The lowest fare and which train it is on
+      full: Trains shown as full ("Complet")
+    tags: [train, rail, tickets]
+
+  - id: ratp.traffic_status
+    title: Paris metro and RER traffic (RATP)
+    says:
+      - Is metro line 13 running normally?
+      - Y a-t-il des perturbations sur le RER B ?
+      - Any problems on the Paris metro right now?
+    kind: look
+    where: prefer_chrome
+    region: fr
+    sites: [ratp.fr]
+    inputs:
+      line: {label: Line, kind: text, default: all lines, hint: "e.g. Métro 13, RER A, Tram T3"}
+    open: https://www.ratp.fr/
+    steps:
+      - kind: do
+        text: Refuse optional cookies and open "Infos trafic".
+      - kind: do
+        text: Open the tab for the line's type (Métro, RER, Tramway) and the line {line} if one was asked.
+    read:
+      status: Normal traffic or disrupted, per line or for the asked line
+      details: The reason, affected stations and expected end of each disruption
+      planned: Planned works or closures coming up (travaux)
+    tags: [transit, paris, disruption]
+
+  - id: leboncoin.search
+    title: Search classified ads on Leboncoin
+    says:
+      - Find a used electric bike on Leboncoin near Lyon.
+      - Cherche un canapé d'occasion à Paris sur Leboncoin.
+      - What do people ask for a used iPhone 14 on Leboncoin?
+    kind: look
+    where: prefer_chrome
+    region: fr
+    sites: [leboncoin.fr]
+    inputs:
+      query: {label: What, kind: text}
+      place: {label: Near, kind: place, required: false, ask: agent}
+      max_price: {label: Max price (EUR), kind: number, required: false, ask: agent}
+    open: https://www.leboncoin.fr/recherche?text={query}
+    steps:
+      - kind: do
+        text: Refuse optional cookies. If a place was given, set the location filter to {place} with a radius and apply.
+      - kind: do
+        text: Set the max price {max_price} if given and sort by most recent.
+    read:
+      count: Number of ads
+      ads: The first 5–8 with title, price, town and date posted
+      price_range: The typical price range across them
+    tags: [classifieds, second-hand]
+
+  - id: laposte.track_parcel
+    title: Track a La Poste or Colissimo parcel
+    says:
+      - Où est mon colis Colissimo ?
+      - Track my La Poste letter.
+      - When will my Colissimo parcel arrive?
+    kind: look
+    where: any
+    region: fr
+    sites: [laposte.fr]
+    inputs:
+      tracking: {label: Numéro de suivi, kind: text, hint: "11 to 15 characters, e.g. starting 6A, 8L or 1K"}
+    open: https://www.laposte.fr/outils/suivre-vos-envois?code={tracking}
+    read:
+      status: The current status
+      events: Recent events with date and place
+      eta: Expected delivery date, or the post office or relay point to collect it from
+    answer: "{status}. {eta}"
+    tags: [parcel, tracking, post]
+
+  - id: servicepublic.procedure
+    title: How to do an official procedure in France
+    says:
+      - How do I renew my passport in France?
+      - Comment faire une carte grise ?
+      - What documents do I need to renew a titre de séjour?
+    kind: look
+    where: any
+    region: fr
+    sites: [service-public.gouv.fr]
+    inputs:
+      topic: {label: Procedure, kind: text}
+    open: https://www.service-public.gouv.fr/particuliers/recherche?keyword={topic}
+    steps:
+      - kind: do
+        text: Open the fiche pratique that matches {topic}, not a news item.
+    read:
+      who: Who it applies to and the conditions
+      documents: The documents needed (pièces justificatives)
+      how: How and where to apply (which website, in person, by post)
+      cost: The cost and processing time
+      checked: The page's "Vérifié le" date
+    tags: [government, paperwork]
+
+  - id: pappers.company_lookup
+    title: French company facts on Pappers
+    says:
+      - Look up this French company on Pappers.
+      - Quel est le chiffre d'affaires de cette entreprise ?
+      - Who runs this SAS and what's its SIREN?
+    kind: look
+    where: prefer_chrome
+    region: fr
+    sites: [pappers.fr]
+    inputs:
+      company: {label: Company name or SIREN, kind: text}
+    open: https://www.pappers.fr/recherche?q={company}
+    steps:
+      - kind: do
+        text: Open the company that matches; if several do, say which one you chose and why.
+    read:
+      identity: SIREN, legal form, creation date and status (active or radiée)
+      address: Registered office
+      activity: Activity and NAF code
+      management: Dirigeants listed
+      financials: Latest chiffre d'affaires and résultat, with the year
+      proceedings: Any procédure collective (redressement, liquidation)
+    tags: [company, register, due-diligence]
+
+  # ── Spain ──────────────────────────────────────────────────────────────────
+
+  - id: renfe.train_times
+    title: Spanish trains and fares on Renfe
+    says:
+      - What AVE trains go from Madrid to Barcelona on Friday?
+      - ¿A qué hora sale el tren de Madrid a Sevilla mañana?
+      - How much is the train from Valencia to Madrid tomorrow?
+    kind: look
+    where: prefer_chrome
+    region: es
+    sites: [renfe.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+    open: https://www.renfe.com/es/es
+    steps:
+      - kind: do
+        text: Reject optional cookies. Type {origin} as Origen and {destination} as Destino, picking each station.
+      - kind: do
+        text: Choose one way ("Solo ida"), set {date} and press "Buscar billete".
+      - kind: do
+        text: Say that Renfe shows only its own trains, not Iryo or Ouigo on the same route.
+    read:
+      trains: Each train's departure and arrival time, duration and type (AVE, Avlo, Alvia, Media Distancia)
+      cheapest: The lowest fare and which train it is on
+      full: Trains shown as full ("Completo")
+    tags: [train, rail, tickets]
+
+  - id: idealista.property_search
+    title: Homes to rent or buy on Idealista
+    says:
+      - Find flats to rent in Madrid's Malasaña under 1,500 euros.
+      - Pisos en venta en Valencia con 3 habitaciones.
+      - What's for sale in Málaga on Idealista?
+    kind: look
+    where: prefer_chrome
+    region: es
+    sites: [idealista.com]
+    inputs:
+      area: {label: "City, district or neighbourhood", kind: place}
+      listing: {label: To, kind: choice, options: [rent, buy], default: rent}
+      max_price: {label: Max price (EUR), kind: number, required: false, ask: agent}
+      rooms: {label: Min bedrooms, kind: number, required: false, ask: agent}
+    open: https://www.idealista.com/
+    steps:
+      - kind: do
+        text: Reject optional cookies. Choose "Alquilar" or "Comprar" for {listing}, keep "Viviendas", type {area}, pick the suggestion and search.
+      - kind: do
+        text: Set the max price {max_price} and bedrooms {rooms} if given; sort by most recent.
+    read:
+      count: Number of listings
+      listings: The first 5–8 with price, m², bedrooms, floor and neighbourhood
+      price_per_m2: The price per m² if shown
+    tags: [real-estate, rent, flat]
+
+  - id: correos.track_parcel
+    title: Track a Correos shipment
+    says:
+      - ¿Dónde está mi paquete de Correos?
+      - Track my Correos parcel.
+      - Has my Correos certified letter been delivered?
+    kind: look
+    where: any
+    region: es
+    sites: [correos.es]
+    inputs:
+      tracking: {label: Número de envío, kind: text}
+    open: https://www.correos.es/es/es/herramientas/localizador/envios
+    steps:
+      - kind: do
+        text: Reject optional cookies, type {tracking} in the shipment number box and search.
+    read:
+      status: The current status
+      events: Recent events with date and place
+      pickup: The office to collect it from and the deadline, if delivery failed
+    answer: "{status}."
+    tags: [parcel, tracking, post]
+
+  # ── Italy ──────────────────────────────────────────────────────────────────
+
+  - id: trenitalia.train_times
+    title: Italian trains and fares on Trenitalia
+    says:
+      - What Frecciarossa trains go from Rome to Milan tomorrow?
+      - A che ora parte il treno da Firenze a Venezia domani?
+      - How much is the regional train from Naples to Salerno?
+    kind: look
+    where: any
+    region: it
+    sites: [trenitalia.com, lefrecce.it]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+      time: {label: From about, kind: time, required: false, ask: agent}
+    open: https://www.trenitalia.com/
+    steps:
+      - kind: do
+        text: Reject optional cookies. Type {origin} as departure and {destination} as arrival, picking each station.
+      - kind: do
+        text: Set the outbound date {date} and time {time}, one adult, and search.
+    read:
+      trains: Each train's departure and arrival time, duration, changes and type (Frecciarossa, Intercity, Regionale)
+      cheapest: The lowest fare and its offer (Base, Economy, Super Economy)
+      full: Trains shown as sold out
+    tags: [train, rail, tickets]
+
+  - id: italo.train_times
+    title: Italo high-speed trains and fares
+    says:
+      - Italo trains from Milan to Naples on Saturday?
+      - How much is Italo from Rome to Florence tomorrow morning?
+      - Treni Italo da Torino a Roma domenica?
+    kind: look
+    where: any
+    region: it
+    sites: [italotreno.com]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+    open: https://www.italotreno.com/it
+    steps:
+      - kind: do
+        text: Reject optional cookies. Pick {origin} as departure and {destination} as arrival, set {date}, one adult, and search.
+    read:
+      trains: Each train's departure and arrival time and duration
+      cheapest: The lowest fare per train and its offer (Low Cost, Economy, Flex)
+      cabins: The cabin classes still on sale (Smart, Comfort, Prima, Club Executive)
+    tags: [train, rail, tickets]
+
+  - id: immobiliare.property_search
+    title: Homes to rent or buy on Immobiliare.it
+    says:
+      - Find two-room flats to rent in Milan under 1,200 euros.
+      - Case in vendita a Bologna con giardino?
+      - What's for sale in Rome's Trastevere on Immobiliare?
+    kind: look
+    where: prefer_chrome
+    region: it
+    sites: [immobiliare.it]
+    inputs:
+      area: {label: City or district, kind: place}
+      listing: {label: To, kind: choice, options: [rent, buy], default: rent}
+      max_price: {label: Max price (EUR), kind: number, required: false, ask: agent}
+      rooms: {label: Min rooms (locali), kind: number, required: false, ask: agent}
+    open: https://www.immobiliare.it/
+    steps:
+      - kind: do
+        text: Reject optional cookies. Choose "Affitto" or "Vendita" for {listing}, type {area}, pick the suggestion and search.
+      - kind: do
+        text: Set "Prezzo massimo" {max_price} and "Locali" from {rooms} if given; sort by most recent.
+    read:
+      count: Number of listings
+      listings: The first 5–8 with price, m², locali, floor and zone
+    tags: [real-estate, rent, flat]
+
+  - id: posteitaliane.track_parcel
+    title: Track a Poste Italiane shipment
+    says:
+      - Dov'è il mio pacco Poste Italiane?
+      - Track my Poste Italiane parcel.
+      - Has my raccomandata been delivered?
+    kind: look
+    where: any
+    region: it
+    sites: [poste.it]
+    inputs:
+      tracking: {label: Codice di spedizione, kind: text}
+    open: https://www.poste.it/cerca/index.html
+    steps:
+      - kind: do
+        text: Reject optional cookies, type {tracking} in the shipment search ("Cerca spedizioni") and search.
+    read:
+      status: The current status
+      events: Recent events with date and place
+      pickup: The post office to collect it from, if delivery failed
+    answer: "{status}."
+    tags: [parcel, tracking, post]
+
+  # ── Netherlands ────────────────────────────────────────────────────────────
+
+  - id: ns.journey_planner
+    title: Dutch train times and disruptions (NS)
+    says:
+      - When's the next train from Amsterdam to Utrecht?
+      - Hoe laat gaat de trein van Rotterdam naar Den Haag?
+      - Are there disruptions between Schiphol and Leiden?
+    kind: look
+    where: any
+    region: nl
+    sites: [ns.nl]
+    inputs:
+      origin: {label: From station, kind: place}
+      destination: {label: To station, kind: place}
+      when: {label: Leaving, kind: text, default: now}
+    open: https://www.ns.nl/en/journeyplanner/
+    steps:
+      - kind: do
+        text: Decline optional cookies. Type {origin} in From and {destination} in To, picking each station.
+      - kind: do
+        text: Set the departure to {when} and plan the journey.
+    read:
+      journeys: The next journeys with departure, arrival, platform, changes and expected crowding
+      disruptions: Disruptions or works on the route
+      price: The single fare, 2nd class, if shown
+    tags: [train, rail, live]
+
+  - id: 9292.journey_advice
+    title: Door-to-door Dutch public transport (9292)
+    says:
+      - How do I get from Amsterdam Centraal to the RAI by public transport?
+      - Hoe kom ik met het OV van Utrecht naar de Uithof?
+      - Which bus goes from Eindhoven station to the High Tech Campus?
+    kind: look
+    where: any
+    region: nl
+    sites: [9292.nl]
+    inputs:
+      origin: {label: From (address or stop), kind: place}
+      destination: {label: To (address or stop), kind: place}
+      when: {label: Leaving, kind: text, default: now}
+    open: https://9292.nl/en
+    steps:
+      - kind: do
+        text: Type {origin} as From and {destination} as To, picking each suggestion; set the time to {when} and plan.
+    read:
+      fastest: The fastest option with total time, departure and arrival
+      legs: Each leg with mode (train, bus, tram, metro, ferry), line and stop
+      fare: The fare shown for the trip
+    tags: [transit, directions]
+
+  - id: funda.property_search
+    title: Homes for sale or rent on Funda
+    says:
+      - What houses are for sale in Haarlem under 600k?
+      - Huurwoningen in Utrecht met 2 slaapkamers?
+      - Show me new listings in Amsterdam Oost on Funda.
+    kind: look
+    where: prefer_chrome
+    region: nl
+    sites: [funda.nl]
+    inputs:
+      area: {label: "City, neighbourhood or postcode", kind: place}
+      listing: {label: To, kind: choice, options: [buy, rent], default: buy}
+      max_price: {label: Max price (EUR), kind: number, required: false, ask: agent}
+    open: https://www.funda.nl/
+    steps:
+      - kind: do
+        text: Decline optional cookies. Choose "Koop" or "Huur" for {listing}, type {area}, pick the suggestion and search.
+      - kind: do
+        text: Set the max price {max_price} if given and sort by newest.
+    read:
+      count: Number of homes
+      listings: The first 5–8 with asking price, m², rooms, energy label and address
+    tags: [real-estate, homes, rent]
+
+  - id: postnl.track_parcel
+    title: Track a PostNL parcel
+    says:
+      - Waar is mijn PostNL pakket?
+      - Track my PostNL parcel.
+      - When will PostNL deliver my package?
+    kind: look
+    where: any
+    region: nl
+    sites: [jouw.postnl.nl]
+    inputs:
+      tracking: {label: Track & trace code, kind: text, hint: "Often starts with 3S"}
+      postcode: {label: Destination postcode, kind: text, hint: "The postcode the parcel goes to, e.g. 1234 AB"}
+    open: https://jouw.postnl.nl/track-and-trace/
+    steps:
+      - kind: do
+        text: Decline optional cookies. Type {tracking} as the code and {postcode} as the postcode, then search.
+    read:
+      status: The current status
+      eta: The expected delivery time window
+      events: Recent events with date and time
+      pickup: The PostNL point to collect it from, if delivery failed
+    answer: "{status}. Expected: {eta}."
+    needs: [memory]
+    tags: [parcel, tracking, post]
+
+  - id: kvk.company_lookup
+    title: Dutch company lookup in the KVK register
+    says:
+      - Look up this company in the KVK.
+      - What's the KVK number of this Dutch company?
+      - Is this Dutch company still registered?
+    kind: look
+    where: any
+    region: nl
+    sites: [kvk.nl]
+    inputs:
+      company: {label: Company name or KVK number, kind: text}
+    open: https://www.kvk.nl/zoeken/?source=all&q={company}
+    steps:
+      - kind: do
+        text: Pick the result that matches and read its free details; do not order a paid extract (uittreksel).
+    read:
+      kvk_number: KVK number and branch number
+      legal_form: Legal form (BV, eenmanszaak, VOF...)
+      address: Visiting address
+      status: Whether it is active or deregistered
+      activity: Registered activities (SBI)
+    tags: [company, register, due-diligence]
+
+  # ── Switzerland and Austria ────────────────────────────────────────────────
+
+  - id: sbb.connections
+    title: Swiss train connections and prices (SBB)
+    says:
+      - When's the next train from Zurich to Bern?
+      - Trains from Geneva to Lausanne tomorrow at 8?
+      - How much is the train from Basel to Lucerne with a Half Fare card?
+    kind: look
+    where: any
+    region: ch
+    sites: [sbb.ch]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      when: {label: Leaving, kind: text, default: now}
+      half_fare: {label: Half Fare travelcard, kind: flag, default: false}
+    open: https://www.sbb.ch/en
+    steps:
+      - kind: do
+        text: Type {origin} in From and {destination} in To, picking each stop; set the time to {when} and search.
+      - kind: do
+        text: Read prices with the Half Fare reduction only if the person has it.
+    read:
+      connections: The next connections with departure, arrival, duration, changes and platform
+      disruptions: Delays, cancellations or works shown
+      price: The cheapest price per connection, including Supersaver tickets if shown
+    tags: [train, rail, tickets]
+
+  - id: oebb.connections
+    title: Austrian train connections and Sparschiene fares (ÖBB)
+    says:
+      - Trains from Vienna to Salzburg on Friday?
+      - Wann fährt der nächste Zug von Graz nach Wien?
+      - Is there a cheap Sparschiene from Innsbruck to Vienna?
+    kind: look
+    where: prefer_chrome
+    region: at
+    sites: [oebb.at, shop.oebbtickets.at]
+    inputs:
+      origin: {label: From, kind: place}
+      destination: {label: To, kind: place}
+      date: {label: Date, kind: date}
+      time: {label: From about, kind: time, required: false, ask: agent}
+    open: https://www.oebb.at/
+    steps:
+      - kind: do
+        text: Decline optional cookies. In the ticket search type {origin} in "Von" and {destination} in "Nach", picking each station.
+      - kind: do
+        text: Set {date} and {time}, one adult without discount card, and search; it opens the ÖBB ticket shop.
+    read:
+      connections: Each connection's departure, arrival, duration, changes and train type (Railjet, Nightjet, REX)
+      cheapest: The lowest fare per connection, marking Sparschiene offers
+      delays: Delays or disruptions shown
+    tags: [train, rail, tickets]
+
+  - id: willhaben.marketplace_search
+    title: Search classified ads on willhaben
+    says:
+      - Find a used bike on willhaben in Vienna.
+      - Gebrauchte Waschmaschine auf willhaben, was kostet das?
+      - What do people ask for a used PS5 on willhaben?
+    kind: look
+    where: any
+    region: at
+    sites: [willhaben.at]
+    inputs:
+      query: {label: What, kind: text}
+      place: {label: State or district, kind: text, required: false, ask: agent}
+      max_price: {label: Max price (EUR), kind: number, required: false, ask: agent}
+    open: https://www.willhaben.at/iad/kaufen-und-verkaufen/marktplatz?keyword={query}
+    steps:
+      - kind: do
+        text: Decline optional cookies. Filter by {place} and the max price {max_price} if given; sort by newest.
+    read:
+      count: Number of ads
+      ads: The first 5–8 with title, price, place and date
+      price_range: The typical price range across them
+    tags: [classifieds, second-hand]
+
+  # ── Croatia ────────────────────────────────────────────────────────────────
+
+  - id: hzpp.train_times
+    title: Croatian train timetable (HŽPP vozni red)
+    says:
+      - Kad ide vlak za Split?
+      - What trains go from Zagreb to Rijeka tomorrow?
+      - Is there an evening train from Osijek to Zagreb?
+      - Koliko košta karta za vlak Zagreb–Varaždin?
+    kind: look
+    where: any
+    region: hr
+    sites: [hzpp.hr]
+    inputs:
+      origin: {label: From station, kind: place}
+      destination: {label: To station, kind: place}
+      date: {label: Date, kind: date}
+    open: https://www.hzpp.hr/hr/vozni-red
+    steps:
+      - kind: do
+        text: Type {origin} as the departure station and {destination} as the arrival station, picking each from the list.
+      - kind: do
+        text: Set the date {date} and search.
+    read:
+      trains: Each train's departure and arrival time, duration, changes and train type
+      replacement_bus: Sections served by a replacement bus (zamjenski autobusni prijevoz)
+      price: The one-way adult 2nd-class fare, if shown
+    tags: [train, rail, timetable]
+
+  - id: jadrolinija.ferry_times
+    title: Jadrolinija ferry and catamaran departures
+    says:
+      - Kad ide trajekt iz Splita za Supetar?
+      - When's the catamaran from Split to Hvar on Saturday?
+      - What ferries go from Zadar to Preko tomorrow?
+      - Last ferry from Brač to Split tonight?
+    kind: look
+    where: any
+    region: hr
+    sites: [jadrolinija.hr]
+    inputs:
+      origin: {label: From port, kind: place}
+      destination: {label: To port, kind: place}
+      date: {label: Date, kind: date}
+      vessel: {label: Vessel, kind: choice, options: [any, ferry, catamaran], default: any}
+    open: https://www.jadrolinija.hr/en/search-buy-ticket
+    steps:
+      - kind: do
+        text: Pick {origin} as the departure port and {destination} as the arrival port, set {date} and search.
+      - kind: do
+        text: If {vessel} is ferry or catamaran, keep only car ferries (trajekt) or passenger catamarans (katamaran).
+    read:
+      departures: Each departure's time, arrival time, vessel type and ship name
+      reservation: Whether vehicles need a reservation on this line, as the page says
+      price: The adult passenger fare, and the car fare on ferries, if shown
+    tags: [ferry, catamaran, islands]
+
+  - id: jadrolinija.line_status
+    title: Are Jadrolinija ferries running (weather and cancellations)
+    says:
+      - Vozi li trajekt danas zbog bure?
+      - Are the ferries to Hvar cancelled today because of the wind?
+      - Is the Split–Supetar ferry running?
+    kind: look
+    where: any
+    region: hr
+    sites: [jadrolinija.hr]
+    inputs:
+      line: {label: Line or island, kind: text, default: all lines}
+    open: https://www.jadrolinija.hr/hr/obavijesti/stanje-u-prometu/
+    read:
+      interrupted: Lines suspended or sailing changed, with the reason (bura, jugo, fog, breakdown)
+      asked_line: What the notices say about the asked line or island, or that it is not mentioned
+      updated: The time of the latest notice
+    tags: [ferry, weather, disruption]
+
+  - id: njuskalo.search
+    title: Search Njuškalo classifieds
+    says:
+      - Find a used bike on Njuškalo in Zagreb.
+      - Traži stan za najam u Splitu na Njuškalu.
+      - What do used Golf 7s go for on Njuškalo?
+    kind: look
+    where: prefer_chrome
+    region: hr
+    sites: [njuskalo.hr]
+    inputs:
+      query: {label: What, kind: text}
+      place: {label: County or town, kind: text, required: false, ask: agent}
+      max_price: {label: Max price (EUR), kind: number, required: false, ask: agent}
+    open: https://www.njuskalo.hr/search/?keywords={query}
+    steps:
+      - kind: do
+        text: If a robot check appears, hand it to the person. Filter by {place} and the max price {max_price} if given; sort by newest.
+    read:
+      count: Number of ads
+      ads: The first 5–8 with title, price, place and date
+      price_range: The typical price range across them
+    tags: [classifieds, second-hand]
+
+  - id: indexoglasi.search
+    title: Search Index Oglasi classifieds
+    says:
+      - Search Index Oglasi for a used car under 8,000 euros.
+      - Traži stan na prodaju u Rijeci na Index oglasima.
+      - Any used road bikes on Index Oglasi?
+    kind: look
+    where: any
+    region: hr
+    sites: [index.hr/oglasi]
+    inputs:
+      query: {label: What, kind: text}
+      place: {label: County or town, kind: text, required: false, ask: agent}
+      max_price: {label: Max price (EUR), kind: number, required: false, ask: agent}
+    open: https://www.index.hr/oglasi/
+    steps:
+      - kind: do
+        text: Type {query} in the search box and search.
+      - kind: do
+        text: Filter by {place} and the max price {max_price} if given; sort by newest.
+    read:
+      count: Number of ads
+      ads: The first 5–8 with title, price, place and date
+    tags: [classifieds, second-hand]
+
+  - id: hrvatskaposta.track_parcel
+    title: Track a Hrvatska pošta shipment
+    says:
+      - Gdje je moja pošiljka?
+      - Track my Croatian Post parcel.
+      - Je li stigla preporučena pošiljka?
+    kind: look
+    where: any
+    region: hr
+    sites: [posiljka.posta.hr]
+    inputs:
+      tracking: {label: Broj pošiljke, kind: text, hint: "e.g. two letters, nine digits and HR for a registered item"}
+    open: https://posiljka.posta.hr/tracking/trackingdata?barcode={tracking}
+    read:
+      status: The current status
+      events: Events with date, time and post office
+      pickup: The post office holding it and until when, if delivery failed
+    answer: "{status}."
+    tags: [parcel, tracking, post]
+
+  - id: sudreg.company_lookup
+    title: Croatian court register company lookup (sudski registar)
+    says:
+      - Look up this company in the Croatian court register.
+      - Tko je direktor ove tvrtke?
+      - What's the share capital of this d.o.o.?
+    kind: look
+    where: any
+    region: hr
+    sites: [sudreg.pravosudje.hr]
+    inputs:
+      company: {label: Company name, kind: text}
+    open: https://sudreg.pravosudje.hr/
+    steps:
+      - kind: do
+        text: Search for {company} by name and open the matching subject; say which one if several match.
+    read:
+      identity: MBS, OIB, legal form and court
+      status: Whether it is active, in liquidation or bankruptcy, or deleted
+      seat: Registered seat (sjedište)
+      representatives: Persons authorised to represent it (osobe ovlaštene za zastupanje)
+      capital: Share capital (temeljni kapital)
+      activities: Registered activities (predmet poslovanja)
+    tags: [company, register, due-diligence]
+
+  - id: companywall.company_financials
+    title: Croatian company revenue, profit and account blocks
+    says:
+      - What's the revenue of this Croatian company?
+      - Koliko je ova tvrtka imala prihoda i dobiti prošle godine?
+      - Is this company's account blocked?
+    kind: look
+    where: any
+    region: hr
+    sites: [companywall.hr]
+    inputs:
+      company: {label: Company name, kind: text}
+    open: https://www.companywall.hr/pretraga?n={company}
+    steps:
+      - kind: do
+        text: Open the company that matches; read only what shows without signing in.
+    read:
+      financials: Latest revenue (prihodi), profit or loss (dobit/gubitak) and year
+      employees: Number of employees
+      blocked: Whether the account is blocked (blokada) and since when
+      rating: The credit rating or score shown
+    tags: [company, financials, due-diligence]
+
+  - id: hak.road_conditions
+    title: Croatian road conditions and closures (HAK)
+    says:
+      - Je li otvorena autocesta A1 zbog bure?
+      - Are there any closures on the road to Split today?
+      - Is the Krk bridge open for campers in this wind?
+      - Do I need winter chains on Gorski kotar roads?
+    kind: look
+    where: any
+    region: hr
+    sites: [hak.hr]
+    inputs:
+      road: {label: Road or route, kind: text, default: all roads, hint: "e.g. A1, A6, Krčki most, Zagreb–Split"}
+    open: https://www.hak.hr/info/stanje-na-cestama/
+    read:
+      closures: Closures and restrictions for the road, with the reason
+      wind: Wind (bura) restrictions by vehicle type
+      winter: Winter conditions and chains or winter tyre requirements
+      incidents: Accidents, roadworks and queues
+    tags: [traffic, roads, weather]
+
+  - id: hak.border_waits
+    title: Croatian border crossing waits (HAK)
+    says:
+      - How long is the wait at the Bregana border?
+      - Kolika je gužva na granici Macelj?
+      - Any queues at the border to Bosnia today?
+    kind: look
+    where: any
+    region: hr
+    sites: [hak.hr]
+    inputs:
+      crossing: {label: Border crossing, kind: text, default: all crossings}
+    open: https://www.hak.hr/info/stanje-na-cestama/#granicni-prijelazi
+    read:
+      waits: Waiting times per crossing and direction (entering or leaving), cars and trucks apart
+      asked: The asked crossing's wait, or that it is not listed
+      updated: When the figures were last updated
+    tags: [traffic, border]
+
+  - id: hak.fuel_prices
+    title: Fuel prices in Croatia (HAK)
+    says:
+      - Koliko košta benzin danas?
+      - What's the price of diesel in Croatia?
+      - Which company has the cheapest Eurosuper 95?
+    kind: look
+    where: any
+    region: hr
+    sites: [hak.hr]
+    inputs:
+      fuel: {label: Fuel, kind: choice, options: [Eurosuper 95, Eurodiesel, LPG, all], default: all}
+    open: https://www.hak.hr/info/cijene-goriva/
+    read:
+      prices: The price per litre of each fuel, per company (INA, Petrol, Tifon, Crodux...)
+      cheapest: The cheapest company for the asked fuel
+      valid_from: The date the prices apply from
+    tags: [fuel, prices, car]
+
+  - id: zet.service_changes
+    title: Zagreb tram and bus service changes (ZET)
+    says:
+      - Vozi li tramvaj broj 6 normalno?
+      - Are there any tram diversions in Zagreb today?
+      - Why isn't the 11 going to Dubec?
+    kind: look
+    where: any
+    region: hr
+    sites: [zet.hr]
+    inputs:
+      line: {label: Line, kind: text, default: all lines}
+    open: https://www.zet.hr/aktualnosti/izmjene-u-prometu/31
+    steps:
+      - kind: do
+        text: Open the current notices that mention line {line}, or all current ones.
+    read:
+      changes: Current diversions, shortened routes and replacement buses, with lines affected
+      dates: From and until when each change applies
+    tags: [transit, zagreb, disruption]
+
+  - id: egradjani.inbox
+    title: New messages in my e-Građani inbox
+    says:
+      - Do I have anything new in e-Građani?
+      - Imam li novih poruka u osobnom korisničkom pretincu?
+      - Did the tax office send me anything on e-Građani?
+    kind: look
+    where: chrome
+    region: hr
+    sites: [gov.hr]
+    open: https://gov.hr/
+    steps:
+      - kind: do
+        text: If not signed in, ask the person to sign in through NIAS themselves (e-Osobna, mToken, bank token) and wait.
+      - kind: do
+        text: Open "Osobni korisnički pretinac" and list unread messages; open one only to read it, never reply, delete or download.
+    read:
+      unread: Unread messages with sender institution, subject and date
+      action_needed: Any message that asks for an action or names a deadline
+    tags: [government, inbox]

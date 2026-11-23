@@ -149,6 +149,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "insights": "Search and manage persistent cross-session insights — facts, contacts, decisions, preferences, deadlines auto-extracted from conversations. Actions: search, list, add, update, delete.",
     "personality": "Read or update the agent personality profile (name, description, background, expertise)",
     "browser": "Control a browser for web app interaction — headless, or target='chrome': the person's own Chrome (Captain for Chrome), signed in as them, in your own tab group. Both: read_page/find refs, click/type/form_input with ref, page_text, page_files, download, save_page. Headless also supports observe/act (page understanding), click/type with nth-match disambiguation, login with encrypted credentials + cookie persistence, network capture for API discovery, API replay (execute captured APIs directly — skip the browser!), and multi-app sessions. Use for login flows, form filling, and interacting with dynamic/React web apps.",
+    "web_playbook": "Known ways to get everyday things done on websites (travel times, flights/trains/ferries, parcel and order tracking, invoices, prices, reviews, bookings, subscriptions, account pages) plus the person's own recordings: find (query) → run (id, inputs) opens the right page in the right browser and often answers in one call, else leaves the page open with the steps; act playbooks stop before the final button. Check it before working a site step by step.",
     "direct_api": "Register, manage, and execute HTTP API endpoints directly. Users define endpoints with URL, method, description, and payload schemas. Supports auth capture from browser sessions. Methods: GET, POST, PUT, PATCH (DELETE is rejected for safety).",
     "termux": "Interact with the Android device via Termux API (take photo, battery status, GPS location, torch on/off)",
     "summarize_files": "IMPORTANT: When the user asks you to go through, review, analyse, or summarise multiple files or documents in a folder, ALWAYS use this tool FIRST instead of reading/extracting files one by one. This tool handles the entire pipeline internally (reads all files including PDF/DOCX/XLSX/PPTX, summarises each one via LLM, combines into final output) and returns only the output file path — massively saving context. After getting the summary file, you can read it and use it to write reports, answer questions, etc.",
@@ -238,6 +239,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "insights": "persistent cross-session insights (facts, contacts, decisions, deadlines)",
     "personality": "agent personality profile",
     "browser": "browser for dynamic web apps — headless, or the person's own Chrome (target='chrome')",
+    "web_playbook": "known ways to do things on sites (travel times, tracking, invoices, prices, bookings): find → run",
     "direct_api": "register and call HTTP endpoints",
     "termux": "Android device: photo/battery/location/torch",
     "summarize_files": "ALWAYS use for reviewing/analysing/summarising multiple files in a folder — handles PDF/DOCX/XLSX/PPTX internally, returns summary file path",
@@ -2633,7 +2635,7 @@ class AgentContextMixin:
         "insights": ["insights"],
         "personality": ["personality"],
         "termux": ["termux"],
-        "browser": ["browser"],
+        "browser": ["browser", "web_playbook"],
         "pinchtab": ["pinchtab"],
         "screen_capture": ["screen_capture"],
         "desktop_action": ["desktop_action"],
@@ -2904,6 +2906,8 @@ class AgentContextMixin:
                 self.tools.register(bt)
             elif tool_name == "browser":
                 self.tools.register(BrowserTool())
+                from captain_claw.tools.web_playbook import WebPlaybookTool
+                self.tools.register(WebPlaybookTool())   # known ways to do things on sites
             elif tool_name == "pinchtab":
                 self.tools.register(PinchTabTool())
             elif tool_name == "screen_capture":

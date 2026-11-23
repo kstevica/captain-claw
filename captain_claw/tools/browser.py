@@ -638,6 +638,15 @@ class BrowserTool(Tool):
         target = self._target(action, kwargs)
         if isinstance(target, ToolResult):
             return target
+        if action in ("click", "double_click", "triple_click"):
+            # A web playbook that fills something in stops before its last
+            # button for the rest of the turn (tools/web_playbook.py).
+            from captain_claw.tools import web_playbook
+
+            if web_playbook.armed_stop(kwargs):
+                refused = await web_playbook.stop_check(self, action, target, kwargs)
+                if refused is not None:
+                    return refused
         if target == "chrome":
             from captain_claw.tools.browser_chrome import ChromeHands
 

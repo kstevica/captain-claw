@@ -321,6 +321,81 @@ live (a folder read at run time rather than copied), sharing one with a teammate
 hover / drag steps, and a recording an agent tidies after a run ("step 4 is
 now called Export").
 
+## Web playbooks: recordings Captain ships
+
+"How long from A to B?" shouldn't take an agent ten browser calls to work
+out. A **playbook** is a known way to get one thing done on a site: open
+Google Maps directions with A and B in the link, read the fastest route's
+time, say it. It is a recording Captain ships, plus three things a recording
+doesn't have: a link template (`open`), the fields to take off the page
+(`read`) and, for anything that books, buys, posts or submits, the button
+never pressed (`stop`).
+
+The seed lives in `captain_claw/flight_deck/playbooks/<category>.yaml`
+(travel, local, shopping, accounts, work, research, money, home, media,
+regional); the rules are in `flight_deck/web_playbooks.py`, which also
+checks the seed (`python -m captain_claw.flight_deck.web_playbooks`).
+Steps use the recordings' vocabulary (`open/click/type/select/check/key/do`,
+values asked `before`, `during` or by the `agent`), so the person's own
+recordings can sit in the same list as "my playbooks".
+
+- `kind: look` reads and answers; `kind: act` fills in and stops before
+  `stop`, with that page in front of the person.
+- `where: any` — a headless browser will do; `prefer_chrome` — public, but
+  the site walls bots; `chrome` — needs the person signed in.
+- No playbook types a secret, pays, trades or moves money; money playbooks
+  only look.
+
+### The `web_playbook` tool
+
+Agents get `web_playbook` wherever they have `browser`
+(`captain_claw/tools/web_playbook.py`):
+
+- `find(query, region?, category?)` — the playbooks that fit the person's
+  words, best first, with their inputs; the person's own recordings that fit
+  come first (Flight Deck's `GET /fd/browser-hands/agent/recordings`, their
+  own only). Search is plain word matching over id, site, title, tags and the
+  example phrasings, with a few synonyms folded ("parcel" → "package").
+- `show(id)` — one playbook in full: inputs, steps in words, what it reads,
+  its stop.
+- `run(id, inputs)` — checks the values first (a missing one says whether to
+  ask the person or decide; a place is never "here"; dates `YYYY-MM-DD`,
+  times `HH:MM`; a site the person names becomes `https://…`), fills the
+  link and opens it through the `browser` tool, so the page stays open for
+  the agent:
+  - `chrome` playbooks and recordings run in the person's Chrome or not at
+    all (the answer says what to ask: install Captain for Chrome, turn on
+    "Agents can use this browser", or "Let it again");
+  - `prefer_chrome` runs there when it's connected, else headless;
+  - `any` runs headless unless the session already works in their Chrome;
+  - a headless run keeps to public addresses on a `user`-tier deck, the
+    same as `browser` itself (`deck_confine`).
+- A `look` whose page may answer as opened (no steps, or a first step that
+  only applies sometimes — about half of them) gets one quiet call on the
+  agent's own model with the page text and the fields: when it says the page
+  answers, the run returns the answer and the fields. Otherwise, and always
+  for an `act`, it returns the steps with the run's values in them, for the
+  agent to finish with `browser` in that tab (cookie screens: the option that
+  shares least). A link that doesn't open repeats the values it carried and
+  their hints.
+- An `act` playbook arms its stop for the rest of the turn: the browser tool
+  refuses a click on a button with that name — by `text`, or by the name of
+  the element a `ref` points at (read with `read_page` on that ref) — except
+  as many clicks as the steps themselves make on a button of that name
+  before the end ("Cancel subscription" that only opens the reason dialog).
+  The turn's end lets it go, so the person's next message can ask for it.
+  Clicks by coordinate or selector, and Enter in a field, aren't checked.
+- A recording runs in the person's Chrome from where they started, with its
+  steps worded as a run from the panel words them (Flight Deck's
+  `POST /fd/browser-hands/agent/recordings/<id>/words`); its asked-before
+  values are its inputs, by step id. Runs started here aren't kept in the
+  recording's run history.
+
+Checked against live sites in a headless browser with a small local model
+reading: XE and Google Finance answered in one call; Google Maps from an EU
+address opens Google's consent page first, which the read recognises and
+hands over. Not built: the panel's chips for the site in front.
+
 ## Versions: the extension against the deck's copy
 
 The extension is loaded unpacked, so nothing updates it — a deck that moves on

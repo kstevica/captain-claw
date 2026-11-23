@@ -1,0 +1,1248 @@
+category: shopping
+playbooks:
+  # ── Search and compare prices ─────────────────────────────────────────
+
+  - id: googleshopping.compare_prices
+    title: Compare a product's price across shops
+    says:
+      - Where is the Sony WH-1000XM5 cheapest right now?
+      - Compare prices for a Dyson V15 across shops.
+      - Who sells the Nintendo Switch 2 for the least?
+      - Find the best price on an iPad Air 13-inch.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com/search]
+    inputs:
+      query: {label: Product, kind: text, hint: "Brand and model, as exact as the person gave it"}
+      condition: {label: Condition, kind: choice, options: [new, any], default: new}
+    open: https://www.google.com/search?q={query}&udm=28
+    steps:
+      - kind: do
+        text: Open the product card for the exact model (not a bundle, case or accessory) and its "Compare prices" list.
+      - kind: do
+        text: If condition is new, leave out used and refurbished offers.
+      - kind: do
+        text: Rank the offers by price plus shipping.
+    read:
+      best_price: The lowest total price and the shop offering it
+      offers: The next four offers, each with shop, price, shipping and stock
+      price_range: Lowest to highest price listed
+      rating: The product's star rating and review count
+    answer: "Cheapest: {best_price}. Others: {offers}."
+    tags: [price-comparison, product-search]
+
+  - id: web.find_cheaper
+    title: Find the product on this page cheaper
+    says:
+      - Can I get this cheaper somewhere else?
+      - Is this a good price, or does another shop beat it?
+      - Find this cheaper.
+      - Does anyone sell this blender for less?
+    kind: look
+    where: chrome
+    region: global
+    sites: [google.com/search]
+    inputs:
+      product: {label: Product, kind: text, default: the product on the tab the person has open, hint: "Exact model name or number, and EAN/GTIN if shown, read off the person's current tab"}
+    open: https://www.google.com/search?q={product}&udm=28
+    steps:
+      - kind: do
+        text: The price to beat is on the tab the person started from; note its shop, price, shipping and seller.
+      - kind: do
+        text: Open the matching product card and its "Compare prices" list; match model, size, colour and condition exactly.
+      - kind: do
+        text: Open the two cheapest offers and check that price, shipping and stock hold on the shop's own page.
+    read:
+      current_price: The price, shipping and shop on the page the person started from
+      cheaper_offers: Up to three offers that beat it, each with shop, total price and link
+      saving: How much the best offer saves, in money and percent
+      caveats: Differences that matter, such as marketplace seller, refurbished, import from abroad or slower delivery
+    answer: "You're looking at {current_price}. Cheaper: {cheaper_offers} (saves {saving})."
+    tags: [price-comparison, find-cheaper]
+
+  - id: amazon.search_best
+    title: Best-rated product on Amazon within a budget
+    says:
+      - What's the best-rated USB-C charger on Amazon under $30?
+      - Find me a well-reviewed air fryer on Amazon.
+      - Show me the top Amazon picks for running headphones under 100 dollars.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [amazon.com]
+    inputs:
+      query: {label: What to look for, kind: text}
+      max_price: {label: Most to spend, kind: number, required: false, ask: agent}
+    open: https://www.amazon.com/s?k={query}
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon site (amazon.co.uk, amazon.de, amazon.ca ...), run the same search there.
+      - kind: do
+        text: If max_price was given, set the price filter in the left column to at most {max_price}.
+      - kind: do
+        text: Skip "Sponsored" results; keep items rated 4 stars or more with at least a few hundred ratings.
+    read:
+      picks: The three best matches, each with name, price, star rating and number of ratings
+      delivery: Which of them arrive soonest, and the delivery date shown
+      deal: Any of them on a limited-time deal or with a coupon to clip
+    answer: "Top picks: {picks}."
+    tags: [amazon, product-search, reviews]
+
+  - id: ebay.search
+    title: Cheapest Buy It Now listing on eBay
+    says:
+      - Find a used Canon 50mm f/1.8 lens on eBay.
+      - What's the cheapest Buy It Now for a PS5 controller on eBay?
+      - Look on eBay for the Lego Millennium Falcon set.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [ebay.com]
+    inputs:
+      query: {label: What to look for, kind: text}
+      condition: {label: Condition, kind: choice, options: [any, new, used], default: any}
+    open: https://www.ebay.com/sch/i.html?_nkw={query}&_sop=15&LH_BIN=1
+    steps:
+      - kind: do
+        text: If the person uses another eBay site (ebay.co.uk, ebay.de, ebay.com.au ...), use it with the same link path.
+      - kind: do
+        text: If condition is new or used, tick that box under Condition.
+      - kind: do
+        text: Results are sorted by price plus shipping; skip "for parts", boxes only and accessories that don't match.
+    read:
+      listings: The five cheapest matching listings, each with title, condition, price, shipping and seller feedback
+      ships_from: Where the cheapest ones ship from
+      returns: Whether the cheapest listing accepts returns
+    answer: "Cheapest on eBay: {listings}."
+    tags: [ebay, product-search]
+
+  - id: idealo.compare_prices
+    title: Compare prices on idealo
+    says:
+      - Check idealo for the cheapest Bosch Serie 4 dishwasher.
+      - What's the best price for AirPods Pro on idealo?
+      - Compare prices for a Garmin Forerunner 265 on idealo.
+    kind: look
+    where: prefer_chrome
+    region: eu
+    sites: [idealo.de, idealo.at, idealo.fr, idealo.it, idealo.es]
+    inputs:
+      query: {label: Product, kind: text}
+    open: https://www.idealo.de/preisvergleich/MainSearchProductCategory.html?q={query}
+    steps:
+      - kind: do
+        text: For a person in Austria, France, Italy or Spain, search on idealo.at, idealo.fr, idealo.it or idealo.es instead.
+      - kind: do
+        text: Open the product page for the exact model and read its offers, sorted by price including shipping.
+      - kind: do
+        text: Open the price chart and read the last three months.
+    read:
+      best_offer: The cheapest offer including shipping, its shop and delivery time
+      offers: The next three offers, each with shop, total price and shop rating
+      price_trend: Lowest and typical price over the last three months from the chart
+    answer: "Best: {best_offer}. Three-month trend: {price_trend}."
+    tags: [price-comparison, price-history]
+
+  - id: pricerunner.compare_prices
+    title: Compare prices on PriceRunner
+    says:
+      - What's the cheapest Samsung Galaxy S25 on PriceRunner?
+      - Compare UK prices for a Ninja air fryer.
+      - Which shop has the Dyson Airwrap for the least on PriceRunner?
+    kind: look
+    where: prefer_chrome
+    region: gb
+    sites: [pricerunner.com, pricerunner.se, pricerunner.dk]
+    inputs:
+      query: {label: Product, kind: text}
+    open: https://www.pricerunner.com/results?q={query}
+    steps:
+      - kind: do
+        text: For a person in Sweden or Denmark, search on pricerunner.se or pricerunner.dk instead.
+      - kind: do
+        text: Open the product that matches the exact model and read its shop list, cheapest first.
+    read:
+      best_offer: The cheapest price, its shop and stock status
+      offers: The next three offers, each with shop, price, delivery cost and shop rating
+      price_drop: Whether PriceRunner marks the price as dropped or low, and by how much
+    answer: "Best: {best_offer}. Also: {offers}."
+    tags: [price-comparison]
+
+  # ── Price history ─────────────────────────────────────────────────────
+
+  - id: pricespy.price_history
+    title: Has this product been cheaper (PriceSpy)
+    says:
+      - Has the PS5 Pro been cheaper than this?
+      - Show me the price history of the Sonos Era 100 on PriceSpy.
+      - Is now a good time to buy a Kindle Paperwhite, or was it lower before?
+    kind: look
+    where: prefer_chrome
+    region: gb
+    sites: [pricespy.co.uk, pricespy.co.nz, prisjakt.nu, prisjakt.no, hintaopas.fi]
+    inputs:
+      query: {label: Product, kind: text}
+    open: https://pricespy.co.uk/search?search={query}
+    steps:
+      - kind: do
+        text: For New Zealand, Sweden, Norway or Finland use pricespy.co.nz, prisjakt.nu, prisjakt.no or hintaopas.fi instead.
+      - kind: do
+        text: Open the product for the exact model, then its price history chart; set it to the longest range shown.
+    read:
+      lowest_now: Today's lowest price and the shop
+      lowest_ever: The lowest price in the chart and when it was
+      typical: The price it usually sits at over the last three months
+      verdict: Whether today's price is near the low, typical or high end of its history
+    answer: "{lowest_now} today; lowest was {lowest_ever}, usually {typical}. {verdict}."
+    tags: [price-history, price-comparison]
+
+  - id: camelcamelcamel.price_history
+    title: Amazon price history (camelcamelcamel)
+    says:
+      - Is this Amazon price actually a good deal?
+      - What's the lowest the Kindle Paperwhite has been on Amazon?
+      - Show me the Amazon price history for the Instant Pot Duo.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [camelcamelcamel.com]
+    inputs:
+      product: {label: Product, kind: text, hint: "A name, an ASIN or the Amazon link itself"}
+    open: https://camelcamelcamel.com/search?sq={product}
+    steps:
+      - kind: do
+        text: For another Amazon site use its camel subdomain (uk., de., fr., it., es., ca., au., jp.camelcamelcamel.com).
+      - kind: do
+        text: Open the matching product and read the "Amazon" price type first, then "3rd party new".
+    read:
+      current: Current Amazon price
+      lowest: Lowest Amazon price ever and its date
+      highest: Highest Amazon price ever and its date
+      average: Average price over the period shown
+    answer: "Now {current}; lowest ever {lowest}, highest {highest}, average {average}."
+    tags: [amazon, price-history]
+
+  - id: keepa.price_history
+    title: Was this Amazon deal really a deal (Keepa)
+    says:
+      - Was this Prime Day price really a deal, or did they raise it first?
+      - Check Keepa for the product I'm looking at on Amazon.
+      - Did this Amazon price go up right before the sale?
+    kind: look
+    where: any
+    region: global
+    sites: [keepa.com]
+    inputs:
+      asin: {label: Amazon product ID (ASIN), kind: text, default: the ASIN of the Amazon product on the person's open tab, hint: "The 10 characters after /dp/ in the Amazon link"}
+    open: https://keepa.com/#!product/1-{asin}
+    steps:
+      - kind: do
+        text: "The 1 before the dash is amazon.com; for other sites use 2 UK, 3 Germany, 4 France, 5 Japan, 6 Canada, 8 Italy, 9 Spain, 10 India, 11 Mexico."
+      - kind: do
+        text: Set the chart range to 3 months, then to 1 year, and compare the Amazon line with the current price.
+    read:
+      current: Current Amazon price
+      before_sale: The price in the weeks before the current deal, and whether it was raised just before
+      low_90d: Lowest price in the last 90 days
+      low_year: Lowest price in the last year
+    answer: "Now {current}; before the sale {before_sale}; 90-day low {low_90d}, 1-year low {low_year}."
+    tags: [amazon, price-history, deals]
+
+  # ── Deals and coupons ─────────────────────────────────────────────────
+
+  - id: slickdeals.find_deals
+    title: Deals on a product (Slickdeals)
+    says:
+      - Any good deals on AirPods right now?
+      - Has anyone posted a deal on a 65-inch OLED TV?
+      - Check Slickdeals for SSD deals.
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [slickdeals.net]
+    inputs:
+      query: {label: What to look for, kind: text}
+    open: https://slickdeals.net/newsearch.php?q={query}
+    steps:
+      - kind: do
+        text: Keep deals posted in the last two weeks; skip ones marked expired.
+      - kind: do
+        text: Prefer frontpage or popular deals with many thumbs up; open the top one to check the comments for catches.
+    read:
+      deals: Up to five live deals, each with title, price, store and date posted
+      best: The best deal with its votes and any catch from the comments (coupon, rebate, membership)
+    answer: "Best deal: {best}. Others: {deals}."
+    tags: [deals, electronics]
+
+  - id: amazon.todays_deals
+    title: Today's Amazon deals in a category
+    says:
+      - What's on sale on Amazon today?
+      - Any Amazon deals on headphones today?
+      - Show me today's Lightning Deals for kitchen stuff.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [amazon.com]
+    inputs:
+      category: {label: Category or product, kind: text, default: "", hint: "Leave empty for the top deals overall"}
+    open: https://www.amazon.com/deals
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon site, open /deals on that site instead.
+      - kind: do
+        text: If a category was given, pick it in the deals filters, or search for it on the deals page.
+    read:
+      deals: The top five deals, each with item, deal price, list price, percent off and star rating
+      ending: Deals with a countdown, and the time left
+    answer: "Today's deals: {deals}."
+    tags: [amazon, deals]
+
+  - id: retailmenot.coupons
+    title: Coupon codes for a shop
+    says:
+      - Is there a coupon code for Target?
+      - Find me a promo code for Nike before I check out.
+      - Any discount codes for Best Buy right now?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [retailmenot.com]
+    inputs:
+      store: {label: Shop's website, kind: text, hint: "The shop's domain, like target.com"}
+    open: https://www.retailmenot.com/view/{store}
+    steps:
+      - kind: do
+        text: Keep codes marked verified or used recently; note each code's minimum spend and exclusions.
+      - kind: do
+        text: Don't apply codes at checkout unless the person asks; just list them.
+    read:
+      codes: Up to five codes, each with what it gives, conditions and when it was last verified
+      sales: Sitewide sales that need no code
+      cashback: Any cashback offer shown for the shop
+    answer: "Codes to try: {codes}."
+    tags: [coupons, deals]
+
+  # ── Reviews ───────────────────────────────────────────────────────────
+
+  - id: amazon.review_digest
+    title: What Amazon reviews say about a product
+    says:
+      - What do people say about the Roomba Combo j9+ on Amazon?
+      - Summarize the Amazon reviews for this coffee grinder.
+      - Are there common complaints about the Kindle Scribe?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [amazon.com]
+    inputs:
+      product: {label: Product, kind: text}
+    open: https://www.amazon.com/s?k={product}
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon site, search there instead.
+      - kind: do
+        text: Open the matching product (not a sponsored one) and scroll to the reviews section.
+      - kind: do
+        text: Read the "Customers say" summary, then filter to 1- and 2-star reviews and note what repeats.
+      - kind: do
+        text: If more reviews need a sign-in, use what the page shows and say so.
+    read:
+      rating: Average star rating and number of ratings
+      breakdown: Share of 5-star and 1-star ratings
+      customers_say: Amazon's "Customers say" summary
+      pros: What reviewers praise most often
+      cons: Complaints that come up again and again in critical reviews
+    answer: "{rating}. Liked: {pros}. Complaints: {cons}."
+    tags: [amazon, reviews]
+
+  - id: rtings.review
+    title: RTINGS test results for a product
+    says:
+      - What does RTINGS say about the LG C4?
+      - How did the Sony WH-1000XM5 test on RTINGS?
+      - Is the Dell U2724D a good monitor according to RTINGS?
+    kind: look
+    where: any
+    region: global
+    sites: [rtings.com]
+    inputs:
+      product: {label: Product, kind: text}
+    open: https://www.rtings.com/search?q={product}
+    steps:
+      - kind: do
+        text: Open the full review for the exact model, not a comparison or a "best of" list.
+    read:
+      scores: The usage scores out of 10 (for example Mixed Usage, Gaming, Office)
+      pros: The pros listed at the top
+      cons: The cons listed at the top
+      verdict: The short verdict paragraph
+      alternatives: The alternatives the review compares it with
+    answer: "{scores}. Pros: {pros}. Cons: {cons}."
+    tags: [reviews, electronics]
+
+  - id: wirecutter.best_pick
+    title: Wirecutter's pick for a category
+    says:
+      - What's Wirecutter's top pick for air purifiers?
+      - Which robot vacuum does Wirecutter recommend?
+      - What's the best budget blender according to Wirecutter?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [nytimes.com/wirecutter]
+    inputs:
+      category: {label: What kind of product, kind: text}
+    open: https://www.nytimes.com/wirecutter/search/?s={category}
+    steps:
+      - kind: do
+        text: Open the "best" guide for the category, the newest one if there are several.
+      - kind: do
+        text: If the guide is cut off by the paywall, read what shows and say the rest needs a subscription.
+    read:
+      top_pick: The top pick and why
+      runner_up: The runner-up, if any
+      budget_pick: The budget pick, if any
+      upgrade_pick: The upgrade pick, if any
+      updated: When the guide was last updated
+    answer: "Top pick: {top_pick}. Budget: {budget_pick}. Updated {updated}."
+    tags: [reviews, recommendations]
+
+  # ── Compare specs ─────────────────────────────────────────────────────
+
+  - id: web.compare_specs
+    title: Compare two products' specs side by side
+    says:
+      - Compare the MacBook Air M4 and the Dell XPS 13.
+      - What's the difference between the Sony A7 IV and the Canon R6 Mark II?
+      - Dyson V15 or Shark Stratos, which has better specs?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com/search]
+    inputs:
+      product_a: {label: First product, kind: text}
+      product_b: {label: Second product, kind: text}
+    open: https://www.google.com/search?q={product_a}+vs+{product_b}+specs
+    steps:
+      - kind: do
+        text: Open each maker's official spec page (not a reseller's) for {product_a} and for {product_b}.
+      - kind: do
+        text: Line up the specs that matter for this kind of product, plus weight, warranty and current price.
+    read:
+      specs: A side-by-side of the key specs for both
+      differences: The three differences that matter most
+      prices: The current price of each on the maker's site
+    answer: "{differences}. Prices: {prices}."
+    tags: [specs, comparison]
+
+  - id: gsmarena.compare_phones
+    title: Compare two phones on GSMArena
+    says:
+      - Compare the iPhone 17 Pro and the Galaxy S25 Ultra.
+      - Pixel 10 or iPhone 17, which has the bigger battery?
+      - Show me the specs of the OnePlus 13 next to the Xiaomi 15.
+    kind: look
+    where: any
+    region: global
+    sites: [gsmarena.com]
+    inputs:
+      phone_a: {label: First phone, kind: text}
+      phone_b: {label: Second phone, kind: text}
+    open: https://www.gsmarena.com/compare.php3
+    steps:
+      - kind: type
+        note: The first phone's search box
+        value: "{phone_a}"
+      - kind: do
+        text: Pick the exact model from the suggestions.
+      - kind: type
+        note: The second phone's search box
+        value: "{phone_b}"
+      - kind: do
+        text: Pick the exact model from the suggestions and wait for the table.
+    read:
+      display: Screen size, type and refresh rate of each
+      chipset: Chipset of each
+      battery: Battery capacity and charging speed of each
+      cameras: Main and selfie camera specs of each
+      size_weight: Dimensions and weight of each
+      released: Release date and launch price of each
+    answer: "Display: {display}. Chip: {chipset}. Battery: {battery}. Cameras: {cameras}."
+    tags: [specs, comparison, phones]
+
+  # ── Package tracking ──────────────────────────────────────────────────
+
+  - id: amazon.track_order
+    title: Where is my Amazon order
+    says:
+      - Where's my Amazon package?
+      - When does my Amazon order arrive?
+      - Has the vacuum I ordered on Amazon shipped yet?
+    kind: look
+    where: chrome
+    region: global
+    sites: [amazon.com]
+    inputs:
+      order: {label: Which order, kind: text, default: the most recent order not yet delivered}
+    open: https://www.amazon.com/gp/css/order-history
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon site, open Your Orders there instead.
+      - kind: do
+        text: Find {order} in the list.
+      - kind: click
+        target: {role: link, name: Track package}
+    read:
+      status: The shipment status line (ordered, shipped, out for delivery, delivered)
+      eta: Expected delivery date or time window
+      last_event: The latest tracking event with place and time
+      carrier: Carrier and tracking number, if shown
+    answer: "{status}, arriving {eta}. Last update: {last_event}."
+    tags: [amazon, tracking, orders]
+
+  - id: ups.track
+    title: Track a UPS package
+    says:
+      - Track UPS 1Z999AA10123456784.
+      - Where is my UPS parcel?
+      - When will UPS deliver my package?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [ups.com]
+    inputs:
+      tracking: {label: Tracking number, kind: text, hint: "Most UPS numbers start with 1Z"}
+    open: https://www.ups.com/track?tracknum={tracking}&loc=en_US
+    read:
+      status: Current status (in transit, out for delivery, delivered, exception)
+      delivery: Scheduled delivery date and time window
+      last_event: The latest scan with place and time
+      action: Anything needed from the person (signature, customs fee, missed delivery)
+    answer: "{status}, delivery {delivery}. Last scan: {last_event}."
+    tags: [tracking, ups]
+
+  - id: fedex.track
+    title: Track a FedEx package
+    says:
+      - Track FedEx 123456789012.
+      - Where's my FedEx delivery?
+      - Is my FedEx shipment out for delivery?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [fedex.com]
+    inputs:
+      tracking: {label: Tracking number, kind: text, hint: "Usually 12 or 15 digits"}
+    open: https://www.fedex.com/fedextrack/?trknbr={tracking}
+    read:
+      status: Current status (label created, in transit, out for delivery, delivered, delay)
+      delivery: Estimated delivery date and time window
+      last_event: The latest scan with place and time
+      action: Anything needed from the person (signature, customs fee, held at location)
+    answer: "{status}, delivery {delivery}. Last scan: {last_event}."
+    tags: [tracking, fedex]
+
+  - id: dhl.track
+    title: Track a DHL shipment
+    says:
+      - Track DHL 1234567890.
+      - Where's my DHL Express parcel?
+      - Is my DHL package stuck in customs?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [dhl.com]
+    inputs:
+      tracking: {label: Tracking number, kind: text, hint: "DHL Express numbers are usually 10 digits"}
+    open: https://www.dhl.com/global-en/home/tracking.html?tracking-id={tracking}&submit=1
+    steps:
+      - kind: do
+        text: If DHL asks which service the number belongs to, pick the one that returns results.
+    read:
+      status: Current status (in transit, customs, out for delivery, delivered)
+      delivery: Estimated delivery date
+      last_event: The latest event with place and time
+      customs: Whether customs is holding it or duties are due
+    answer: "{status}, delivery {delivery}. Last update: {last_event}."
+    tags: [tracking, dhl]
+
+  - id: 17track.track_parcel
+    title: Track a parcel from any carrier
+    says:
+      - Track this parcel, I don't know the carrier.
+      - Where is package RR123456785CN?
+      - Which carrier does this tracking number belong to?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [17track.net]
+    inputs:
+      tracking: {label: Tracking number, kind: text}
+    open: https://t.17track.net/en#nums={tracking}
+    steps:
+      - kind: do
+        text: If a robot check appears, hand it to the person and wait; never solve it.
+    read:
+      carrier: The carrier 17TRACK detected, and the local carrier if it was handed over
+      status: Current status
+      last_event: The latest event with place and time
+      days: Days in transit so far
+    answer: "{carrier}: {status}. Last event: {last_event} ({days} days in transit)."
+    tags: [tracking]
+
+  - id: parcelsapp.track_cross_border
+    title: Track an AliExpress, Temu or Shein parcel
+    says:
+      - Where is my AliExpress order? Tracking LP00123456789012.
+      - Track my Temu parcel.
+      - Has my Shein package reached the country yet?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [parcelsapp.com]
+    inputs:
+      tracking: {label: Tracking number, kind: text}
+    open: https://parcelsapp.com/en/tracking/{tracking}
+    read:
+      status: Current status
+      route: Origin and destination countries, and whether it has arrived in the destination country
+      last_event: The latest event with place and time
+      local_tracking: The local carrier and its tracking number after hand-over, if shown
+      eta: Estimated delivery, if shown
+    answer: "{status} ({route}). Last: {last_event}. Local carrier: {local_tracking}."
+    tags: [tracking, cross-border]
+
+  # ── Orders: returns, reorders, cart, wishlist ─────────────────────────
+
+  - id: amazon.start_return
+    title: Start an Amazon return
+    says:
+      - Return the headphones I bought on Amazon, they don't fit.
+      - Start a return for my last Amazon order.
+      - I want a replacement for the broken kettle from Amazon.
+    kind: act
+    where: chrome
+    region: global
+    sites: [amazon.com]
+    inputs:
+      item: {label: Item to return, kind: text}
+      reason: {label: Why, kind: text, hint: "In the person's words; matched to Amazon's reason list"}
+      resolution: {label: Refund or replacement, kind: choice, options: [refund, replacement], default: refund}
+      method: {label: How to send it back, kind: text, default: the free drop-off option nearest the person}
+    open: https://www.amazon.com/gp/css/order-history
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon site, open Your Orders there instead.
+      - kind: do
+        text: Find the order with {item} and check it is still inside its return window.
+      - kind: click
+        target: {role: button, name: Return or replace items}
+      - kind: do
+        text: Tick {item}, pick the reason closest to {reason}, and choose {resolution}.
+      - kind: do
+        text: Choose {method}; read the refund amount and any return fee shown.
+    read:
+      window: The last day to return it
+      refund: The refund amount, fee and where the money goes
+      drop_off: The return method and drop-off place picked
+    stop: Confirm your return
+    needs: [location]
+    tags: [amazon, returns, orders]
+
+  - id: amazon.reorder
+    title: Reorder something from Amazon
+    says:
+      - Reorder the dishwasher tablets from Amazon.
+      - Buy the same coffee beans again on Amazon.
+      - Put my usual cat litter in the Amazon cart.
+    kind: act
+    where: chrome
+    region: global
+    sites: [amazon.com]
+    inputs:
+      item: {label: What to reorder, kind: text}
+      quantity: {label: How many, kind: number, default: 1}
+    open: https://www.amazon.com/gp/buyagain
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon site, open its Buy Again page instead.
+      - kind: do
+        text: Find {item}; if several match, pick the one bought most recently.
+      - kind: do
+        text: Compare its price with what the person paid last time and mention any big change.
+      - kind: do
+        text: Set the quantity to {quantity} and press "Add to cart".
+      - kind: open
+        url: https://www.amazon.com/gp/cart/view.html
+    read:
+      item_added: The item, quantity and price added
+      cart_total: The cart subtotal
+      delivery: The delivery date shown
+    stop: Proceed to checkout
+    tags: [amazon, reorder, cart]
+
+  - id: amazon.add_list_to_cart
+    title: Add a shopping list to the Amazon cart
+    says:
+      - Add everything on this list to my Amazon cart.
+      - Put AA batteries, printer paper and a desk lamp in my Amazon basket.
+      - Fill my Amazon cart from the packing list.
+    kind: act
+    where: chrome
+    region: global
+    sites: [amazon.com]
+    inputs:
+      items: {label: The list, kind: text, hint: "Typed in chat, or read from a note or file the person points at"}
+    open: https://www.amazon.com/
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon site, use that one.
+      - kind: do
+        text: For each item, search, pick the best match (brand and size if given; otherwise well rated and quick to deliver) and add it.
+      - kind: do
+        text: Keep a list of what was added at what price, and anything not found or unclear.
+      - kind: open
+        url: https://www.amazon.com/gp/cart/view.html
+    read:
+      added: Each item added, with price and quantity
+      missing: Items not found or needing the person's choice
+      cart_total: The cart subtotal
+    stop: Proceed to checkout
+    needs: [files]
+    tags: [amazon, cart, list]
+
+  - id: amazon.wishlist
+    title: What's on my Amazon wish list
+    says:
+      - What's on my Amazon wish list?
+      - Has anything on my wish list dropped in price?
+      - Read me my Amazon gift ideas list.
+    kind: look
+    where: chrome
+    region: global
+    sites: [amazon.com]
+    inputs:
+      list: {label: Which list, kind: text, default: all lists}
+    open: https://www.amazon.com/hz/wishlist/ls
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon site, open its wish list page instead.
+      - kind: do
+        text: If there are several lists, open {list}, or each one in turn for all lists.
+    read:
+      items: Each item with its price and availability
+      price_drops: Items marked with a price drop, and by how much
+      unavailable: Items no longer available
+    answer: "{price_drops}. Full list: {items}."
+    tags: [amazon, wishlist]
+
+  - id: amazon.delivery_date
+    title: When would it arrive if I order now
+    says:
+      - If I order the Kindle now, when will it get here?
+      - Will this arrive by Friday if I order today?
+      - How fast can Amazon deliver an HDMI cable?
+    kind: look
+    where: chrome
+    region: global
+    sites: [amazon.com]
+    inputs:
+      product: {label: Product, kind: text, default: the product on the tab the person has open}
+    open: https://www.amazon.com/s?k={product}
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon site, search there instead; skip this search if they are already on the product page.
+      - kind: do
+        text: Open the matching product and check "Deliver to" shows the person's address.
+    read:
+      delivery: The standard delivery date and its cost
+      fastest: The fastest delivery date and its cost
+      order_within: The "order within" countdown for the fastest date
+      seller: Ships from and sold by
+    answer: "Standard {delivery}; fastest {fastest} if ordered within {order_within}."
+    tags: [amazon, delivery]
+
+  # ── Groceries ─────────────────────────────────────────────────────────
+
+  - id: instacart.recipe_basket
+    title: Grocery basket for a recipe on Instacart
+    says:
+      - Get me the ingredients for lasagna on Instacart.
+      - Add everything for this recipe to my Instacart cart.
+      - Order the groceries for chicken tikka masala for six.
+    kind: act
+    where: chrome
+    region: us
+    sites: [instacart.com, instacart.ca]
+    inputs:
+      recipe: {label: Recipe, kind: text, hint: "A recipe link, or a dish name the agent finds a recipe for"}
+      servings: {label: Servings, kind: number, default: 4}
+      store: {label: Store, kind: text, default: the store the person used last}
+    open: https://www.instacart.com/store
+    steps:
+      - kind: do
+        text: For a person in Canada, use instacart.ca.
+      - kind: do
+        text: Read the recipe's ingredients and scale them to {servings} servings.
+      - kind: do
+        text: Open {store}; list pantry staples (salt, oil, spices) for the person to confirm rather than adding them.
+      - kind: do
+        text: For each other ingredient, search and add the closest item in a sensible size.
+      - kind: do
+        text: Open the cart and note anything out of stock or swapped.
+    read:
+      added: Each ingredient with the product, size and price added
+      skipped: Staples left out and items not found
+      cart_total: The cart subtotal and delivery fee shown
+    stop: Go to checkout
+    needs: [web_search]
+    tags: [groceries, recipe, cart]
+
+  # ── Store stock ───────────────────────────────────────────────────────
+
+  - id: ikea.store_stock
+    title: Is it in stock at my IKEA
+    says:
+      - Does IKEA have the Billy bookcase in stock at my store?
+      - Is the Kallax 4x4 available at IKEA today?
+      - Where in the warehouse do I find the Malm dresser?
+    kind: look
+    where: any
+    region: global
+    sites: [ikea.com]
+    inputs:
+      product: {label: Product, kind: text, hint: "Name, size and colour, or the article number"}
+      store: {label: IKEA store, kind: place, default: the IKEA nearest the person}
+    open: https://www.ikea.com/us/en/search/?q={product}
+    steps:
+      - kind: do
+        text: Use the person's country site in the link (for example /gb/en/, /de/de/, /fr/fr/).
+      - kind: do
+        text: Open the matching product and the in-store stock check; choose {store}.
+    read:
+      stock: In stock, low or out of stock at the store, with quantity if shown
+      location: Aisle and location in the self-serve area, or "collect at the market hall"
+      restock: Expected restock date if out of stock
+      price: Price at that store
+    answer: "{stock} at {store}; find it at {location}."
+    needs: [location]
+    tags: [store-stock, furniture]
+
+  - id: apple.store_pickup
+    title: Can I pick it up at an Apple Store today
+    says:
+      - Can I pick up an iPhone 17 Pro at an Apple Store today?
+      - Which Apple Store near me has the MacBook Air in stock?
+      - Is the iPad mini available for pickup in Berlin?
+    kind: look
+    where: any
+    region: global
+    sites: [apple.com/shop]
+    inputs:
+      product: {label: Product line, kind: choice, options: [iphone, ipad, mac, watch], default: iphone}
+      model: {label: Model and configuration, kind: text, hint: "Like iPhone 17 Pro, 256 GB, Deep Blue"}
+      near: {label: Near, kind: place, default: the person's location}
+    open: https://www.apple.com/shop/buy-{product}
+    steps:
+      - kind: do
+        text: Outside the US, use the person's country store (apple.com/uk/shop/, apple.com/de/shop/ ...).
+      - kind: do
+        text: Choose {model} and its options.
+      - kind: do
+        text: Open the pickup availability check and search near {near}.
+    read:
+      available_today: Stores with pickup available today, with distance
+      later: The earliest pickup date at other nearby stores
+      delivery: The delivery date if ordered online
+      price: The price of that configuration
+    answer: "Pickup today at {available_today}; otherwise {later}."
+    needs: [location]
+    tags: [store-stock, apple]
+
+  - id: mediamarkt.store_stock
+    title: Is it in stock at my MediaMarkt
+    says:
+      - Does MediaMarkt have the PS5 Pro in stock near me?
+      - Can I pick up a Dyson V15 at MediaMarkt today?
+      - Check MediaMarkt stock for AirPods 4.
+    kind: look
+    where: prefer_chrome
+    region: eu
+    sites: [mediamarkt.de, mediamarkt.at, mediamarkt.nl, mediamarkt.be, mediamarkt.es, mediamarkt.pl, mediaworld.it]
+    inputs:
+      product: {label: Product, kind: text}
+      store: {label: Store, kind: place, default: the MediaMarkt nearest the person}
+    open: https://www.mediamarkt.de/de/search.html?query={product}
+    steps:
+      - kind: do
+        text: Use the person's country site instead (mediamarkt.at, .nl, .be, .es, .pl, or mediaworld.it in Italy) and search there.
+      - kind: do
+        text: Open the matching product and choose {store} for pickup.
+    read:
+      stock: Pickup availability at the store and when it is ready
+      online: Online delivery availability and date
+      price: The price
+      nearby: Other nearby stores that have it, if the chosen one doesn't
+    answer: "{stock} at {store}; price {price}."
+    needs: [location]
+    tags: [store-stock, electronics]
+
+  # ── Secondhand and refurbished ────────────────────────────────────────
+
+  - id: ebay.sold_prices
+    title: What it actually sells for used (eBay sold)
+    says:
+      - What's my old iPhone 13 worth?
+      - How much do used Nintendo Switch OLEDs sell for?
+      - What do people actually pay for a used Herman Miller Aeron?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [ebay.com]
+    inputs:
+      query: {label: Item, kind: text, hint: "Model, plus storage or size if it changes the price"}
+    open: https://www.ebay.com/sch/i.html?_nkw={query}&LH_Sold=1&LH_Complete=1
+    steps:
+      - kind: do
+        text: If the person uses another eBay site (ebay.co.uk, ebay.de ...), use it with the same link path.
+      - kind: do
+        text: Leave out listings for parts, boxes only or bundles with extras; use the 20 most recent sales.
+    read:
+      typical: The middle sold price of the recent sales
+      range: Lowest and highest of those sales
+      by_condition: Typical price for like-new versus worn or damaged
+      recent: The five most recent sales with date, condition and price
+    answer: "Usually sells for about {typical} (range {range})."
+    tags: [secondhand, resale, ebay]
+
+  - id: vinted.search
+    title: Secondhand clothes on Vinted
+    says:
+      - Find Levi's 501 in W32 L32 on Vinted.
+      - Is there a used Patagonia fleece on Vinted in size M?
+      - What do Nike Air Force 1s go for on Vinted?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [vinted.com, vinted.co.uk, vinted.fr, vinted.de, vinted.it, vinted.es, vinted.nl, vinted.pl]
+    inputs:
+      query: {label: What to look for, kind: text}
+      size: {label: Size, kind: text, required: false, ask: agent}
+    open: https://www.vinted.com/catalog?search_text={query}
+    steps:
+      - kind: do
+        text: Use the person's country site with the same path (vinted.co.uk, vinted.fr, vinted.de ...).
+      - kind: do
+        text: If a size was given, set the Size filter to {size}; sort by newest first.
+    read:
+      listings: Five good matches, each with price, buyer protection fee, size, condition and brand
+      typical: The usual asking price across the first page
+    answer: "Typical price {typical}. Good finds: {listings}."
+    tags: [secondhand, clothes]
+
+  - id: backmarket.refurbished
+    title: Refurbished price on Back Market
+    says:
+      - How much is a refurbished iPhone 15 on Back Market?
+      - Find a refurbished MacBook Air M2 in excellent condition.
+      - Is a refurbished iPad much cheaper than a new one?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [backmarket.com, backmarket.co.uk, backmarket.fr, backmarket.de, backmarket.es, backmarket.it]
+    inputs:
+      product: {label: Product, kind: text, hint: "Model plus storage, like iPhone 15 128 GB"}
+    open: https://www.backmarket.com/en-us/search?q={product}
+    steps:
+      - kind: do
+        text: Use the person's country site (backmarket.co.uk/en-gb, backmarket.fr/fr-fr, backmarket.de/de-de ...).
+      - kind: do
+        text: Open the matching model and read the price for each condition grade.
+    read:
+      by_grade: Price for each condition (Fair, Good, Excellent, Premium)
+      battery: Whether a new battery is offered and what it adds
+      warranty: Warranty length and return period
+      new_price: The new price Back Market shows for comparison
+    answer: "{by_grade}; new is {new_price}. Warranty {warranty}."
+    tags: [refurbished, secondhand]
+
+  - id: apple.trade_in_value
+    title: What Apple gives for my old device
+    says:
+      - How much will Apple give me for my iPhone 13?
+      - What's my old MacBook worth as an Apple trade-in?
+      - Trade-in value for an Apple Watch Series 7?
+    kind: look
+    where: any
+    region: global
+    sites: [apple.com/shop]
+    inputs:
+      device: {label: Device, kind: text, hint: "Model, storage and condition"}
+    open: https://www.apple.com/shop/trade-in
+    steps:
+      - kind: do
+        text: Outside the US, use the person's country store (apple.com/uk/shop/trade-in ...).
+      - kind: do
+        text: Pick the device type and model, answer the condition questions as described, and stop at the estimate.
+    read:
+      estimate: The estimated credit toward a new purchase
+      gift_card: The estimate as a gift card or recycling value, if different
+      conditions: What the estimate assumes about condition
+    answer: "About {estimate} toward a new purchase ({conditions})."
+    tags: [trade-in, resale, apple]
+
+  # ── Gifts, makers, sizes ──────────────────────────────────────────────
+
+  - id: web.gift_ideas
+    title: Gift ideas within a budget
+    says:
+      - Gift ideas for a 10-year-old who loves Lego, under $50.
+      - What can I get my dad who cooks a lot, around 80 euros?
+      - Find a birthday present for a coffee lover under 40.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com/search]
+    inputs:
+      interests: {label: Who it's for and what they like, kind: text}
+      budget: {label: Budget, kind: number}
+      needed_by: {label: Needed by, kind: date, required: false, ask: agent}
+    open: https://www.google.com/search?q={interests}+gift&udm=28
+    steps:
+      - kind: do
+        text: Set the price filter to at most {budget}.
+      - kind: do
+        text: Pick five ideas of different kinds from different shops, each well rated; avoid gimmicks.
+      - kind: do
+        text: If needed_by was given, check each one can be delivered by {needed_by}.
+    read:
+      ideas: Five gift ideas, each with name, price, shop and one line on why it suits
+      delivery: Delivery dates where shown
+    answer: "Ideas: {ideas}."
+    needs: [memory]
+    tags: [gifts]
+
+  - id: etsy.search
+    title: Find handmade or personalized items on Etsy
+    says:
+      - Find a personalized cutting board on Etsy.
+      - Look for a handmade ceramic mug on Etsy under $40.
+      - Any Etsy shops doing custom pet portraits?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [etsy.com]
+    inputs:
+      query: {label: What to look for, kind: text}
+      needed_by: {label: Needed by, kind: date, required: false, ask: agent}
+    open: https://www.etsy.com/search?q={query}
+    steps:
+      - kind: do
+        text: Skip ads; keep listings from shops rated 4.8 or more with many sales.
+      - kind: do
+        text: Open the top three and read the delivery estimate to the person's address; check it beats {needed_by} if given.
+    read:
+      listings: Three good listings, each with title, price, shop rating and number of shop sales
+      delivery: The delivery estimate and shipping cost for each
+      personalization: Whether each can be personalized, and how
+    answer: "{listings}. Delivery: {delivery}."
+    tags: [etsy, handmade, gifts]
+
+  - id: web.size_guide
+    title: Which size to order
+    says:
+      - What size should I get in Levi's 501 if I'm a 32 waist?
+      - Do Nike running shoes run small?
+      - Which Uniqlo shirt size fits 100 cm chest?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com/search]
+    inputs:
+      brand_item: {label: Brand and item, kind: text}
+      measurements: {label: Measurements or usual size, kind: text, default: what the agent knows about the person's sizes}
+    open: https://www.google.com/search?q={brand_item}+size+chart
+    steps:
+      - kind: do
+        text: If the person is on the product page, use its own size guide link instead of searching.
+      - kind: do
+        text: Open the brand's official size chart (not a reseller's) and match {measurements} to a size.
+      - kind: do
+        text: Check the product's reviews for "runs small" or "runs large" remarks.
+    read:
+      size: The size the chart gives for those measurements
+      fit_notes: What reviews or the brand say about the fit
+      chart: The chart row used, with its measurements
+    answer: "Size {size} ({fit_notes})."
+    needs: [memory]
+    tags: [sizes, clothes]
+
+  # ── Warranty ──────────────────────────────────────────────────────────
+
+  - id: apple.check_coverage
+    title: Is my Apple device still under warranty
+    says:
+      - Is my MacBook still under warranty?
+      - Does my iPhone have AppleCare?
+      - When does the warranty on my AirPods end?
+    kind: look
+    where: chrome
+    region: global
+    sites: [checkcoverage.apple.com]
+    inputs:
+      serial: {label: Serial number, kind: text, hint: "Settings > General > About on iPhone and iPad; About This Mac on a Mac"}
+    open: https://checkcoverage.apple.com/
+    steps:
+      - kind: type
+        note: The serial number field
+        value: "{serial}"
+      - kind: do
+        text: The page asks for a verification code; hand it to the person to type and wait. Never solve it.
+      - kind: do
+        text: After the person continues, read the coverage page.
+    read:
+      device: The device model Apple shows
+      repairs: Repairs and service coverage, active or expired, with end date
+      applecare: Whether AppleCare is on it, and until when
+      support: Telephone technical support status
+    answer: "{device}: {repairs}. AppleCare: {applecare}."
+    tags: [warranty, apple]
+
+  # ── Books ─────────────────────────────────────────────────────────────
+
+  - id: bookfinder.book_prices
+    title: Cheapest copy of a book, new or used
+    says:
+      - Where can I buy Dune cheapest?
+      - Find a used copy of The Design of Everyday Things.
+      - Compare prices for ISBN 9780441172719.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [bookfinder.com]
+    inputs:
+      book: {label: Title and author, or ISBN, kind: text}
+      condition: {label: Condition, kind: choice, options: [any, new, used], default: any}
+    open: https://www.bookfinder.com/
+    steps:
+      - kind: type
+        target: {role: searchbox, name: Keywords}
+        note: The search box (title, author or ISBN)
+        value: "{book}"
+      - kind: key
+        key: Enter
+      - kind: do
+        text: Pick the edition the person means (format, language); read the new and used lists per {condition}.
+    read:
+      cheapest_new: The cheapest new copy with shop and shipping
+      cheapest_used: The cheapest used copy with shop, condition and shipping
+      edition: The edition and format the prices are for
+    answer: "New from {cheapest_new}; used from {cheapest_used} ({edition})."
+    tags: [books, price-comparison]
+
+  # ── AliExpress and Temu ───────────────────────────────────────────────
+
+  - id: aliexpress.shipping_time
+    title: How long AliExpress takes to deliver
+    says:
+      - How long would a phone case from AliExpress take to get here?
+      - Find a cheap USB hub on AliExpress that ships fast.
+      - What does shipping cost on AliExpress for a camping lantern?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [aliexpress.com]
+    inputs:
+      query: {label: What to look for, kind: text}
+    open: https://www.aliexpress.com/wholesale?SearchText={query}
+    steps:
+      - kind: do
+        text: Check "Ship to" at the top is the person's country.
+      - kind: do
+        text: Open the top three well-reviewed matches and read each one's delivery estimate and shipping cost.
+    read:
+      options: Three items, each with price, shipping cost, delivery estimate and rating
+      fastest: The fastest option and whether it ships from a local warehouse or is a Choice item
+    answer: "Fastest: {fastest}. Options: {options}."
+    tags: [aliexpress, shipping, cross-border]
+
+  - id: temu.shipping_time
+    title: How long Temu takes to deliver
+    says:
+      - How long does Temu take to ship a phone tripod?
+      - Find a cheap bike light on Temu and tell me when it would arrive.
+      - Does Temu ship this from a local warehouse?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [temu.com]
+    inputs:
+      query: {label: What to look for, kind: text}
+    open: https://www.temu.com/search_result.html?search_key={query}
+    steps:
+      - kind: do
+        text: If Temu asks to sign in to see results, use what is shown or hand the page to the person; never type a password.
+      - kind: do
+        text: Open the top three well-reviewed matches and read the delivery estimate for the person's country.
+    read:
+      options: Three items, each with price, delivery estimate and rating
+      local: Which of them ship from a local warehouse
+      free_shipping: The free-shipping threshold shown
+    answer: "Options: {options}. Local warehouse: {local}."
+    tags: [temu, shipping, cross-border]
+
+  # ── Brand stores: configure and price ─────────────────────────────────
+
+  - id: apple.configure_price
+    title: Price an Apple product configuration
+    says:
+      - How much is a MacBook Pro 14 with 32 GB RAM and 1 TB?
+      - Price an iPhone 17 Pro Max with 512 GB.
+      - What does an iPad Air 13 with cellular cost?
+    kind: look
+    where: any
+    region: global
+    sites: [apple.com/shop]
+    inputs:
+      product: {label: Product line, kind: choice, options: [iphone, ipad, mac, watch], default: mac}
+      config: {label: Model and options, kind: text}
+    open: https://www.apple.com/shop/buy-{product}
+    steps:
+      - kind: do
+        text: Outside the US, use the person's country store (apple.com/uk/shop/, apple.com/de/shop/ ...).
+      - kind: do
+        text: Pick the model and set each option to match {config}; stop on the summary before "Add to Bag".
+    read:
+      price: The total price for that configuration
+      monthly: The monthly price Apple shows, if any
+      delivery: The delivery date shown
+      base_price: The starting price of the model, to show what the options add
+    answer: "{price} (from {base_price}); delivery {delivery}."
+    tags: [apple, configure, price]
+
+  - id: googlestore.configure_price
+    title: Price a Pixel on the Google Store
+    says:
+      - How much is a Pixel 10 Pro with 256 GB on the Google Store?
+      - What does the Pixel Watch cost with LTE?
+      - Any Google Store offers on Pixel phones right now?
+    kind: look
+    where: any
+    region: global
+    sites: [store.google.com]
+    inputs:
+      config: {label: Product and options, kind: text}
+    open: https://store.google.com/
+    steps:
+      - kind: do
+        text: If a region picker shows, choose the person's country.
+      - kind: do
+        text: Open the product and set colour, storage and connectivity to match {config}; stop before "Add to cart".
+    read:
+      price: The price for that configuration
+      offers: Any bundle, trade-in or discount offer shown
+      delivery: The delivery date shown
+    answer: "{price}. Offers: {offers}."
+    tags: [google, configure, price]

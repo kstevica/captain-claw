@@ -1,0 +1,1424 @@
+category: work
+playbooks:
+  # ---- Web analytics and search ------------------------------------------
+
+  - id: ga4.weekly_traffic
+    title: Website traffic last week
+    says:
+      - How much traffic did the website get last week?
+      - How many visitors did we have in the last 7 days?
+      - Is site traffic up or down this month?
+      - Where are our visitors coming from lately?
+    kind: look
+    where: chrome
+    region: global
+    sites: [analytics.google.com]
+    inputs:
+      property: {label: Property, kind: text, default: the one Analytics opens on, hint: "The site or app name as Google Analytics lists it"}
+      period: {label: Period, kind: choice, options: [last 7 days, last 28 days, last 90 days], default: last 7 days}
+    open: https://analytics.google.com/analytics/web/
+    steps:
+      - kind: do
+        text: If {property} is not the property shown top left, switch to it with the property picker.
+      - kind: do
+        text: Open Reports → Acquisition → Traffic acquisition, set the date range to {period} and turn on "Compare to preceding period".
+    read:
+      users: Total users, and the change vs the preceding period
+      sessions: Sessions, and the change vs the preceding period
+      engagement_rate: Engagement rate
+      top_channels: The three session channel groups with the most sessions, each with its sessions
+    answer: "{users} users and {sessions} sessions over the {period}; most came from {top_channels}."
+    tags: [analytics, traffic, website]
+
+  - id: ga4.top_pages
+    title: Most viewed pages on the website
+    says:
+      - What were our top pages last week?
+      - Which blog posts got the most views this month?
+      - What pages do people visit most on the site?
+    kind: look
+    where: chrome
+    region: global
+    sites: [analytics.google.com]
+    inputs:
+      property: {label: Property, kind: text, default: the one Analytics opens on}
+      period: {label: Period, kind: choice, options: [last 7 days, last 28 days, last 90 days], default: last 7 days}
+      path: {label: Only pages under, kind: text, default: "", hint: "A path prefix like /blog/ to narrow the list"}
+    open: https://analytics.google.com/analytics/web/
+    steps:
+      - kind: do
+        text: If {property} is not the property shown top left, switch to it with the property picker.
+      - kind: do
+        text: Open Reports → Engagement → Pages and screens, set the date range to {period}, and set the table's dimension to "Page path and screen class".
+      - kind: do
+        text: If a path was given, type {path} into the table's search box. Sort by Views, highest first.
+    read:
+      top_pages: The ten pages with the most views, each with views, active users and average engagement time
+      total_views: Total views across all pages for the period
+    answer: "Top pages over the {period}: {top_pages}."
+    tags: [analytics, content, website]
+
+  - id: ga4.key_events
+    title: Conversions on the website
+    says:
+      - How many sign-ups did we get from the website last week?
+      - How are conversions doing this month?
+      - Which channel brought the most purchases in the last 28 days?
+    kind: look
+    where: chrome
+    region: global
+    sites: [analytics.google.com]
+    inputs:
+      property: {label: Property, kind: text, default: the one Analytics opens on}
+      event: {label: Which conversion, kind: text, default: all key events, hint: "An event name like sign_up, purchase or generate_lead"}
+      period: {label: Period, kind: choice, options: [last 7 days, last 28 days, last 90 days], default: last 7 days}
+    open: https://analytics.google.com/analytics/web/
+    steps:
+      - kind: do
+        text: If {property} is not the property shown top left, switch to it with the property picker.
+      - kind: do
+        text: Open Reports → Engagement → Key events (called Conversions in older properties), set the date range to {period} with "Compare to preceding period" on.
+      - kind: do
+        text: Then open Reports → Acquisition → Traffic acquisition, pick {event} in the Key events column's menu, and note which channels bring the most.
+    read:
+      key_events: Each key event's count for the period and its change vs the preceding period
+      top_channel: The session channel group with the most of {event}, with its count
+      rate: The session key event rate, if shown
+    answer: "{key_events}. The best channel was {top_channel}."
+    tags: [analytics, conversions, marketing]
+
+  - id: searchconsole.top_queries
+    title: Top Google searches bringing visitors
+    says:
+      - What are people searching on Google to find us?
+      - How many clicks did we get from Google search last month?
+      - Which keywords is our site ranking for?
+      - Did our search clicks drop this week?
+    kind: look
+    where: chrome
+    region: global
+    sites: [search.google.com/search-console]
+    inputs:
+      property: {label: Search Console property, kind: text, hint: "sc-domain:example.com for a domain property, or the full prefix like https://www.example.com/"}
+      period: {label: Period, kind: choice, options: [last 7 days, last 28 days, last 3 months], default: last 28 days}
+    open: https://search.google.com/search-console/performance/search-analytics?resource_id={property}
+    steps:
+      - kind: do
+        text: If the property isn't found, open the property picker top left and choose the one that matches the site.
+      - kind: do
+        text: Set the date filter to {period}, turn on Average CTR and Average position, and stay on the Queries tab.
+    read:
+      clicks: Total clicks for the period
+      impressions: Total impressions
+      ctr: Average CTR
+      position: Average position
+      top_queries: The ten queries with the most clicks, each with clicks, impressions and position
+    answer: "{clicks} clicks from {impressions} impressions over the {period}; top queries: {top_queries}."
+    tags: [seo, search, website]
+
+  - id: searchconsole.indexing_problems
+    title: Pages Google isn't indexing
+    says:
+      - Are there any indexing problems in Search Console?
+      - Why aren't some of our pages showing up on Google?
+      - Is our new pricing page indexed yet?
+      - How many of our pages does Google have indexed?
+    kind: look
+    where: chrome
+    region: global
+    sites: [search.google.com/search-console]
+    inputs:
+      property: {label: Search Console property, kind: text, hint: "sc-domain:example.com for a domain property, or the full prefix like https://www.example.com/"}
+      page: {label: One page to check, kind: url, default: "", hint: "A full page address to run through URL Inspection"}
+    open: https://search.google.com/search-console/index?resource_id={property}
+    steps:
+      - kind: do
+        text: Read the Indexed and Not indexed totals, then the "Why pages aren't indexed" table.
+      - kind: do
+        text: Open the reason with the most pages and note three example URLs.
+      - kind: do
+        text: If a page was given, paste {page} into "Inspect any URL" at the top and read the result. Never click "Request indexing" unless the person asked.
+    read:
+      indexed: Number of indexed pages
+      not_indexed: Number of pages not indexed
+      reasons: Each reason pages aren't indexed, with its page count and validation status
+      examples: Example URLs for the biggest reason
+      page_status: For the inspected page, whether it is on Google, its last crawl date and the canonical Google chose
+    answer: "{indexed} pages indexed, {not_indexed} not. Main reasons: {reasons}."
+    tags: [seo, indexing, website]
+
+  # ---- Payments and store -------------------------------------------------
+
+  - id: stripe.revenue_this_month
+    title: Revenue in Stripe this month
+    says:
+      - How much revenue have we done this month in Stripe?
+      - What's our gross volume this week?
+      - How did last month's sales compare to the month before?
+      - What's our MRR right now?
+    kind: look
+    where: chrome
+    region: global
+    sites: [dashboard.stripe.com]
+    inputs:
+      period: {label: Period, kind: choice, options: [today, last 7 days, this month, last month], default: this month}
+      account: {label: Stripe account, kind: text, default: the one the dashboard opens on}
+    open: https://dashboard.stripe.com/dashboard
+    steps:
+      - kind: do
+        text: Look only. Never open refunds, payouts, transfers or any page that moves money.
+      - kind: do
+        text: If {account} isn't the account shown top left, switch to it. Make sure test mode or a sandbox is off so the numbers are live.
+      - kind: do
+        text: On Home, set the overview's date range to {period} and compare to the previous period.
+      - kind: do
+        text: If the account bills subscriptions, open Billing → Overview and read MRR.
+    read:
+      gross_volume: Gross volume for the period, with the change vs the previous period
+      net_volume: Net volume for the period
+      payments: Number of successful payments
+      mrr: Monthly recurring revenue, if the account uses subscriptions
+    answer: "Gross volume {gross_volume}, net {net_volume} for {period}."
+    tags: [revenue, payments, finance]
+
+  - id: stripe.failed_payments
+    title: Failed payments in Stripe
+    says:
+      - Any failed payments in Stripe this week?
+      - Which customers' cards got declined recently?
+      - How much did we lose to failed charges this month?
+    kind: look
+    where: chrome
+    region: global
+    sites: [dashboard.stripe.com]
+    inputs:
+      period: {label: Period, kind: choice, options: [last 7 days, last 30 days, this month], default: last 7 days}
+    open: "https://dashboard.stripe.com/payments?status[]=failed"
+    steps:
+      - kind: do
+        text: Look only. Never retry a charge, refund, or contact a customer from here.
+      - kind: do
+        text: Set the Date filter to {period}. Open a few payments to read their decline reason.
+    read:
+      count: Number of failed payments in the period
+      amount: Their total amount, by currency
+      reasons: The most common decline reasons, with counts
+      customers: The customers with failed payments, each with amount and date
+    answer: "{count} failed payments ({amount}) in the {period}; mostly {reasons}."
+    tags: [payments, failed, finance]
+
+  - id: stripe.new_customers
+    title: New customers in Stripe
+    says:
+      - How many new customers did we get this week?
+      - Who signed up as a paying customer this month?
+      - Show me our newest Stripe customers.
+    kind: look
+    where: chrome
+    region: global
+    sites: [dashboard.stripe.com]
+    inputs:
+      period: {label: Period, kind: choice, options: [today, last 7 days, this month, last month], default: last 7 days}
+    open: https://dashboard.stripe.com/customers
+    steps:
+      - kind: do
+        text: Look only; change nothing on any customer.
+      - kind: do
+        text: Add the Created date filter for {period} and sort by newest.
+    read:
+      count: Number of customers created in the period
+      customers: Each new customer's name or email, created date and plan or first payment
+      not_paying: New customers whose first payment failed or who have no payment yet
+    answer: "{count} new customers in the {period}."
+    tags: [customers, payments, growth]
+
+  - id: shopify.todays_orders
+    title: Today's orders in Shopify
+    says:
+      - How many orders did we get today?
+      - What are today's sales on the Shopify store?
+      - Any orders still waiting to be shipped?
+      - How did yesterday go in the shop?
+    kind: look
+    where: chrome
+    region: global
+    sites: [admin.shopify.com]
+    inputs:
+      store: {label: Store, kind: text, hint: "The store handle, the part after /store/ in the admin link"}
+      day: {label: Day, kind: date, default: today}
+    open: https://admin.shopify.com/store/{store}/orders
+    steps:
+      - kind: do
+        text: Filter the orders to {day} (Date → the day). Look only; don't fulfil, refund or edit orders.
+      - kind: do
+        text: Count unfulfilled ones and note any with a fraud-risk flag or pending payment.
+    read:
+      order_count: Number of orders on the day
+      total_sales: Their total value
+      unfulfilled: Orders not yet fulfilled
+      flagged: Orders with a high-risk flag or pending payment, each with its number
+    answer: "{order_count} orders for {total_sales} on {day}; {unfulfilled} still to ship."
+    tags: [ecommerce, orders, store]
+
+  - id: shopify.low_stock
+    title: Products running low in Shopify
+    says:
+      - What's running low in the shop?
+      - Which products are out of stock?
+      - Do we need to reorder anything this week?
+    kind: look
+    where: chrome
+    region: global
+    sites: [admin.shopify.com]
+    inputs:
+      store: {label: Store, kind: text, hint: "The store handle, the part after /store/ in the admin link"}
+      threshold: {label: Low means at most, kind: number, default: 5}
+      location: {label: Location, kind: text, default: all locations}
+    open: https://admin.shopify.com/store/{store}/products/inventory
+    steps:
+      - kind: do
+        text: Pick {location} in the location menu, then sort by Available, lowest first. Look only; don't adjust quantities.
+    read:
+      out_of_stock: Products and variants with 0 or less available
+      low_items: Products and variants at or below {threshold}, each with available and incoming quantity
+    answer: "Out of stock: {out_of_stock}. Running low: {low_items}."
+    tags: [ecommerce, inventory, store]
+
+  # ---- Ads and email marketing --------------------------------------------
+
+  - id: metaads.campaign_spend
+    title: Facebook and Instagram ads spend
+    says:
+      - How much did we spend on Facebook ads this week?
+      - What's our cost per lead on Meta right now?
+      - Which Instagram campaign is performing best?
+      - Are any of our Meta ads not delivering?
+    kind: look
+    where: chrome
+    region: global
+    sites: [adsmanager.facebook.com]
+    inputs:
+      period: {label: Period, kind: choice, options: [today, yesterday, last 7 days, last 30 days, this month], default: last 7 days}
+      account: {label: Ad account, kind: text, default: the one Ads Manager opens on}
+    open: https://adsmanager.facebook.com/adsmanager/manage/campaigns
+    steps:
+      - kind: do
+        text: Look only. Never change a budget, bid or status, and never toggle a campaign on or off.
+      - kind: do
+        text: If {account} isn't selected, switch ad account at the top left. Set the date range to {period} on the Campaigns tab.
+    read:
+      total_spend: Amount spent across campaigns
+      campaigns: Each active campaign with amount spent, results, and cost per result
+      best: The campaign with the lowest cost per result
+      delivery_issues: Campaigns or ads marked Not delivering, Rejected or Learning limited
+    answer: "{total_spend} spent over {period}; best campaign {best}."
+    tags: [ads, marketing, spend]
+
+  - id: googleads.campaign_performance
+    title: Google Ads spend and conversions
+    says:
+      - How are our Google Ads doing this month?
+      - What's our cost per conversion on Google Ads?
+      - How much have we spent on search ads this week?
+    kind: look
+    where: chrome
+    region: global
+    sites: [ads.google.com]
+    inputs:
+      period: {label: Period, kind: choice, options: [today, yesterday, last 7 days, last 30 days, this month], default: last 7 days}
+      account: {label: Ads account, kind: text, default: the one Google Ads opens on}
+    open: https://ads.google.com/aw/campaigns
+    steps:
+      - kind: do
+        text: Look only. Never change budgets, bids, ads or campaign status, and dismiss recommendation prompts without applying them.
+      - kind: do
+        text: If asked to pick an account, choose {account}. Set the date range to {period}.
+    read:
+      cost: Total cost for the period
+      conversions: Total conversions and cost per conversion
+      campaigns: Each enabled campaign with cost, clicks, conversions and cost per conversion
+      limited: Campaigns marked Limited by budget or with disapproved ads
+    answer: "{cost} spent over {period}; {conversions}."
+    tags: [ads, marketing, spend]
+
+  - id: linkedin.ads_spend
+    title: LinkedIn ads spend and results
+    says:
+      - How much have we spent on LinkedIn ads this month?
+      - What's the cost per lead on our LinkedIn campaigns?
+      - How is the LinkedIn campaign doing?
+    kind: look
+    where: chrome
+    region: global
+    sites: [linkedin.com/campaignmanager]
+    inputs:
+      period: {label: Period, kind: choice, options: [last 7 days, last 30 days, this month, last month], default: last 30 days}
+      account: {label: Ad account, kind: text, default: the only or most recent one}
+    open: https://www.linkedin.com/campaignmanager/
+    steps:
+      - kind: do
+        text: Look only; never change budgets, bids or campaign status.
+      - kind: do
+        text: Open the ad account {account}, go to Campaigns, and set the date range to {period}.
+    read:
+      spent: Total spent
+      key_results: Key results (leads, clicks or conversions, as the campaigns' objective sets) and cost per result
+      ctr: Average click-through rate
+      campaigns: Each active campaign with spent, key results and cost per result
+    answer: "{spent} spent over {period}; {key_results}."
+    tags: [ads, marketing, linkedin]
+
+  - id: mailchimp.campaign_stats
+    title: How the last newsletter did
+    says:
+      - How did our last newsletter perform?
+      - What was the open rate on the Mailchimp campaign?
+      - How many people clicked last week's email?
+    kind: look
+    where: chrome
+    region: global
+    sites: [admin.mailchimp.com]
+    inputs:
+      campaign: {label: Campaign, kind: text, default: the latest sent}
+    open: https://admin.mailchimp.com/reports/
+    steps:
+      - kind: do
+        text: Open the report for {campaign}. Look only; don't send, resend or edit anything.
+    read:
+      sent_to: Recipients and send date
+      open_rate: Open rate
+      click_rate: Click rate
+      unsubscribes: Unsubscribes and bounces
+      top_links: The most clicked links
+    answer: "Sent to {sent_to}: {open_rate} opened, {click_rate} clicked, {unsubscribes}."
+    tags: [email, newsletter, marketing]
+
+  # ---- CRM ----------------------------------------------------------------
+
+  - id: hubspot.find_contact
+    title: Look up a contact or company in HubSpot
+    says:
+      - What's the status of the Acme account in HubSpot?
+      - Who owns this contact in HubSpot?
+      - When did we last talk to the Acme lead?
+      - Look up the open deals for this company in our CRM.
+    kind: look
+    where: chrome
+    region: global
+    sites: [app.hubspot.com]
+    inputs:
+      who: {label: Contact or company, kind: text, hint: "A name, email address or company"}
+    open: https://app.hubspot.com/
+    steps:
+      - kind: do
+        text: Search {who} in the search bar at the top and open the contact or company that matches.
+      - kind: do
+        text: Look only; don't edit properties or log anything.
+    read:
+      record: Name, company and email of the record found
+      owner: Contact or company owner
+      stage: Lifecycle stage and lead status
+      last_activity: Date and kind of the last activity, and what it said
+      deals: Associated deals, each with stage, amount and close date
+    answer: "{record}: {stage}, owned by {owner}; last activity {last_activity}."
+    tags: [crm, contacts, sales]
+
+  - id: salesforce.opportunity_lookup
+    title: Look up a deal in Salesforce
+    says:
+      - Where is the Acme deal in Salesforce?
+      - What stage is the Acme opportunity at, and when does it close?
+      - What's the next step on our biggest open deal?
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Salesforce address, kind: url, hint: "The org's own link, like https://acme.lightning.force.com or https://acme.my.salesforce.com"}
+      deal: {label: Opportunity or account, kind: text}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Search {deal} in the global search at the top (or open the Opportunities tab) and open the matching opportunity.
+      - kind: do
+        text: Look only; don't edit fields or change the stage.
+    read:
+      opportunity: Opportunity name and account
+      stage: Stage and probability
+      amount: Amount
+      close_date: Close date
+      owner: Opportunity owner
+      next_step: Next step and the last logged activity
+    answer: "{opportunity} is at {stage}, {amount}, closing {close_date}; next step {next_step}."
+    tags: [crm, sales, deals]
+
+  - id: pipedrive.log_note
+    title: Add a note to a deal in Pipedrive
+    says:
+      - Add a note to the Acme deal in Pipedrive that they want a demo next week.
+      - Log in Pipedrive that the client asked for a revised quote.
+      - Put a note on this deal saying we sent the contract.
+    kind: act
+    where: chrome
+    region: global
+    sites: [app.pipedrive.com, pipedrive.com]
+    inputs:
+      deal: {label: Deal, kind: text}
+      note: {label: Note, kind: text}
+    open: https://app.pipedrive.com/pipeline
+    steps:
+      - kind: do
+        text: Search {deal} with the search bar at the top and open the deal that matches.
+      - kind: click
+        target: {role: tab, name: Notes}
+      - kind: type
+        note: the note box ("Take notes")
+        value: "{note}"
+    read:
+      deal_found: The deal's title, organization and stage
+    stop: Save
+    tags: [crm, notes, sales]
+
+  # ---- Code and engineering -----------------------------------------------
+
+  - id: github.prs_to_review
+    title: Pull requests waiting for my review
+    says:
+      - Which PRs are waiting for my review?
+      - Do I have any code reviews pending on GitHub?
+      - What pull requests need me?
+    kind: look
+    where: chrome
+    region: global
+    sites: [github.com]
+    open: https://github.com/pulls/review-requested
+    read:
+      count: Number of open pull requests requesting the person's review
+      prs: Each one with title, repository, author, age and its checks status
+      oldest: The longest-waiting pull request and how long it has waited
+    answer: "{count} PRs wait for your review; the oldest is {oldest}."
+    tags: [github, code-review, engineering]
+
+  - id: github.failing_checks
+    title: My pull requests with failing checks
+    says:
+      - Are any of my PRs failing CI?
+      - Why is my pull request red?
+      - Which of my GitHub PRs have broken checks?
+    kind: look
+    where: chrome
+    region: global
+    sites: [github.com]
+    open: https://github.com/pulls?q=is%3Aopen+is%3Apr+author%3A%40me+status%3Afailure
+    steps:
+      - kind: do
+        text: For up to three of the pull requests, open the Checks tab, open the failing job and find the first error line.
+      - kind: do
+        text: Look only; never re-run jobs, push or merge.
+    read:
+      count: Number of the person's open pull requests with failing checks
+      prs: Each one with title, repository and the names of its failing checks
+      causes: The first error line from each failing job opened
+    answer: "{count} of your PRs are failing: {prs}."
+    tags: [github, ci, engineering]
+
+  - id: github.issues_assigned
+    title: GitHub issues assigned to me
+    says:
+      - What GitHub issues are assigned to me?
+      - What's on my plate in GitHub?
+      - Any stale issues assigned to me?
+    kind: look
+    where: chrome
+    region: global
+    sites: [github.com]
+    inputs:
+      repo: {label: Only in repository, kind: text, default: "", hint: "owner/name to narrow it to one repository"}
+    open: https://github.com/search?q=is%3Aissue+is%3Aopen+assignee%3A%40me&type=issues
+    steps:
+      - kind: do
+        text: If a repository was given, add repo:{repo} to the search. Sort by Recently updated.
+    read:
+      count: Number of open issues assigned to the person
+      issues: Each issue with title, repository, labels and last update
+      stale: Issues not updated for more than 14 days
+    answer: "{count} open issues are assigned to you; stale: {stale}."
+    tags: [github, issues, engineering]
+
+  - id: github.changes_since_tag
+    title: What changed since the last release
+    says:
+      - What's changed since v2.3.0?
+      - Write release notes for everything merged since the last tag.
+      - What went into main since the last release?
+    kind: look
+    where: chrome
+    region: global
+    sites: [github.com]
+    inputs:
+      owner: {label: Owner, kind: text, hint: "The user or organization in the repository link"}
+      repo: {label: Repository, kind: text}
+      tag: {label: Since tag, kind: text, hint: "e.g. v2.3.0; if unknown the run reads the latest release first"}
+      branch: {label: Up to branch, kind: text, default: main}
+    open: https://github.com/{owner}/{repo}/compare/{tag}...{branch}
+    steps:
+      - kind: open
+        url: https://github.com/{owner}/{repo}/releases/latest
+        note: Only if the tag wasn't given or the comparison doesn't exist; take the latest release's tag and compare from it.
+      - kind: do
+        text: Read the commit list; merge commits and squash titles name the pull requests. Group them as features, fixes and other.
+    read:
+      commit_count: Number of commits between {tag} and {branch}
+      merged_prs: The pull requests merged in that range, with numbers and titles
+      breaking: Anything marked breaking, a major version bump or a migration
+      contributors: Who contributed
+    answer: "{commit_count} commits since {tag}: {merged_prs}."
+    tags: [github, release, changelog]
+
+  - id: gitlab.mrs_to_review
+    title: Merge requests waiting for my review
+    says:
+      - Which merge requests are waiting for my review in GitLab?
+      - Any MRs assigned to me for review?
+      - What GitLab reviews do I owe people?
+    kind: look
+    where: chrome
+    region: global
+    sites: [gitlab.com]
+    open: https://gitlab.com/dashboard/merge_requests
+    steps:
+      - kind: do
+        text: Open the reviews view (the "Reviews" tab, or filter Reviewer = the person). Look only; don't approve or merge.
+    read:
+      count: Number of open merge requests where the person is a reviewer
+      mrs: Each with title, project, author, age and pipeline status
+      oldest: The longest-waiting one
+    answer: "{count} merge requests wait for your review; the oldest is {oldest}."
+    tags: [gitlab, code-review, engineering]
+
+  # ---- Tickets and tasks --------------------------------------------------
+
+  - id: jira.my_open_issues
+    title: My open Jira tickets
+    says:
+      - What Jira tickets are assigned to me?
+      - What's in my Jira queue right now?
+      - Do I have any overdue tickets?
+      - What should I work on next in Jira?
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Jira address, kind: url, hint: "The team's Jira link, like https://acme.atlassian.net"}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: "Open the issue search (Filters → View all work items, or {site}/issues/), switch to JQL and run: assignee = currentUser() AND statusCategory != Done ORDER BY priority DESC, duedate ASC"
+      - kind: do
+        text: Look only; don't change status or assignee.
+    read:
+      count: Number of unresolved issues assigned to the person
+      issues: Each with key, summary, status, priority and due date
+      overdue: Issues past their due date
+    answer: "{count} open tickets; overdue: {overdue}."
+    tags: [jira, tickets, tasks]
+
+  - id: jira.sprint_status
+    title: How the current sprint is going
+    says:
+      - How's the sprint going?
+      - How many tickets are left in this sprint?
+      - Is anything blocked in the current sprint?
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Jira address, kind: url, hint: "The team's Jira link, like https://acme.atlassian.net"}
+      project: {label: Project key, kind: text, hint: "The letters before the ticket numbers, e.g. WEB"}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: "Open the issue search (Filters → View all work items, or {site}/issues/), switch to JQL and run: project = {project} AND sprint in openSprints() ORDER BY status"
+      - kind: do
+        text: Count the issues by status category (To do, In progress, Done) and note flagged or Blocked ones.
+      - kind: do
+        text: Open the project's board from the sidebar to read the sprint's name and end date.
+    read:
+      sprint: The active sprint's name and end date
+      done: Issues done
+      in_progress: Issues in progress
+      to_do: Issues not started
+      blocked: Flagged or blocked issues, each with key, summary and assignee
+    answer: "{sprint}: {done} done, {in_progress} in progress, {to_do} to do. Blocked: {blocked}."
+    tags: [jira, sprint, agile]
+
+  - id: jira.create_issue
+    title: Create a Jira ticket
+    says:
+      - Create a Jira ticket for the login page bug.
+      - Open a task in the WEB project to update the pricing page.
+      - File a bug that the export button times out.
+    kind: act
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Jira address, kind: url, hint: "The team's Jira link, like https://acme.atlassian.net"}
+      project: {label: Project, kind: text}
+      type: {label: Type, kind: choice, options: [Task, Bug, Story], default: Task}
+      summary: {label: Summary, kind: text}
+      description: {label: Description, kind: text, default: ""}
+    open: "{site}"
+    steps:
+      - kind: click
+        target: {role: button, name: Create}
+        note: The "+ Create" button in the top bar
+      - kind: do
+        text: Choose project {project} and work type {type}.
+      - kind: type
+        target: {role: textbox, name: Summary}
+        value: "{summary}"
+      - kind: do
+        text: Put {description} in Description, if given. Leave assignee, priority and sprint as they are unless the person said otherwise.
+    read:
+      fields: Project, type and summary as filled in
+    stop: Create
+    tags: [jira, tickets, create]
+
+  - id: linear.create_issue
+    title: Create a Linear issue
+    says:
+      - Create a Linear issue to fix the broken signup email.
+      - Add a ticket in Linear for the dark mode bug.
+      - Log an issue in Linear that the dashboard loads slowly.
+    kind: act
+    where: chrome
+    region: global
+    sites: [linear.app]
+    inputs:
+      title: {label: Title, kind: text}
+      description: {label: Description, kind: text, default: ""}
+      team: {label: Team, kind: text, default: the person's usual team}
+    open: https://linear.app/new?title={title}&description={description}
+    steps:
+      - kind: do
+        text: Check the title and description came through; pick team {team}, and set priority, labels or assignee only if the person gave them.
+    read:
+      fields: Team, title and description as filled in
+    stop: Create issue
+    tags: [linear, tickets, create]
+
+  - id: trello.add_card
+    title: Add a card to a Trello board
+    says:
+      - Add a card "Order new badges" to the To Do list on our Trello board.
+      - Put "Book venue for offsite" on the Planning board in Trello.
+      - Add a Trello card for the client feedback.
+    kind: act
+    where: chrome
+    region: global
+    sites: [trello.com]
+    inputs:
+      board: {label: Board, kind: text}
+      list: {label: List, kind: text, default: the first list}
+      title: {label: Card title, kind: text}
+    open: https://trello.com/
+    steps:
+      - kind: do
+        text: Open the board {board} from the boards page.
+      - kind: click
+        target: {role: button, name: Add a card}
+        note: The "Add a card" button at the bottom of the {list} list
+      - kind: type
+        note: the new card's title box
+        value: "{title}"
+      - kind: do
+        text: Never press Enter in the title box; it adds the card. Details and due dates go on the card after the person adds it.
+    read:
+      placement: The board and list the card will go to
+    stop: Add card
+    tags: [trello, tasks, create]
+
+  # ---- Docs and files -----------------------------------------------------
+
+  - id: notion.search
+    title: Find a page in Notion
+    says:
+      - Find our onboarding doc in Notion.
+      - What does our Notion say about the expense policy?
+      - Where's the Q3 roadmap page in Notion?
+    kind: look
+    where: chrome
+    region: global
+    sites: [notion.so, notion.com]
+    inputs:
+      query: {label: Looking for, kind: text}
+    open: https://www.notion.so/
+    steps:
+      - kind: do
+        text: Click Search in the sidebar, type {query}, and open the best match. Look only; don't edit pages.
+    read:
+      matches: The top five results, each with title, where it lives and when it was last edited
+      content: What the best page says about {query}, in a few lines
+    answer: "{content}"
+    tags: [notion, docs, search]
+
+  - id: confluence.search
+    title: Find a page in Confluence
+    says:
+      - Search Confluence for the deployment runbook.
+      - What does our wiki say about on-call?
+      - Find the Confluence page about the holiday policy.
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Confluence address, kind: url, hint: "The team's Confluence link, like https://acme.atlassian.net/wiki"}
+      query: {label: Looking for, kind: text}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Type {query} into the search box at the top and open the full results (on Confluence Cloud that is the wiki's /search page).
+      - kind: do
+        text: Open the best match. Look only; don't edit pages.
+    read:
+      matches: The top five results, each with title, space and last updated date
+      content: What the best page says about {query}, in a few lines
+    answer: "{content}"
+    tags: [confluence, docs, search]
+
+  - id: drive.find_file
+    title: Find a file in Google Drive
+    says:
+      - Find the Q3 board deck in my Drive.
+      - Where's the signed contract with Acme in Google Drive?
+      - Get me the link to the brand guidelines doc.
+    kind: look
+    where: chrome
+    region: global
+    sites: [drive.google.com]
+    inputs:
+      query: {label: Looking for, kind: text, hint: "Words from the file's name or contents"}
+    open: https://drive.google.com/drive/search?q={query}
+    steps:
+      - kind: do
+        text: If there are many results, narrow them with the Type or Modified chips. Look only; don't move, share or delete files.
+    read:
+      files: The best matches, each with name, type, owner, last modified date and folder
+      link: The link to the best match
+    answer: "Best match: {files} ({link})."
+    tags: [drive, files, search]
+
+  - id: sheets.read_range
+    title: Read numbers from a Google Sheet
+    says:
+      - What's in B2:F20 of the budget sheet?
+      - Read me the totals from the sales tracker spreadsheet.
+      - What does the hiring plan sheet say for Q1?
+    kind: look
+    where: chrome
+    region: global
+    sites: [drive.google.com, docs.google.com/spreadsheets]
+    inputs:
+      sheet: {label: Spreadsheet, kind: text, hint: "Its name or words from it"}
+      tab: {label: Tab, kind: text, default: the first tab}
+      range: {label: Range, kind: text, default: the used range, hint: "Like B2:F20, or a column or row heading to find"}
+    open: https://drive.google.com/drive/search?q=type%3Aspreadsheet%20{sheet}
+    steps:
+      - kind: do
+        text: Open the spreadsheet that matches, then the tab {tab}.
+      - kind: do
+        text: Type {range} in the Name box left of the formula bar to jump to it, or find the heading. Look only; don't type into cells.
+    read:
+      values: The cells in the range as a small table, headers first
+      totals: Any total or sum rows in or next to the range
+      last_edit: When the sheet was last edited and by whom, if shown
+    answer: "{values}"
+    tags: [sheets, spreadsheet, files]
+
+  # ---- Calendar, mail and chat --------------------------------------------
+
+  - id: calendar.leave_by
+    title: When to leave for my next meeting
+    says:
+      - When do I have to leave for my 3 pm?
+      - What time should I head out for my next meeting?
+      - Will I make it to the dentist on time if I leave now?
+    kind: look
+    where: chrome
+    region: global
+    sites: [calendar.google.com, google.com/maps]
+    inputs:
+      event: {label: Which meeting, kind: text, default: next event with an address}
+      origin: {label: From, kind: place, default: here}
+      mode: {label: How, kind: choice, options: [driving, transit, walking, bicycling], default: driving}
+    open: https://calendar.google.com/calendar/r/day
+    steps:
+      - kind: do
+        text: Find {event} in the calendar and note its start time and address.
+      - kind: open
+        url: https://www.google.com/maps/dir/?api=1&origin={origin}&destination={event}&travelmode={mode}
+        note: Put the meeting's address in place of {event}.
+      - kind: do
+        text: Set "Arrive by" to the meeting's start time and read the suggested departure.
+    read:
+      meeting: The meeting's title, start time and address
+      leave_by: The latest departure time Maps suggests
+      duration: Expected travel time
+    answer: "Leave by {leave_by} for {meeting} ({duration})."
+    needs: [calendar, location]
+    tags: [calendar, directions]
+
+  - id: calendar.free_slots
+    title: Free time in my calendar this week
+    says:
+      - When am I free this week?
+      - Find me an hour on Thursday or Friday.
+      - When are my manager and I both free next week?
+      - Do I have any gaps for a 30-minute call tomorrow?
+    kind: look
+    where: chrome
+    region: global
+    sites: [calendar.google.com]
+    inputs:
+      week: {label: Week of, kind: date, default: this week}
+      length: {label: At least (minutes), kind: number, default: 30}
+      people: {label: Also free, kind: text, default: "", hint: "Colleagues whose calendars to overlay, by name or email"}
+    open: https://calendar.google.com/calendar/r/week
+    steps:
+      - kind: do
+        text: If {week} isn't the week shown, move to it with the arrows or the mini calendar.
+      - kind: do
+        text: If people were given, type each of {people} into "Search for people" on the left so their busy times overlay.
+      - kind: do
+        text: List gaps of at least {length} minutes inside working hours (the calendar's working hours, else 9 to 17) where everyone is free.
+    read:
+      free_slots: The free gaps, each with day, start and end
+      busiest_day: The day with the least free time
+      conflicts: Overlapping events, if any
+    answer: "Free: {free_slots}."
+    needs: [calendar, contacts]
+    tags: [calendar, scheduling, availability]
+
+  - id: calendar.schedule_meeting
+    title: Set up a meeting in Google Calendar
+    says:
+      - Schedule a 30-minute sync with the design team on Tuesday at 10.
+      - Set up a call with the Acme folks on Friday at 3 pm.
+      - Book a meeting for the project kickoff next Monday morning.
+    kind: act
+    where: chrome
+    region: global
+    sites: [calendar.google.com]
+    inputs:
+      title: {label: Title, kind: text}
+      date: {label: Date, kind: date}
+      start: {label: Start, kind: time}
+      duration: {label: Minutes, kind: number, default: 30}
+      guests: {label: Guests, kind: text, default: "", hint: "Email addresses, comma-separated"}
+      agenda: {label: Agenda, kind: text, default: ""}
+    open: https://calendar.google.com/calendar/r/eventedit?text={title}&details={agenda}&add={guests}
+    steps:
+      - kind: do
+        text: Set the date to {date}, start to {start} and the end {duration} minutes later. Add any guests from {guests} that didn't come through.
+      - kind: do
+        text: Open "Find a time" and check every guest is free; if someone is busy, tell the person instead of moving the time.
+      - kind: do
+        text: Add Google Meet video conferencing unless the person said it's in person.
+    read:
+      conflicts: Guests who are busy at that time
+    stop: Save
+    needs: [calendar, contacts]
+    tags: [calendar, meeting, scheduling]
+
+  - id: gmail.waiting_for_reply
+    title: Emails waiting for my reply
+    says:
+      - Which emails am I supposed to reply to?
+      - Who's waiting on an answer from me?
+      - What did I miss in my inbox this week that needs a response?
+    kind: look
+    where: chrome
+    region: global
+    sites: [mail.google.com]
+    inputs:
+      days: {label: Looking back (days), kind: number, default: 7}
+    open: "https://mail.google.com/mail/u/0/#search/in%3Ainbox+newer_than%3A{days}d+-category%3Apromotions+-category%3Asocial+-category%3Aupdates+-category%3Aforums"
+    steps:
+      - kind: do
+        text: Go through the threads whose last message isn't from the person. Keep the ones that ask them something or wait on them; skip newsletters, notifications and FYIs.
+      - kind: do
+        text: Look only; don't reply, archive or mark anything read.
+    read:
+      count: Number of threads waiting on the person
+      waiting: Each with sender, subject, what they need and how long they've waited
+      oldest: The thread that has waited longest
+    answer: "{count} emails wait for your reply; the oldest is {oldest}."
+    tags: [email, inbox, follow-up]
+
+  - id: slack.unread_mentions
+    title: Slack mentions I haven't seen
+    says:
+      - Did anyone mention me on Slack?
+      - What did I miss on Slack this morning?
+      - Any Slack messages I need to answer?
+    kind: look
+    where: chrome
+    region: global
+    sites: [app.slack.com]
+    inputs:
+      workspace: {label: Workspace, kind: text, default: the one Slack opens on}
+    open: https://app.slack.com/client
+    steps:
+      - kind: do
+        text: If {workspace} isn't the open workspace, switch to it.
+      - kind: do
+        text: Open Activity → Mentions, then check unread direct messages. Look only; don't reply or react.
+    read:
+      mentions: Each unread mention with who, channel, when and what they asked
+      dms: Unread direct messages, each with sender and gist
+      urgent: Anything that looks time-sensitive
+    answer: "Mentions: {mentions}. DMs: {dms}."
+    tags: [slack, chat, inbox]
+
+  - id: outlook.schedule_meeting
+    title: Set up a meeting in Outlook
+    says:
+      - Set up a Teams meeting with the finance team on Wednesday at 2.
+      - Send an Outlook invite for the vendor review next Thursday at 11.
+      - Book an hour in Outlook with the hiring panel on Friday.
+    kind: act
+    where: chrome
+    region: global
+    sites: [outlook.office.com]
+    inputs:
+      title: {label: Title, kind: text}
+      date: {label: Date, kind: date}
+      start: {label: Start, kind: time}
+      end: {label: End, kind: time}
+      guests: {label: Attendees, kind: text, default: "", hint: "Email addresses, comma-separated"}
+      agenda: {label: Agenda, kind: text, default: ""}
+      location: {label: Location, kind: text, default: ""}
+    open: https://outlook.office.com/calendar/deeplink/compose?subject={title}&body={agenda}&to={guests}&startdt={date}T{start}:00&enddt={date}T{end}:00&location={location}
+    steps:
+      - kind: do
+        text: Check the title, attendees and times came through; fix any that didn't.
+      - kind: do
+        text: Turn on "Teams meeting" unless the person said it's in person. Open the Scheduling assistant and note anyone busy.
+      - kind: do
+        text: With no attendees the button reads Save instead of Send; stop there too.
+    read:
+      conflicts: Attendees the Scheduling assistant shows as busy
+    stop: Send
+    needs: [contacts]
+    tags: [outlook, meeting, scheduling]
+
+  - id: zoom.recording_transcript
+    title: Find a Zoom recording and its transcript
+    says:
+      - Find the recording of yesterday's client call on Zoom.
+      - What was decided in the Monday all-hands? Check the Zoom transcript.
+      - Get me the action items from the last Zoom meeting with the agency.
+    kind: look
+    where: chrome
+    region: global
+    sites: [zoom.us]
+    inputs:
+      meeting: {label: Meeting, kind: text, hint: "Its topic, or the day it happened"}
+    open: https://zoom.us/recording
+    steps:
+      - kind: do
+        text: Find {meeting} by topic or date range in the cloud recordings and open it.
+      - kind: do
+        text: Open the audio transcript (or the AI Companion summary, if there is one) and read it through.
+      - kind: do
+        text: Look only; don't change sharing settings, download or delete recordings.
+    read:
+      recording: Topic, date and length of the recording
+      summary: What was discussed, in a few lines
+      decisions: Decisions made
+      action_items: Action items, each with who it falls to
+    answer: "{recording}: {summary} Decisions: {decisions}. To do: {action_items}."
+    tags: [zoom, meetings, transcript]
+
+  # ---- Design, deploys and cloud ------------------------------------------
+
+  - id: figma.open_comments
+    title: Open comments on a Figma file
+    says:
+      - What comments are still open on the homepage design in Figma?
+      - Any Figma feedback I need to deal with?
+      - Show me the unresolved comments on the onboarding file.
+    kind: look
+    where: chrome
+    region: global
+    sites: [figma.com]
+    inputs:
+      file: {label: Figma file, kind: text}
+    open: https://www.figma.com/files/recents-and-sharing
+    steps:
+      - kind: do
+        text: Find {file} (search or recents) and open it.
+      - kind: do
+        text: Open the comments panel and show unresolved comments only. Look only; don't reply or resolve.
+    read:
+      count: Number of unresolved comments
+      comments: Each with author, page or frame, what it says and how old it is
+      for_me: Comments that mention the person
+    answer: "{count} open comments on {file}; for you: {for_me}."
+    tags: [figma, design, feedback]
+
+  - id: vercel.deploy_status
+    title: Did the Vercel deploy go through
+    says:
+      - Did the latest deploy on Vercel succeed?
+      - Is production up to date with main?
+      - Why did the Vercel build fail?
+    kind: look
+    where: chrome
+    region: global
+    sites: [vercel.com]
+    inputs:
+      project: {label: Project, kind: text}
+    open: https://vercel.com/dashboard
+    steps:
+      - kind: do
+        text: Open the project {project} and its Deployments tab. Look only; never redeploy, promote or roll back.
+      - kind: do
+        text: If the latest deployment failed, open it and read the end of the build log.
+    read:
+      status: The latest production deployment's status (Ready, Error, Building or Canceled)
+      commit: Its commit message, branch and author
+      when: When it was deployed
+      error: The last error lines of the build log, if it failed
+    answer: "Latest production deploy is {status} ({commit}, {when})."
+    tags: [deploy, hosting, engineering]
+
+  - id: cloudflare.traffic
+    title: Website traffic in Cloudflare
+    says:
+      - How much traffic did Cloudflare see on our domain this week?
+      - Are we getting attacked? Check Cloudflare.
+      - What's our cache hit rate on Cloudflare?
+    kind: look
+    where: chrome
+    region: global
+    sites: [dash.cloudflare.com]
+    inputs:
+      domain: {label: Domain, kind: text}
+      period: {label: Period, kind: choice, options: [last 24 hours, last 7 days, last 30 days], default: last 7 days}
+    open: https://dash.cloudflare.com/
+    steps:
+      - kind: do
+        text: Pick the account, then the domain {domain}, then Analytics & Logs → HTTP Traffic (called Traffic in older views). Set the period to {period}.
+      - kind: do
+        text: Look only; don't change any setting, rule or DNS record.
+    read:
+      requests: Total requests
+      visitors: Unique visitors
+      bandwidth: Data served
+      cached: Share of requests served from cache
+      threats: Requests mitigated or threats blocked
+      top_countries: The countries with the most traffic
+    answer: "{requests} requests from {visitors} visitors over {period}; {cached} cached, {threats} mitigated."
+    tags: [cloudflare, traffic, security]
+
+  - id: aws.month_to_date_cost
+    title: AWS bill so far this month
+    says:
+      - How much have we spent on AWS this month?
+      - What's the AWS forecast for the month?
+      - Which AWS services cost the most?
+    kind: look
+    where: chrome
+    region: global
+    sites: [console.aws.amazon.com]
+    open: https://console.aws.amazon.com/costmanagement/home
+    steps:
+      - kind: do
+        text: Look only. Never change budgets, payment methods, plans or billing settings.
+      - kind: do
+        text: Read the month-to-date and forecast figures on the home page, then open Cost Explorer for this month grouped by Service.
+      - kind: do
+        text: If the person's role has no billing access, say so; don't touch permissions.
+    read:
+      month_to_date: Cost so far this month
+      forecast: Forecast for the whole month
+      vs_last_month: Last month's cost for the same period
+      top_services: The five most expensive services this month with their cost
+    answer: "{month_to_date} so far this month, forecast {forecast}; top services {top_services}."
+    tags: [cloud, billing, costs]
+
+  - id: gcp.month_to_date_cost
+    title: Google Cloud bill so far this month
+    says:
+      - How much have we spent on Google Cloud this month?
+      - What's driving our GCP costs?
+      - Which Google Cloud project costs the most?
+    kind: look
+    where: chrome
+    region: global
+    sites: [console.cloud.google.com]
+    inputs:
+      billing_account: {label: Billing account, kind: text, default: the only or first one}
+    open: https://console.cloud.google.com/billing
+    steps:
+      - kind: do
+        text: Look only. Never change budgets, payment methods or billing settings.
+      - kind: do
+        text: Open {billing_account}, read the Overview, then Reports for the current month grouped by Service and then by Project.
+    read:
+      month_to_date: Costs so far this month
+      forecast: Forecasted total for the month
+      top_services: The five most expensive services with their cost
+      top_projects: The most expensive projects with their cost
+    answer: "{month_to_date} so far, forecast {forecast}; top services {top_services}."
+    tags: [cloud, billing, costs]
+
+  - id: status.vendor_outage
+    title: Is a service down right now
+    says:
+      - Is Slack down?
+      - Is GitHub having an outage right now?
+      - Is it just me or is Zoom broken?
+      - Any incidents on AWS today?
+    kind: look
+    where: any
+    region: global
+    sites: [statusgator.com]
+    inputs:
+      vendor: {label: Service, kind: text, hint: "A short name like slack, github, aws, stripe or zoom"}
+    open: https://statusgator.com/services/{vendor}
+    steps:
+      - kind: do
+        text: Read the current status and recent incidents, then follow the link to the vendor's official status page and confirm there, since aggregators can lag.
+    read:
+      status: Current status as the official page states it
+      incident: Any open incident with its title, affected parts, start time and latest update
+      official_page: The official status page's address
+    answer: "{vendor}: {status}. {incident}"
+    tags: [status, outage, vendors]
+
+  # ---- Time, expenses and posting ------------------------------------------
+
+  - id: harvest.log_hours
+    title: Log hours in Harvest
+    says:
+      - Log 3 hours on the Acme website project in Harvest for today.
+      - Put 90 minutes of design review into Harvest for yesterday.
+      - Add my hours for the client workshop to Harvest.
+    kind: act
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Harvest address, kind: url, hint: "The account's link, like https://acme.harvestapp.com; https://id.getharvest.com lists the person's accounts"}
+      date: {label: Day, kind: date, default: today}
+      project: {label: Project, kind: text}
+      task: {label: Task, kind: text, default: the project's usual task}
+      hours: {label: Hours, kind: text, hint: "Like 1.5 or 1:30"}
+      notes: {label: Notes, kind: text, default: ""}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Open Time in the top menu and move to the day {date} with the calendar arrows.
+      - kind: click
+        target: {role: button, name: Track time}
+        note: The green "+ Track time" button
+      - kind: do
+        text: Pick project {project} and task {task}, put {notes} in notes and {hours} in the hours box.
+    read:
+      entry: Project, task, day and hours as filled in
+    stop: Save entry
+    tags: [timesheet, hours, billing]
+
+  - id: expensify.expense_report
+    title: File an expense in Expensify
+    says:
+      - Put in an expense for the 45 euro client lunch yesterday.
+      - Submit my taxi receipt to Expensify.
+      - File the conference hotel as an expense.
+    kind: act
+    where: chrome
+    region: global
+    sites: [new.expensify.com, expensify.com]
+    inputs:
+      amount: {label: Amount, kind: text, hint: "With currency, like 45.00 EUR"}
+      merchant: {label: Merchant, kind: text}
+      date: {label: Date, kind: date}
+      category: {label: Category, kind: text, default: ""}
+      description: {label: Description, kind: text, default: ""}
+      receipt: {label: Receipt, kind: file, default: ""}
+      workspace: {label: Workspace, kind: text, default: the person's company workspace}
+    open: https://new.expensify.com/
+    steps:
+      - kind: do
+        text: Click the green Create (+) button and start a new expense; use Scan if there's a receipt, Manual if not.
+      - kind: upload
+        note: The receipt, if one was given
+      - kind: do
+        text: Enter {amount}, choose {workspace}, then fill merchant {merchant}, date {date}, category {category} and description {description}.
+      - kind: do
+        text: Stop at the final confirm button whatever its label (Submit, Submit plus the amount, or Create expense); on many workspaces creating the expense submits it.
+    read:
+      expense: Amount, merchant, date and workspace as filled in
+    stop: Submit
+    needs: [files]
+    tags: [expenses, receipts, finance]
+
+  - id: linkedin.write_post
+    title: Write a LinkedIn post
+    says:
+      - Draft a LinkedIn post announcing our new hire.
+      - Post on LinkedIn that we're speaking at the conference next week.
+      - Put this announcement on our company LinkedIn page.
+    kind: act
+    where: chrome
+    region: global
+    sites: [linkedin.com]
+    inputs:
+      text: {label: Post, kind: text}
+      as: {label: Post as, kind: choice, options: [me, company page], default: me}
+      page: {label: Company page, kind: text, default: "", hint: "The page's id or name from its LinkedIn link, if posting as the company"}
+    open: https://www.linkedin.com/feed/?shareActive=true
+    steps:
+      - kind: open
+        url: https://www.linkedin.com/company/{page}/admin/
+        note: Only when posting as the company page; then click Create → Start a post there.
+      - kind: do
+        text: If the post box isn't open, click "Start a post".
+      - kind: type
+        note: the post editor
+        value: "{text}"
+      - kind: do
+        text: Check the author shown is right (the person or the page) and the audience is what they want.
+    read:
+      author: Who the post will appear from
+    stop: Post
+    tags: [linkedin, social, post]
+
+  - id: x.write_post
+    title: Write a post on X
+    says:
+      - Tweet that our new feature is live.
+      - Draft an X post about the webinar on Thursday.
+      - Post this on our X account.
+    kind: act
+    where: chrome
+    region: global
+    sites: [x.com]
+    inputs:
+      text: {label: Post, kind: text}
+    open: https://x.com/intent/post?text={text}
+    steps:
+      - kind: do
+        text: Check the account shown is the right one and the text fits the length limit; shorten it with the person if not.
+    read:
+      account: The account the post will go out from
+      length: Characters used and the limit
+    stop: Post
+    tags: [x, social, post]
+
+  - id: linkedin.job_post
+    title: Draft a job post on LinkedIn
+    says:
+      - Post a job on LinkedIn for a senior backend engineer.
+      - Draft a LinkedIn job ad for a part-time office manager.
+      - Put our marketing lead opening on LinkedIn Jobs.
+    kind: act
+    where: chrome
+    region: global
+    sites: [linkedin.com]
+    inputs:
+      title: {label: Job title, kind: text}
+      company: {label: Company, kind: text, default: the person's company page}
+      location: {label: Location, kind: place}
+      workplace: {label: Workplace, kind: choice, options: [On-site, Hybrid, Remote], default: On-site}
+      type: {label: Job type, kind: choice, options: [Full-time, Part-time, Contract, Temporary, Internship], default: Full-time}
+      description: {label: Description, kind: text, default: drafted from the title and what the agent knows}
+    open: https://www.linkedin.com/talent/post-a-job
+    steps:
+      - kind: do
+        text: Fill job title {title}, company {company}, workplace {workplace}, location {location} and job type {type}, then continue.
+      - kind: do
+        text: Put {description} in the description; add screening questions only if the person gave them.
+      - kind: do
+        text: If LinkedIn asks for a budget, a card or a promotion, pick the free option or stop and tell the person. Never enter payment details.
+    read:
+      job: Title, company, location and type as filled in
+      cost: Whether this post is free or LinkedIn wants a budget
+    stop: Post job
+    tags: [hiring, linkedin, jobs]
+
+  # ---- Scheduling links, signatures and admin -----------------------------
+
+  - id: calendly.open_slots
+    title: Open times on a Calendly link
+    says:
+      - What times are open on this Calendly link next week?
+      - When can I book a call with the vendor through their Calendly?
+      - What slots does my Calendly show for Friday?
+    kind: look
+    where: any
+    region: global
+    sites: [calendly.com]
+    inputs:
+      user: {label: Calendly name, kind: text, hint: "The part right after calendly.com/"}
+      event: {label: Event, kind: text, default: "", hint: "The part after the name, like 30min"}
+      date: {label: Around, kind: date, default: this week}
+    open: https://calendly.com/{user}/{event}
+    steps:
+      - kind: do
+        text: If no event was given, pick the event type whose length fits the request.
+      - kind: do
+        text: Move to the month of {date} and open the days around it to list the times. Don't book anything.
+    read:
+      event_type: The event's name and length
+      slots: Open days and times near {date}
+      time_zone: The time zone the times are shown in
+    answer: "{event_type}: open {slots} ({time_zone})."
+    tags: [calendly, scheduling, availability]
+
+  - id: docusign.waiting_envelopes
+    title: DocuSign envelopes waiting
+    says:
+      - Do I have anything to sign in DocuSign?
+      - Who still hasn't signed the contract we sent?
+      - What DocuSign envelopes are waiting on others?
+    kind: look
+    where: chrome
+    region: global
+    sites: [app.docusign.com]
+    open: https://app.docusign.com/documents
+    steps:
+      - kind: do
+        text: Read the Action Required folder, then Waiting for Others. Look only; never sign, decline, void or resend.
+    read:
+      action_required: Envelopes waiting for the person's signature, each with subject, sender, sent date and expiry
+      waiting_on_others: Envelopes waiting on someone else, each with subject, who hasn't signed and since when
+      expiring_soon: Envelopes that expire within a week
+    answer: "To sign: {action_required}. Waiting on others: {waiting_on_others}."
+    tags: [docusign, contracts, signatures]
+
+  - id: googleadmin.user_lookup
+    title: Look up a user in Google Workspace admin
+    says:
+      - Is the new hire's Google account set up?
+      - When did this user last sign in to Google Workspace?
+      - Does the contractor account have 2-step verification on?
+    kind: look
+    where: chrome
+    region: global
+    sites: [admin.google.com]
+    inputs:
+      user: {label: User, kind: text, hint: "Name or email address"}
+    open: https://admin.google.com/ac/users
+    steps:
+      - kind: do
+        text: Search {user} in the users list and open the account. Look only; never reset a password, suspend, delete or change settings.
+    read:
+      account: Name, email and organizational unit
+      status: Active, suspended or archived
+      last_sign_in: Last sign-in time
+      two_step: 2-step verification enrollment and enforcement
+      licenses: Assigned licenses
+      groups: Groups the user belongs to
+    answer: "{account} is {status}; last sign-in {last_sign_in}; 2-step {two_step}."
+    tags: [admin, workspace, users]
