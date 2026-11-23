@@ -433,6 +433,22 @@ Checked in Chromium with the unpacked extension against a deck with a fake
 agent, dark and light: chips on an Amazon page, the store, search, a
 category, a playbook's form, the shelf, an act's stop note, a run to Done.
 
+### In Flight Deck: the Playbooks store
+
+The same store is in Captain itself — **Playbooks** in the nav, under Agents
+(`flight-deck/src/components/playbooks/PlaybookStorePanel.tsx`, routes
+`/fd/playbooks` with the person's sign-in, the same functions as the panel's).
+It looks like the Agent store: a big heading, category pills and a search,
+Popular as large cards (a swipe row on a phone), My playbooks, then each
+category as two columns of rows. A playbook opens as a sheet: badges, the
+stop note for an act, a note when it needs Captain for Chrome and that isn't
+set up or lent (`/fd/browsers`), the same form, "Who does it" and **Run in
+‹agent›'s chat**. Run asks the deck to word it (`POST /fd/playbooks/{id}/compose`
+— checked like a run, counted) and Flight Deck opens that agent's chat and
+sends it as the person's message: the values as a list, the stop for an act,
+and one line for the agent (`web_playbook` · id · inputs). The shelf is one
+shelf: a star here is a star in the panel.
+
 ## Versions: the extension against the deck's copy
 
 The extension is loaded unpacked, so nothing updates it — a deck that moves on

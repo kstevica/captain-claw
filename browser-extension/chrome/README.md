@@ -216,6 +216,8 @@ page to open, what to do there, what to read off it.
   tool and you follow it here like any clip. One that books, buys, sends or
   submits says so and **stops before its last button** — you press it.
 - A place is a town or an address: a link can't carry "here".
+- The same store is in Captain (Flight Deck) under **Playbooks** — Run there
+  sends it to an agent in its chat. Your My playbooks are the same in both.
 
 ## Record a process — an agent does it after that
 
