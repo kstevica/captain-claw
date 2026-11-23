@@ -23,9 +23,11 @@ const FETCH_PARALLEL = 3
 const $view = document.getElementById('view')
 const $deckName = document.getElementById('deckName')
 const $btnHistory = document.getElementById('btnHistory')
+const $btnPlaybooks = document.getElementById('btnPlaybooks')
 const $btnSettings = document.getElementById('btnSettings')
 const $toast = document.getElementById('toast')
 $btnHistory.innerHTML = icon('history')
+$btnPlaybooks.innerHTML = icon('bolt')
 $btnSettings.innerHTML = icon('settings')
 
 const S = {
@@ -166,6 +168,8 @@ function restoreScroll(before) {
 function render() {
   const connected = !!S.conn
   $btnHistory.hidden = !connected || S.view === 'connect' || S.view === 'agent'
+  $btnPlaybooks.hidden = $btnHistory.hidden
+  $btnPlaybooks.classList.toggle('on', S.view === 'pbs' || S.view === 'pb')
   $btnSettings.hidden = !connected || S.view === 'connect' || S.view === 'agent'
   $deckName.textContent = connected ? (S.me?.deck?.name ? `${S.me.deck.name} · ${hostOf(S.conn.url)}` : hostOf(S.conn.url)) : 'Not connected'
   const before = listScroll()
@@ -237,6 +241,8 @@ function renderView() {
     else if (S.view === 'recs') $view.innerHTML = viewRecs()
     else if (S.view === 'rec-run') $view.innerHTML = viewRecRun()
     else if (S.view === 'run') $view.innerHTML = viewRun()
+    else if (S.view === 'pbs') $view.innerHTML = viewStore()
+    else if (S.view === 'pb') $view.innerHTML = viewPb()
     else if (S.view === 'anon') $view.innerHTML = viewAnon()
     else if (S.view === 'history') $view.innerHTML = viewHistory()
     else if (S.view === 'settings') $view.innerHTML = viewSettings()
@@ -408,6 +414,7 @@ async function scan() {
   const tab = await currentTab()
   const changed = !S.tab || !tab || S.tab.id !== tab.id || S.tab.url !== tab.url
   S.tab = tab
+  pbForTab(tab)
   S.needsPermission = ''
   S.scanError = ''
   if (changed) {
@@ -755,6 +762,7 @@ function viewMain() {
         <select class="select" id="agent">${agentOptions}</select>
       </div>` : `<div class="notice">No agents yet — create or start one in Flight Deck, then <button class="btn" data-act="retry-me" style="padding:2px 8px">reload</button></div>`}
     <div class="card">${pageBlock}</div>
+    ${viewPbStrip()}
     ${pageNotice}
     ${focus}
     <div>
@@ -1598,7 +1606,7 @@ function viewRun() {
       <button class="icon-btn" data-act="back" title="Back to the page">${icon('back')}</button>
       <div class="grow">
         <div style="font-weight:600" class="ellipsis">${esc(run.actionLabel || 'Clip')}: ${esc(run.title)}</div>
-        <div class="dim ellipsis">${esc(run.agent)} · ${esc(hostOf(run.url))}</div>
+        <div class="dim ellipsis">${esc([run.agent, hostOf(run.url)].filter(Boolean).join(' · '))}</div>
       </div>
     </div>
     ${viewWatchTask(run.watch)}
@@ -1617,7 +1625,7 @@ function viewRun() {
         <span class="elapsed" id="elapsed">${esc(elapsed(run.at))}</span>
         ${S.follow ? '' : `<button class="icon-btn" data-act="follow" title="Show the latest">${icon('chevron', 'sm')}</button>`}
       </div>` : ''}
-    ${files ? `<div class="card"><div class="label">${run.action === 'recording' ? 'In the run’s folder' : 'In the clip folder'}</div><div class="out-files">${files}</div>
+    ${files ? `<div class="card"><div class="label">${run.action === 'recording' || run.action === 'playbook' ? 'In the run’s folder' : 'In the clip folder'}</div><div class="out-files">${files}</div>
       <div class="dim" style="margin-top:6px">${esc(run.vfs || '')}</div></div>` : ''}
     ${run.done ? `
       <div class="row">
@@ -1626,7 +1634,7 @@ function viewRun() {
       </div>
       <div class="row" style="justify-content:center">${newTopicButton(run.agentSlug)}</div>
       <div>
-        <textarea id="followUp" rows="2" placeholder="${run.action === 'recording' ? 'Tell it what to do next, or what went wrong…' : 'Ask a follow-up about this page…'}">${esc(S.followUp)}</textarea>
+        <textarea id="followUp" rows="2" placeholder="${run.action === 'recording' || run.action === 'playbook' ? 'Tell it what to do next, or what went wrong…' : 'Ask a follow-up about this page…'}">${esc(S.followUp)}</textarea>
         <button class="btn primary block" data-act="follow-up" style="margin-top:6px">${icon('send', 'sm')} Ask ${esc(run.agent)}</button>
       </div>` : ''}`
 }
@@ -1646,7 +1654,7 @@ async function sendFollowUp() {
   try {
     const res = await upload(S.conn, '/fd/clip/send', form, () => {})
     startRun({ clip_id: res.clip_id, folder: res.folder, vfs: res.vfs, agent: res.agent || run.agent, agentSlug: run.agentSlug,
-               title: run.title, url: run.url, action: run.action === 'recording' ? 'recording' : 'ask', actionLabel: 'Follow-up' })
+               title: run.title, url: run.url, action: run.action === 'recording' || run.action === 'playbook' ? run.action : 'ask', actionLabel: 'Follow-up' })
   } catch (e) {
     if (e instanceof AuthError) return disconnected(e.message)
     toast(e.message)
@@ -2350,6 +2358,476 @@ $askLayer.addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); sendAnswer(ev.target.closest('form'), false) }
 })
 
+// ── web playbooks: chips for the site in front, the store, a playbook ──
+//
+// Flight Deck serves them (/fd/clip/playbooks, browser_playbooks.py): the
+// ones for the page's site, the store (categories, search, the person's
+// shelf) and one playbook's form. Run hands it to the chosen agent, which
+// runs it with its web_playbook tool; the panel follows that like any run.
+
+const PB_HUE = { travel: 205, local: 152, shopping: 330, accounts: 35, work: 250, research: 188, money: 140, home: 18, media: 280, regional: 0 }
+const PB_ICON = { travel: 'plane', local: 'pin', shopping: 'bag', accounts: 'receipt', work: 'briefcase', research: 'search', money: 'coins', home: 'home', media: 'film', regional: 'flag' }
+const PB_WHERE = { any: 'Any browser', prefer_chrome: 'Best in your Chrome', chrome: 'Your Chrome, signed in' }
+const PB_FOR_KEEP_MS = 60 * 1000
+const PB_SEARCH_WAIT_MS = 180
+
+const PB = {
+  site: '', url: '', chips: [], recsHere: [], more: 0, at: 0, asked: '',   // the page in front
+  store: null, storeError: '', cat: '', q: '', items: null, searching: false, listError: '',
+  open: null,           // one playbook: {book, values, note, error, sending, loading}
+  back: 'main',         // where its Back goes
+  region: '',
+}
+
+const pbRegion = () => {
+  if (PB.region) return PB.region
+  const m = /^[a-z]{2,3}-([A-Za-z]{2})\b/.exec(navigator.language || '')
+  PB.region = m ? m[1].toLowerCase() : ''
+  return PB.region
+}
+const flagOf = (cc) => (/^[a-z]{2}$/i.test(cc || '') ? String.fromCodePoint(...[...cc.toUpperCase()].map((c) => 0x1F1E6 + c.charCodeAt(0) - 65)) : '')
+const pbSiteName = (site) => String(site || '').replace(/^www\./, '').replace(/\/+$/, '')
+const pbBrand = (host) => String(host || '').replace(/^www\./, '').split('.')[0]
+// A link can't carry where the person is: they give the town or address.
+const PB_HERE = /^\s*(here|me|my location|current location|where i am|home)\s*[.!]?\s*$/i
+
+function pbTile(p, cls = '') {
+  const lead = String(p.id || '').split('.')[0]
+  const letter = lead && lead !== 'web' ? lead.replace(/^\d+/, '')[0] || lead[0] : ''
+  const inner = letter ? esc(letter.toUpperCase()) : icon(PB_ICON[p.category] || 'bolt')
+  return `<span class="pb-tile ${cls}" style="--h:${PB_HUE[p.category] ?? 250}" aria-hidden="true">${inner}</span>`
+}
+
+function pbMeta(p) {
+  const bits = [p.site ? esc(pbSiteName(p.site)) : 'a site you name']
+  bits.push(p.kind === 'act' ? `<span class="pb-kind act">Fills it in</span>` : 'Looks it up')
+  if (p.where === 'chrome') bits.push('your Chrome')
+  if (p.region && p.region.length === 2) bits.push(`${flagOf(p.region)} ${esc(p.region.toUpperCase())}`)
+  return bits.join(' · ')
+}
+
+function pbRow(p) {
+  return `
+    <div class="pb-row" role="button" tabindex="0" data-pb="${esc(p.id)}" title="${esc(p.hint || p.title)}">
+      ${pbTile(p)}
+      <div class="grow">
+        <div class="pb-title">${esc(p.title)}</div>
+        <div class="pb-meta">${pbMeta(p)}</div>
+      </div>
+      <button class="pb-add ${p.mine ? 'on' : ''}" data-pb-shelf="${esc(p.id)}" aria-pressed="${!!p.mine}"
+        title="${p.mine ? 'On My playbooks — take it off' : 'Add to My playbooks'}">${icon(p.mine ? 'check' : 'plus')}</button>
+    </div>`
+}
+
+const pbList = (items) => `<div class="pb-list">${items.map(pbRow).join('')}</div>`
+const pbSkeleton = (n = 4) => `<div class="pb-list">${'<div class="pb-skel"></div>'.repeat(n)}</div>`
+
+// ── the chips under the page card ──
+
+async function pbForTab(tab = S.tab) {
+  const url = tab?.url || ''
+  if (!S.conn || S.conn.agent || !/^https?:/i.test(url)) {
+    if (PB.url) { PB.url = ''; PB.site = ''; PB.chips = []; PB.recsHere = []; PB.more = 0 }
+    return
+  }
+  let host = ''
+  try { host = new URL(url).host } catch { return }
+  const key = host + new URL(url).pathname.split('/').slice(0, 2).join('/')   // a site's part: google.com/maps
+  if (PB.asked === key && Date.now() - PB.at < PB_FOR_KEEP_MS) return
+  PB.asked = key
+  try {
+    const got = await api(S.conn, `/fd/clip/playbooks/for?url=${encodeURIComponent(url)}`)
+    if (PB.asked !== key) return
+    PB.url = url
+    PB.site = got.site || ''
+    PB.chips = got.items || []
+    PB.recsHere = got.recordings || []
+    PB.more = got.more || 0
+    PB.at = Date.now()
+    if (S.view === 'main') render()
+  } catch (e) {
+    PB.asked = ''
+    if (e instanceof AuthError) disconnected(e.message)
+    // An older Flight Deck has no playbooks: no chips, nothing to say.
+  }
+}
+
+function viewPbStrip() {
+  if (!PB.chips.length && !PB.recsHere.length) return ''
+  const fav = S.tab?.favIconUrl && /^https?:|^data:image\//.test(S.tab.favIconUrl) ? S.tab.favIconUrl : ''
+  const chip = (p) => `<button class="pb-chip" data-pb="${esc(p.id)}" title="${esc(p.hint || p.title)}">
+      ${fav ? `<img class="fav" src="${esc(fav)}" alt="">` : pbTile(p, 'sm')}<span>${esc(p.title)}</span></button>`
+  const recs = PB.recsHere.map((r) => `<button class="pb-chip own" data-rec-run="${esc(r.id)}" title="Your recording · ${esc(plural(r.steps, 'step'))}">
+      <span class="rec-dot"></span><span>${esc(r.name)}</span></button>`).join('')
+  return `
+    <div class="pb-strip">
+      <div class="label-row"><span class="label" style="margin:0">Do it here</span><span class="grow"></span>
+        <button class="link-btn" data-act="pb-store-site">${PB.chips.length + PB.more > PB.chips.length ? `All ${PB.chips.length + PB.more}` : 'More'} ${icon('arrowright', 'sm')}</button></div>
+      <div class="pb-chips">${recs}${PB.chips.map(chip).join('')}</div>
+    </div>`
+}
+
+// ── the store ──
+
+async function openStore({ cat = PB.cat, q = PB.q, site = false } = {}) {
+  PB.cat = cat
+  PB.q = q
+  if (site && PB.site) { PB.q = ''; PB.cat = '' }
+  S.view = 'pbs'
+  render()
+  window.scrollTo(0, 0)
+  if (!PB.store) loadStore()
+  if (PB.q || PB.cat) pbSearch(true)
+}
+
+async function loadStore() {
+  PB.storeError = ''
+  try {
+    PB.store = await api(S.conn, `/fd/clip/playbooks?region=${encodeURIComponent(pbRegion())}`)
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    PB.storeError = /404/.test(e.message) ? 'This Flight Deck has no playbooks yet — it needs an update.' : e.message
+  }
+  if (S.view === 'pbs') render()
+}
+
+let pbSearchTimer = 0
+let pbSearchSeq = 0
+function pbSearch(now = false) {
+  clearTimeout(pbSearchTimer)
+  if (!PB.q.trim() && !PB.cat) { PB.items = null; PB.searching = false; render(); return }
+  PB.searching = true
+  const go = async () => {
+    const seq = ++pbSearchSeq
+    const qs = new URLSearchParams({ q: PB.q.trim(), category: PB.cat, region: pbRegion(), limit: '40' })
+    try {
+      const got = await api(S.conn, `/fd/clip/playbooks/search?${qs}`)
+      if (seq !== pbSearchSeq) return
+      PB.items = got.items || []
+      PB.listError = ''
+    } catch (e) {
+      if (e instanceof AuthError) return disconnected(e.message)
+      if (seq !== pbSearchSeq) return
+      PB.listError = e.message
+    }
+    PB.searching = false
+    if (S.view === 'pbs') render()
+  }
+  if (now) go()
+  else pbSearchTimer = setTimeout(go, PB_SEARCH_WAIT_MS)
+}
+
+function viewStore() {
+  const st = PB.store
+  const cats = st?.categories || []
+  const mineN = st?.shelf?.length || 0
+  const catBtn = (id, label, ic, n) => `<button class="pb-cat ${PB.cat === id ? 'on' : ''}" data-pb-cat="${esc(id)}" aria-pressed="${PB.cat === id}">
+      ${ic ? icon(ic) : ''}${esc(label)}${n != null ? ` <span class="n">${n}</span>` : ''}</button>`
+  const head = `
+    <div class="pb-head">
+      <button class="icon-btn" data-act="pb-back" title="Back">${icon('back')}</button>
+      <div class="grow"><div class="pb-h1">Playbooks</div>
+        <div class="dim">${st ? `${st.total} ready-made ways to get things done` : 'Ready-made ways to get things done'}</div></div>
+    </div>
+    <div class="pb-sticky" id="pbSticky">
+      <div class="search pb-search">${icon('search', 'sm')}<input type="search" id="pbSearch" placeholder="What do you want done? Try “track a parcel”" value="${esc(PB.q)}" autocomplete="off" spellcheck="false"></div>
+      <div class="pb-cats">
+        ${catBtn('', 'All', 'grid')}${mineN ? catBtn('mine', 'Mine', 'star', mineN) : ''}
+        ${cats.map((c) => catBtn(c.id, c.label, c.icon)).join('')}
+      </div>
+    </div>`
+  if (PB.storeError) return head + `<div class="notice err">${esc(PB.storeError)}</div>`
+  if (!st) return head + pbSkeleton(6)
+
+  if (PB.q.trim() || PB.cat) {
+    const catName = PB.cat === 'mine' ? 'My playbooks' : cats.find((c) => c.id === PB.cat)?.label || ''
+    let body
+    if (PB.listError) body = `<div class="notice err">${esc(PB.listError)}</div>`
+    else if (PB.items === null) body = pbSkeleton()
+    else if (!PB.items.length) {
+      body = `<div class="pb-empty">${icon('search')}<div>${PB.q.trim() ? `Nothing for “${esc(PB.q.trim())}”${catName ? ` in ${esc(catName)}` : ''}.` : 'Nothing here yet.'}</div>
+        <div class="dim" style="margin-top:4px">Ask your agent anyway — it works sites step by step, or record it once.</div></div>`
+    } else if (PB.cat === 'regional' && !PB.q.trim()) {
+      const by = {}
+      for (const p of PB.items) (by[p.region] = by[p.region] || []).push(p)
+      body = Object.entries(by).map(([cc, items]) => `
+        <div class="pb-section"><div class="pb-section-head"><span class="t">${flagOf(cc)} ${esc(cc.toUpperCase())}</span><span class="n">${items.length}</span></div>${pbList(items)}</div>`).join('')
+    } else {
+      body = `<div class="pb-section">
+        <div class="pb-section-head"><span class="t">${PB.q.trim() ? `Best for “${esc(PB.q.trim())}”` : esc(catName)}</span>
+          <span class="n">${PB.items.length}${PB.searching ? ' · …' : ''}</span></div>${pbList(PB.items)}</div>`
+    }
+    return head + body
+  }
+
+  const sections = []
+  if (PB.chips.length) {
+    sections.push(`<div class="pb-section"><div class="pb-section-head">${S.tab?.favIconUrl ? `<img class="fav" src="${esc(S.tab.favIconUrl)}" alt="" style="width:14px;height:14px;border-radius:3px">` : icon('globe', 'sm')}
+      <span class="t">On ${esc(PB.site)}</span><span class="n">${PB.chips.length + PB.more}</span>
+      ${PB.more ? `<button class="link-btn pb-see" data-pb-q="${esc(pbBrand(PB.site))}">See all ${icon('arrowright', 'sm')}</button>` : ''}</div>${pbList(PB.chips)}</div>`)
+  }
+  if (mineN) {
+    sections.push(`<div class="pb-section"><div class="pb-section-head">${icon('star', 'sm')}<span class="t">My playbooks</span><span class="n">${mineN}</span>
+      ${mineN > 4 ? `<button class="link-btn pb-see" data-pb-cat="mine">See all ${icon('arrowright', 'sm')}</button>` : ''}</div>${pbList(st.shelf.slice(0, 4))}</div>`)
+  }
+  sections.push(`<div class="pb-section"><div class="pb-section-head">${icon('sparkles', 'sm')}<span class="t">Popular</span></div>${pbList(st.popular)}</div>`)
+  for (const c of cats) {
+    const top = st.top?.[c.id] || []
+    if (!top.length) continue
+    sections.push(`<div class="pb-section"><div class="pb-section-head">${icon(c.icon, 'sm')}<span class="t">${esc(c.label)}</span><span class="n">${c.count}</span>
+      <button class="link-btn pb-see" data-pb-cat="${esc(c.id)}">See all ${icon('arrowright', 'sm')}</button></div>${pbList(top)}</div>`)
+  }
+  return head + sections.join('')
+}
+
+// ── one playbook: what it does, its form, Run ──
+
+async function openPb(id, back = S.view) {
+  PB.back = back === 'pb' ? PB.back : back
+  PB.open = { id, book: null, values: {}, note: '', error: '', sending: false, loading: true }
+  S.view = 'pb'
+  render()
+  window.scrollTo(0, 0)
+  try {
+    const book = await api(S.conn, `/fd/clip/playbooks/${encodeURIComponent(id)}`)
+    if (PB.open?.id !== id) return
+    PB.open.book = book
+    PB.open.values = pbPrefill(book)
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    if (PB.open?.id === id) PB.open.error = e.message
+  }
+  if (PB.open?.id === id) { PB.open.loading = false; render() }
+}
+
+/** What the page already says: the site in front for one the person names,
+ * a short selection for its one text box. */
+function pbPrefill(book) {
+  const values = {}
+  const tabUrl = S.tab?.url || ''
+  const urlInput = book.inputs.find((i) => i.kind === 'url' && i.required)
+  if (urlInput && /^https:\/\//i.test(tabUrl)) values[urlInput.name] = new URL(tabUrl).origin
+  const sel = String(S.scan?.selection?.text || '').trim()
+  const texts = book.inputs.filter((i) => i.required && !('default' in i) && i.kind === 'text')
+  if (sel && sel.length <= 120 && !sel.includes('\n') && texts.length === 1) values[texts[0].name] = sel
+  return values
+}
+
+function pbMissing(o) {
+  return o.book.inputs.filter((i) => (i.required && !('default' in i) && i.ask === 'before' && !String(o.values[i.name] ?? '').trim())
+    || (i.kind === 'place' && PB_HERE.test(String(o.values[i.name] ?? 'x'))))
+}
+
+function pbField(i, o) {
+  const id = `pbIn-${i.name}`
+  const v = o.values[i.name]
+  const optional = !i.required || 'default' in i
+  const label = `<label class="label" for="${id}">${esc(i.label)}${optional ? '<span class="opt-mark">optional</span>' : ''}</label>`
+  const hint = i.hint ? `<div class="help">${esc(i.hint)}</div>` : ''
+  const dflt = 'default' in i && i.default !== '' && i.default !== false ? String(i.default) : ''
+  let control
+  if (i.kind === 'choice') {
+    const cur = v ?? i.default ?? ''
+    control = i.options.length <= 5
+      ? `<div class="pb-seg" role="group" aria-label="${esc(i.label)}">${i.options.map((opt) => `
+          <button type="button" class="${opt === cur ? 'on' : ''}" data-pb-choice="${esc(i.name)}" data-val="${esc(opt)}" aria-pressed="${opt === cur}">${esc(opt.replace(/_/g, ' '))}</button>`).join('')}</div>`
+      : `<select class="select" id="${id}" data-pb-input="${esc(i.name)}">${i.options.map((opt) => `<option ${opt === cur ? 'selected' : ''}>${esc(opt)}</option>`).join('')}</select>`
+    return `<div class="pb-field"><div class="label">${esc(i.label)}${optional ? '<span class="opt-mark">optional</span>' : ''}</div>${control}${hint}</div>`
+  }
+  if (i.kind === 'flag') {
+    const on = v ?? i.default ?? false
+    return `<div class="pb-field"><label class="pb-toggle"><input type="checkbox" id="${id}" data-pb-flag="${esc(i.name)}" ${on ? 'checked' : ''}><span class="track"></span><span>${esc(i.label)}</span></label>${hint}</div>`
+  }
+  if (i.kind === 'file') {
+    return `<div class="pb-field">${label}<div class="dim">${icon('file', 'sm')} ${esc(dflt || 'Your agent picks the file')}</div></div>`
+  }
+  const type = { date: 'date', time: 'time', number: 'number', url: 'url' }[i.kind] || 'text'
+  const value = v ?? (type === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(dflt) ? dflt : type === 'time' && /^\d{2}:\d{2}$/.test(dflt) ? dflt : '')
+  const ph = i.kind === 'place' ? 'Town or address' : i.kind === 'url' ? 'https://…' : dflt ? `Default: ${dflt}` : ''
+  const input = `<input type="${type}" id="${id}" data-pb-input="${esc(i.name)}" value="${esc(value)}" placeholder="${esc(ph)}" ${type === 'number' ? 'inputmode="decimal" step="any"' : ''} autocomplete="off">`
+  control = i.kind === 'place' ? `<div class="with-ic">${icon('pin', 'sm')}${input}</div>`
+    : i.kind === 'url' ? `<div class="with-ic">${icon('globe', 'sm')}${input}</div>` : input
+  const here = i.kind === 'place' && PB_HERE.test(String(v ?? 'x')) ? '<div class="warn">Type the town or address — a link can\'t carry where you are.</div>' : ''
+  return `<div class="pb-field">${label}${control}${here || hint || (type === 'date' && dflt && !value ? `<div class="help">Leave it for ${esc(dflt)}</div>` : '')}</div>`
+}
+
+function viewPb() {
+  const o = PB.open
+  const back = `<button class="icon-btn" data-act="pb-close" title="Back">${icon('back')}</button>`
+  if (!o) return ''
+  if (o.loading || !o.book) {
+    return `<div class="pb-head">${back}<div class="grow"></div></div>
+      ${o.error ? `<div class="notice err">${esc(o.error)}</div>` : `<div class="pb-hero"><span class="pb-tile lg"></span><div class="grow">${pbSkeleton(1)}</div></div>`}`
+  }
+  const b = o.book
+  const main = b.inputs.filter((i) => i.required && !('default' in i))
+  const more = b.inputs.filter((i) => !main.includes(i))
+  const missing = pbMissing(o)
+  const ag = agentDef()
+  const agents = (S.me?.agents || []).map((a) => {
+    const up = a.status === 'running' || a.status === 'asleep'
+    return `<option value="${esc(a.slug)}" ${a.slug === S.agent ? 'selected' : ''} ${up ? '' : 'disabled'}>${a.status === 'running' ? '●' : a.status === 'asleep' ? '◐' : '○'} ${esc(a.name)}${up ? '' : ` (${esc(a.status)})`}</option>`
+  }).join('')
+  const needsChrome = b.where === 'chrome' || b.where === 'prefer_chrome'
+  const handsOk = S.hands.on && S.handsStatus?.state !== 'denied'
+  const cat = (PB.store?.categories || []).find((c) => c.id === b.category)
+  const runLabel = o.sending ? 'Starting…' : !ag ? 'Pick an agent' : missing.length ? `Fill in ${missing.map((i) => i.label).slice(0, 2).join(' and ')}` : `Run with ${ag.name}`
+  return `
+    <div class="pb-head">${back}<div class="grow"></div>
+      <button class="pb-star ${b.mine ? 'on' : ''}" data-pb-shelf="${esc(b.id)}" aria-pressed="${!!b.mine}">${icon('star', 'sm')} ${b.mine ? 'In My playbooks' : 'Add to mine'}</button></div>
+    <div class="pb-hero">${pbTile(b, 'lg')}
+      <div class="grow"><div class="pb-h1">${esc(b.title)}</div>
+        <div class="dim">${esc([b.sites?.length ? b.sites.map(pbSiteName).filter((x, k, all) => all.indexOf(x) === k).slice(0, 3).join(', ') : 'Any site you name', cat?.label].filter(Boolean).join(' · '))}</div></div></div>
+    <div class="pb-badges">
+      ${b.kind === 'act' ? `<span class="pb-badge act">${icon('pencil')} Fills it in for you</span>` : `<span class="pb-badge look">${icon('eye')} Looks it up</span>`}
+      <span class="pb-badge">${icon(needsChrome ? 'lock' : 'globe')} ${esc(PB_WHERE[b.where] || b.where)}</span>
+      ${b.region?.length === 2 ? `<span class="pb-badge">${flagOf(b.region)} ${esc(b.region.toUpperCase())}</span>` : ''}
+      ${b.runs ? `<span class="pb-badge">${icon('history')} ran ${b.runs}×</span>` : ''}
+    </div>
+    ${b.says?.length ? `<div class="pb-says">${b.says.slice(0, 2).map((s) => `<div class="pb-say">“${esc(s)}”</div>`).join('')}</div>` : ''}
+    ${b.kind === 'act' ? `<div class="pb-stop">${icon('stop', 'sm')}<div>It fills everything in and stops before <b>“${esc(b.stop)}”</b> — you look it over and press it yourself.</div></div>` : ''}
+    <div class="pb-form">
+      ${main.map((i) => pbField(i, o)).join('')}
+      ${more.length ? (main.length
+        ? `<details class="pb-more" ${o.moreOpen ? 'open' : ''} data-pb-more><summary>${icon('chevron', 'sm chev')} More options <span class="dim">— ${more.length}, or let ${esc(ag?.name || 'the agent')} decide</span></summary><div class="pb-form">${more.map((i) => pbField(i, o)).join('')}</div></details>`
+        : more.map((i) => pbField(i, o)).join('')) : ''}
+      <div><label class="label" for="agent">Who does it</label><select class="select" id="agent">${agents}</select></div>
+      <textarea id="pbNote" rows="2" placeholder="Anything else it should know? (optional)">${esc(o.note)}</textarea>
+    </div>
+    ${needsChrome && !handsOk ? `<div class="notice">${icon('globe')}<div class="grow">${b.where === 'chrome' ? 'This one needs you signed in, in this browser' : 'This site often turns robots away — it goes best in this browser'}, and your agents can't use it yet.
+      <div style="margin-top:6px"><button class="btn" data-act="rec-hands-on">Let agents use this browser</button></div></div></div>` : ''}
+    <details class="pb-fold card" ${o.foldOpen ? 'open' : ''} data-pb-fold>
+      <summary>${icon('chevron', 'sm chev')}<span class="grow"><b>How it goes</b> <span class="dim">— ${b.steps.length ? plural(b.steps.length, 'step') + ', then ' : ''}it reads ${plural(b.read.length, 'thing')}</span></span></summary>
+      ${b.steps.length ? `<ol class="pb-steps">${b.steps.map((s) => `<li><span>${esc(s.replace(/^\d+\.\s*/, ''))}</span></li>`).join('')}</ol>` : ''}
+      ${b.read.length ? `<div class="pb-reads">${b.read.map((r) => `<div class="pb-read"><b>${esc(r.name.replace(/_/g, ' '))}</b> — ${esc(r.about)}</div>`).join('')}</div>` : ''}
+    </details>
+    ${o.error ? `<div class="notice err">${esc(o.error)}</div>` : ''}
+    <div class="pb-runbar">
+      <button class="btn primary block" data-act="pb-run" ${ag && !o.sending && !missing.length ? '' : 'disabled'}>${icon('play', 'sm')} ${esc(runLabel)}</button>
+    </div>`
+}
+
+async function pbShelf(id, on) {
+  const flip = (p) => { if (p && p.id === id) p.mine = on }
+  try {
+    await api(S.conn, `/fd/clip/playbooks/${encodeURIComponent(id)}/shelf`, { method: 'POST', body: JSON.stringify({ on }) })
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    toast(e.message)
+    return
+  }
+  for (const list of [PB.chips, PB.items || [], PB.store?.popular || [], ...Object.values(PB.store?.top || {})]) list.forEach(flip)
+  flip(PB.open?.book)
+  if (PB.store) {
+    const item = [...(PB.items || []), ...PB.chips, ...(PB.store.popular || []), ...Object.values(PB.store.top || {}).flat(), PB.open?.book]
+      .find((p) => p && p.id === id)
+    PB.store.shelf = on ? [{ ...(item || { id, title: id }), mine: true }, ...PB.store.shelf.filter((p) => p.id !== id)]
+      : PB.store.shelf.filter((p) => p.id !== id)
+  }
+  toast(on ? 'Added to My playbooks' : 'Taken off My playbooks')
+  render()
+}
+
+async function pbRunGo() {
+  const o = PB.open
+  const ag = agentDef()
+  if (!o?.book || !ag || o.sending || pbMissing(o).length) return
+  o.sending = true
+  o.error = ''
+  render()
+  const inputs = {}
+  for (const [k, v] of Object.entries(o.values)) if (v !== '' && v != null) inputs[k] = v
+  try {
+    const res = await api(S.conn, `/fd/clip/playbooks/${encodeURIComponent(o.book.id)}/run`, {
+      method: 'POST', body: JSON.stringify({ agent: ag.slug, inputs, note: o.note, browser: browserLabel(), hands: !!S.hands.on }) })
+    PB.open = null
+    startRun({ clip_id: res.clip_id, folder: res.folder, vfs: res.vfs, agent: res.agent || ag.name, agentSlug: ag.slug,
+               title: o.book.title, url: o.book.sites?.[0] ? `https://${o.book.sites[0]}` : '', action: 'playbook', actionLabel: 'Playbook' })
+  } catch (e) {
+    o.sending = false
+    if (e instanceof AuthError) return disconnected(e.message)
+    o.error = e.message
+    render()
+  }
+}
+
+$view.addEventListener('click', (ev) => {
+  const el = ev.target.closest('[data-pb-shelf],[data-pb],[data-pb-cat],[data-pb-q],[data-pb-choice],[data-act^="pb-"]')
+  if (!el) return
+  const d = el.dataset
+  if (d.pbShelf) {
+    ev.stopPropagation()
+    const cur = [PB.open?.book, ...PB.chips, ...(PB.items || []), ...(PB.store?.shelf || []), ...(PB.store?.popular || []), ...Object.values(PB.store?.top || {}).flat()]
+      .find((p) => p && p.id === d.pbShelf)
+    return void pbShelf(d.pbShelf, !cur?.mine)
+  }
+  if (d.pbChoice && PB.open) {
+    PB.open.values[d.pbChoice] = d.val
+    return void render()
+  }
+  if (d.pbCat !== undefined) {
+    PB.cat = PB.cat === d.pbCat && d.pbCat ? '' : d.pbCat
+    if (S.view !== 'pbs') return void openStore()
+    window.scrollTo(0, 0)
+    return void pbSearch(true)
+  }
+  if (d.pbQ !== undefined) { PB.q = d.pbQ; PB.cat = ''; window.scrollTo(0, 0); return void pbSearch(true) }
+  if (d.pb) return void openPb(d.pb)
+  if (d.act === 'pb-store' || d.act === 'pb-store-site') return void openStore({ site: d.act === 'pb-store-site' })
+  if (d.act === 'pb-back') { S.view = 'main'; render(); scheduleScan(0); return }
+  if (d.act === 'pb-close') {
+    PB.open = null
+    S.view = PB.back === 'pbs' ? 'pbs' : 'main'
+    if (S.view === 'pbs' && !PB.store) loadStore()
+    render()
+    return
+  }
+  if (d.act === 'pb-run') pbRunGo()
+})
+
+$view.addEventListener('keydown', (ev) => {
+  const row = ev.target.closest?.('.pb-row[data-pb]')
+  if (row && (ev.key === 'Enter' || ev.key === ' ') && ev.target === row) { ev.preventDefault(); openPb(row.dataset.pb) }
+  if (ev.target.id === 'pbSearch' && ev.key === 'Escape' && PB.q) { ev.preventDefault(); PB.q = ''; pbSearch(true) }
+})
+
+$view.addEventListener('input', (ev) => {
+  const el = ev.target
+  if (el.id === 'pbSearch') {
+    PB.q = el.value
+    // Typing is a new search, over everything (a category picked after it narrows it; Mine stays Mine).
+    if (PB.cat && PB.cat !== 'mine' && PB.q.trim()) PB.cat = ''
+    if (!PB.q.trim() && !PB.cat) { PB.items = null; render(); return }
+    if (PB.items === null) render()
+    pbSearch()
+  } else if (el.dataset.pbInput && PB.open) {
+    const was = pbMissing(PB.open).length
+    PB.open.values[el.dataset.pbInput] = el.value
+    if (was !== pbMissing(PB.open).length || PB.open.error) { PB.open.error = ''; render() }
+  } else if (el.id === 'pbNote' && PB.open) PB.open.note = el.value
+})
+
+$view.addEventListener('change', (ev) => {
+  const el = ev.target
+  if (el.dataset.pbFlag && PB.open) PB.open.values[el.dataset.pbFlag] = el.checked
+  else if (el.dataset.pbInput && PB.open && el.tagName === 'SELECT') PB.open.values[el.dataset.pbInput] = el.value
+})
+
+$view.addEventListener('toggle', (ev) => {
+  if (!PB.open) return
+  if (ev.target.matches('details[data-pb-more]')) PB.open.moreOpen = ev.target.open
+  if (ev.target.matches('details[data-pb-fold]')) PB.open.foldOpen = ev.target.open
+}, true)
+
+window.addEventListener('scroll', () => {
+  document.getElementById('pbSticky')?.classList.toggle('scrolled', window.scrollY > 40)
+}, { passive: true })
+
+$btnPlaybooks.addEventListener('click', () => {
+  if (S.view === 'pbs') { S.view = 'main'; render(); return }
+  openStore()
+})
+
 // ── history ──
 
 async function remember(run) {
@@ -2709,7 +3187,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && (changes.hands || changes.handsStopped)) {
     if (changes.hands) S.hands = { on: false, front: false, ...(changes.hands.newValue || {}) }
     if (changes.handsStopped) S.handsStopped = changes.handsStopped.newValue || []
-    if (S.view === 'main' || S.view === 'settings' || S.view === 'rec-run') render()
+    if (S.view === 'main' || S.view === 'settings' || S.view === 'rec-run' || S.view === 'pb') render()
   }
   // A size picked in another window's panel applies here too.
   if (area === 'local' && changes.prefs?.newValue && changes.prefs.newValue.textSize !== S.prefs.textSize) {

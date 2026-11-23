@@ -13,7 +13,7 @@ playbooks:
     region: global
     sites: [google.com/maps]
     inputs:
-      origin: {label: From, kind: place, hint: "An address, a place name, or 'here' for the person's location"}
+      origin: {label: From, kind: place, hint: "An address or a place name — a link can't carry 'here'"}
       destination: {label: To, kind: place}
       mode: {label: How, kind: choice, options: [driving, transit, walking, bicycling], default: driving}
       depart_at: {label: Leaving at, kind: time, required: false, ask: agent}
@@ -72,7 +72,7 @@ playbooks:
     region: global
     sites: [google.com/maps]
     inputs:
-      origin: {label: From, kind: place, hint: "A stop, an address, or 'here'"}
+      origin: {label: From, kind: place, hint: "A stop, an address or a place name"}
       destination: {label: To, kind: place}
       when: {label: Leave or arrive at, kind: text, default: now, hint: "now, 'depart 08:15' or 'arrive by 09:00'"}
     open: https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}&travelmode=transit

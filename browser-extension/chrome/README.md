@@ -194,6 +194,29 @@ again for ten minutes. A page that only refuses (no check to answer) isn't
 shown. Agents from before this don't wait — the search goes to Flight Deck's
 own engine as it used to.
 
+## Playbooks — ready-made ways to get things done
+
+Captain knows a few hundred everyday jobs on the web: how long from A to B,
+where a parcel is, the cheapest days to fly, last year's invoices, what a
+subscription costs, whether a place is open now. Each is a **playbook** — the
+page to open, what to do there, what to read off it.
+
+- **Do it here** (under the page card): the playbooks for the site you're on
+  — on Amazon, "Where is my Amazon order", "Download Amazon invoices"… — and
+  your own recordings made there. The same brand on another country's
+  domain counts (amazon.de, amazon.co.uk).
+- **The store** (⚡ at the top, or *More* beside the chips): search what you
+  want done ("track a parcel"), or browse Travel, Nearby, Shopping, Accounts
+  & bills, Work, Research, Money, Home & life, Media & social and Local
+  services (your country's first). **＋** puts one in **My playbooks**, which
+  come first in the chips and in the store, in every browser you connect.
+- **A playbook**: what it does and where it runs (*any browser*, or *your
+  Chrome, signed in*), a short form — places, dates, a choice, a switch — and
+  **Run with** the agent you pick. The agent runs it with its `web_playbook`
+  tool and you follow it here like any clip. One that books, buys, sends or
+  submits says so and **stops before its last button** — you press it.
+- A place is a town or an address: a link can't carry "here".
+
 ## Record a process — an agent does it after that
 
 **Record what I do** (under Send) starts a recording in the tab in front. Do
