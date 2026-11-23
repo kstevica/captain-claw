@@ -234,6 +234,8 @@ _TABLES: dict[str, list[tuple[str, str]]] = {
         # v1.1: the board user's own conversation with the agent (their chat,
         # their devices, their own WhatsApp / Telegram) — the ingest's verdict.
         ("own_chat", "INTEGER NOT NULL DEFAULT 0"),
+        # v1.2: the cognitive mode the agent was in ('' = none, or not reported).
+        ("cognitive_mode", "TEXT NOT NULL DEFAULT ''"),
     ],
     "source_cursors": [
         ("source", "TEXT PRIMARY KEY"),
@@ -1476,6 +1478,24 @@ class TaskboardStore:
                                    (*sets.values(), turn_id))
             self._conn.commit()
         return "new"
+
+    def mode_stats(self, user_id: str, since: float = 0.0) -> list[dict]:
+        """How *user_id*'s finished turns went, per agent and cognitive mode,
+        since *since*: how many, how they ended, their tool calls and how long
+        they took. Counts only; nothing a turn said."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT agent_slug, cognitive_mode, COUNT(*) AS turns,"
+                " SUM(outcome = 'ok') AS ok, SUM(outcome = 'error') AS error,"
+                " SUM(outcome = 'blocked') AS blocked, SUM(outcome = 'cancelled') AS cancelled,"
+                " SUM(tool_calls) AS tool_calls, SUM(failed_tool_calls) AS failed_tool_calls,"
+                " AVG(CASE WHEN ended_at >= started_at THEN ended_at - started_at END) AS avg_seconds"
+                " FROM turns WHERE user_id = ? AND outcome != '' AND open_ref != ''"
+                " AND gate != ? AND COALESCE(started_at, 0) >= ?"
+                " GROUP BY agent_slug, cognitive_mode ORDER BY agent_slug, cognitive_mode",
+                (user_id, TURN_DROPPED, float(since or 0.0))).fetchall()
+        return [{**dict(r), "avg_seconds": round(r["avg_seconds"], 1) if r["avg_seconds"] is not None else None}
+                for r in rows]
 
     def drop_turn(self, turn_id: str, agent_slug: str, agent_owner_id: str, ref: str) -> None:
         """A turn that is nobody's to see (a member's words naming no member):

@@ -157,12 +157,21 @@ class TurnRecord(BaseModel):
     text_head: str = Field("", max_length=8000)
     ext_refs: dict[str, Any] = Field(default_factory=dict)
     automation: dict[str, Any] = Field(default_factory=dict)
+    cognitive_mode: str = Field("", max_length=32)
     # close
     outcome: str = Field("", max_length=16)
     reply_head: str = Field("", max_length=8000)
     deliverables: list[str] = Field(default_factory=list, max_length=200)
     tool_calls: int = Field(0, ge=0, le=10**9)
     failed_tool_calls: int = Field(0, ge=0, le=10**9)
+
+
+def _mode(raw: str) -> str:
+    """A mode name this deck knows, or ``""``."""
+    from captain_claw.cognitive_mode import MODES
+
+    name = str(raw or "").strip().lower()
+    return name if name in MODES else ""
 
 
 class TurnBatch(BaseModel):
@@ -422,6 +431,7 @@ def _take(boot: str, who: dict[str, str], items: list[tuple[TurnRecord, _Board]]
                 "opener": rec.opener, "human": rec.human, "literal": rec.literal.strip().lower(),
                 "text_head": mask_text(rec.text_head)[:_HEAD_MAX], "ext_refs": _small(rec.ext_refs),
                 "automation": _automation(rec.automation, kind),
+                "cognitive_mode": _mode(rec.cognitive_mode),
                 "started_at": at,
             }
         else:

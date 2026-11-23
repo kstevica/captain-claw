@@ -2821,6 +2821,21 @@ class WebServer:
             "byok_calls": sum(1 for r in rows if r.get("byok")),
         }
 
+        # The same totals per cognitive mode ("" = no mode in effect).
+        by_mode: dict[str, dict[str, int]] = {}
+        for r in rows:
+            m = by_mode.setdefault(str(r.get("cognitive_mode") or ""), {
+                "total_calls": 0, "error_count": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                "total_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                "latency_ms": 0,
+            })
+            m["total_calls"] += 1
+            m["error_count"] += 1 if r["error"] else 0
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens",
+                        "cache_creation_input_tokens", "cache_read_input_tokens", "latency_ms"):
+                m[key] += int(r[key] or 0)
+        totals["by_mode"] = by_mode
+
         return web.json_response(
             {"totals": totals, "records": rows, "period": period,
              "since": since, "until": until},

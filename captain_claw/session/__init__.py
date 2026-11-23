@@ -1030,6 +1030,7 @@ class SessionManager:
                     latency_ms                  INTEGER NOT NULL DEFAULT 0,
                     task_name                   TEXT NOT NULL DEFAULT '',
                     byok                        INTEGER NOT NULL DEFAULT 0,
+                    cognitive_mode              TEXT NOT NULL DEFAULT '',
                     created_at                  TEXT NOT NULL
                 )
             """)
@@ -1050,6 +1051,13 @@ class SessionManager:
             try:
                 await self._db.execute(
                     "ALTER TABLE llm_usage ADD COLUMN byok INTEGER NOT NULL DEFAULT 0"
+                )
+            except Exception:
+                pass  # column already exists
+            # Migration: the cognitive mode the agent was in when it made the call.
+            try:
+                await self._db.execute(
+                    "ALTER TABLE llm_usage ADD COLUMN cognitive_mode TEXT NOT NULL DEFAULT ''"
                 )
             except Exception:
                 pass  # column already exists
@@ -3203,12 +3211,21 @@ class SessionManager:
         latency_ms: int = 0,
         task_name: str = "",
         byok: bool = False,
+        cognitive_mode: str | None = None,
     ) -> None:
         """Persist a single LLM call usage record. ``byok``: paid with someone's
         own key — a visitor's (the caller says so), or every call of an agent
         Flight Deck started on its owner's own API keys (``FD_KEY_SOURCE``),
-        so the deck's spend ledger counts it as theirs, not the deck's."""
+        so the deck's spend ledger counts it as theirs, not the deck's.
+        ``cognitive_mode``: the mode in effect for the call (``""`` = none);
+        a caller that doesn't say gets this process's mode, so an agent's side
+        calls (reflection, dreaming, summaries) are counted under its mode."""
         byok = bool(byok) or os.environ.get("FD_KEY_SOURCE", "").strip().lower() == "byok"
+        if cognitive_mode is None:
+            from captain_claw.cognitive_mode import effective_mode_name
+
+            cognitive_mode = effective_mode_name()
+        cognitive_mode = str(cognitive_mode or "")[:32]
         await self._ensure_db()
         assert self._db is not None
         now_iso = _utcnow_iso()
@@ -3220,15 +3237,15 @@ class SessionManager:
                 cache_creation_input_tokens, cache_read_input_tokens,
                 input_bytes, output_bytes, streaming, tools_enabled,
                 max_tokens, finish_reason, error, latency_ms, task_name,
-                byok, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                byok, cognitive_mode, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 row_id, session_id, interaction, provider, model,
                 prompt_tokens, completion_tokens, total_tokens,
                 cache_creation_input_tokens, cache_read_input_tokens,
                 input_bytes, output_bytes, int(streaming), int(tools_enabled),
                 max_tokens, finish_reason, int(error), latency_ms, task_name,
-                int(byok), now_iso,
+                int(byok), cognitive_mode, now_iso,
             ),
         )
         await self._db.commit()
@@ -3302,7 +3319,7 @@ class SessionManager:
             " cache_creation_input_tokens, cache_read_input_tokens,"
             " input_bytes, output_bytes, streaming, tools_enabled,"
             " max_tokens, finish_reason, error, latency_ms, task_name,"
-            " byok, created_at"
+            " byok, cognitive_mode, created_at"
             f" FROM llm_usage{where}"
             " ORDER BY created_at DESC LIMIT ?"
         )
@@ -3315,7 +3332,7 @@ class SessionManager:
             "cache_creation_input_tokens", "cache_read_input_tokens",
             "input_bytes", "output_bytes", "streaming", "tools_enabled",
             "max_tokens", "finish_reason", "error", "latency_ms", "task_name",
-            "byok", "created_at",
+            "byok", "cognitive_mode", "created_at",
         ]
         return [dict(zip(cols, row)) for row in rows]
 
