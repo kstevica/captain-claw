@@ -89,3 +89,54 @@ def test_game_temperatures_follow_the_modes():
     assert all(0.4 <= v <= 1.0 for v in t.values())
     assert t["lydian"] > t["ionian"]
     assert t["lydian"] > t["aeolian"]
+
+
+# ── The mode in logs ─────────────────────────────────────────────────
+
+
+def test_effective_mode_name(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(cm, "load_agent_mode", lambda: "dorian")
+    cfg = SimpleNamespace(cognitive_mode=SimpleNamespace(enabled=True))
+    monkeypatch.setattr("captain_claw.config.get_config", lambda: cfg)
+    assert cm.effective_mode_name() == "dorian"
+    # An agent whose prompt was built says what that prompt carried.
+    assert cm.effective_mode_name(SimpleNamespace(_cognitive_mode=cm.get_mode("lydian"))) == "lydian"
+    assert cm.effective_mode_name(SimpleNamespace(_cognitive_mode=None)) == ""
+    # Not built yet: what the process is set to.
+    assert cm.effective_mode_name(SimpleNamespace()) == "dorian"
+    cfg.cognitive_mode.enabled = False
+    assert cm.effective_mode_name() == ""
+
+
+async def test_llm_usage_rows_carry_the_mode(tmp_path, monkeypatch):
+    import sqlite3
+
+    from captain_claw.session import SessionManager
+
+    monkeypatch.setattr("captain_claw.fd_usage_report.report_tokens", lambda *a, **k: None)
+    monkeypatch.setattr(cm, "effective_mode_name", lambda agent=None: "aeolian")
+    # A database made before the column existed gains it.
+    db = tmp_path / "sessions.db"
+    old = sqlite3.connect(db)
+    old.execute("CREATE TABLE llm_usage (id TEXT PRIMARY KEY, session_id TEXT, interaction TEXT NOT NULL DEFAULT '',"
+                " provider TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', prompt_tokens INTEGER NOT NULL"
+                " DEFAULT 0, completion_tokens INTEGER NOT NULL DEFAULT 0, total_tokens INTEGER NOT NULL DEFAULT 0,"
+                " cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0, cache_read_input_tokens INTEGER NOT NULL"
+                " DEFAULT 0, input_bytes INTEGER NOT NULL DEFAULT 0, output_bytes INTEGER NOT NULL DEFAULT 0,"
+                " streaming INTEGER NOT NULL DEFAULT 0, tools_enabled INTEGER NOT NULL DEFAULT 0, max_tokens INTEGER,"
+                " finish_reason TEXT NOT NULL DEFAULT '', error INTEGER NOT NULL DEFAULT 0, latency_ms INTEGER NOT NULL"
+                " DEFAULT 0, created_at TEXT NOT NULL)")
+    old.execute("INSERT INTO llm_usage (id, created_at) VALUES ('old', '2026-01-01T00:00:00+00:00')")
+    old.commit()
+    old.close()
+    sm = SessionManager(db_path=db)
+    try:
+        await sm.record_llm_usage(model="m", total_tokens=5)                          # side call: process mode
+        await sm.record_llm_usage(model="m", total_tokens=7, cognitive_mode="phrygian")
+        await sm.record_llm_usage(model="m", total_tokens=9, cognitive_mode="")       # no mode in effect
+        rows = {r["total_tokens"]: r["cognitive_mode"] for r in await sm.query_llm_usage()}
+    finally:
+        await sm.close()
+    assert rows == {0: "", 5: "aeolian", 7: "phrygian", 9: ""}

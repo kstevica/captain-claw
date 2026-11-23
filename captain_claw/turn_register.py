@@ -367,6 +367,7 @@ def _automation(agent: Any) -> tuple[str, str, str, str, str]:
 
 def _open_record(agent: Any, turn: Turn) -> dict[str, Any]:
     from captain_claw import member_privacy, msg_origin, origin, speaker
+    from captain_claw.cognitive_mode import effective_mode_name
 
     turn_origin = getattr(agent, "_turn_origin", None)
     if not (isinstance(turn_origin, tuple) and len(turn_origin) == 3):
@@ -437,6 +438,9 @@ def _open_record(agent: Any, turn: Turn) -> dict[str, Any]:
         "text_head": _head(text), "ext_refs": refs,
         "automation": {"kind": automation, "id": automation_id,
                        **({"name": _head(automation_name)[:160]} if automation_name else {})},
+        # The cognitive mode the agent is in ("" = none), so runs can be
+        # compared by mode.
+        "cognitive_mode": effective_mode_name(agent),
     }
 
 

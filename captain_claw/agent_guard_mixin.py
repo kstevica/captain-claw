@@ -744,6 +744,8 @@ class AgentGuardMixin:
                             int(window.get("provider_input_tokens", 0) or 0),
                         )
 
+            from captain_claw.cognitive_mode import effective_mode_name
+
             loop = asyncio.get_event_loop()
             loop.create_task(self.session_manager.record_llm_usage(
                 session_id=session_id,
@@ -765,6 +767,7 @@ class AgentGuardMixin:
                 latency_ms=latency_ms,
                 task_name=task_name,
                 byok=bool(getattr(self, "_byok_active", False)),
+                cognitive_mode=effective_mode_name(self),
             ))
         except Exception:
             pass  # Never fail the main flow

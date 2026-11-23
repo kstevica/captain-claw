@@ -333,6 +333,33 @@ def cognitive_mode_review_block(mode: CognitiveMode) -> str:
     return f"Review lens: {mode.label}. {mode.review_lens}"
 
 
+_UNSET: Any = object()
+
+
+def effective_mode_name(agent: Any | None = None) -> str:
+    """The mode in effect, for logs: a mode name, or ``""`` when none applies.
+
+    With an *agent* whose system prompt has been built, this is the mode that
+    prompt carried (``""`` when modes are off or the prompt has no mode slot).
+    Otherwise it is what this process is set to: the mode file or the config
+    default, ``""`` when modes are disabled.  Never raises.
+    """
+    try:
+        if agent is not None:
+            held = getattr(agent, "_cognitive_mode", _UNSET)
+            if held is None:
+                return ""
+            if isinstance(held, CognitiveMode):
+                return held.name
+        from captain_claw.config import get_config
+        if not get_config().cognitive_mode.enabled:
+            return ""
+        name = load_agent_mode()
+        return name if name in MODES else ""
+    except Exception:
+        return ""
+
+
 # ── File I/O with mtime caching ─────────────────────────────────────
 
 _cached_mode_name: str | None = None

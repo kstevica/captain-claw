@@ -1109,3 +1109,24 @@ async def test_a_reply_answered_at_once_closes_a_done_request_with_nothing_new(a
     await _triage_due(api, api.alice)
     task = _task(api, api.alice, tid)
     assert (task["status"], task["closed_by"]) == ("done", "source") and not _flags(task).get("new_since_done")
+
+
+# ── Cognitive mode on turns ───────────────────────────────────────────
+
+
+async def test_a_turn_keeps_the_mode_it_ran_in_and_stats_count_by_it(api):
+    a, b, c, d = _tid(), _tid(), _tid(), _tid()
+    await _send(api, _open(api, a, cognitive_mode="phrygian"), _close(api, a, tool_calls=4, failed_tool_calls=1))
+    await _send(api, _open(api, b, cognitive_mode="phrygian"), _close(api, b, outcome="error", tool_calls=0))
+    await _send(api, _open(api, c), _close(api, c))                       # an agent that reports no mode
+    await _send(api, _open(api, d, cognitive_mode="made-up"))             # unknown name, and still running
+    assert api.board.get_turn(a)["cognitive_mode"] == "phrygian"
+    assert api.board.get_turn(c)["cognitive_mode"] == "" == api.board.get_turn(d)["cognitive_mode"]
+    rows = {r["cognitive_mode"]: r for r in api.board.mode_stats(api.alice)}
+    assert set(rows) == {"", "phrygian"}
+    p = rows["phrygian"]
+    assert (p["agent_slug"], p["turns"], p["ok"], p["error"], p["tool_calls"], p["failed_tool_calls"]) == \
+        ("helper", 2, 1, 1, 4, 1)
+    assert rows[""]["turns"] == 1                                          # the running turn is not counted
+    assert api.board.mode_stats(api.bob) == []                             # another person's board
+    assert api.board.mode_stats(api.alice, since=time.time() + 60) == []
