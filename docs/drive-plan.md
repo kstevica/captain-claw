@@ -183,6 +183,7 @@ Each phase is its own PR and leaves Diligent unchanged.
 | 5 | Initiative, behind its own switch | Ambitious does bounded extra work |
 |   | *Phase 5 status (2026-11-23): built on branch `feat/drive-phase5`. The switch is `drive.initiative` in the agent's config (no UI yet). Extra work is its own step after the answer has passed every gate, so the harness knows which tool calls are extra: only read-class calls and file-writing tools run, at most 25% of the base step budget in tool calls (10), never on an automated turn or a shared agent member's turn. The answer is delivered unchanged with what was added under it.* | |
 | 6 | Statistics per level, and a comparison on real tasks | evidence for the default values |
+|   | *Phase 6 status (2026-11-23): built on branch `feat/drive-phase6`; results in §11.* | |
 
 Phases 1–3 are the useful core. Phases 4 and 5 are each optional.
 
@@ -221,3 +222,43 @@ Phases 1–3 are the useful core. Phases 4 and 5 are each optional.
   table in §1 in the docs and the picker's help text; Drive never launches Bat.
 - **Relaxed mistaken for careless.** Mitigation: it never lowers an honesty guard
   and still has to deliver a complete answer.
+
+## 11. First real runs (2026-11-23)
+
+Eleven real agent turns on Claude Haiku, each in its own empty home: three small
+file tasks (add up three expense files; create three number files and an index;
+list the people in a note) at Relaxed, Diligent and Persistent, plus two Ambitious
+runs with extra work switched on.
+
+| | Relaxed | Diligent | Persistent | Ambitious + extra work |
+|---|---|---|---|---|
+| Files correct | 3 of 3 | 3 of 3 | 3 of 3 | 2 of 2 |
+| Main-loop model calls (per task) | 5, 4, 4 | 5, 3, 4 | 4, 3, 4 | 6, 5 |
+| Delivery checks | 0 | 0 | 1 per task | 1 per task |
+| Wall time, seconds | 16, 12, 7 | 19, 13, 8 | 17, 17, 10 | 30, 12 |
+
+What they show:
+
+- **The whole path works with a real agent.** The level picked for the turn reached
+  the harness, every usage row carries it, the delivery check ran only at Persistent
+  and above, and the extra-work step was offered only at Ambitious.
+- **The check costs one small call**: 2–5 thousand input tokens and under a thousand
+  output tokens, against roughly 110 thousand input tokens for each main-loop call.
+- **On tasks this small the levels do not differ otherwise.** Three to five steps
+  never reach any step ceiling or retry limit, so Relaxed and Diligent cost the same.
+  These runs say nothing about long tasks, where the limits are meant to matter.
+- **Extra work stayed quiet when there was nothing to add**: on the people task the
+  agent answered "nothing to add" and the answer went out unchanged.
+- **The check caught a real problem once and could not fix it.** On the expense task
+  at Ambitious it found two gaps and sent the reply back, but the second reply was
+  overwritten by the fault below.
+
+A fault these runs exposed, which is not part of Drive: when a reply contains the
+file's content in a code block, the harness runs that text as a shell command
+("Executing inline command"), the command fails, and a follow-up call replaces a
+correct reply with "No file was created" although the file exists and is right. It
+happened on the expense task at Relaxed, Diligent and Ambitious (not at Persistent).
+The same log line shows the shell call allowed because no approval callback was
+configured in this headless run.
+
+Still unmeasured: long tool-using tasks, other models, and a running deck.

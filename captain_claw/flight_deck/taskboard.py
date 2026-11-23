@@ -751,6 +751,16 @@ async def taskboard_mode_stats(days: int = 30, user: dict = Depends(get_current_
     return {"days": days, "rows": await asyncio.to_thread(store().mode_stats, uid, since)}
 
 
+@router.get("/drive-stats")
+async def taskboard_drive_stats(days: int = 30, user: dict = Depends(get_current_user)) -> dict:
+    """How the caller's turns went per agent and Drive level over the last
+    *days* (turns are kept 30): counts, outcomes, tool calls, average length."""
+    uid = _uid(user)
+    days = max(1, min(int(days or 30), 30))
+    since = time.time() - days * 86400
+    return {"days": days, "rows": await asyncio.to_thread(store().drive_stats, uid, since)}
+
+
 def _settings(uid: str) -> dict:
     s = store().get_settings(uid)
     passive = s.get("passive") or {}
