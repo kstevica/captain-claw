@@ -366,7 +366,7 @@ def _automation(agent: Any) -> tuple[str, str, str, str, str]:
 
 
 def _open_record(agent: Any, turn: Turn) -> dict[str, Any]:
-    from captain_claw import member_privacy, msg_origin, origin, speaker
+    from captain_claw import drive, member_privacy, msg_origin, origin, speaker
     from captain_claw.cognitive_mode import effective_mode_name
 
     turn_origin = getattr(agent, "_turn_origin", None)
@@ -441,6 +441,8 @@ def _open_record(agent: Any, turn: Turn) -> dict[str, Any]:
         # The cognitive mode the agent is in ("" = none), so runs can be
         # compared by mode.
         "cognitive_mode": effective_mode_name(agent),
+        # …and the Drive level the turn runs at (drive.py).
+        "drive": drive.current_name(),
     }
 
 

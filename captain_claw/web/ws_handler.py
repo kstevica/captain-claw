@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from aiohttp import web
 
-from captain_claw import mail_authority
+from captain_claw import drive, mail_authority
 from captain_claw.agent import Agent
 from captain_claw.llm import reasoning
 from captain_claw.logging import get_logger
@@ -541,7 +541,10 @@ async def handle_ws_message(
                     return
         # The reasoning effort picked in the chat box (absent = the model's
         # default). Scoped to this frame: the turn's task inherits it.
-        with reasoning.turn_effort(data.get("reasoning_effort")):
+        # Likewise the Drive level (absent = the agent's default). A frame an
+        # automation sent never carries a person's pick.
+        with reasoning.turn_effort(data.get("reasoning_effort")), \
+                drive.turn_drive(data.get("drive") if automation is None else None):
             if automation is None and not has_attachments and content.startswith("/"):
                 from captain_claw.web.slash_commands import handle_command
                 # On this socket's own agent, as a "command" frame is: a lane's

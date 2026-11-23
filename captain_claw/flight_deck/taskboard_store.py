@@ -236,6 +236,8 @@ _TABLES: dict[str, list[tuple[str, str]]] = {
         ("own_chat", "INTEGER NOT NULL DEFAULT 0"),
         # v1.2: the cognitive mode the agent was in ('' = none, or not reported).
         ("cognitive_mode", "TEXT NOT NULL DEFAULT ''"),
+        # v1.3: the Drive level the turn ran at ('' = not reported).
+        ("drive", "TEXT NOT NULL DEFAULT ''"),
     ],
     "source_cursors": [
         ("source", "TEXT PRIMARY KEY"),

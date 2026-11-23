@@ -1031,6 +1031,7 @@ class SessionManager:
                     task_name                   TEXT NOT NULL DEFAULT '',
                     byok                        INTEGER NOT NULL DEFAULT 0,
                     cognitive_mode              TEXT NOT NULL DEFAULT '',
+                    drive                       TEXT NOT NULL DEFAULT '',
                     created_at                  TEXT NOT NULL
                 )
             """)
@@ -1058,6 +1059,13 @@ class SessionManager:
             try:
                 await self._db.execute(
                     "ALTER TABLE llm_usage ADD COLUMN cognitive_mode TEXT NOT NULL DEFAULT ''"
+                )
+            except Exception:
+                pass  # column already exists
+            # Migration: the Drive level the call's turn ran at (drive.py).
+            try:
+                await self._db.execute(
+                    "ALTER TABLE llm_usage ADD COLUMN drive TEXT NOT NULL DEFAULT ''"
                 )
             except Exception:
                 pass  # column already exists
@@ -3212,6 +3220,7 @@ class SessionManager:
         task_name: str = "",
         byok: bool = False,
         cognitive_mode: str | None = None,
+        drive: str | None = None,
     ) -> None:
         """Persist a single LLM call usage record. ``byok``: paid with someone's
         own key — a visitor's (the caller says so), or every call of an agent
@@ -3219,13 +3228,20 @@ class SessionManager:
         so the deck's spend ledger counts it as theirs, not the deck's.
         ``cognitive_mode``: the mode in effect for the call (``""`` = none);
         a caller that doesn't say gets this process's mode, so an agent's side
-        calls (reflection, dreaming, summaries) are counted under its mode."""
+        calls (reflection, dreaming, summaries) are counted under its mode.
+        ``drive``: the Drive level of the turn the call belongs to; a caller
+        that doesn't say gets the level in effect where it was called."""
         byok = bool(byok) or os.environ.get("FD_KEY_SOURCE", "").strip().lower() == "byok"
         if cognitive_mode is None:
             from captain_claw.cognitive_mode import effective_mode_name
 
             cognitive_mode = effective_mode_name()
         cognitive_mode = str(cognitive_mode or "")[:32]
+        if drive is None:
+            from captain_claw import drive as drive_levels
+
+            drive = drive_levels.current_name()
+        drive = str(drive or "")[:32]
         await self._ensure_db()
         assert self._db is not None
         now_iso = _utcnow_iso()
@@ -3237,15 +3253,15 @@ class SessionManager:
                 cache_creation_input_tokens, cache_read_input_tokens,
                 input_bytes, output_bytes, streaming, tools_enabled,
                 max_tokens, finish_reason, error, latency_ms, task_name,
-                byok, cognitive_mode, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                byok, cognitive_mode, drive, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 row_id, session_id, interaction, provider, model,
                 prompt_tokens, completion_tokens, total_tokens,
                 cache_creation_input_tokens, cache_read_input_tokens,
                 input_bytes, output_bytes, int(streaming), int(tools_enabled),
                 max_tokens, finish_reason, int(error), latency_ms, task_name,
-                int(byok), cognitive_mode, now_iso,
+                int(byok), cognitive_mode, drive, now_iso,
             ),
         )
         await self._db.commit()
@@ -3319,7 +3335,7 @@ class SessionManager:
             " cache_creation_input_tokens, cache_read_input_tokens,"
             " input_bytes, output_bytes, streaming, tools_enabled,"
             " max_tokens, finish_reason, error, latency_ms, task_name,"
-            " byok, cognitive_mode, created_at"
+            " byok, cognitive_mode, drive, created_at"
             f" FROM llm_usage{where}"
             " ORDER BY created_at DESC LIMIT ?"
         )
@@ -3332,7 +3348,7 @@ class SessionManager:
             "cache_creation_input_tokens", "cache_read_input_tokens",
             "input_bytes", "output_bytes", "streaming", "tools_enabled",
             "max_tokens", "finish_reason", "error", "latency_ms", "task_name",
-            "byok", "cognitive_mode", "created_at",
+            "byok", "cognitive_mode", "drive", "created_at",
         ]
         return [dict(zip(cols, row)) for row in rows]
 

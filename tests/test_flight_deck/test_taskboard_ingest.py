@@ -1130,3 +1130,10 @@ async def test_a_turn_keeps_the_mode_it_ran_in_and_stats_count_by_it(api):
     assert rows[""]["turns"] == 1                                          # the running turn is not counted
     assert api.board.mode_stats(api.bob) == []                             # another person's board
     assert api.board.mode_stats(api.alice, since=time.time() + 60) == []
+
+
+async def test_a_turn_keeps_its_drive_level(api):
+    a, b, c = _tid(), _tid(), _tid()
+    await _send(api, _open(api, a, drive="persistent"), _open(api, b), _open(api, c, drive="turbo"))
+    assert api.board.get_turn(a)["drive"] == "persistent"
+    assert api.board.get_turn(b)["drive"] == "" == api.board.get_turn(c)["drive"]  # unreported, unknown
