@@ -394,7 +394,44 @@ Agents get `web_playbook` wherever they have `browser`
 Checked against live sites in a headless browser with a small local model
 reading: XE and Google Finance answered in one call; Google Maps from an EU
 address opens Google's consent page first, which the read recognises and
-hands over. Not built: the panel's chips for the site in front.
+hands over.
+
+### In the panel: chips, the store, the shelf
+
+Captain for Chrome 0.9.0 shows them (`browser_playbooks.py`, routes under
+`/fd/clip/playbooks` with the extension's token):
+
+- **Do it here** chips under the page card — `GET /for?url=`: playbooks
+  whose site matches the tab (host or subdomain, and a site's path:
+  `google.com/maps` isn't Google Search), then the same brand on its other
+  country domains (`amazon.de` for `amazon.com`, root domains only, so
+  `play.google.com` isn't "Google"). A bare search engine in `sites`
+  (`google.com`) means the playbook *starts* with a web search, so it gets no
+  chip there. Order: the person's shelf, what they ran most, the everyday
+  ones (`POPULAR`), looks before acts; at most 8, plus their own recordings
+  made on that site.
+- **The store** (⚡ in the header): search (`/search?q=`, the same matching
+  as the agent's `find`), category tabs, "Mine"; its front (`GET /`) has
+  "On this site", My playbooks, Popular (plus four from the person's country,
+  from the browser's language) and three per category. Typing searches
+  everything; Local services lists by country, the person's first.
+- **A playbook** (`GET /{id}`): kind and browser badges, the "stops before"
+  note for an act, a form from its inputs (date/time pickers, choice chips for
+  five or fewer options, a switch for a flag; required ones first, the rest
+  under "More options" for the agent to decide), steps and what it reads under
+  "How it goes". A url input is filled with the tab's site; a short selection
+  fills its one text box; "here" in a place is caught before Run.
+- **The shelf** (`POST /{id}/shelf`) and run counts live per person in
+  `<FD_DATA_DIR>/browser-playbooks/<user>.json`.
+- **Run** (`POST /{id}/run`) checks the values like the tool does, makes a
+  run folder in web-clips with `playbook.md`, and sends the person's own turn
+  (source "browser"): the values, `web_playbook(action="run", id, inputs)`,
+  the stop for an act, and the link and steps written out for an agent without
+  the tool. The panel follows it like a clip.
+
+Checked in Chromium with the unpacked extension against a deck with a fake
+agent, dark and light: chips on an Amazon page, the store, search, a
+category, a playbook's form, the shelf, an act's stop note, a run to Done.
 
 ## Versions: the extension against the deck's copy
 
