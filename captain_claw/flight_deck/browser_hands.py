@@ -64,6 +64,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSo
 from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
+from captain_claw.flight_deck import browser_waits as waits
 from captain_claw.flight_deck import person_asks as asks
 from captain_claw.flight_deck.auth import get_db, get_mcp_user, hash_token
 from captain_claw.flight_deck.browser_clip import (
@@ -164,6 +165,11 @@ class _Act:
     files: list[dict] = field(default_factory=list)
     file_bytes: int = 0
     content_limit: int = MAX_CONTENT_CHARS   # a page read for web_fetch is allowed more
+    # A search or page read that may wait for the person (browser_waits.py):
+    job: Any = None             # the agent's job it runs in — None: no robot check is handed over
+    wait_until: float = 0.0     # loop time it may run till while the person answers a check
+    page_wait_s: float = 0.0    # a page's own wait (after the person answered)
+    robot: dict | None = None   # the check handed over, and how it ended
 
 
 _CONNS: dict[str, list[_Conn]] = {}
@@ -428,6 +434,11 @@ async def hands_ws(ws: WebSocket) -> None:
                 act = _ACTS.get(str(msg.get("id") or ""))
                 if act is not None and act.conn is conn and not act.future.done():
                     act.future.set_result(_clean_result(msg, act.content_limit))
+            elif kind == "waiting":
+                # A robot check handed to the person for a search or a page read.
+                act = _ACTS.get(str(msg.get("id") or ""))
+                if act is not None and act.conn is conn and not act.future.done():
+                    waits.note(act, msg, act.page_wait_s)
     except (WebSocketDisconnect, RuntimeError):
         pass
     except Exception:
@@ -672,8 +683,13 @@ async def _connect_outcome(ask_id: str, done: dict, owner: str, slug: str, name:
 async def agent_search(body: SearchBody, request: Request) -> dict:
     """A web search run in the person's own Chrome, on the engine they picked
     (browser_search.py). ``ok: false`` with ``why`` sends the agent to its
-    search API instead."""
+    search API instead. With ``job``, a robot check on the way is handed to
+    the person and ``{"pending"}`` answers while they're at it
+    (browser_waits.py)."""
     owner, slug = _owner_of(request, "web searches through the person's browser")
+    if body.job:
+        return await waits.run(owner, slug, body.job, asks.attended(body.origin),
+                               lambda: search_in_browser(owner, slug, body), body.wait)
     return await search_in_browser(owner, slug, body)
 
 
@@ -681,9 +697,36 @@ async def agent_search(body: SearchBody, request: Request) -> dict:
 async def agent_fetch(body: FetchBody, request: Request) -> dict:
     """A web page read in the person's own Chrome, signed in as them, for the
     agent's web_fetch (browser_fetch.py). ``ok: false`` with ``why`` sends the
-    agent to its own fetch."""
+    agent to its own fetch. ``job`` as for searches."""
     owner, slug = _owner_of(request, "reading pages in the person's browser")
+    if body.job:
+        return await waits.run(owner, slug, body.job, asks.attended(body.origin),
+                               lambda: fetch_in_browser(owner, slug, body), body.wait)
     return await fetch_in_browser(owner, slug, body)
+
+
+class WaitFollow(BaseModel):
+    id: str = Field(..., pattern=r"^[A-Za-z0-9_-]{4,48}$")
+    wait: float = Field(25.0, ge=1, le=30)
+
+
+@agent_router.post("/wait/follow")
+async def agent_wait_follow(body: WaitFollow, request: Request) -> dict:
+    """A search or page read waiting for the person (a robot check in their
+    Chrome): its answer, or ``{"pending", "waiting"}`` again."""
+    owner, slug = _owner_of(request, "the person's browser")
+    got = await waits.follow(body.id, owner, slug, body.wait)
+    if got is None:
+        raise HTTPException(404, "There's no such request (it ended a while ago).")
+    return got
+
+
+@agent_router.post("/wait/cancel")
+async def agent_wait_cancel(body: WaitFollow, request: Request) -> dict:
+    """The agent stops waiting (its turn was stopped): the browser stops too,
+    and leaves the check's tab open for the person."""
+    owner, slug = _owner_of(request, "the person's browser")
+    return {"cancelled": await waits.cancel(body.id, owner, slug)}
 
 
 @agent_router.post("/turn-over")

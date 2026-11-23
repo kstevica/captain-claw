@@ -388,7 +388,8 @@ class WebSearchTool(Tool):
         if bool(getattr(search_cfg, "via_chrome", True)):
             via_chrome, chrome_note = await self._chrome(
                 q, n=n, page=page, country=country, search_lang=search_lang,
-                freshness=freshness, safesearch=safesearch)
+                freshness=freshness, safesearch=safesearch,
+                agent=kwargs.get("_agent"), stream=kwargs.get("_stream_callback"))
         if via_chrome is not None:
             engine, (hits, notes) = via_chrome[0], via_chrome[1:]
             provider = "chrome"
@@ -435,11 +436,13 @@ class WebSearchTool(Tool):
         return f"{error} (The person's Chrome didn't search either: {chrome_note})" if chrome_note else error
 
     async def _chrome(self, q: str, *, n: int, page: int, country: str, search_lang: str,
-                      freshness: str, safesearch: str) -> tuple[tuple[str, list[_Hit], list[str]] | None, str]:
+                      freshness: str, safesearch: str, agent: Any = None,
+                      stream: Any = None) -> tuple[tuple[str, list[_Hit], list[str]] | None, str]:
         """``((engine label, hits, notes), "")`` when the owner's Chrome ran the
         search; ``(None, why)`` to use the configured engine — ``why`` is "" when
         it's simply not on (or not this turn's to use), else what went wrong.
-        Never raises."""
+        A robot check on the way is handed to the owner, and this waits while
+        they answer it (web_chrome.call_waiting). Never raises."""
         try:
             from captain_claw import speaker
             from captain_claw.fd_client import flight_deck_base, flight_deck_headers
@@ -457,20 +460,18 @@ class WebSearchTool(Tool):
             return None, ""
         body = {"query": q[:500], "count": n, "page": page, "search_lang": search_lang,
                 "country": country, "freshness": freshness, "safesearch": safesearch}
+        from captain_claw.tools.web_chrome import call_waiting
+
         try:
-            resp = await self.client.post(f"{base}/fd/browser-hands/agent/search", json=body,
-                                          headers=headers, timeout=_CHROME_WAIT + 5)
+            status, data = await call_waiting(self.client, base, headers, "/fd/browser-hands/agent/search", body,
+                                              agent=agent, stream=stream, first_wait=_CHROME_WAIT)
         except httpx.HTTPError as e:
             log.debug("web_search: Flight Deck unreachable for a Chrome search", error=str(e))
             return None, ""
-        if resp.status_code in (404, 405):   # a Flight Deck from before this
+        if status in (404, 405):   # a Flight Deck from before this
             _CHROME_OFF[base] = loop.time() + 240
             return None, ""
-        try:
-            data = resp.json()
-        except ValueError:
-            return None, ""
-        if resp.status_code >= 400 or not isinstance(data, dict):
+        if status >= 400 or not isinstance(data, dict):
             return None, ""
         if not data.get("ok"):
             why = str(data.get("why") or "")

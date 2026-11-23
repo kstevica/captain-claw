@@ -231,3 +231,42 @@ async def test_shell_exec_policy_ask_uses_approval_callback():
         assert prompts
     finally:
         set_config(old_cfg)
+
+
+class WaitsOnThePersonTool(Tool):
+    """Asks for more time once a wait on the person begins (a robot check
+    handed to them in their Chrome)."""
+
+    name = "waits"
+    description = "Waits"
+    parameters = {"type": "object", "properties": {}, "required": []}
+    timeout_seconds = 1.0   # the registry's least
+
+    def __init__(self, ask: bool):
+        self.ask = ask
+
+    async def execute(self, **kwargs):
+        from captain_claw.tools.registry import more_time
+
+        await asyncio.sleep(0.2)
+        if self.ask:
+            assert more_time(2.0)
+        await asyncio.sleep(1.2)
+        return ToolResult(success=True, content="answered")
+
+
+@pytest.mark.asyncio
+async def test_a_tool_waiting_on_the_person_gets_more_time_and_others_still_time_out():
+    from captain_claw.tools.registry import more_time
+
+    registry = ToolRegistry()
+    registry.register(WaitsOnThePersonTool(ask=True))
+    got = await registry.execute("waits", {})
+    assert got.success and got.content == "answered"
+
+    plain = ToolRegistry()
+    plain.register(WaitsOnThePersonTool(ask=False))
+    with pytest.raises(ToolExecutionError, match="timed out"):
+        await plain.execute("waits", {})
+    # Outside a tool call there's nothing to move.
+    assert more_time(5) is False

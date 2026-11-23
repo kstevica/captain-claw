@@ -62,6 +62,8 @@ async def deck(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
     monkeypatch.setattr(bh, "_CONNS", {})
     monkeypatch.setattr(bh, "_ACTS", {})
+    from captain_claw.flight_deck import browser_waits
+    monkeypatch.setattr(browser_waits, "_JOBS", {})
     monkeypatch.setattr(bh, "_MINTED", {})
     monkeypatch.setattr(bh, "_agent_store_path", lambda: tmp_path / "agent-browsers.json")
     from captain_claw.flight_deck import person_asks
