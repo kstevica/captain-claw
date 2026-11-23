@@ -20,7 +20,7 @@ playbooks:
     open: https://www.xe.com/currencyconverter/convert/?Amount={amount}&From={from}&To={to}
     read:
       converted: The converted amount XE shows
-      rate: The "1 {from} = x {to}" rate under it
+      rate: How many {to} one {from} buys, with the code — the "x {to}" part of XE's "1 {from} = x {to}" line
       as_of: The time XE gives for that rate
     answer: "{amount} {from} = {converted} at the mid-market rate (1 {from} = {rate}, {as_of}). A bank or card will usually give a little less."
     tags: [currency, exchange-rate, convert]

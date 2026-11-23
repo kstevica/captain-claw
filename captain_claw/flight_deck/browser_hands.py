@@ -793,3 +793,47 @@ async def agent_disconnect(request: Request) -> dict:
     """The agent lets go of its own browser's connection (Captain removed)."""
     owner, slug = _owner_of(request, "connecting a browser")
     return {"ok": True, "dropped": await drop_agent_browser(owner, slug=slug)}
+
+
+# ── The person's recordings, for the agent's web_playbook tool ───────
+
+
+class RecordingWords(BaseModel):
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
+def _owners_recording(owner: str, rec_id: str) -> dict:
+    from captain_claw.flight_deck import browser_recordings as rec
+
+    found = next((r for r in rec.load_all(owner) if r["id"] == rec_id), None)
+    if found is None:
+        raise HTTPException(404, "That recording is gone.")
+    return found
+
+
+@agent_router.get("/recordings")
+async def agent_recordings(request: Request) -> dict:
+    """What the person recorded in Captain for Chrome, as playbooks the agent's
+    web_playbook tool finds next to the shipped ones (their own, never another's)."""
+    from captain_claw.flight_deck import browser_recordings as rec
+
+    owner, _slug = _owner_of(request, "the person's recordings")
+    items = sorted(rec.load_all(owner), key=lambda r: str(r.get("updated_at") or ""), reverse=True)
+    return {"recordings": [rec.as_playbook(r) for r in items]}
+
+
+@agent_router.get("/recordings/{rec_id}")
+async def agent_recording(rec_id: str, request: Request) -> dict:
+    from captain_claw.flight_deck import browser_recordings as rec
+
+    owner, _slug = _owner_of(request, "the person's recordings")
+    return rec.as_playbook(_owners_recording(owner, rec_id))
+
+
+@agent_router.post("/recordings/{rec_id}/words")
+async def agent_recording_words(rec_id: str, body: RecordingWords, request: Request) -> dict:
+    """The recording's steps in words, with this run's values in them."""
+    from captain_claw.flight_deck import browser_recordings as rec
+
+    owner, _slug = _owner_of(request, "the person's recordings")
+    return rec.playbook_words(_owners_recording(owner, rec_id), body.inputs)

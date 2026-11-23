@@ -2,8 +2,9 @@
 
 A playbook is a recording Captain ships: "How long from A to B?" → open Google
 Maps directions with A and B in the link, read the fastest route's time, say
-it. The person's own recordings join the same list later ("my playbooks");
-this module holds the shipped seed and the rules every playbook keeps.
+it. The person's own recordings join the same list (browser_recordings.as_playbook);
+this module holds the shipped seed, the rules every playbook keeps, and what
+the agent's ``web_playbook`` tool (tools/web_playbook.py) needs to run one.
 
 Seed files: ``flight_deck/playbooks/<category>.yaml``, each
 ``{"category": <file stem>, "playbooks": [...]}``. One playbook::
@@ -59,7 +60,7 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import yaml
 
@@ -356,6 +357,338 @@ def seed() -> tuple[dict[str, Any], ...]:
 
 def by_id(pid: str) -> dict[str, Any] | None:
     return next((b for b in seed() if b["id"] == pid), None)
+
+
+# ── Running one: finding it, its values, its link, its steps in words ─────
+#
+# Pure functions, used by the agent's web_playbook tool (tools/web_playbook.py)
+# — nothing here opens a page.
+
+_WORD = re.compile(r"\w+")
+_QUIET_WORDS = frozenset(
+    "a an the to of in on for from at by my me i is it how what when which who do does did can could "
+    "get got show find much many with and or this that there be are was will would should please tell "
+    "check see look up out want need".split())
+HERE_WORDS = frozenset({"here", "me", "my location", "current location", "where i am", "my place", "home"})
+MAX_VALUE_CHARS = 2000
+_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TIME = re.compile(r"^(\d{1,2}):(\d{2})$")
+_QUOTED = re.compile(r"[\"“„]([^\"“”„]{1,80})[\"”“]")
+_ROLE_WORDS = {"button": "button", "link": "link", "textbox": "field", "searchbox": "search box",
+               "combobox": "field", "checkbox": "checkbox", "radio": "option", "tab": "tab",
+               "menuitem": "menu item", "option": "option", "switch": "switch"}
+
+
+# Words people use for the same thing, folded into one.
+_SAME = {
+    "parcel": "package", "shipment": "package", "packet": "package",
+    "tracking": "track", "where's": "track", "cost": "price", "costs": "price", "prices": "price",
+    "cheapest": "cheap", "cheaper": "cheap", "fly": "flight", "flying": "flight", "plane": "flight",
+    "rail": "train", "trains": "train", "bill": "invoice", "receipt": "invoice", "statement": "invoice",
+    "subscription": "subscription", "membership": "subscription", "renewal": "subscription",
+    "far": "distance", "drive": "driving", "commute": "travel", "trip": "travel", "journey": "travel",
+    "hours": "open", "opening": "open", "booking": "book", "reserve": "book", "reservation": "book",
+    "weather": "forecast", "rain": "forecast", "temperature": "forecast",
+}
+
+
+def words(text: Any) -> list[str]:
+    """Lowercase words without the filler ("how", "my", "the"), plurals cut,
+    the usual synonyms folded into one ("parcel" → "package")."""
+    out: list[str] = []
+    for w in _WORD.findall(str(text or "").casefold().replace("_", " ")):
+        if w in _QUIET_WORDS or len(w) < 2:
+            continue
+        w = _SAME.get(w, w)
+        if len(w) > 4 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        out.append(_SAME.get(w, w))
+    return out
+
+
+def _book_words(book: dict[str, Any]) -> list[tuple[set[str], int]]:
+    hosts = " ".join(s.split("/", 1)[0].removeprefix("www.").rsplit(".", 1)[0] for s in book["sites"])
+    return [
+        (set(words(book["id"].replace(".", " "))) | set(words(hosts)), 3),
+        (set(words(book["title"])), 3),
+        (set(words(" ".join(book["tags"]))), 2),
+        # the examples name places and things ("Berlin"): a hint, not the job
+        (set(words(" ".join(book["says"]))) | set(words(" ".join(f"{k} {v}" for k, v in book["read"].items()))), 1),
+    ]
+
+
+def search(query: str, *, region: str = "", category: str = "", kind: str = "", limit: int = 6,
+           books: Any = None) -> list[dict[str, Any]]:
+    """The playbooks that best fit *query* (what the person asked), best first.
+    *region*: the person's country (two letters) — that country's playbooks
+    and the global and EU ones; empty = all. *books*: another list to search
+    (the person's recordings joined in); the seed by default."""
+    wanted = list(dict.fromkeys(words(query)))
+    if not wanted:
+        return []
+    region = (region or "").strip().lower()
+    scored: list[tuple[float, str, dict[str, Any]]] = []
+    for book in (seed() if books is None else books):
+        if category and book.get("category") != category:
+            continue
+        if kind and book.get("kind") != kind:
+            continue
+        if region and book.get("region") not in ("global", "eu", region):
+            continue
+        fields = _book_words(book)
+        score = 0.0
+        hit = 0
+        for w in wanted:
+            best = max((weight for bag, weight in fields if w in bag), default=0)
+            if not best:   # a word's start: "flight" ~ "flights", "invoice" ~ "invoices"
+                best = max((weight - 1 for bag, weight in fields
+                            if len(w) >= 4 and any(b.startswith(w) or w.startswith(b) for b in bag if len(b) >= 4)),
+                           default=0)
+            score += best
+            hit += 1 if best else 0
+        if not hit:
+            continue
+        score += hit / len(wanted)            # the share of the ask it covers breaks ties
+        if region and book.get("region") == region:
+            score += 1
+        scored.append((score, book["id"], book))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return [b for _s, _i, b in scored[:max(1, limit)]]
+
+
+def check_values(book: dict[str, Any], given: dict[str, Any] | None) -> dict[str, Any]:
+    """This run's values for *book*'s inputs: what the agent gave, checked and
+    put in shape, defaults for the rest. ``{"values", "problems", "ask_before",
+    "decide", "ask_during"}`` — the last three are input names still without a
+    value: asked of the person before the run, the agent's own call, asked when
+    a step gets there (only for inputs the link doesn't carry)."""
+    given = dict(given or {})
+    inputs = book["inputs"]
+    in_open = _slots(book["open"])
+    out: dict[str, Any] = {"values": {}, "problems": [], "ask_before": [], "decide": [], "ask_during": []}
+    for name in given:
+        if name not in inputs:
+            known = ", ".join(inputs) or "none"
+            out["problems"].append(f"{name!r} isn't one of its inputs ({known})")
+    for name, spec in inputs.items():
+        raw = given.get(name)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            if "default" in spec:
+                out["values"][name] = spec["default"]
+            elif spec["required"]:
+                if spec["ask"] == "during" and name not in in_open:
+                    out["ask_during"].append(name)
+                elif spec["ask"] == "agent":
+                    out["decide"].append(name)
+                else:
+                    out["ask_before"].append(name)
+            continue
+        value, problem = _shape(name, spec, raw)
+        if problem:
+            out["problems"].append(problem)
+        else:
+            out["values"][name] = value
+    return out
+
+
+def _shape(name: str, spec: dict[str, Any], raw: Any) -> tuple[Any, str]:
+    kind = spec["kind"]
+    label = spec["label"]
+    if kind == "flag":
+        if isinstance(raw, bool):
+            return raw, ""
+        low = str(raw).strip().lower()
+        if low in ("true", "yes", "1", "on"):
+            return True, ""
+        if low in ("false", "no", "0", "off"):
+            return False, ""
+        return None, f"{name} ({label}) is true or false"
+    if isinstance(raw, (dict, list)):
+        return None, f"{name} ({label}) is one value, not a list"
+    text = " ".join(str(raw).split())
+    if len(text) > MAX_VALUE_CHARS:
+        return None, f"{name} ({label}) is over {MAX_VALUE_CHARS} characters"
+    if kind == "choice":
+        options = spec.get("options") or []
+        pick = next((o for o in options if o.casefold() == text.casefold()
+                     or o.casefold() == text.casefold().replace(" ", "_")), None)
+        if pick is None:
+            return None, f"{name} ({label}) is one of: {', '.join(options)}"
+        return pick, ""
+    if kind == "date":
+        if not _DATE.match(text):
+            return None, f"{name} ({label}) is a date as YYYY-MM-DD (got {text!r})"
+        return text, ""
+    if kind == "time":
+        m = _TIME.match(text)
+        if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+            return None, f"{name} ({label}) is a 24-hour time as HH:MM (got {text!r})"
+        return f"{int(m.group(1)):02d}:{m.group(2)}", ""
+    if kind == "number":
+        try:
+            num = float(text.replace(",", "."))
+        except ValueError:
+            return None, f"{name} ({label}) is a number (got {text!r})"
+        return (str(int(num)) if num.is_integer() else str(num)), ""
+    if kind == "url":
+        low = text.lower()
+        if "://" not in low:
+            text = "https://" + text
+        elif not low.startswith("https://"):
+            return None, f"{name} ({label}) is an https:// address (got {text!r})"
+        host = urlsplit(text).hostname or ""
+        if " " in text or "." not in host:
+            return None, f"{name} ({label}) is a web address like https://example.com (got {text!r})"
+        return text, ""
+    if kind == "place" and text.casefold().strip(" .!") in HERE_WORDS:
+        return None, (f"{name} ({label}): “{text}” can't go in a link — give the town or address "
+                      "(from what you know of where they are, or ask them)")
+    return text, ""
+
+
+def open_link(book: dict[str, Any], values: dict[str, Any]) -> str:
+    """The link to open, with this run's values in it (URL-encoded; a site the
+    person names goes in as given — check_values made it https)."""
+    url = book["open"]
+    m = _SLOT.fullmatch(url)
+    if m and _named_site(url, book["inputs"]):
+        return str(values.get(m.group(1)) or "")
+
+    def put(slot: re.Match) -> str:
+        value = values.get(slot.group(1), "")
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        return quote(str(value), safe="")
+
+    return _SLOT.sub(put, url)
+
+
+def filled(text: Any, book: dict[str, Any], values: dict[str, Any]) -> str:
+    """*text* with this run's values in its slots (‹label› for one not given)."""
+    def put(slot: re.Match) -> str:
+        name = slot.group(1)
+        value = values.get(name)
+        if value is True:
+            return "yes"
+        if value is False:
+            return "no"
+        if value not in (None, ""):
+            return str(value)
+        label = book["inputs"].get(name, {}).get("label", name)
+        return f"‹{label}: not given›" if name in values else f"‹{label}›"
+
+    return _SLOT.sub(put, str(text or ""))
+
+
+def step_sentence(step: dict[str, Any], book: dict[str, Any], values: dict[str, Any]) -> str:
+    """One step as an instruction, with this run's values in it."""
+    fill = lambda v: filled(v, book, values)  # noqa: E731
+    kind = step["kind"]
+    target = step.get("target") or {}
+    name, role = fill(target.get("name") or ""), _ROLE_WORDS.get(str(target.get("role") or ""), "")
+    what = (f"the {role} “{name}”" if role else f"“{name}”") if name else (f"the {role}" if role else "")
+    note = fill(step.get("note") or "")
+    if not what and note:
+        what, note = note[:1].lower() + note[1:], ""
+    value = fill(step.get("value") or "")
+    if kind == "do":
+        line = fill(step.get("text"))
+    elif kind == "open":
+        line = f"Open {fill(step.get('url'))}"
+    elif kind == "switch":
+        line = f"Switch to the tab {fill(step.get('url') or step.get('title'))}"
+    elif kind == "click":
+        line = f"Click {what or 'it'}"
+    elif kind == "type":
+        line = f"Type “{value}” into {what or 'the field'}"
+    elif kind == "select":
+        line = f"Choose “{value}” in {what or 'the list'}"
+    elif kind == "check":
+        line = f"Tick {what or 'the box'}"
+    elif kind == "upload":
+        line = f"Upload {value} with {what or 'the file field'}"
+    elif kind == "key":
+        line = f"Press {step.get('key')}" + (f" in {what}" if what else "")
+    else:
+        line = ""
+    return f"{line} — {note}" if note and line else line
+
+
+def step_lines(book: dict[str, Any], values: dict[str, Any]) -> list[str]:
+    return [f"{n}. {step_sentence(s, book, values)}" for n, s in enumerate(book["steps"], 1)]
+
+
+# A first step starting with one of these has to be done before the page can answer.
+_ACTION_WORDS = frozenset(
+    "open type search for pick look find set go choose in scroll filter enter click fill apply hand pause select "
+    "sign log press tap expand switch sort add upload".split())
+_IF_WORDS = ("if ", "only ", "unless ", "when ", "where ")
+
+
+def answers_as_opened(book: dict[str, Any]) -> bool:
+    """Whether the page a look playbook's link opens may already hold the
+    answer: no steps, or a first one that only applies sometimes ("If a time
+    was given …") or says what to read — not one to do first ("Open …",
+    "Type …"). Only then is a read of the page worth a call."""
+    if book.get("kind") != "look" or not book.get("read"):
+        return False
+    steps = book.get("steps") or []
+    if not steps:
+        return True
+    step = steps[0]
+    said = " ".join(str(step.get("text") or step.get("note") or "").split()).lower()
+    if said.startswith(_IF_WORDS):
+        return True
+    if step["kind"] != "do":
+        return False
+    return (said.split(" ", 1)[0].strip(",:;") if said else "") not in _ACTION_WORDS
+
+
+def label_words(label: Any) -> str:
+    return " ".join(_WORD.findall(str(label or "").casefold()))
+
+
+def is_stop(label: Any, stop: Any) -> bool:
+    """Whether a button named *label* is the playbook's *stop*: the same words,
+    give or take a count after them ("Check in (2)") and punctuation."""
+    a, b = label_words(label), label_words(stop)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return a.startswith(b + " ") and all(w.isdigit() for w in a[len(b) + 1:].split())
+
+
+def stop_clicks_before(book: dict[str, Any]) -> int:
+    """How many times the steps click a button with the stop's own name before
+    the end ("“Cancel subscription” only opens the reason dialog"): those clicks
+    go through, the next one is the stop."""
+    stop = book.get("stop") or ""
+    if not stop:
+        return 0
+    count = 0
+    for step in book["steps"][:-1]:
+        name = (step.get("target") or {}).get("name")
+        if name and is_stop(name, stop):
+            count += 1
+            continue
+        said = " ".join(str(step.get(k) or "") for k in ("text", "note"))
+        if any(is_stop(q, stop) for q in _QUOTED.findall(said)):
+            count += 1
+    return count
+
+
+def answer_text(book: dict[str, Any], values: dict[str, Any], fields: dict[str, Any]) -> str:
+    """The playbook's answer line with what was read, or "" when it has none
+    or a part of it wasn't found."""
+    template = book.get("answer") or ""
+    if not template:
+        return ""
+    known = {k: v for k, v in {**{k: v for k, v in values.items() if not isinstance(v, bool)},
+                               **fields}.items() if v not in (None, "")}
+    if not _slots(template) <= set(known):
+        return ""
+    return _SLOT.sub(lambda m: str(known[m.group(1)]), template)
 
 
 if __name__ == "__main__":  # python -m captain_claw.flight_deck.web_playbooks [file.yaml ...]

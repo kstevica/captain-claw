@@ -735,9 +735,11 @@ class Agent(
         tab, and a model switched to for that turn only goes back."""
         self._turn_depth = max(0, getattr(self, "_turn_depth", 1) - 1)
         if self._turn_depth == 0:
+            from captain_claw.tools import web_playbook
             from captain_claw.tools.browser_chrome import turn_over
 
             turn_over(self)
+            web_playbook.turn_over(self)   # a playbook's stop lasts the turn it ran in
             try:
                 self._restore_turn_model()
             except Exception as exc:
