@@ -179,6 +179,7 @@ Each phase is its own PR and leaves Diligent unchanged.
 | 3 | Picker in the chat box, default in agent settings, cost wording; bundle rebuild | people can choose |
 |   | *Phase 3 status (2026-11-23): built on branch `feat/drive-phase3`. The agent's own default lives in `~/.captain-claw/drive.txt` (read every turn, like the task-rephrase switch), with `drive.default` in the config as the fallback. A member of a shared agent gets no picker.* | |
 | 4 | The check before delivering | Persistent and Ambitious catch gaps |
+|   | *Phase 4 status (2026-11-23): built on branch `feat/drive-phase4`. The check is skipped when the reply was already judged against a contract (no second opinion on the same reply), on a turn's last allowed step, and when the checker fails or answers badly. A reply that is open about what it could not do passes.* | |
 | 5 | Initiative, behind its own switch | Ambitious does bounded extra work |
 | 6 | Statistics per level, and a comparison on real tasks | evidence for the default values |
 

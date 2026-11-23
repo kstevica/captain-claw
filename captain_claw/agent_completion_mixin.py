@@ -26,6 +26,14 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
+# What the check before delivering shows its checker: the last tool calls of
+# the turn, each shortened, and the start of the request and of the reply.
+_DELIVERY_LOG_CALLS = 40
+_DELIVERY_LOG_ARGS = 200
+_DELIVERY_LOG_RESULT = 400
+_DELIVERY_REQUEST_CHARS = 6000
+_DELIVERY_REPLY_CHARS = 12000
+
 
 # How many times a zero-length reply may be re-rolled before the turn gives
 # up honestly. Mirrors MAX_STALL_RETRIES: two re-rolls convert a transient
@@ -885,6 +893,47 @@ class AgentCompletionMixin:
             )
             return True, MSG_EMPTY_RESPONSE, False, completion_feedback, python_worker_attempted
 
+        # ── Check before delivering (Drive: Persistent and above) ────
+        # Once per turn, for a turn that did work with tools and was not
+        # already judged against a contract: compare the reply with what was
+        # asked, and send it back when something asked for is missing.
+        if (
+            drive.current(self).delivery_check
+            and not getattr(self, "_delivery_check_done", False)
+            and not (completion_requirements and task_contract is not None)
+            and iteration < (hard_turn_iterations - 1)
+            and self._turn_did_work(turn_start_idx)
+        ):
+            self._delivery_check_done = True
+            gaps = await self._delivery_check(
+                user_input=effective_user_input,
+                candidate_response=final_response,
+                turn_start_idx=turn_start_idx,
+                turn_usage=turn_usage,
+            )
+            if gaps:
+                completion_feedback = (
+                    "[Check before delivering] Compared with what was asked, your reply "
+                    "is missing or does not support the following:\n"
+                    + "\n".join(f"- {gap}" for gap in gaps)
+                    + "\n\nIf a point is right, finish it now with your tools. If it is "
+                    "wrong, or cannot be done, leave it. Then give your complete answer "
+                    "again, and say plainly what is still missing or unverified. Do not "
+                    "ask the person a question, and do not mention this check."
+                )
+                self._emit_tool_output(
+                    "completion_gate",
+                    {"step": "delivery_check", "passed": False, "gaps": len(gaps)},
+                    "step=delivery_check\npassed=False\n" + "\n".join(f"gap={gap}" for gap in gaps),
+                )
+                log.info("Finalize BLOCKED by delivery check", iteration=iteration, gaps=len(gaps))
+                return False, "", finish_success, completion_feedback, python_worker_attempted
+            self._emit_tool_output(
+                "completion_gate",
+                {"step": "delivery_check", "passed": True, "gaps": 0},
+                "step=delivery_check\npassed=True",
+            )
+
         # ── Finalize: persist and return ─────────────────────────────
         log.info("All completion gates passed — finalizing response", iteration=iteration)
         self._update_clarification_state(
@@ -918,6 +967,93 @@ class AgentCompletionMixin:
         )
 
         return True, final_response, finish_success, completion_feedback, python_worker_attempted
+
+    # ------------------------------------------------------------------
+    # Check before delivering (Drive)
+    # ------------------------------------------------------------------
+
+    def _turn_work_messages(self, turn_start_idx: int) -> list[dict[str, Any]]:
+        """This turn's tool results, leaving out tools that only watch."""
+        session = getattr(self, "session", None)
+        messages = getattr(session, "messages", None) or []
+        out: list[dict[str, Any]] = []
+        for msg in messages[turn_start_idx:]:
+            if not isinstance(msg, dict) or str(msg.get("role", "")).strip().lower() != "tool":
+                continue
+            name = str(msg.get("tool_name", "")).strip().lower()
+            if name and self._is_monitor_only_tool_name(name):
+                continue
+            out.append(msg)
+        return out
+
+    def _turn_did_work(self, turn_start_idx: int) -> bool:
+        """Whether the turn called a tool: a reply made of words alone (small
+        talk, a simple answer) is not checked."""
+        return bool(self._turn_work_messages(turn_start_idx))
+
+    def _delivery_work_log(self, turn_start_idx: int) -> str:
+        """What the turn did, shortened for the checker: each tool call with
+        the start of its arguments and of its result."""
+        lines: list[str] = []
+        work = self._turn_work_messages(turn_start_idx)
+        for msg in work[-_DELIVERY_LOG_CALLS:]:
+            args = msg.get("tool_arguments")
+            try:
+                arg_text = json.dumps(args, ensure_ascii=False, default=str) if args else ""
+            except Exception:
+                arg_text = str(args)
+            result = " ".join(str(msg.get("content", "")).split())
+            lines.append(
+                f"- {str(msg.get('tool_name', '') or 'tool')}"
+                f"({arg_text[:_DELIVERY_LOG_ARGS]}) -> {result[:_DELIVERY_LOG_RESULT] or '(no output)'}"
+            )
+        if len(work) > _DELIVERY_LOG_CALLS:
+            lines.insert(0, f"({len(work) - _DELIVERY_LOG_CALLS} earlier tool call(s) not shown)")
+        return "\n".join(lines) or "(no tool calls)"
+
+    async def _delivery_check(
+        self,
+        *,
+        user_input: str,
+        candidate_response: str,
+        turn_start_idx: int,
+        turn_usage: dict[str, int],
+    ) -> list[str]:
+        """What the reply still owes the request, as the checker sees it: up
+        to five short statements, or none. Anything that goes wrong (the call
+        fails, the answer is not the JSON asked for) means none — the check
+        may add a round of work, never block a reply."""
+        try:
+            from captain_claw.llm import Message
+
+            messages = [
+                Message(role="system", content=self.instructions.load("delivery_check_system_prompt.md")),
+                Message(role="user", content=self.instructions.render(
+                    "delivery_check_user_prompt.md",
+                    user_input=str(user_input or "")[:_DELIVERY_REQUEST_CHARS],
+                    work_log=self._delivery_work_log(turn_start_idx),
+                    candidate_response=str(candidate_response or "")[:_DELIVERY_REPLY_CHARS],
+                )),
+            ]
+            from captain_claw.config import get_config
+
+            response = await self._complete_with_guards(
+                messages=messages,
+                tools=None,
+                interaction_label="delivery_check",
+                turn_usage=turn_usage,
+                max_tokens=min(800, int(get_config().model.max_tokens)),
+            )
+            payload = self._extract_json_object(response.content or "")
+        except Exception as exc:
+            log.warning("Delivery check failed — delivering as is", error=str(exc))
+            return []
+        if not isinstance(payload, dict) or payload.get("complete") is not False:
+            return []
+        gaps = payload.get("gaps")
+        if not isinstance(gaps, list):
+            return []
+        return [" ".join(str(g).split())[:300] for g in gaps if str(g or "").strip()][:5]
 
     # ------------------------------------------------------------------
     # Playbook rating hint

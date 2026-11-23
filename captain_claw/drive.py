@@ -71,6 +71,11 @@ class DriveLevel:
     # (agent_orchestration_mixin). Never below 2: that is about finishing.
     stall_retries: int = 2
 
+    # Check before delivering (agent_completion_mixin._delivery_check): one
+    # extra model call compares a tool-using turn's reply with what was asked,
+    # once, and sends it back when something asked for is missing.
+    delivery_check: bool = False
+
 
 LEVELS: dict[str, DriveLevel] = {
     "relaxed": DriveLevel(
@@ -84,15 +89,17 @@ LEVELS: dict[str, DriveLevel] = {
         "The everyday level: works until the task is done, within normal limits."),
     "persistent": DriveLevel(
         "persistent", "Persistent",
-        "Keeps going longer and sends a weak answer back more often. Slower, costs more.",
+        "Keeps going longer and checks the result before delivering. Slower, costs more.",
         step_ceiling_multiplier=6, step_ceiling_cap=450, free_extension_multiplier=3,
-        validation_retries=3, validation_retries_after_list=2, stall_retries=3),
+        validation_retries=3, validation_retries_after_list=2, stall_retries=3,
+        delivery_check=True),
     # Same limits as Persistent until its extra-work part is built (plan, phase 5).
     "ambitious": DriveLevel(
         "ambitious", "Ambitious",
         "As Persistent for now; doing the obvious next step is still to come.",
         step_ceiling_multiplier=6, step_ceiling_cap=450, free_extension_multiplier=3,
-        validation_retries=3, validation_retries_after_list=2, stall_retries=3),
+        validation_retries=3, validation_retries_after_list=2, stall_retries=3,
+        delivery_check=True),
 }
 
 _ALIASES = {"relax": "relaxed", "default": "", "auto": "", "normal": "diligent",
