@@ -1,0 +1,764 @@
+category: money
+playbooks:
+  # --- Currencies -----------------------------------------------------------
+
+  - id: xe.convert_amount
+    title: Convert an amount between currencies
+    says:
+      - How much is 250 euros in dollars?
+      - Convert 1,200 GBP to EUR.
+      - What's 5,000 yen in euros?
+      - How many Swiss francs is 300 dollars?
+    kind: look
+    where: any
+    region: global
+    sites: [xe.com]
+    inputs:
+      amount: {label: Amount, kind: number}
+      from: {label: From currency, kind: text, hint: "Three-letter code, e.g. EUR, USD, GBP, JPY"}
+      to: {label: To currency, kind: text, hint: "Three-letter code"}
+    open: https://www.xe.com/currencyconverter/convert/?Amount={amount}&From={from}&To={to}
+    read:
+      converted: The converted amount XE shows
+      rate: The "1 {from} = x {to}" rate under it
+      as_of: The time XE gives for that rate
+    answer: "{amount} {from} = {converted} at the mid-market rate (1 {from} = {rate}, {as_of}). A bank or card will usually give a little less."
+    tags: [currency, exchange-rate, convert]
+
+  - id: xe.historical_rate
+    title: Exchange rate on a past date
+    says:
+      - What was the dollar to euro rate on 15 March 2025?
+      - I need the USD/EUR rate on the invoice date, 2025-06-30.
+      - What was the pound worth in euros on 1 January?
+    kind: look
+    where: any
+    region: global
+    sites: [xe.com]
+    inputs:
+      from: {label: Base currency, kind: text, hint: "Three-letter code of the currency the amount is in, e.g. USD"}
+      to: {label: Rate in, kind: text, hint: "Three-letter code to read the rate for, e.g. EUR"}
+      date: {label: Date, kind: date}
+    open: https://www.xe.com/currencytables/?from={from}&date={date}
+    steps:
+      - kind: do
+        text: Find the {to} row in the table; search the page for the code if the table is long.
+    read:
+      rate: Units of {to} per 1 {from} on that date
+      inverse: Units of {from} per 1 {to}
+      fixing_time: The time of day the table says its rates are for
+    answer: "On {date}, 1 {from} = {rate} {to} (1 {to} = {inverse} {from}), XE mid-market at {fixing_time}."
+    tags: [currency, exchange-rate, history, invoice]
+
+  - id: ecb.reference_rate
+    title: ECB euro reference rate
+    says:
+      - What's today's ECB reference rate for the dollar?
+      - I need the official ECB EUR to GBP rate for my VAT return.
+      - What rate did the ECB publish for the Swiss franc last Friday?
+    kind: look
+    where: any
+    region: eu
+    sites: [ecb.europa.eu]
+    inputs:
+      currency: {label: Currency against the euro, kind: text, hint: "Lowercase three-letter code, e.g. usd, gbp, chf"}
+      date: {label: For date, kind: date, default: today}
+    open: https://www.ecb.europa.eu/stats/policy_and_exchange_rates/euro_reference_exchange_rates/html/eurofxref-graph-{currency}.en.html
+    steps:
+      - kind: do
+        text: Read {date} in the "Reference rates over last four months" calendar; for older dates switch the chart's time period and read the value there.
+      - kind: do
+        text: The ECB publishes no rate on weekends or TARGET holidays; for such a day take the last working day before it and say so.
+    read:
+      rate: Units of the currency per 1 euro on the day used
+      rate_date: The day that rate is for
+      latest: The most recent rate on the page and its date
+    answer: "ECB reference rate for {rate_date}: 1 EUR = {rate} {currency}."
+    tags: [currency, exchange-rate, official, ecb, invoice]
+
+  - id: wise.rate_trend
+    title: How a currency pair has moved lately
+    says:
+      - Has the dollar gone up against the euro this month?
+      - How has GBP to EUR moved over the last 30 days?
+      - What's the mid-market rate for euros to Polish zloty right now?
+    kind: look
+    where: any
+    region: global
+    sites: [wise.com]
+    inputs:
+      from: {label: From currency, kind: text, hint: "Lowercase three-letter code, e.g. eur"}
+      to: {label: To currency, kind: text, hint: "Lowercase three-letter code, e.g. usd"}
+      period: {label: Over, kind: choice, options: [48H, 1W, 1M, 6M, 12M, 5Y], default: 1M}
+    open: https://wise.com/gb/currency-converter/{from}-to-{to}-rate?amount=1
+    steps:
+      - kind: do
+        text: Set the rate chart's time period to {period} and read where the line started and where it is now.
+    read:
+      rate: The mid-market rate now
+      period_start: The rate at the start of the chosen period, from the chart
+      high_low_30d: The 30-day high, low and average from the stats section
+      volatility: The 30-day volatility, as stated
+    answer: "1 {from} = {rate} {to} now, against {period_start} at the start of {period}. 30-day range: {high_low_30d}."
+    tags: [currency, exchange-rate, trend]
+
+  # --- Stocks and markets ---------------------------------------------------
+
+  - id: gfinance.stock_quote
+    title: Stock price and key numbers
+    says:
+      - What's Apple's share price?
+      - How is Nvidia stock doing today?
+      - What's Microsoft's market cap and P/E?
+      - Price of SAP shares on Xetra?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/finance]
+    inputs:
+      ticker: {label: Ticker, kind: text, hint: "The symbol, e.g. AAPL, NVDA, SAP; work it out from the company name if needed"}
+      exchange: {label: Exchange, kind: text, default: NASDAQ, hint: "Google Finance code: NASDAQ, NYSE, LON, ETR, EPA, AMS, SWX, TYO, HKG"}
+    open: https://www.google.com/finance/quote/{ticker}:{exchange}
+    steps:
+      - kind: do
+        text: If Google Finance finds no such listing, search the company name in its search box and open the listing on the main exchange.
+    read:
+      price: The current price and its currency
+      day_change: The day's change in amount and percent
+      as_of: The time stamp or "Closed" note under the price
+      market_cap: Market cap
+      pe_ratio: P/E ratio
+      dividend_yield: Dividend yield, if shown
+      year_range: 52-week low to high
+    answer: "{ticker} is at {price}, {day_change} today ({as_of}). Market cap {market_cap}, P/E {pe_ratio}, 52-week range {year_range}."
+    tags: [stocks, quote]
+
+  - id: yahoo.key_statistics
+    title: A company's valuation and financial stats
+    says:
+      - What's Tesla's profit margin?
+      - What's Apple's EV to EBITDA?
+      - How many shares does Meta have outstanding?
+      - What's the short interest in GameStop?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [finance.yahoo.com]
+    inputs:
+      ticker: {label: Ticker, kind: text, hint: "Yahoo symbol, e.g. TSLA; non-US listings carry a suffix such as SAP.DE or VOD.L"}
+      stat: {label: Which numbers, kind: text, default: the valuation measures}
+    open: https://finance.yahoo.com/quote/{ticker}/
+    steps:
+      - kind: do
+        text: If a cookie consent page comes first, pick the choice that rejects all but necessary cookies.
+      - kind: click
+        target: {role: link, name: Statistics}
+    read:
+      requested: "{stat}, as the Statistics tab shows it"
+      valuation: Market cap, enterprise value, trailing and forward P/E, price/sales, price/book, EV/EBITDA
+      profitability: Profit margin, operating margin and return on equity (trailing twelve months)
+      shares: Shares outstanding, float, and short interest as % of float with its date
+    answer: "{ticker}: {requested} (Yahoo Finance, Statistics)."
+    tags: [stocks, fundamentals, valuation]
+
+  - id: yahoo.earnings_date
+    title: When a company reports earnings next
+    says:
+      - When does Nvidia report earnings?
+      - When is Apple's next earnings call?
+      - What EPS are analysts expecting from Microsoft this quarter?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [finance.yahoo.com]
+    inputs:
+      ticker: {label: Ticker, kind: text, hint: "Yahoo symbol, e.g. NVDA; non-US listings carry a suffix such as ASML.AS"}
+    open: https://finance.yahoo.com/quote/{ticker}/
+    steps:
+      - kind: do
+        text: If a cookie consent page comes first, pick the choice that rejects all but necessary cookies.
+      - kind: do
+        text: Read "Earnings Date" in the summary table; "(est.)" means the company has not confirmed it yet.
+      - kind: open
+        url: https://finance.yahoo.com/quote/{ticker}/analysis/
+        note: The consensus estimates for the coming quarter.
+    read:
+      earnings_date: The next earnings date and whether it is an estimate
+      eps_estimate: Average EPS estimate for the current quarter and how many analysts it averages
+      revenue_estimate: Average revenue estimate for the current quarter
+    answer: "{ticker} reports next on {earnings_date}. Consensus for the quarter: EPS {eps_estimate}, revenue {revenue_estimate}."
+    tags: [stocks, earnings, calendar]
+
+  - id: yahoo.price_on_date
+    title: A share price on a past date
+    says:
+      - What did Tesla stock close at on 3 January 2025?
+      - What was Apple's share price on 2024-09-16, when my RSUs vested?
+      - Microsoft's closing price on 31 December 2023?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [finance.yahoo.com]
+    inputs:
+      ticker: {label: Ticker, kind: text, hint: "Yahoo symbol, e.g. TSLA; non-US listings carry a suffix such as SAP.DE or VOD.L"}
+      date: {label: Date, kind: date}
+    open: https://finance.yahoo.com/quote/{ticker}/history/
+    steps:
+      - kind: do
+        text: If a cookie consent page comes first, pick the choice that rejects all but necessary cookies.
+      - kind: do
+        text: Open the date-range picker, set it from a week before {date} to a day after, and apply.
+      - kind: do
+        text: Find the row for {date}; if the market was closed that day, take the last trading day before it and say so.
+    read:
+      trading_day: The date of the row used
+      close: Close price
+      adj_close: Adjusted close (after splits and dividends)
+      day_range: Open, high and low that day
+      currency: The currency the prices are in
+    answer: "{ticker} closed at {close} {currency} on {trading_day} (adjusted close {adj_close}; open/high/low {day_range})."
+    tags: [stocks, history, tax]
+
+  - id: ir.latest_quarter
+    title: A company's latest quarterly results
+    says:
+      - What were Apple's revenue and profit last quarter?
+      - How did Siemens do in its latest quarterly results?
+      - Get Netflix's last earnings numbers from their investor relations page.
+    kind: look
+    where: any
+    region: global
+    sites: [google.com, sec.gov]
+    inputs:
+      company: {label: Company, kind: text}
+    open: https://www.google.com/search?q={company}+investor+relations+quarterly+results
+    steps:
+      - kind: do
+        text: Open the company's own investor-relations site from the results (its own domain, not a news or data site); skip ads.
+      - kind: do
+        text: Open the latest quarterly (or half-year) results press release or report; prefer the release over the slide deck.
+      - kind: do
+        text: For a US-listed company whose site has no release, read the latest 10-Q or 10-K on sec.gov instead.
+    read:
+      period: The period the results cover and the date they were released
+      revenue: Revenue and its change from a year earlier
+      net_income: Net income (profit after tax) and its change
+      eps: Diluted EPS, GAAP and adjusted if both are given
+      guidance: The outlook the company states, in a sentence
+      source: The page or document read
+    answer: "{company}, {period}: revenue {revenue}, net income {net_income}, EPS {eps}. Outlook: {guidance} (from {source})."
+    tags: [stocks, earnings, investor-relations]
+
+  - id: gfinance.market_indexes
+    title: How the stock markets are doing
+    says:
+      - How are the markets doing today?
+      - Where's the S&P 500 at?
+      - Is the DAX up or down today?
+      - How did the Nikkei close?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/finance]
+    inputs:
+      markets: {label: Markets, kind: choice, options: [Americas, Europe, Asia], default: Americas}
+    open: https://www.google.com/finance/markets/indexes
+    steps:
+      - kind: do
+        text: Switch to the {markets} tab if the page shows region tabs; for one named index, read just that row.
+    read:
+      levels: Each index's level with its day change in points and percent
+      status: Whether those markets are open or closed, and the time stamp
+    answer: "{levels} ({status})."
+    tags: [stocks, indexes, markets]
+
+  - id: etf.issuer_holdings
+    title: What an ETF holds
+    says:
+      - What's in the VWCE ETF?
+      - Top holdings of QQQ?
+      - How much Nvidia is in SPY?
+      - How many stocks does the iShares Core MSCI World ETF hold?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com]
+    inputs:
+      fund: {label: ETF, kind: text, hint: "Ticker or name, e.g. SPY, VWCE, iShares Core MSCI World"}
+      holding: {label: Look for holding, kind: text, required: false, ask: agent}
+    open: https://www.google.com/search?q={fund}+ETF+holdings
+    steps:
+      - kind: do
+        text: Open the fund's page on its issuer's own site (iShares, Vanguard, SPDR, Invesco, Amundi, Xtrackers and the like), not a data site; skip ads.
+      - kind: do
+        text: If the issuer asks the person's country and investor type and to accept its terms first, stop there and let the person choose.
+      - kind: do
+        text: Open the Holdings tab; if {holding} was given, find its weight in the full list.
+    read:
+      top_holdings: The top 10 holdings with their weights
+      holdings_count: Number of holdings
+      as_of: The date the holdings are as of
+      holding_weight: The weight of {holding}, if one was asked for
+      expense_ratio: The expense ratio (TER)
+    answer: "{fund} holds {holdings_count} positions as of {as_of}; top: {top_holdings}. TER {expense_ratio}."
+    tags: [etf, holdings, funds]
+
+  # --- Commodities and crypto -----------------------------------------------
+
+  - id: tradingeconomics.commodity_price
+    title: Price of gold, oil and other commodities
+    says:
+      - What's the price of gold today?
+      - How much is a barrel of Brent?
+      - Where's WTI crude trading?
+      - Price of silver per ounce?
+    kind: look
+    where: any
+    region: global
+    sites: [tradingeconomics.com]
+    inputs:
+      commodity: {label: Commodity, kind: choice, options: [gold, silver, crude-oil, brent-crude-oil, natural-gas, copper, wheat, coffee], default: gold, hint: "crude-oil is WTI"}
+    open: https://tradingeconomics.com/commodity/{commodity}
+    read:
+      price: The current price and its unit (e.g. USD/t.oz, USD/Bbl)
+      day_change: The day's change in amount and percent
+      longer_change: The change over the past month and year, as the page states it
+      as_of: The time stamp shown
+    answer: "{commodity}: {price}, {day_change} today ({as_of}); {longer_change}."
+    tags: [commodities, gold, oil]
+
+  - id: coingecko.coin_price
+    title: Price of a cryptocurrency
+    says:
+      - What's Bitcoin at right now?
+      - How much is one Ethereum in euros?
+      - Has Solana gone up today?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [coingecko.com]
+    inputs:
+      coin: {label: Coin, kind: text, hint: "CoinGecko's id from its URL, lowercase with hyphens: bitcoin, ethereum, solana, ripple (XRP)"}
+      currency: {label: Shown in, kind: text, default: USD}
+    open: https://www.coingecko.com/en/coins/{coin}
+    steps:
+      - kind: do
+        text: If the id doesn't resolve, search the coin's name in CoinGecko's search and open the match with the largest market cap.
+      - kind: do
+        text: If the price isn't shown in {currency}, switch it in the currency picker.
+    read:
+      price: The current price
+      change_24h: Change over 24 hours in percent
+      change_7d: Change over 7 days in percent
+      market_cap: Market cap and its rank
+      range_24h: 24-hour low and high
+    answer: "{coin} is at {price} ({change_24h} in 24 h, {change_7d} over 7 days); market cap {market_cap}."
+    tags: [crypto, quote]
+
+  - id: coinmarketcap.top_coins
+    title: Top cryptocurrencies by market cap
+    says:
+      - What are the biggest cryptocurrencies right now?
+      - How's the crypto market doing today?
+      - What's the total crypto market cap?
+    kind: look
+    where: any
+    region: global
+    sites: [coinmarketcap.com]
+    inputs:
+      count: {label: How many, kind: number, default: 10}
+    open: https://coinmarketcap.com/
+    read:
+      total_market_cap: The total crypto market cap and its 24-hour change
+      top: The top {count} coins, each with price, 24-hour change and market cap
+      btc_dominance: Bitcoin's share of the market, if shown
+    answer: "Crypto market cap {total_market_cap}; Bitcoin dominance {btc_dominance}. Top: {top}."
+    tags: [crypto, markets]
+
+  # --- Fuel -----------------------------------------------------------------
+
+  - id: gasbuddy.nearby_prices
+    title: Cheapest gas nearby
+    says:
+      - Where's the cheapest gas near me?
+      - Gas prices around 94110?
+      - Cheapest diesel near Denver?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [gasbuddy.com]
+    inputs:
+      place: {label: Near, kind: place, default: here, hint: "A city, ZIP or postal code in the US or Canada"}
+      fuel: {label: Fuel, kind: choice, options: [regular, midgrade, premium, diesel], default: regular}
+    open: https://www.gasbuddy.com/home
+    steps:
+      - kind: do
+        text: Type {place} in the search box (for "here", the person's city or ZIP) and press Find Gas.
+      - kind: do
+        text: Set the fuel type to {fuel} and sort the stations by price.
+    read:
+      cheapest: The three cheapest stations, each with price, address and how long ago the price was reported
+      area_average: The area's average price, if shown
+    answer: "Cheapest {fuel} near {place}: {cheapest}."
+    needs: [location]
+    tags: [fuel, gas, prices]
+
+  - id: globalpetrolprices.country_average
+    title: Average petrol or diesel price in a country
+    says:
+      - What does petrol cost in Croatia?
+      - Average diesel price in Germany per litre?
+      - Is fuel cheaper in Slovenia or Austria?
+    kind: look
+    where: any
+    region: global
+    sites: [globalpetrolprices.com]
+    inputs:
+      country: {label: Country, kind: text, hint: "English name as the site writes it, hyphens for spaces: Croatia, United-Kingdom, Bosnia-and-Herzegovina; the US is USA"}
+      fuel: {label: Fuel, kind: choice, options: [gasoline, diesel], default: gasoline}
+    open: https://www.globalpetrolprices.com/{country}/{fuel}_prices/
+    steps:
+      - kind: do
+        text: To compare two countries, read this page, then open the same page for the other country.
+    read:
+      price_local: The current price per litre in the local currency
+      price_usd: The same in USD (and EUR if shown)
+      as_of: The date the price is for
+      world_compare: How it compares with the world average, as stated
+    answer: "{fuel} in {country}: {price_local} per litre ({price_usd}), as of {as_of}."
+    tags: [fuel, petrol, diesel, prices]
+
+  # --- Economy --------------------------------------------------------------
+
+  - id: tradingeconomics.inflation_rate
+    title: A country's inflation rate
+    says:
+      - What's inflation in Croatia right now?
+      - What was the latest US CPI number?
+      - How high is inflation in the euro area?
+    kind: look
+    where: any
+    region: global
+    sites: [tradingeconomics.com]
+    inputs:
+      country: {label: Country, kind: text, hint: "Lowercase, hyphens for spaces: croatia, united-states, euro-area, united-kingdom"}
+    open: https://tradingeconomics.com/{country}/inflation-cpi
+    steps:
+      - kind: do
+        text: If the person wants the official figure, open the statistics office the page credits and read the same month there.
+    read:
+      rate: The latest annual inflation rate and the month it is for
+      previous: The previous month's rate
+      source: The statistics office credited as the source
+      next_release: The next release date in the page's calendar
+    answer: "Inflation in {country}: {rate} (previous {previous}), per {source}. Next figure due {next_release}."
+    tags: [economy, inflation, cpi]
+
+  - id: tradingeconomics.central_bank_rate
+    title: A central bank's interest rate
+    says:
+      - What's the ECB interest rate?
+      - What's the Fed funds rate right now?
+      - When does the Bank of England next decide on rates?
+    kind: look
+    where: any
+    region: global
+    sites: [tradingeconomics.com]
+    inputs:
+      country: {label: Country or area, kind: text, hint: "Lowercase, hyphens for spaces: euro-area, united-states, united-kingdom, japan, switzerland"}
+    open: https://tradingeconomics.com/{country}/interest-rate
+    read:
+      bank: The central bank and the name of the rate (e.g. deposit facility rate, fed funds target range)
+      rate: The current rate and when it was set
+      last_change: The last decision (hold, hike or cut) and by how much
+      next_meeting: The next decision date in the page's calendar
+    answer: "{bank}: {rate}. Last decision: {last_change}. Next meeting: {next_meeting}."
+    tags: [economy, interest-rates, central-bank]
+
+  - id: tradingeconomics.bond_yield
+    title: Government bond yield
+    says:
+      - What's the US 10-year Treasury yield?
+      - Where are German Bund yields today?
+      - What's Italy's 10-year yield?
+    kind: look
+    where: any
+    region: global
+    sites: [tradingeconomics.com]
+    inputs:
+      country: {label: Country, kind: text, hint: "Lowercase, hyphens for spaces: united-states, germany, italy, united-kingdom, japan"}
+    open: https://tradingeconomics.com/{country}/government-bond-yield
+    steps:
+      - kind: do
+        text: For another maturity (2-year, 30-year), read it from the page's table of related bond yields.
+    read:
+      yield_10y: The 10-year yield now
+      day_change: Its change today
+      longer_change: The change over the past month and year, as stated
+      as_of: The time stamp shown
+    answer: "{country} 10-year yield: {yield_10y} ({day_change} today, {as_of}); {longer_change}."
+    tags: [bonds, yields, economy]
+
+  # --- Rates for borrowers and savers (US) -----------------------------------
+
+  - id: bankrate.mortgage_rates
+    title: Today's US mortgage rates
+    says:
+      - What are 30-year mortgage rates today?
+      - Current 15-year fixed mortgage rate?
+      - What are refinance rates right now?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [bankrate.com]
+    inputs:
+      product: {label: Loan, kind: choice, options: [30-year fixed, 15-year fixed, 5/1 ARM, 30-year jumbo, 30-year FHA, 30-year VA], default: 30-year fixed}
+      zip: {label: ZIP code, kind: text, required: false, ask: agent}
+    open: https://www.bankrate.com/mortgages/mortgage-rates/
+    steps:
+      - kind: do
+        text: For refinancing, go to https://www.bankrate.com/mortgages/refinance-rates/ instead.
+      - kind: do
+        text: If a ZIP code was given, set it in the rate table's location filter and update.
+    read:
+      rate: The {product} average rate and APR, with the date and time of the table
+      weekly_change: Its change since last week, as shown
+      other_products: The other loan types' averages in the same table
+    answer: "Bankrate's average for a {product}: {rate} ({weekly_change}). Averages, not an offer."
+    tags: [mortgage, interest-rates]
+
+  - id: bankrate.savings_rates
+    title: Top US savings account rates
+    says:
+      - What are the best high-yield savings rates right now?
+      - Which banks pay the most on savings?
+      - What's the national average savings rate?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [bankrate.com]
+    open: https://www.bankrate.com/banking/savings/best-high-yield-interests-savings-accounts/
+    read:
+      top_rates: The highest APYs listed, each with the bank and minimum deposit
+      national_average: The national average savings APY the page quotes
+      updated: When the list was last updated
+    answer: "Top APYs on Bankrate: {top_rates}. National average {national_average} (updated {updated})."
+    tags: [savings, interest-rates]
+
+  # --- Pay and cost of living ------------------------------------------------
+
+  - id: levelsfyi.salary
+    title: Pay at a tech company by level
+    says:
+      - How much does Google pay a software engineer?
+      - What's total comp for a product manager at Meta?
+      - What does a senior engineer at Amazon make?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [levels.fyi]
+    inputs:
+      company: {label: Company, kind: text, hint: "Lowercase slug as in the URL: google, meta, amazon, microsoft"}
+      role: {label: Role, kind: text, default: software-engineer, hint: "Slug: software-engineer, product-manager, data-scientist, software-engineering-manager, product-designer"}
+      location: {label: Location, kind: text, default: United States}
+    open: https://www.levels.fyi/companies/{company}/salaries/{role}
+    steps:
+      - kind: do
+        text: If the page isn't showing {location}, pick it in the location filter.
+    read:
+      median_total: The median yearly total compensation and the location it's for
+      by_level: Each level's total comp, split into base, stock per year and bonus
+      updated: When the data was last updated
+    answer: "{company} {role} in {location}: median total comp {median_total}. By level: {by_level}."
+    tags: [salary, compensation, jobs]
+
+  - id: glassdoor.salary
+    title: Typical salary for a job in a city
+    says:
+      - What does a nurse earn in Chicago?
+      - Average salary for an accountant in London?
+      - How much do marketing managers make in Berlin?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [glassdoor.com, glassdoor.co.uk, glassdoor.de]
+    inputs:
+      job: {label: Job title, kind: text}
+      place: {label: City or country, kind: place}
+    open: https://www.glassdoor.com/Salaries/index.htm
+    steps:
+      - kind: do
+        text: Type {job} in the job-title box and {place} in the location box, and search.
+      - kind: do
+        text: If Glassdoor asks the person to sign in or add a salary to see more, read what is visible; never sign up for them.
+    read:
+      pay_range: The likely total pay range per year and its currency
+      median: The median or average base pay
+      sample: How many salaries the estimate rests on, and when it was updated
+    answer: "{job} in {place}: about {median} base, likely range {pay_range} ({sample})."
+    tags: [salary, jobs]
+
+  - id: numbeo.compare_cities
+    title: Cost of living, city against city
+    says:
+      - Is Vienna more expensive than Zagreb?
+      - How much pricier is London than Manchester to live in?
+      - What salary in Munich matches 3,000 euros in Ljubljana?
+    kind: look
+    where: any
+    region: global
+    sites: [numbeo.com]
+    inputs:
+      city1: {label: From city, kind: text}
+      country1: {label: Its country, kind: text}
+      city2: {label: Compared with, kind: text}
+      country2: {label: Its country, kind: text}
+      amount: {label: Monthly amount in the first city, kind: number, required: false, ask: agent}
+    open: https://www.numbeo.com/cost-of-living/compare_cities.jsp?country1={country1}&city1={city1}&country2={country2}&city2={city2}
+    steps:
+      - kind: do
+        text: If an amount was given, enter {amount} in the "you would need around" calculator and update it.
+    read:
+      equivalent: The "you would need around X in {city2} to keep the standard of life of Y in {city1}" line
+      consumer_prices: How much higher or lower consumer prices are, excluding and including rent
+      rent: How rents compare
+      groceries_restaurants: How grocery and restaurant prices compare
+    answer: "{equivalent}. Prices: {consumer_prices}; rent: {rent}."
+    tags: [cost-of-living, relocation]
+
+  # --- Tax ------------------------------------------------------------------
+
+  - id: youreurope.vat_rates
+    title: VAT rates in an EU country
+    says:
+      - What's the VAT rate in Germany?
+      - What are the reduced VAT rates in Croatia?
+      - Standard VAT in Hungary?
+    kind: look
+    where: any
+    region: eu
+    sites: [europa.eu]
+    inputs:
+      country: {label: EU country, kind: text}
+    open: https://europa.eu/youreurope/business/taxation/vat/vat-rules-rates/index_en.htm
+    steps:
+      - kind: do
+        text: Find {country} in the "List of VAT rates applied in EU member countries" table.
+      - kind: do
+        text: To say which goods a reduced rate covers, look {country} up in the Commission's VAT rates database the page links to.
+    read:
+      standard: The standard rate
+      reduced: The reduced rate or rates
+      super_reduced: The super-reduced rate, if any
+      parking: The parking rate, if any
+    answer: "{country}: standard VAT {standard}%, reduced {reduced}."
+    tags: [tax, vat]
+
+  - id: irs.filing_deadlines
+    title: US federal tax deadlines
+    says:
+      - When are US taxes due this year?
+      - When is the next estimated tax payment due?
+      - What's the filing deadline if I get an extension?
+      - When are 1099s due for my business?
+    kind: look
+    where: any
+    region: us
+    sites: [irs.gov]
+    inputs:
+      who: {label: For, kind: choice, options: [individual, business], default: individual}
+    open: https://www.irs.gov/filing/individuals/when-to-file
+    steps:
+      - kind: do
+        text: For business dates (payroll, 1099s, estimated tax by entity type), open the IRS Tax Calendar at https://www.irs.gov/businesses/small-businesses-self-employed/online-tax-calendar and read the coming ones.
+    read:
+      filing_deadline: The return due date for the tax year
+      extension_deadline: The due date with an extension, and the note that tax owed is still due on the original date
+      estimated_payments: The quarterly estimated-tax due dates
+      business_dates: The next business deadlines, if who is business
+    answer: "Returns are due {filing_deadline} ({extension_deadline} with an extension). Estimated tax: {estimated_payments}."
+    tags: [tax, deadlines, calendar]
+
+  # --- The person's own accounts (read only) ---------------------------------
+
+  - id: card.statement_summary
+    title: Read my latest credit card statement
+    says:
+      - How much is my credit card bill and when is it due?
+      - What's the minimum payment on my Amex?
+      - What were the biggest charges on my last card statement?
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Card issuer's site, kind: url, hint: "The issuer's sign-in or statements page, e.g. the person's bookmarked Amex or Chase page"}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Check the page is {site}, the address the person gave; if they only know the issuer's name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+      - kind: do
+        text: If a sign-in page shows, hand it to the person to sign in; never type a password, card number or one-time code.
+      - kind: do
+        text: Open Statements and read the latest one. Only read; never open Pay, Transfer or autopay settings.
+    read:
+      period: The statement period and closing date
+      statement_balance: The statement balance
+      minimum_due: The minimum payment due
+      due_date: The payment due date
+      current_balance: The current balance and available credit, if shown
+      largest_charges: The five largest charges on the statement, each with date, merchant and amount
+    answer: "Statement for {period}: {statement_balance}, minimum {minimum_due}, due {due_date}."
+    tags: [credit-card, statement, bills]
+
+  - id: wise.balances
+    title: My Wise balances
+    says:
+      - How much do I have in my Wise account?
+      - What's my Wise euro balance?
+      - Has the client's transfer landed in Wise yet?
+    kind: look
+    where: chrome
+    region: global
+    sites: [wise.com]
+    inputs:
+      search: {label: Look for, kind: text, required: false, ask: agent, hint: "A sender or amount to find in recent activity"}
+    open: https://wise.com/home
+    steps:
+      - kind: do
+        text: If Wise shows a sign-in page, hand it to the person to sign in; never type a password or code.
+      - kind: do
+        text: If {search} was given, look for it in the recent transactions. Only read; never open Send, Convert or Add money.
+    read:
+      balances: Each currency balance with its amount
+      total: The total the page shows and its currency
+      recent: The latest transactions, each with date, description, amount and status
+      match: The transaction matching {search}, if one was asked for
+    answer: "Wise: {balances} (total {total})."
+    tags: [wise, balance]
+
+  - id: stripe.open_invoices
+    title: Unpaid invoices and their due dates in Stripe
+    says:
+      - Which invoices are still unpaid in Stripe?
+      - What's overdue in Stripe?
+      - When is the invoice for Acme due?
+    kind: look
+    where: chrome
+    region: global
+    sites: [dashboard.stripe.com]
+    inputs:
+      customer: {label: Customer, kind: text, required: false, ask: agent}
+    open: https://dashboard.stripe.com/invoices
+    steps:
+      - kind: do
+        text: If Stripe shows a sign-in page, hand it to the person to sign in; never type a password or code.
+      - kind: do
+        text: Filter to the Open and Past due invoices; if {customer} was given, search for that customer.
+      - kind: do
+        text: Only read; never send, finalize, void or mark an invoice paid.
+    read:
+      past_due: Past-due invoices, each with customer, amount, due date and days overdue
+      open_not_due: Open invoices not yet due, each with customer, amount and due date
+      total_outstanding: The total outstanding, as shown or summed from the rows
+    answer: "Past due: {past_due}. Coming due: {open_not_due}. Outstanding in all: {total_outstanding}."
+    tags: [invoices, accounts-receivable, due-dates]

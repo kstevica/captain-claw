@@ -321,6 +321,38 @@ live (a folder read at run time rather than copied), sharing one with a teammate
 hover / drag steps, and a recording an agent tidies after a run ("step 4 is
 now called Export").
 
+## Web playbooks: recordings Captain ships
+
+"How long from A to B?" shouldn't take an agent ten browser calls to work
+out. A **playbook** is a known way to get one thing done on a site: open
+Google Maps directions with A and B in the link, read the fastest route's
+time, say it. It is a recording Captain ships, plus three things a recording
+doesn't have: a link template (`open`), the fields to take off the page
+(`read`) and, for anything that books, buys, posts or submits, the button
+never pressed (`stop`).
+
+The seed lives in `captain_claw/flight_deck/playbooks/<category>.yaml`
+(travel, local, shopping, accounts, work, research, money, home, media,
+regional); the rules are in `flight_deck/web_playbooks.py`, which also
+checks the seed (`python -m captain_claw.flight_deck.web_playbooks`).
+Steps use the recordings' vocabulary (`open/click/type/select/check/key/do`,
+values asked `before`, `during` or by the `agent`), so the person's own
+recordings can sit in the same list as "my playbooks".
+
+- `kind: look` reads and answers; `kind: act` fills in and stops before
+  `stop`, with that page in front of the person.
+- `where: any` — a headless browser will do; `prefer_chrome` — public, but
+  the site walls bots; `chrome` — needs the person signed in.
+- No playbook types a secret, pays, trades or moves money; money playbooks
+  only look.
+
+Not built yet: the `web_playbook` tool that finds and runs them (one call:
+fill the link, open it in the person's Chrome or the agent's own browser,
+wait for it to draw, pull the `read` fields with one small call on the
+agent's own model, hand over to `browser(target="chrome")` with the tab
+open when a step doesn't match), the panel's chips for the site in front,
+and recordings in the same list.
+
 ## Versions: the extension against the deck's copy
 
 The extension is loaded unpacked, so nothing updates it — a deck that moves on

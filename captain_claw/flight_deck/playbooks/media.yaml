@@ -1,0 +1,1031 @@
+category: media
+playbooks:
+  # ── YouTube ──────────────────────────────────────────────────────────────
+  - id: youtube.search_filtered
+    title: Find YouTube videos with filters
+    says:
+      - Find YouTube videos about the Artemis launch from this week.
+      - Show me short YouTube tutorials on sourdough.
+      - Any long YouTube documentaries about the Roman Empire?
+      - Search YouTube for Python asyncio talks uploaded this year.
+    kind: look
+    where: any
+    region: global
+    sites: [youtube.com]
+    inputs:
+      query: {label: Search for, kind: text}
+      uploaded: {label: Uploaded, kind: choice, options: [any time, today, this week, this month, this year], default: any time}
+      length: {label: Length, kind: choice, options: [any, short, medium, long], default: any, hint: "short is under about 4 minutes, long over 20; pick the nearest Duration filter"}
+      newest_first: {label: Newest first, kind: flag, default: false}
+    open: https://www.youtube.com/results?search_query={query}
+    steps:
+      - kind: do
+        text: If uploaded or length isn't the default, open "Filters" and pick the matching Upload date and Duration; the results reload.
+      - kind: do
+        text: If newest_first is on, pick the newest-first sort in the same Filters panel.
+      - kind: do
+        text: Skip ads, Shorts shelves and "People also watched" rows; take the first eight real videos.
+    read:
+      videos: Each video's title, channel, length, views and upload age
+      links: Each video's watch link
+    tags: [video, search]
+
+  - id: youtube.channel_latest
+    title: A YouTube channel's latest videos
+    says:
+      - What has MKBHD posted on YouTube lately?
+      - Any new videos from Veritasium this week?
+      - Show me the latest uploads from the Kurzgesagt channel.
+    kind: look
+    where: any
+    region: global
+    sites: [youtube.com]
+    inputs:
+      handle: {label: Channel, kind: text, hint: "The channel's @handle without the @, e.g. veritasium"}
+    open: https://www.youtube.com/@{handle}/videos
+    steps:
+      - kind: do
+        text: If the channel isn't found, search YouTube for the name, open the right channel (check the subscriber count) and its Videos tab.
+      - kind: do
+        text: The Videos tab lists the latest first; look at the Live or Shorts tabs only if asked.
+    read:
+      channel: Channel name and subscriber count
+      latest: The newest eight videos, each with title, length, views and how long ago
+      newest_link: Link to the newest video
+    answer: "{channel} — latest: {latest}"
+    tags: [video, channel]
+
+  - id: youtube.watch_later
+    title: What's in my Watch Later
+    says:
+      - What's in my YouTube Watch Later?
+      - Pick something under 15 minutes from my Watch Later.
+      - How many videos have I saved to watch later?
+    kind: look
+    where: chrome
+    region: global
+    sites: [youtube.com]
+    inputs:
+      max_minutes: {label: Longest length (minutes), kind: number, required: false, ask: agent}
+    open: https://www.youtube.com/playlist?list=WL
+    steps:
+      - kind: do
+        text: Scroll until the list stops growing (or 100 videos), noting each title, channel and length.
+      - kind: do
+        text: If max_minutes was given, keep only videos no longer than {max_minutes} minutes.
+    read:
+      count: How many videos are in Watch Later
+      videos: Titles with channel and length, in the order shown
+      total_time: The summed length of the list, or of the filtered part
+    answer: "{count} videos in Watch Later, about {total_time} in all."
+    tags: [video, watch-later]
+
+  - id: youtube.subscriptions_feed
+    title: New videos from my YouTube subscriptions
+    says:
+      - What's new from the channels I subscribe to?
+      - Anything new in my YouTube subscriptions today?
+      - Catch me up on my YouTube subscriptions from this week.
+    kind: look
+    where: chrome
+    region: global
+    sites: [youtube.com]
+    inputs:
+      since: {label: Since, kind: choice, options: [today, yesterday, this week], default: today}
+      shorts: {label: Include Shorts, kind: flag, default: false}
+    open: https://www.youtube.com/feed/subscriptions
+    steps:
+      - kind: do
+        text: Scroll until uploads are older than {since}; leave out Shorts unless shorts is on.
+    read:
+      videos: Each new video's channel, title, length and upload age
+      live: Channels live or premiering now, if any
+    tags: [video, subscriptions, feed]
+
+  - id: youtube.comments_digest
+    title: What people say under a YouTube video
+    says:
+      - What are people saying in the comments under this video?
+      - Summarize the top comments on the new Apple event video.
+      - Do the comments say this tutorial actually works?
+    kind: look
+    where: any
+    region: global
+    sites: [youtube.com, youtu.be]
+    inputs:
+      video_id: {label: Video, kind: text, hint: "The ID after v= or youtu.be/ in the link; search YouTube first if only a title was given"}
+      sort: {label: Comments, kind: choice, options: [top, newest], default: top}
+    open: https://www.youtube.com/watch?v={video_id}
+    steps:
+      - kind: do
+        text: Pause the video if it plays, then scroll below the description until comments load.
+      - kind: do
+        text: If sort is newest, open "Sort by" and pick "Newest first".
+      - kind: do
+        text: Read about 40 comments and open the replies under the three most-liked ones.
+    read:
+      video: Title, channel, views and upload date
+      comment_count: The comment count shown above the comments
+      themes: The main points commenters make, and how common each is
+      standout: Two or three notable comments with their like counts
+      creator: The pinned comment or the channel's own replies, if any
+    answer: "{video} — {comment_count} comments. {themes}"
+    tags: [video, comments]
+
+  # ── Spotify and podcasts ─────────────────────────────────────────────────
+  - id: spotify.playlist_tracks
+    title: What's in a Spotify playlist
+    says:
+      - What songs are on my Road Trip playlist on Spotify?
+      - List the tracks in Spotify's Today's Top Hits.
+      - How long is my running playlist?
+    kind: look
+    where: chrome
+    region: global
+    sites: [open.spotify.com]
+    inputs:
+      playlist: {label: Playlist, kind: text}
+    open: https://open.spotify.com/search/{playlist}/playlists
+    steps:
+      - kind: do
+        text: If it's one of the person's own playlists, open it from "Your Library" on the left instead of the search results.
+      - kind: do
+        text: Open the matching playlist (check the owner) and scroll to the end of the track list.
+    read:
+      name: Playlist name and owner
+      summary: The song count and total length under the title
+      tracks: Every track as title — artist, in order
+    answer: "{name}: {summary}."
+    tags: [music, playlist]
+
+  - id: spotify.make_playlist
+    title: Make a Spotify playlist from a list of songs
+    says:
+      - Make me a Spotify playlist with these ten songs.
+      - Put Bohemian Rhapsody, Hotel California and Africa in a new playlist called Car Singalong.
+      - Turn this setlist into a Spotify playlist.
+    kind: act
+    where: chrome
+    region: global
+    sites: [open.spotify.com]
+    inputs:
+      songs: {label: Songs, kind: text, hint: "One per line, as title — artist"}
+      name: {label: Playlist name, kind: text}
+    open: https://open.spotify.com/
+    steps:
+      - kind: do
+        text: Click "Create" (+) in Your Library and pick "Playlist"; Spotify adds an empty private playlist called "My Playlist #…".
+      - kind: do
+        text: For each song in {songs}, search it in "Let's find something for your playlist" and click "Add" on the original track, not a cover, karaoke or live cut.
+      - kind: do
+        text: List songs with no clear match instead of guessing.
+      - kind: do
+        text: Click the playlist's title to open "Edit details".
+      - kind: type
+        note: The name field in "Edit details"
+        value: "{name}"
+    read:
+      added: The songs added, in order
+      missing: Songs with no clear match on Spotify
+    stop: Save
+    tags: [music, playlist]
+
+  - id: applepodcasts.latest_episode
+    title: A podcast's latest episode and notes
+    says:
+      - What's the latest episode of Hard Fork about?
+      - Is there a new Lex Fridman episode, and who's the guest?
+      - Give me the show notes for this week's Planet Money.
+    kind: look
+    where: any
+    region: global
+    sites: [podcasts.apple.com]
+    inputs:
+      show: {label: Podcast, kind: text}
+      country: {label: Store country, kind: text, default: us, hint: "Apple's two-letter store code, e.g. us, gb, de"}
+    open: https://podcasts.apple.com/{country}/search?term={show}
+    steps:
+      - kind: do
+        text: Open the matching show (check the publisher), not a single-episode result.
+      - kind: do
+        text: Open the newest episode in its Episodes list and expand the full description.
+    read:
+      podcast: Show name and publisher
+      episode: The newest episode's title, date and length
+      notes: The episode description — topics, guests and links
+      previous: Titles and dates of the two episodes before it
+    answer: "{episode}: {notes}"
+    tags: [podcast, episode]
+
+  - id: spotify.episode_about_topic
+    title: Find a podcast episode about a topic
+    says:
+      - Find me a podcast episode about the history of coffee.
+      - Is there a good podcast episode explaining interest rates?
+      - Any podcast episodes on sleep science I could listen to?
+    kind: look
+    where: any
+    region: global
+    sites: [open.spotify.com]
+    inputs:
+      topic: {label: Topic, kind: text}
+    open: https://open.spotify.com/search/{topic}/episodes
+    steps:
+      - kind: do
+        text: Read the first fifteen episode results; open a promising one only to check its description really covers {topic}.
+    read:
+      episodes: The five best matches, each with episode title, show, date and length
+      why: One line per episode on what it covers
+      links: Each episode's Spotify link
+    tags: [podcast, search]
+
+  - id: pocketcasts.new_episodes
+    title: New episodes in my Pocket Casts
+    says:
+      - What new episodes came out in my podcasts this week?
+      - What's in my Pocket Casts Up Next?
+      - Anything new from the shows I follow?
+    kind: look
+    where: chrome
+    region: global
+    sites: [play.pocketcasts.com]
+    inputs:
+      list: {label: Which list, kind: choice, options: [new releases, up next, in progress], default: new releases}
+    open: https://play.pocketcasts.com/podcasts
+    steps:
+      - kind: do
+        text: Open {list} from the sidebar ("New Releases" and "In Progress" sit under Filters; Up Next is its own button).
+      - kind: do
+        text: Read the episodes listed, newest first, up to twenty.
+    read:
+      episodes: Each episode's show, title, release date and length
+      played: Which ones are partly played, with time left
+    tags: [podcast, queue]
+
+  # ── Reddit ───────────────────────────────────────────────────────────────
+  - id: reddit.thread_digest
+    title: Digest of a Reddit thread
+    says:
+      - Summarize this Reddit thread for me.
+      - What's the consensus in the comments on this r/BuyItForLife post?
+      - What did people answer in that AskHistorians thread?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [reddit.com]
+    inputs:
+      post_id: {label: Thread, kind: text, hint: "The ID after /comments/ in the thread's link"}
+      sort: {label: Comments by, kind: choice, options: [top, best, new, controversial], default: top}
+    open: https://www.reddit.com/comments/{post_id}/?sort={sort}
+    steps:
+      - kind: do
+        text: Read the post, then the top 30 comments with their first replies; press "View more comments" once on a big thread.
+      - kind: do
+        text: Note replies from OP (the OP badge) or mods, and any edits to the post.
+    read:
+      post: Title, subreddit, score, age and what the post asks or says
+      consensus: The main answers or opinions and how upvoted each is
+      dissent: The strongest disagreeing views
+      op_updates: What OP added later in edits or replies
+      links: Useful links commenters shared
+    answer: "{post} — {consensus}"
+    tags: [reddit, thread, comments]
+
+  - id: reddit.subreddit_top
+    title: Top posts in a subreddit this week
+    says:
+      - What's hot on r/MechanicalKeyboards this week?
+      - Show me the top posts in r/science this month.
+      - What was r/Formula1 talking about today?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [reddit.com]
+    inputs:
+      subreddit: {label: Subreddit, kind: text, hint: "The name without r/"}
+      period: {label: Period, kind: choice, options: [day, week, month, year], default: week}
+    open: https://www.reddit.com/r/{subreddit}/top/?t={period}
+    steps:
+      - kind: do
+        text: Skip promoted posts; take the top ten.
+    read:
+      posts: The top ten posts with title, score, comment count and flair
+      themes: What keeps coming up across them
+    tags: [reddit, feed]
+
+  # ── X / Twitter ──────────────────────────────────────────────────────────
+  - id: x.account_latest
+    title: An X account's latest posts
+    says:
+      - What has NASA posted on X today?
+      - Did The Verge tweet anything about the new Pixel?
+      - Show me the latest posts from @NWS.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [x.com, twitter.com]
+    inputs:
+      handle: {label: Account, kind: text, hint: "The @handle without the @"}
+      count: {label: How many, kind: number, default: 10}
+    open: https://x.com/{handle}
+    steps:
+      - kind: do
+        text: Read the newest {count} posts; skip the pinned post unless it's new, and mark reposts as reposts.
+      - kind: do
+        text: If X shows a sign-in wall or posts out of order (signed out), say so and read what is visible.
+    read:
+      posts: The newest posts, each with time, text and reply/repost/like counts
+      pinned: The pinned post, if any
+    tags: [social, x]
+
+  - id: x.my_mentions
+    title: My mentions on X
+    says:
+      - Who mentioned me on X today?
+      - Any replies to me on Twitter I should answer?
+      - Check my X mentions.
+    kind: look
+    where: chrome
+    region: global
+    sites: [x.com]
+    open: https://x.com/notifications/mentions
+    steps:
+      - kind: do
+        text: Read mentions back to the last day (or 20), opening a thread only when the mention makes no sense alone.
+    read:
+      mentions: Each mention's account, time and text, and the post of mine it replies to
+      needs_reply: The ones that ask a question or seem to want an answer
+    tags: [social, x, notifications]
+
+  - id: x.reply_draft
+    title: Draft a reply on X
+    says:
+      - Draft a reply to that NASA post congratulating them on the launch.
+      - Write a reply to this tweet, but let me post it.
+      - Reply to my latest mention with a thank-you.
+    kind: act
+    where: chrome
+    region: global
+    sites: [x.com]
+    inputs:
+      handle: {label: Posted by, kind: text, hint: "The @handle without the @"}
+      post_id: {label: Post, kind: text, hint: "The number after /status/ in the post's link"}
+      reply: {label: Reply, kind: text, hint: "What to say; drafted to fit 280 characters if only the gist was given"}
+    open: https://x.com/{handle}/status/{post_id}
+    steps:
+      - kind: click
+        target: {role: textbox, name: "Post your reply"}
+      - kind: type
+        target: {role: textbox, name: "Post your reply"}
+        value: "{reply}"
+      - kind: do
+        text: Check the draft fits the character counter and reads right; touch nothing else.
+    read:
+      post: The post being answered, its author and text
+      draft: The reply as typed
+    stop: Reply
+    tags: [social, x, reply]
+
+  # ── Instagram and Facebook ───────────────────────────────────────────────
+  - id: instagram.profile_recent
+    title: An Instagram profile's recent posts
+    says:
+      - What has National Geographic posted on Instagram lately?
+      - Show me NASA's last few Instagram posts.
+      - Has this café posted its new menu on Instagram?
+    kind: look
+    where: chrome
+    region: global
+    sites: [instagram.com]
+    inputs:
+      username: {label: Profile, kind: text, hint: "The Instagram username without the @"}
+    open: https://www.instagram.com/{username}/
+    steps:
+      - kind: do
+        text: Pinned posts (pin icon) come first; skip them when judging what's newest.
+      - kind: do
+        text: Open the newest few posts only to read their date and caption.
+    read:
+      profile: Name, follower count and post count
+      recent: The newest nine posts, each with date, type (photo, reel, carousel), caption start and likes/comments
+      pinned: The pinned posts, if any
+    tags: [social, instagram]
+
+  - id: instagram.unread_dms
+    title: Unread Instagram messages
+    says:
+      - Do I have unread DMs on Instagram?
+      - Who messaged me on Instagram?
+      - Any new message requests on Instagram?
+    kind: look
+    where: chrome
+    region: global
+    sites: [instagram.com]
+    open: https://www.instagram.com/direct/inbox/
+    steps:
+      - kind: do
+        text: Read unread chats (bold, blue dot) from the list previews; don't open them, since opening shows the sender "Seen".
+      - kind: do
+        text: Check the "Requests" tab for new message requests too.
+    read:
+      unread: Each unread chat's name, last message preview and time
+      requests: How many message requests are waiting, and from whom
+    tags: [social, instagram, messages]
+
+  - id: facebook.group_new_posts
+    title: New posts in a Facebook group
+    says:
+      - What's new in my neighbourhood Facebook group?
+      - Anything posted in the hiking group this week?
+      - Catch me up on the parents' group on Facebook.
+    kind: look
+    where: chrome
+    region: global
+    sites: [facebook.com]
+    inputs:
+      group: {label: Group, kind: text}
+      since: {label: Since, kind: choice, options: [today, this week], default: this week}
+    open: https://www.facebook.com/search/groups/?q={group}
+    steps:
+      - kind: do
+        text: Open the matching group the person has joined (it says "Joined" or "Visit").
+      - kind: do
+        text: Switch the feed's sort from "Most relevant" to "New posts", then scroll back to {since}.
+    read:
+      posts: Each new post's time, gist, and reaction and comment counts
+      featured: Announcements or featured posts at the top
+      asks: Posts asking members for help, items or replies
+    tags: [social, facebook, group]
+
+  - id: facebook.marketplace_search
+    title: Search Facebook Marketplace near me
+    says:
+      - Find a used road bike on Facebook Marketplace near me.
+      - Is anyone selling a standing desk on Marketplace under 100?
+      - Check Marketplace for a PS5 nearby.
+    kind: look
+    where: chrome
+    region: global
+    sites: [facebook.com/marketplace]
+    inputs:
+      query: {label: Looking for, kind: text}
+      max_price: {label: Top price, kind: number, required: false, ask: agent}
+      radius_km: {label: Within (km), kind: number, required: false, ask: agent}
+    open: https://www.facebook.com/marketplace/search/?query={query}
+    steps:
+      - kind: do
+        text: If max_price was given, set Max price in the left panel; if radius_km was, set it in the location filter.
+      - kind: do
+        text: Skip sponsored tiles; read the first fifteen listings.
+    read:
+      location: The area and radius Marketplace searched
+      listings: Each listing's title, price, place and how long ago it was listed
+      cheapest: The cheapest listing that really matches
+    tags: [shopping, marketplace, secondhand]
+
+  - id: facebook.event_invites
+    title: My Facebook event invites
+    says:
+      - What Facebook events have I been invited to?
+      - Any event invites on Facebook I haven't answered?
+      - Am I invited to anything this weekend on Facebook?
+    kind: look
+    where: chrome
+    region: global
+    sites: [facebook.com/events]
+    open: https://www.facebook.com/events/
+    steps:
+      - kind: do
+        text: Open the invitations list ("Your events" then "Invites" in the left menu, or the invites panel on Events home).
+      - kind: do
+        text: Read each invite; never press Going, Interested or Can't go.
+    read:
+      invites: Each event's name, date and time, place, and who invited the person
+      soonest: The next one coming up
+    tags: [social, facebook, events]
+
+  # ── LinkedIn ─────────────────────────────────────────────────────────────
+  - id: linkedin.whats_waiting
+    title: What's waiting for me on LinkedIn
+    says:
+      - Anything new on LinkedIn I should look at?
+      - Do I have unread LinkedIn messages?
+      - Who wants to connect with me on LinkedIn?
+    kind: look
+    where: chrome
+    region: global
+    sites: [linkedin.com]
+    open: https://www.linkedin.com/notifications/
+    steps:
+      - kind: do
+        text: Note the unread notifications, rolling likes and profile views into one line each.
+      - kind: open
+        url: https://www.linkedin.com/messaging/
+        note: Read unread threads from the list previews without opening them.
+      - kind: open
+        url: https://www.linkedin.com/mynetwork/invitation-manager/
+        note: Read pending invitations; accept or ignore nothing.
+    read:
+      messages: Unread conversations with who, preview and time
+      invitations: Pending invitations with name, headline and any note
+      notifications: Comments, mentions and other notifications that need the person
+    tags: [social, linkedin, notifications]
+
+  - id: linkedin.reply_message
+    title: Draft a LinkedIn message reply
+    says:
+      - Reply to the recruiter on LinkedIn that I'm interested and free Thursday.
+      - Answer my last LinkedIn message with a polite no thanks.
+      - Draft a LinkedIn reply saying I'll send the deck tomorrow.
+    kind: act
+    where: chrome
+    region: global
+    sites: [linkedin.com]
+    inputs:
+      conversation: {label: Conversation with, kind: text}
+      reply: {label: Reply, kind: text}
+    open: https://www.linkedin.com/messaging/
+    steps:
+      - kind: do
+        text: Find the conversation with {conversation} (use "Search messages" if it isn't near the top) and open it.
+      - kind: do
+        text: Read the last few messages so the reply fits.
+      - kind: type
+        target: {role: textbox, name: "Write a message…"}
+        value: "{reply}"
+    read:
+      last_message: The latest message in the conversation
+      draft: The reply as typed
+    stop: Send
+    tags: [social, linkedin, reply]
+
+  # ── Messaging ────────────────────────────────────────────────────────────
+  - id: whatsapp.unread_summary
+    title: Unread WhatsApp chats
+    says:
+      - What did I miss on WhatsApp?
+      - Summarize my unread WhatsApp chats.
+      - Does anyone on WhatsApp need an answer from me?
+    kind: look
+    where: chrome
+    region: global
+    sites: [web.whatsapp.com]
+    open: https://web.whatsapp.com/
+    steps:
+      - kind: do
+        text: If a QR code shows, ask the person to link WhatsApp from their phone, and wait for the chats.
+      - kind: click
+        target: {role: button, name: "Unread"}
+      - kind: do
+        text: Read each unread chat's preview and badge from the list; open one only if the person agrees, since opening sends read ticks.
+    read:
+      chats: Each unread chat's name, unread count, last message and time
+      needs_answer: Chats that ask the person something
+    tags: [messaging, whatsapp]
+
+  - id: whatsapp.reply
+    title: Draft a WhatsApp reply
+    says:
+      - Reply on WhatsApp to the book club group that I'll be 10 minutes late.
+      - Answer the plumber on WhatsApp that Tuesday works.
+      - Write back on WhatsApp saying thanks, I'll check tonight.
+    kind: act
+    where: chrome
+    region: global
+    sites: [web.whatsapp.com]
+    inputs:
+      chat: {label: Chat, kind: text}
+      message: {label: Message, kind: text}
+    open: https://web.whatsapp.com/
+    steps:
+      - kind: do
+        text: Search {chat} in the chat list's search box and open the right chat (check the name; it may be a group).
+      - kind: do
+        text: Read the last messages so the reply fits.
+      - kind: type
+        target: {role: textbox, name: "Type a message"}
+        value: "{message}"
+    read:
+      context: The last messages in the chat
+      draft: The message as typed
+    stop: Send
+    tags: [messaging, whatsapp, reply]
+
+  - id: telegram.unread
+    title: Unread Telegram chats
+    says:
+      - Anything unread on Telegram?
+      - What's new in my Telegram chats and channels?
+      - Did anyone mention me in a Telegram group?
+    kind: look
+    where: chrome
+    region: global
+    sites: [web.telegram.org]
+    open: https://web.telegram.org/a/
+    steps:
+      - kind: do
+        text: If a QR code shows, ask the person to log in from the Telegram app, and wait for the chat list.
+      - kind: do
+        text: Read unread badges and previews from the list without opening chats; an @ badge means a mention.
+    read:
+      chats: Unread private and group chats with count, last message and time
+      mentions: Groups where the person was mentioned or replied to
+      channels: Muted channels with new posts, as a short count list
+    tags: [messaging, telegram]
+
+  - id: discord.mentions
+    title: My Discord mentions and DMs
+    says:
+      - Did anyone mention me on Discord?
+      - What's in my Discord inbox?
+      - Any unread Discord DMs?
+    kind: look
+    where: chrome
+    region: global
+    sites: [discord.com]
+    open: https://discord.com/channels/@me
+    steps:
+      - kind: click
+        target: {role: button, name: "Inbox"}
+      - kind: do
+        text: Open the "Mentions" tab and read back a day or 20 mentions; close the inbox.
+      - kind: do
+        text: Note direct messages with an unread badge in the left list.
+    read:
+      mentions: Each mention's server, channel, who, when and message
+      dms: Unread direct messages with who and how many
+    tags: [messaging, discord]
+
+  # ── News and reading ─────────────────────────────────────────────────────
+  - id: googlenews.topic
+    title: Latest news on a topic
+    says:
+      - What's the latest news on the EU AI Act?
+      - Any news about SpaceX today?
+      - Catch me up on the news about the Champions League this week.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [news.google.com]
+    inputs:
+      topic: {label: Topic, kind: text}
+      period: {label: How recent, kind: choice, options: [1h, 1d, 7d, 30d], default: 7d}
+    open: https://news.google.com/search?q={topic}%20when%3A{period}
+    steps:
+      - kind: do
+        text: Read the first fifteen stories; where a story has "Full coverage", count how many outlets carry it.
+    read:
+      stories: Each story's headline, outlet and age
+      big_stories: Stories carried by many outlets
+      summary: Three or four lines on where things stand
+    answer: "{summary}"
+    tags: [news]
+
+  - id: news.top_headlines
+    title: Top headlines from BBC, AP or Reuters
+    says:
+      - What are today's top headlines?
+      - What's on the BBC News front page right now?
+      - Give me the AP top stories.
+      - What's leading Reuters business news?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [bbc.com, apnews.com, reuters.com]
+    inputs:
+      outlet: {label: Outlet, kind: choice, options: [BBC, AP, Reuters], default: BBC}
+      section: {label: Section, kind: text, required: false, ask: agent, hint: "e.g. world, business, technology, sport"}
+    open: https://www.bbc.com/news
+    steps:
+      - kind: do
+        text: If outlet is AP, go to https://apnews.com/ instead; if Reuters, go to https://www.reuters.com/.
+      - kind: do
+        text: If a section was asked for, open it from the site's top menu.
+    read:
+      lead: The lead story's headline and first line
+      headlines: The next nine headlines, one line each
+      updated: When the page says it was last updated
+    tags: [news, headlines]
+
+  - id: news.subscribed_article
+    title: Read an article I subscribe to
+    says:
+      - Read me the New York Times article on the housing market.
+      - Summarize this FT piece; I'm a subscriber.
+      - What does the Economist's cover story say?
+    kind: look
+    where: chrome
+    region: global
+    sites: [news.google.com, nytimes.com, wsj.com, ft.com, economist.com, washingtonpost.com, bloomberg.com, theatlantic.com, newyorker.com]
+    inputs:
+      article: {label: Article, kind: text, hint: "Its link, or the headline and publication"}
+    open: https://news.google.com/search?q={article}
+    steps:
+      - kind: do
+        text: If {article} is a link, go straight to it; otherwise open the result from the right publication.
+      - kind: do
+        text: If the paywall still shows, ask the person to sign in to the publication themselves; never type a password.
+      - kind: do
+        text: Expand "Continue reading" if there is one and read to the end, skipping ads and related links.
+    read:
+      headline: Title, author and date
+      summary: What the article argues or reports, in a few lines
+      key_points: The main facts, numbers and quotes
+      access: Whether the full text showed or only the free part
+    answer: "{headline}: {summary}"
+    tags: [news, article, subscription]
+
+  - id: substack.latest_posts
+    title: A Substack writer's latest posts
+    says:
+      - What has Gary Marcus written on Substack lately?
+      - Any new posts on Noahpinion this week?
+      - Summarize the latest issue of this Substack newsletter.
+    kind: look
+    where: any
+    region: global
+    sites: [substack.com]
+    inputs:
+      publication: {label: Newsletter, kind: text, hint: "The name before .substack.com, e.g. garymarcus"}
+    open: https://{publication}.substack.com/archive?sort=new
+    steps:
+      - kind: do
+        text: If the address doesn't exist, search the writer on substack.com and open their publication's Archive.
+      - kind: do
+        text: Open the newest free post and read it; for a paid post, read only what shows unless the person is signed in as a subscriber.
+    read:
+      posts: The newest eight posts with title, date, subtitle and paid or free
+      newest: The gist of the newest post
+    tags: [newsletter, reading]
+
+  - id: medium.author_latest
+    title: A Medium author's latest stories
+    says:
+      - What has this author published on Medium recently?
+      - Show me the newest Medium stories from this writer.
+      - Did she post anything new on Medium this month?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [medium.com]
+    inputs:
+      handle: {label: Author, kind: text, hint: "The @handle from their Medium link, without the @"}
+    open: https://medium.com/@{handle}
+    steps:
+      - kind: do
+        text: If the profile isn't found, search Medium for the name and open the author's or publication's page.
+      - kind: do
+        text: Read the story list; open the newest one if it isn't member-only or the person is signed in.
+    read:
+      stories: The newest stories with title, date, read time and claps
+      member_only: Which of them are member-only
+      newest: The gist of the newest story, if readable
+    tags: [blog, reading]
+
+  - id: kindle.highlights
+    title: My Kindle highlights from a book
+    says:
+      - What did I highlight in Atomic Habits on Kindle?
+      - Show me my Kindle notes from the last book I read.
+      - Pull my highlights from Sapiens.
+    kind: look
+    where: chrome
+    region: global
+    sites: [read.amazon.com/notebook, read.amazon.co.uk/notebook, read.amazon.de/notebook]
+    inputs:
+      book: {label: Book, kind: text, default: most recent, hint: "A title, or 'most recent' for the book at the top"}
+    open: https://read.amazon.com/notebook
+    steps:
+      - kind: do
+        text: If Amazon asks to sign in, ask the person to do it; for a non-US Amazon account use that country's read.amazon notebook.
+      - kind: do
+        text: Pick {book} in the left list and scroll until all its highlights have loaded.
+    read:
+      title: The book's title, author and last annotated date
+      count: How many highlights and notes it has
+      highlights: Each highlight with its location and any note
+    answer: "{count} highlights in {title}."
+    tags: [books, kindle, highlights]
+
+  - id: raindrop.saved_items
+    title: Find something I saved in Raindrop
+    says:
+      - What did I save in Raindrop about home espresso?
+      - Show me the links I bookmarked this week.
+      - Find that article I saved on remote work.
+    kind: look
+    where: chrome
+    region: global
+    sites: [app.raindrop.io]
+    inputs:
+      query: {label: Search for, kind: text, default: "", hint: "Words, a tag or a site; empty lists the newest saves"}
+    open: https://app.raindrop.io/my/0
+    steps:
+      - kind: do
+        text: If query isn't empty, type it in the search field at the top and wait for the results.
+      - kind: do
+        text: Sort by date, newest first, and read the first twenty items.
+    read:
+      items: Each item's title, site, collection, tags and saved date
+      count: How many items matched
+    tags: [bookmarks, reading]
+
+  # ── Watching, reading, playing ───────────────────────────────────────────
+  - id: justwatch.where_to_stream
+    title: Where can I stream a film or show
+    says:
+      - Where can I stream Dune Part Two?
+      - Is Severance on any streaming service I can get here?
+      - Where can I watch The Bear?
+      - Can I rent Oppenheimer somewhere?
+    kind: look
+    where: any
+    region: global
+    sites: [justwatch.com]
+    inputs:
+      title: {label: Film or show, kind: text}
+      country: {label: Country, kind: text, default: us, hint: "JustWatch's country code, e.g. us, uk, de, fr, ca"}
+    open: https://www.justwatch.com/{country}/search?q={title}
+    steps:
+      - kind: do
+        text: Open the matching title (check the year and whether it's the film or the series).
+      - kind: do
+        text: Read the "Where to watch" offers; for a series, note if only some seasons are available.
+    read:
+      stream: Subscription services that stream it
+      free: Free-with-ads services, if any
+      rent_buy: Where to rent or buy it, with prices
+    answer: "{title} streams on {stream}; rent or buy: {rent_buy}."
+    tags: [streaming, movies, tv]
+
+  - id: imdb.title_info
+    title: IMDb rating and details for a film or show
+    says:
+      - What's the IMDb rating of Oppenheimer?
+      - Who's in the cast of Shōgun?
+      - How long is Killers of the Flower Moon?
+      - How many seasons does Slow Horses have?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [imdb.com]
+    inputs:
+      title: {label: Film or show, kind: text}
+    open: https://www.imdb.com/find/?q={title}&s=tt
+    steps:
+      - kind: do
+        text: Open the result with the right year and type (film, series, episode).
+    read:
+      name: Title, year and type
+      rating: IMDb rating and number of votes
+      runtime: Runtime, or seasons and episodes for a series
+      genres: Genres and age certificate
+      people: Director or creators and the top-billed cast
+      plot: The one-paragraph plot summary
+    answer: "{name}: {rating}, {runtime}."
+    tags: [movies, tv, ratings]
+
+  - id: rottentomatoes.scores
+    title: Rotten Tomatoes scores for a film or show
+    says:
+      - What's the Rotten Tomatoes score for Barbie?
+      - Did critics like the new Alien movie?
+      - Is Fallout season 2 fresh on Rotten Tomatoes?
+    kind: look
+    where: any
+    region: global
+    sites: [rottentomatoes.com]
+    inputs:
+      title: {label: Film or show, kind: text}
+    open: https://www.rottentomatoes.com/search?search={title}
+    steps:
+      - kind: do
+        text: Open the matching result (check the year; for a series, open the season asked about).
+    read:
+      tomatometer: Tomatometer score and number of critic reviews
+      popcornmeter: Popcornmeter (audience) score and number of ratings
+      consensus: The Critics Consensus line
+      where_to_watch: Where the page says to watch it
+    answer: "Tomatometer {tomatometer}, audience {popcornmeter}. {consensus}"
+    tags: [movies, tv, ratings, reviews]
+
+  - id: letterboxd.film_reviews
+    title: Letterboxd rating and reviews for a film
+    says:
+      - What do people on Letterboxd think of Past Lives?
+      - What's Anora's average rating on Letterboxd?
+      - Is The Substance worth watching, according to Letterboxd?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [letterboxd.com]
+    inputs:
+      title: {label: Film, kind: text}
+    open: https://letterboxd.com/search/films/{title}/
+    steps:
+      - kind: do
+        text: Open the film with the right year, then read the ratings histogram and "Popular reviews".
+    read:
+      film: Title, year and director
+      average: Average rating out of five and how many people logged it
+      reviews: The gist of the top five popular reviews
+      similar: Films listed under "Similar films", if shown
+    answer: "{film}: {average}. {reviews}"
+    tags: [movies, ratings, reviews]
+
+  - id: goodreads.book_rating
+    title: Goodreads rating and reviews for a book
+    says:
+      - What's the Goodreads rating for Project Hail Mary?
+      - Is Fourth Wing any good, according to Goodreads?
+      - How long is The Covenant of Water, and do readers like it?
+    kind: look
+    where: any
+    region: global
+    sites: [goodreads.com]
+    inputs:
+      book: {label: Book, kind: text, hint: "Title, and the author if the title is common"}
+    open: https://www.goodreads.com/search?q={book}
+    steps:
+      - kind: do
+        text: Open the matching edition (check the author), then read the rating details and the top community reviews.
+    read:
+      title: Title, author, series (if any) and first published year
+      rating: Average rating and number of ratings
+      pages: Page count
+      readers_say: What the top reviews praise and criticise
+    answer: "{title}: {rating}, {pages} pages. {readers_say}"
+    tags: [books, ratings, reviews]
+
+  - id: goodreads.want_to_read
+    title: Pick from my Goodreads want-to-read list
+    says:
+      - What's on my Goodreads want-to-read shelf?
+      - Pick a short novel from my want-to-read list.
+      - Which book on my to-read list is rated highest?
+    kind: look
+    where: chrome
+    region: global
+    sites: [goodreads.com]
+    inputs:
+      pick_by: {label: Pick by, kind: text, default: "", hint: "e.g. shortest, highest rated, a genre; empty lists the shelf"}
+    open: https://www.goodreads.com/
+    steps:
+      - kind: do
+        text: Open "My Books" and pick the "Want to Read" shelf.
+      - kind: do
+        text: Read the whole shelf (raise "per page" if there's a pager), with title, author, average rating, pages and date added.
+      - kind: do
+        text: If pick_by was given, choose three that fit it best.
+    read:
+      count: How many books are on the shelf
+      books: The books with author, average rating and pages
+      picks: The three that fit pick_by, with why
+    tags: [books, shelf]
+
+  - id: steam.game_price_reviews
+    title: Steam price and reviews for a game
+    says:
+      - How much is Baldur's Gate 3 on Steam right now?
+      - Is Hades II on sale on Steam?
+      - Are Steam reviews for Cyberpunk 2077 good now?
+    kind: look
+    where: any
+    region: global
+    sites: [store.steampowered.com]
+    inputs:
+      game: {label: Game, kind: text}
+    open: https://store.steampowered.com/search/?term={game}
+    steps:
+      - kind: do
+        text: Open the base game, not a DLC, soundtrack or bundle.
+      - kind: do
+        text: If an age check appears, ask the person instead of entering a birth date.
+    read:
+      price: Current price, any discount and when the sale ends
+      reviews: Recent and all-time review summaries with their percentages
+      release: Release date, developer and platforms
+      tags: The top user tags
+    answer: "{price}. Reviews: {reviews}."
+    tags: [games, prices, reviews]
+
+  - id: twitch.following_live
+    title: Who I follow is live on Twitch
+    says:
+      - Who's live on Twitch right now?
+      - Is anyone I follow streaming?
+      - Is that streamer live on Twitch?
+    kind: look
+    where: chrome
+    region: global
+    sites: [twitch.tv]
+    inputs:
+      channel: {label: Just this channel, kind: text, required: false, ask: agent}
+    open: https://www.twitch.tv/directory/following/live
+    steps:
+      - kind: do
+        text: If a channel was named, look for just it; if it isn't in the list, it isn't live.
+    read:
+      live: Each live channel's name, game or category, stream title, viewers and uptime
+    tags: [games, streaming, live]
+

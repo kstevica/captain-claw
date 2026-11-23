@@ -1,0 +1,1151 @@
+category: local
+playbooks:
+  # ── Places near the person ────────────────────────────────────────────────
+
+  - id: maps.open_now_nearby
+    title: Places open right now nearby
+    says:
+      - Is there a pharmacy open near me right now?
+      - What cafés are still open around Times Square?
+      - Find somewhere to eat that's open now near the station.
+      - Any supermarket open this late near here?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/maps]
+    inputs:
+      what: {label: What kind of place, kind: text, hint: "pharmacy, café, supermarket, vegan restaurant, laundromat …"}
+      near: {label: Near, kind: place, default: me, hint: "An address, neighbourhood or city. For 'near me' put the person's location; 'me' alone only works in their own Chrome"}
+    open: https://www.google.com/maps/search/?api=1&query={what}%20open%20now%20near%20{near}
+    steps:
+      - kind: do
+        text: Check that the "Open now" filter is on; turn it on if Maps shows it off.
+      - kind: do
+        text: Read the first five results; skip ones marked "Closes soon" unless nothing else is open.
+    read:
+      places: Up to five open places, each with name, rating and distance or area
+      closes_at: When each of them closes today
+      nearest: The closest one that is open
+    answer: "Open now near {near}: {places}. Closest is {nearest}."
+    needs: [location]
+    tags: [nearby, open-now, places]
+
+  - id: maps.closest
+    title: Closest pharmacy, ATM, charger or petrol station
+    says:
+      - Where's the nearest ATM?
+      - What's the closest EV charger to the Louvre?
+      - I need petrol, where's the nearest station?
+      - How far is the closest pharmacy from here on foot?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/maps]
+    inputs:
+      what: {label: What, kind: text, hint: "ATM, pharmacy, EV charger, petrol station, public toilet, post office …"}
+      near: {label: From, kind: place, default: me, hint: "An address or place. For 'near me' put the person's location; 'me' alone only works in their own Chrome"}
+      mode: {label: Getting there, kind: choice, options: [walking, driving], default: walking}
+    open: https://www.google.com/maps/search/?api=1&query={what}%20near%20{near}
+    steps:
+      - kind: do
+        text: Pick the nearest result that is open now. For an EV charger, prefer one showing free connectors of the plug type the person needs.
+      - kind: open
+        url: https://www.google.com/maps/dir/?api=1&origin={near}&destination={what}&travelmode={mode}
+        note: Put the chosen place's name and address in place of {what}.
+    read:
+      place: The nearest suitable place's name and address
+      distance: How far it is
+      time: How long it takes by the chosen mode
+      open_status: Open now or closed, and until when
+      extra: For a charger the plug types, power and free connectors; for petrol the price if Maps shows it
+    answer: "Nearest is {place}, {distance} ({time} {mode}). {open_status}."
+    needs: [location]
+    tags: [nearby, closest, ev-charging, fuel]
+
+  - id: maps.opening_hours
+    title: Opening hours, holidays included
+    says:
+      - What time does the Apple Store on Regent Street close today?
+      - Is IKEA open on Sunday?
+      - Is the Louvre open on Christmas Day?
+      - When does the Lidl near me open tomorrow?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/maps]
+    inputs:
+      place: {label: Place, kind: place, hint: "Name plus area or address, so the right branch comes up"}
+      date: {label: On, kind: date, default: today}
+    open: https://www.google.com/maps/search/?api=1&query={place}
+    steps:
+      - kind: do
+        text: If a list comes up, open the branch that matches {place}.
+      - kind: do
+        text: Open the hours drop-down and find the day of {date}; note any "Holiday hours", "Hours might differ" or "Temporarily closed" line.
+      - kind: do
+        text: If {date} is a public holiday and Maps only warns that hours might differ, open the place's own website from the listing and look for its holiday notice.
+    read:
+      hours: Opening and closing time on that day
+      open_now: Whether it is open right now
+      special: Holiday or special hours, or a warning that hours might differ
+      source: Where the hours came from (Maps or the place's own site)
+    answer: "{place} on {date}: {hours}. {special}"
+    tags: [opening-hours, holidays]
+
+  - id: maps.popular_times
+    title: Is it busy right now
+    says:
+      - Is the gym busy right now?
+      - When is the post office quietest?
+      - How crowded is the Sagrada Família around 10 am?
+      - When's the best time to go to Costco on Saturday to avoid the crowds?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/maps]
+    inputs:
+      place: {label: Place, kind: place}
+      when: {label: When, kind: text, default: now, hint: "now, or a day and time"}
+    open: https://www.google.com/maps/search/?api=1&query={place}
+    steps:
+      - kind: do
+        text: Open the matching place and scroll to "Popular times".
+      - kind: do
+        text: For now, read the live line (like "Busier than usual"). Otherwise pick the day and read the bar for {when}, then find the lowest bars that day.
+    read:
+      busy_now: The live busyness, if Maps shows it
+      at_time: How busy it usually is at the asked time
+      quietest: The quietest hours that day
+      typical_visit: How long people typically spend there, if shown
+    answer: "{place}: {busy_now} {at_time} Quietest: {quietest}."
+    tags: [crowds, popular-times]
+
+  - id: maps.review_digest
+    title: What people say about a place on Google Maps
+    says:
+      - What do people complain about at Nobu Malibu?
+      - Are the reviews for this dentist any good?
+      - Sum up the Google reviews for Shake Shack in Covent Garden.
+      - What do people love about Café de Flore?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/maps]
+    inputs:
+      place: {label: Place, kind: place, hint: "Name plus area, so the right branch comes up"}
+    open: https://www.google.com/maps/search/?api=1&query={place}
+    steps:
+      - kind: do
+        text: Open the matching place and its Reviews tab; note the topic chips Maps shows (the words people mention most).
+      - kind: do
+        text: Sort by Newest and read about 20 reviews, then sort by Lowest rating and read about 10. Weigh recent reviews over old ones.
+    read:
+      rating: Star rating and number of reviews
+      praise: What people praise most, in a few words each
+      complaints: What people complain about most, and how often
+      recent: Whether the last few months read better or worse than the overall rating
+      tips: Practical tips reviewers repeat (book ahead, ask for X, avoid Y)
+    answer: "{place}: {rating}. Liked: {praise}. Complaints: {complaints}. Lately: {recent}."
+    tags: [reviews, digest]
+
+  - id: maps.menu
+    title: What's on the menu
+    says:
+      - What's on the menu at Dishoom Shoreditch?
+      - Does Nando's on Oxford Street have vegan options?
+      - How much is a pizza at L'Antica Pizzeria da Michele?
+      - Is there anything gluten-free at the Thai place on Main Street?
+    kind: look
+    where: any
+    region: global
+    sites: [google.com/maps]
+    inputs:
+      place: {label: Restaurant, kind: place}
+      looking_for: {label: Looking for, kind: text, default: "", hint: "vegan, gluten-free, kids' menu, a dish, prices …"}
+    open: https://www.google.com/maps/search/?api=1&query={place}
+    steps:
+      - kind: do
+        text: Open the matching place and its Menu tab. If there is none, follow the place's website or "Menu" link from the listing.
+      - kind: do
+        text: If the menu exists only as photos, read the clearest recent one and say how old it is.
+      - kind: do
+        text: Look for {looking_for} if given; otherwise summarise the sections and price range.
+    read:
+      dishes: The main dishes or the ones matching what was asked
+      prices: Typical prices, with the currency
+      dietary: Vegan, vegetarian, gluten-free or allergy notes shown
+      source: Where the menu came from and how current it looks
+    answer: "{place}: {dishes} ({prices}). {dietary}"
+    tags: [restaurant, menu, dietary]
+
+  - id: parkopedia.find_parking
+    title: Where to park and what it costs
+    says:
+      - Where can I park near Wembley Stadium?
+      - Cheapest parking near the Rijksmuseum for three hours?
+      - Is there a garage near Union Square that's open overnight?
+    kind: look
+    where: any
+    region: global
+    sites: [parkopedia.com, parkopedia.co.uk]
+    inputs:
+      place: {label: Near, kind: place}
+      arrive: {label: Arriving, kind: text, default: now, hint: "now, or a day and time"}
+      hours: {label: For how many hours, kind: number, default: 2}
+    open: https://www.parkopedia.com/parking/{place}/
+    steps:
+      - kind: do
+        text: Set the arrival time to {arrive} and the stay to {hours} hours in the search bar, so the prices are for this visit.
+      - kind: do
+        text: Read the closest five car parks, then sort by price and note the cheapest.
+    read:
+      options: Up to five car parks with name, walking distance and price for the stay
+      cheapest: The cheapest one and its price
+      closest: The closest one and its price
+      notes: Opening hours, height limits, EV charging or pre-booking shown
+    answer: "Closest: {closest}. Cheapest: {cheapest}. {notes}"
+    tags: [parking, nearby]
+
+  # ── Reviews on other sites ───────────────────────────────────────────────
+
+  - id: yelp.review_digest
+    title: What Yelp reviewers say about a business
+    says:
+      - What do Yelp reviews say about Tartine Bakery?
+      - Is this plumber any good on Yelp?
+      - What do people complain about at the Chipotle on Market Street?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [yelp.com]
+    inputs:
+      business: {label: Business, kind: text}
+      near: {label: City or area, kind: place}
+    open: https://www.yelp.com/search?find_desc={business}&find_loc={near}
+    steps:
+      - kind: do
+        text: Open the business that matches; skip ads marked "Sponsored".
+      - kind: do
+        text: Read the review highlights, then sort by Newest and read about 20 reviews, then by Lowest rated and read about 10. Note how the owner replies.
+    read:
+      rating: Star rating and number of reviews
+      praise: What people praise most
+      complaints: What people complain about most, and how often
+      recent: Whether recent reviews are better or worse than the overall rating
+      owner_replies: Whether and how the owner answers complaints
+    answer: "{business}: {rating}. Liked: {praise}. Complaints: {complaints}. Lately: {recent}."
+    tags: [reviews, digest]
+
+  - id: tripadvisor.review_digest
+    title: What Tripadvisor reviewers say about a restaurant or sight
+    says:
+      - Is the Vatican Museums visit worth it according to Tripadvisor?
+      - What do Tripadvisor reviews say about Pizzeria Da Attilio?
+      - Common complaints about visiting Edinburgh Castle?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [tripadvisor.com]
+    inputs:
+      place: {label: Restaurant or sight, kind: text, hint: "Name plus city"}
+    open: https://www.tripadvisor.com/Search?q={place}
+    steps:
+      - kind: do
+        text: Open the listing that matches (restaurant or attraction, not a tour reseller).
+      - kind: do
+        text: Read the rating, the ranking line and the review summary; filter reviews to Terrible and Poor and read about 10, then to Excellent and read about 10. Prefer reviews from the last year.
+    read:
+      rating: Bubble rating, number of reviews and ranking in the city
+      praise: What people praise most
+      complaints: What people complain about most
+      tips: Practical tips reviewers repeat (book ahead, best time, what to skip)
+    answer: "{place}: {rating}. Liked: {praise}. Complaints: {complaints}. Tips: {tips}."
+    tags: [reviews, digest, sights]
+
+  # ── Restaurants ─────────────────────────────────────────────────────────────
+
+  - id: opentable.book_table
+    title: Book a table at a restaurant
+    says:
+      - Book a table for 4 tonight at 8 at Nopa.
+      - Get me a dinner reservation for two on Friday near the office.
+    kind: act
+    where: prefer_chrome
+    region: us
+    sites: [opentable.com]
+    inputs:
+      restaurant: {label: Restaurant or area, kind: text}
+      date: {label: Date, kind: date}
+      time: {label: Time, kind: time}
+      party: {label: People, kind: number, default: 2}
+    open: https://www.opentable.com/s?term={restaurant}&covers={party}&dateTime={date}T{time}
+    steps:
+      - kind: do
+        text: Pick the restaurant that matches, or list the three best-rated ones with free slots if it's an area.
+      - kind: click
+        target: {role: button, name: "the slot closest to {time}"}
+      - kind: do
+        text: Fill in the guest details from what the agent knows about the person; ask for anything missing.
+    read:
+      slot: The time and table booked for
+      policy: Deposit, cancellation or card-hold rules shown
+    stop: Complete reservation
+    needs: [memory]
+    tags: [restaurant, reservation]
+
+  - id: resy.book_table
+    title: Book a table on Resy
+    says:
+      - Get me a Resy table for two at Carbone on Saturday.
+      - Any Resy slots tonight around 8 in the West Village?
+      - Book Lilia for four next Friday on Resy.
+    kind: act
+    where: chrome
+    region: global
+    sites: [resy.com]
+    inputs:
+      restaurant: {label: Restaurant or area, kind: text}
+      city: {label: City, kind: place, hint: "Resy works city by city - New York, Los Angeles, London …"}
+      date: {label: Date, kind: date}
+      time: {label: Time, kind: time}
+      party: {label: People, kind: number, default: 2}
+    open: https://resy.com/
+    steps:
+      - kind: do
+        text: Set the city picker to {city}, then search for {restaurant}.
+      - kind: do
+        text: Set the date to {date} and guests to {party}. Open the restaurant, or list the three best matches with open slots if {restaurant} is an area.
+      - kind: click
+        target: {role: button, name: "the slot closest to {time}"}
+      - kind: do
+        text: If nothing is near {time}, offer the nearest slots and mention Resy's Notify option instead of picking one the person did not agree to.
+    read:
+      slot: Restaurant, date, time and seating (dining room, bar, patio)
+      policy: Cancellation fee, deposit or card-hold rules shown
+    stop: Reserve Now
+    needs: [memory]
+    tags: [restaurant, reservation]
+
+  - id: thefork.book_table
+    title: Book a table on TheFork
+    says:
+      - Book a table for two in Trastevere tomorrow at 8 on TheFork.
+      - Any TheFork deals for dinner in Le Marais tonight?
+      - Reserve Septime for four on Friday through TheFork.
+    kind: act
+    where: prefer_chrome
+    region: eu
+    sites: [thefork.com, thefork.fr, thefork.it, thefork.es, thefork.co.uk]
+    inputs:
+      restaurant: {label: Restaurant or area, kind: text}
+      date: {label: Date, kind: date}
+      time: {label: Time, kind: time}
+      party: {label: People, kind: number, default: 2}
+    open: https://www.thefork.com/
+    steps:
+      - kind: do
+        text: Type {restaurant} into the search field and pick the matching restaurant, or list three well-rated ones with free tables if it's an area.
+      - kind: do
+        text: In the booking box set {date}, the slot closest to {time} and {party} people. Mention any discount on that slot, but only pick a deal the person wants.
+      - kind: do
+        text: Fill in the guest details from what the agent knows about the person; ask for anything missing.
+    read:
+      slot: Restaurant, date, time and party size
+      offer: The discount or set menu attached to the slot, if any
+      policy: Card-hold, deposit or cancellation rules shown
+    stop: Confirm booking
+    needs: [memory]
+    tags: [restaurant, reservation]
+
+  # ── Events and tickets ───────────────────────────────────────────────────
+
+  - id: eventbrite.find_events
+    title: What's on in town
+    says:
+      - What's on in Berlin this weekend?
+      - Any free tech meetups in London next week?
+      - Find comedy nights in Dublin on Friday.
+      - What kids' events are there in Austin tomorrow?
+    kind: look
+    where: any
+    region: global
+    sites: [eventbrite.com]
+    inputs:
+      place: {label: City, kind: place}
+      what: {label: What kind, kind: text, default: events, hint: "A keyword like jazz, tech, comedy, kids; 'events' for everything"}
+      when: {label: When, kind: choice, options: [any time, today, tomorrow, this weekend, this week, next week, this month], default: any time}
+    open: https://www.eventbrite.com/d/{place}/{what}/
+    steps:
+      - kind: do
+        text: Set the date filter to {when}; turn on the Free filter if the person asked for free events.
+      - kind: do
+        text: Read the first eight events, skipping online ones unless the person wants those.
+    read:
+      events: Up to eight events with title, date and time, venue and price
+      highlights: The two or three that best fit what was asked, and why
+    answer: "In {place} ({when}): {highlights}"
+    tags: [events, whats-on]
+
+  - id: eventbrite.get_tickets
+    title: Pick tickets for an Eventbrite event
+    says:
+      - Get me two tickets for the Startup Grind meetup on Eventbrite.
+      - Register me for that free photography workshop in Lisbon.
+      - Reserve a spot at the wine tasting on Saturday.
+    kind: act
+    where: chrome
+    region: global
+    sites: [eventbrite.com]
+    inputs:
+      event: {label: Event, kind: text}
+      place: {label: City, kind: place}
+      tickets: {label: How many, kind: number, default: 1}
+      ticket_type: {label: Ticket type, kind: text, default: cheapest}
+    open: https://www.eventbrite.com/d/{place}/{event}/
+    steps:
+      - kind: do
+        text: Open the event that matches {event}; check its date, time and venue with the person if more than one fits.
+      - kind: click
+        target: {role: button, name: "Get tickets"}
+        note: It may say Reserve a spot or Register instead.
+      - kind: do
+        text: Choose {tickets} × {ticket_type}. On a free event the next button may say Register; stop there just the same.
+    read:
+      event: Event title, date, time and venue
+      tickets: Ticket type and quantity chosen
+      total: Total price with fees, as shown
+      refund: Refund policy shown
+    stop: Check out
+    tags: [events, tickets]
+
+  - id: ticketmaster.pick_tickets
+    title: Pick concert or match tickets on Ticketmaster
+    says:
+      - Find me two tickets for Coldplay in London under £150 each.
+      - Are there still seats for the Knicks on Friday?
+      - Get two tickets for Hamilton next month, best seats under $200.
+    kind: act
+    where: chrome
+    region: global
+    sites: [ticketmaster.com, ticketmaster.co.uk, ticketmaster.de, ticketmaster.ca, ticketmaster.com.au]
+    inputs:
+      artist: {label: Artist, team or show, kind: text}
+      city: {label: City, kind: place}
+      date: {label: Date, kind: date, required: false, ask: agent}
+      tickets: {label: How many, kind: number, default: 2}
+      budget: {label: Max per ticket, kind: number, required: false, ask: agent}
+    open: https://www.ticketmaster.com/search?q={artist}
+    steps:
+      - kind: do
+        text: Outside the US and Canada, run the same search on the person's own Ticketmaster (ticketmaster.co.uk, .de, .com.au …).
+      - kind: do
+        text: Open the event in {city} on {date} (or list the dates if none was given). If a queue, waiting room or robot check appears, hand it to the person and wait.
+      - kind: do
+        text: Set the quantity to {tickets}, filter to at most {budget} per ticket if given, and prefer standard tickets over resale unless the person said otherwise. Pick the best seats that fit.
+    read:
+      event: Event, venue, date and time
+      seats: Section, row and seats picked
+      price: Price per ticket and the total with fees
+      resale: Whether these are resale tickets
+    stop: Next
+    tags: [tickets, concerts, sports]
+
+  - id: songkick.tour_dates
+    title: When an artist plays near the person
+    says:
+      - When is Arctic Monkeys playing near me?
+      - Is Taylor Swift touring Europe next year?
+      - Any Bon Iver gigs in Berlin?
+      - Is Radiohead touring anytime soon?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [songkick.com]
+    inputs:
+      artist: {label: Artist, kind: text}
+      near: {label: Near, kind: place, default: anywhere}
+    open: https://www.songkick.com/search?query={artist}
+    steps:
+      - kind: do
+        text: Open the artist (not a venue or fan page) and its upcoming concerts.
+      - kind: do
+        text: If {near} is a place, pick the dates closest to it; otherwise list the next ones.
+    read:
+      next_near: The next date near the place, with city and venue
+      dates: The next five dates with city and venue
+      tickets: Whether tickets are on sale and where Songkick sends you for them
+    answer: "{artist}: {next_near}. Also: {dates}."
+    tags: [concerts, events]
+
+  - id: meetup.find_events
+    title: Find meetups and groups
+    says:
+      - Any Python meetups in Amsterdam this month?
+      - Find a running club near me.
+      - Are there board game nights in Toronto this week?
+    kind: look
+    where: any
+    region: global
+    sites: [meetup.com]
+    inputs:
+      topic: {label: Topic, kind: text}
+      near: {label: Near, kind: place}
+      when: {label: When, kind: choice, options: [any time, today, tomorrow, this week, this weekend, next week], default: any time}
+    open: https://www.meetup.com/find/?keywords={topic}&source=EVENTS
+    steps:
+      - kind: do
+        text: Set the location to {near} (type it and pick the suggestion) and the date filter to {when}.
+      - kind: do
+        text: Read the first eight events, then switch to Groups and note the two or three most active groups.
+    read:
+      events: Up to eight events with title, group, date and time, in person or online, and attendees
+      groups: The most active matching groups and their member counts
+    answer: "{topic} near {near}: {events}"
+    tags: [events, meetups, community]
+
+  # ── Cinema and sport ─────────────────────────────────────────────────────
+
+  - id: google.showtimes
+    title: Cinema showtimes
+    says:
+      - When is Dune playing tonight near me?
+      - What's on at the cinema in Leeds on Saturday?
+      - Is there an IMAX showing of Oppenheimer tomorrow in Chicago?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com/search]
+    inputs:
+      movie: {label: Film, kind: text, default: "", hint: "Leave empty for everything showing"}
+      near: {label: Where, kind: place, hint: "City or cinema; the person's location for 'near me'"}
+      date: {label: Day, kind: date, default: today}
+    open: https://www.google.com/search?q={movie}%20showtimes%20{near}
+    steps:
+      - kind: do
+        text: In the showtimes card pick the day of {date} and read each cinema's times.
+      - kind: do
+        text: If Google shows no showtimes card, open the nearest cinema's own listings from the results.
+    read:
+      cinemas: The nearest cinemas showing it
+      times: Showtimes at each, with format (2D, 3D, IMAX, original language)
+      details: Runtime and age rating, if shown
+    answer: "Showing near {near} on {date}: {times}"
+    needs: [location]
+    tags: [cinema, showtimes]
+
+  - id: google.live_score
+    title: Live score or last result
+    says:
+      - What's the Arsenal score?
+      - Did the Lakers win last night?
+      - How's India doing against Australia?
+      - Who won the Real Madrid game?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com/search]
+    inputs:
+      team: {label: Team or match, kind: text}
+    open: https://www.google.com/search?q={team}%20score
+    steps:
+      - kind: do
+        text: Read the sports card at the top; if it shows an upcoming match, open the previous one for the last result.
+    read:
+      score: The score
+      status: Live minute or period, half-time, full time, or start time
+      scorers: Goal scorers or the key performers shown
+      competition: The competition and opponent
+    answer: "{score} ({status}, {competition}). {scorers}"
+    tags: [sports, scores]
+
+  - id: google.next_match
+    title: When a team plays next
+    says:
+      - When do Barcelona play next?
+      - What time is the Celtics game tonight?
+      - When's Djokovic's next match?
+      - What are Liverpool's next three fixtures?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [google.com/search]
+    inputs:
+      team: {label: Team or player, kind: text}
+    open: https://www.google.com/search?q={team}%20next%20match
+    steps:
+      - kind: do
+        text: Read the sports card; open its matches or schedule tab for the fixtures after the next one. Give times in the person's time zone.
+    read:
+      opponent: The next opponent
+      kickoff: Date and start time
+      competition: Competition and venue
+      watch: Where to watch, if Google shows it
+      upcoming: The next three fixtures with dates
+    answer: "{team} play {opponent} on {kickoff} ({competition}). {watch}"
+    tags: [sports, fixtures]
+
+  # ── Doctors, beauty, fitness ─────────────────────────────────────────────
+
+  - id: doctolib.book_appointment
+    title: Book a doctor or dentist on Doctolib
+    says:
+      - Book me a dentist in Paris this week on Doctolib.
+      - Find the earliest GP appointment near me on Doctolib.
+      - Get me an appointment with a dermatologist in Munich next month.
+    kind: act
+    where: chrome
+    region: eu
+    sites: [doctolib.fr, doctolib.de, doctolib.it]
+    inputs:
+      who: {label: Doctor, speciality or practice, kind: text}
+      near: {label: Where, kind: place}
+      when: {label: When, kind: text, default: earliest, hint: "earliest, or a day or range"}
+      reason: {label: Reason for the visit, kind: text, required: false, ask: during}
+    open: https://www.doctolib.fr/
+    steps:
+      - kind: do
+        text: For Germany or Italy use doctolib.de or doctolib.it instead; the layout is the same.
+      - kind: type
+        note: The first search field (name, speciality or practice)
+        value: "{who}"
+      - kind: type
+        note: The place field next to it
+        value: "{near}"
+      - kind: key
+        key: Enter
+      - kind: do
+        text: Pick the practitioner named, or the one with the slot that best fits {when}; open their page.
+      - kind: do
+        text: Answer the visit questions (new or returning patient, type of visit, {reason}) from what the person said; ask for anything unknown. If Doctolib asks the person to sign in, hand it to them.
+      - kind: click
+        target: {role: button, name: "the slot that best fits {when}"}
+    read:
+      practitioner: Practitioner, speciality and address
+      slot: Date and time picked
+      visit: Visit type and anything to bring or prepare
+    stop: Confirm appointment
+    needs: [memory]
+    tags: [doctor, dentist, appointment]
+
+  - id: zocdoc.book_appointment
+    title: Book a doctor on Zocdoc
+    says:
+      - Find me a dermatologist in Brooklyn who takes Aetna.
+      - Book the earliest dentist appointment near 10001.
+      - Get me a video visit with a therapist this week.
+    kind: act
+    where: chrome
+    region: us
+    sites: [zocdoc.com]
+    inputs:
+      who: {label: Speciality, condition or doctor, kind: text}
+      near: {label: ZIP or neighbourhood, kind: place}
+      insurance: {label: Insurance plan, kind: text, default: "", hint: "Carrier and plan only, never a member ID"}
+      when: {label: When, kind: text, default: earliest}
+    open: https://www.zocdoc.com/
+    steps:
+      - kind: do
+        text: Search for {who} near {near}; choose {insurance} in the insurance box if given, otherwise skip it.
+      - kind: do
+        text: Filter by in-person or video if the person said, then pick the doctor named or the best-rated one with a slot that fits {when}.
+      - kind: click
+        target: {role: button, name: "the slot that best fits {when}"}
+      - kind: do
+        text: Answer new or returning patient and the visit reason from what the person said. Leave any member ID or personal health detail for the person to type.
+    read:
+      doctor: Doctor, speciality, rating and address or video
+      slot: Date and time picked
+      coverage: Whether Zocdoc shows the plan as in network
+    stop: Book appointment
+    needs: [memory]
+    tags: [doctor, appointment]
+
+  - id: booksy.book_appointment
+    title: Book a barber or salon on Booksy
+    says:
+      - Book me a haircut at a barber near me tomorrow evening on Booksy.
+      - Get a beard trim with my usual barber on Saturday.
+      - Find a Booksy nail salon open after 6 today.
+    kind: act
+    where: chrome
+    region: global
+    sites: [booksy.com]
+    inputs:
+      service: {label: Service, kind: text, hint: "haircut, fade, beard trim, nails, brows …"}
+      business: {label: Shop, kind: text, default: "", hint: "A shop name, or empty for the best-rated nearby"}
+      near: {label: Near, kind: place}
+      when: {label: When, kind: text}
+      staff: {label: With whom, kind: text, default: anyone}
+    open: https://booksy.com/
+    steps:
+      - kind: do
+        text: Search for {business} or {service} near {near}; open the shop named, or list three well-rated ones with time free at {when}.
+      - kind: do
+        text: Choose the {service} service, the staff member {staff} and the time closest to {when}.
+      - kind: do
+        text: If the shop asks for a card or a deposit, stop there; that part is the person's.
+    read:
+      shop: Shop name and address
+      booking: Service, staff member, date and time
+      price: Price and duration shown
+      policy: Cancellation or deposit rules shown
+    stop: Confirm
+    needs: [memory]
+    tags: [beauty, haircut, appointment]
+
+  - id: fresha.book_appointment
+    title: Book a salon, nails or massage on Fresha
+    says:
+      - Book a gel manicure near me on Saturday on Fresha.
+      - Find a massage in Shoreditch tonight.
+      - Book a cut and colour at a salon in Dubai Marina next week.
+    kind: act
+    where: chrome
+    region: global
+    sites: [fresha.com]
+    inputs:
+      service: {label: Treatment, kind: text}
+      venue: {label: Venue, kind: text, default: "", hint: "A venue name, or empty for the best-rated nearby"}
+      near: {label: Near, kind: place}
+      when: {label: When, kind: text}
+    open: https://www.fresha.com/
+    steps:
+      - kind: do
+        text: Search for {venue} or {service} near {near}; open the venue named, or list three well-rated ones with time free at {when}.
+      - kind: click
+        target: {role: button, name: Book now}
+      - kind: do
+        text: Pick the {service} service, any professional the person named, and the time closest to {when}, then continue.
+      - kind: do
+        text: If the venue asks for card details to hold the booking, stop there; that part is the person's.
+    read:
+      venue: Venue name and address
+      booking: Treatment, professional, date and time
+      price: Price and duration shown
+      policy: Cancellation, no-show or deposit rules shown
+    stop: Confirm
+    needs: [memory]
+    tags: [beauty, wellness, appointment]
+
+  - id: classpass.book_class
+    title: Book a fitness class on ClassPass
+    says:
+      - Book a spin class near me tomorrow morning on ClassPass.
+      - Any yoga on ClassPass after work today?
+      - Find a reformer Pilates class in Soho on Saturday.
+    kind: act
+    where: chrome
+    region: global
+    sites: [classpass.com]
+    inputs:
+      activity: {label: Class, kind: text}
+      near: {label: Near, kind: place}
+      date: {label: Day, kind: date}
+      time: {label: Around, kind: time, required: false, ask: agent}
+    open: https://classpass.com/search
+    steps:
+      - kind: do
+        text: Set the location to {near}, the date to {date} and search for {activity}; narrow to classes around {time} if given.
+      - kind: do
+        text: Pick the class that fits best (rating, distance, time) or list the top three, each with its credit cost.
+    read:
+      class: Class name, studio and address
+      time: Date, start time and length
+      credits: Credits it costs
+      cancellation: The cancellation window shown
+    stop: Reserve
+    tags: [fitness, classes, booking]
+
+  - id: mindbody.class_schedule
+    title: A studio's class schedule
+    says:
+      - What time is yoga at Equinox tomorrow?
+      - Is there a HIIT class at my gym tonight?
+      - What's on the Pilates schedule at the studio near me this Saturday?
+    kind: look
+    where: any
+    region: global
+    sites: [mindbodyonline.com]
+    inputs:
+      studio: {label: Studio or class type, kind: text}
+      near: {label: Near, kind: place}
+      date: {label: Day, kind: date, default: today}
+    open: https://www.mindbodyonline.com/explore
+    steps:
+      - kind: do
+        text: Search for {studio} near {near} and open the studio (or the best match for a class type).
+      - kind: do
+        text: Open its schedule or classes tab and go to {date}.
+    read:
+      classes: Classes that day with start time, name and instructor
+      spots: Spots left or waitlist, where shown
+      booking: How to book (Mindbody, the studio's app, drop-in price)
+    answer: "{studio} on {date}: {classes}"
+    tags: [fitness, classes, schedule]
+
+  # ── Local services ───────────────────────────────────────────────────────
+
+  - id: yelp.request_quotes
+    title: Ask local pros for quotes on Yelp
+    says:
+      - Get quotes from plumbers near me for a leaking water heater.
+      - Ask a few movers in Oakland what a one-bedroom move costs.
+      - Request quotes for house cleaning every two weeks.
+    kind: act
+    where: chrome
+    region: us
+    sites: [yelp.com]
+    inputs:
+      service: {label: Service, kind: text, hint: "plumber, movers, electrician, cleaners …"}
+      near: {label: Where, kind: place}
+      job: {label: The job, kind: text, hint: "What needs doing, size, timing, in the person's words"}
+    open: https://www.yelp.com/search?find_desc={service}&find_loc={near}
+    steps:
+      - kind: click
+        target: {role: button, name: Request a quote}
+        note: It may say Get pricing & availability.
+      - kind: do
+        text: Answer the job questions from {job}; ask the person for anything it doesn't cover. Fill contact details only from what the person gave.
+      - kind: do
+        text: Keep the businesses Yelp suggests, or pick the ones the person named; show the list.
+    read:
+      businesses: The businesses the request would go to, with ratings
+      summary: The job as described in the request
+    stop: Send request
+    needs: [memory]
+    tags: [services, quotes]
+
+  - id: thumbtack.compare_pros
+    title: Compare local pros and prices on Thumbtack
+    says:
+      - How much does a handyman cost near me on Thumbtack?
+      - Compare house cleaners in Denver.
+      - Who are the top-rated dog walkers in my ZIP?
+    kind: look
+    where: prefer_chrome
+    region: us
+    sites: [thumbtack.com]
+    inputs:
+      service: {label: Service, kind: text}
+      zip: {label: ZIP code, kind: text}
+    open: https://www.thumbtack.com/
+    steps:
+      - kind: do
+        text: Type {service} into the search field and {zip} into the ZIP field, then search.
+      - kind: do
+        text: Answer the job questions only as far as needed to see the list of pros. If Thumbtack asks for an email or an account to show results, stop and tell the person instead.
+      - kind: do
+        text: Read the top five pros; send no request or message to any of them.
+    read:
+      pros: Up to five pros with rating, reviews, hires and starting price
+      typical_price: The price range Thumbtack shows for this job
+      best_fit: The best-rated pro with a fair price, and why
+    answer: "{service} in {zip}: {typical_price}. Best fit: {best_fit}."
+    tags: [services, prices]
+
+  - id: nextdoor.lost_and_found
+    title: Post a lost or found item on Nextdoor
+    says:
+      - Post on Nextdoor that I lost my grey cat near the park.
+      - Tell the neighbourhood I found a set of keys on Elm Street.
+      - Put up a lost dog post with this photo.
+    kind: act
+    where: chrome
+    region: global
+    sites: [nextdoor.com]
+    inputs:
+      lost_or_found: {label: Lost or found, kind: choice, options: [lost, found], default: lost}
+      item: {label: What, kind: text}
+      where_when: {label: Where and when, kind: text}
+      contact: {label: How to reach the person, kind: text, default: Nextdoor messages, hint: "Only contact details the person gave"}
+      photo: {label: Photo, kind: file, required: false}
+    open: https://nextdoor.com/news_feed/
+    steps:
+      - kind: do
+        text: Open the composer (Post) and choose the Lost & found category if Nextdoor offers it.
+      - kind: do
+        text: Write a short title and message saying {lost_or_found} {item}, {where_when}, and how to reach the person ({contact}). Use only details the person gave.
+      - kind: upload
+        note: The composer's photo button; skip this step when no photo was given
+        value: "{photo}"
+      - kind: do
+        text: Leave the audience on the person's neighbourhood unless they said otherwise.
+    read:
+      post: The title and message as written
+      audience: Who will see it
+    stop: Post
+    tags: [community, lost-and-found]
+
+  # ── Weather and sky ──────────────────────────────────────────────────────
+
+  - id: weathercom.forecast_at
+    title: Weather for a place and time
+    says:
+      - What's the weather in Barcelona on Saturday afternoon?
+      - How cold will it be tomorrow morning in Chicago?
+      - Will I need sunscreen at the beach on Sunday?
+      - Is Friday evening going to be dry for the barbecue?
+    kind: look
+    where: any
+    region: global
+    sites: [weather.com]
+    inputs:
+      place: {label: Where, kind: place}
+      date: {label: Day, kind: date, default: today}
+      time: {label: Time, kind: time, default: "", hint: "Empty for the whole day"}
+    open: https://weather.com/
+    steps:
+      - kind: do
+        text: Type {place} into the location search and pick the matching suggestion.
+      - kind: do
+        text: For the next two days open Hourly and read the hours around {time}; further out open 10 Day and read {date}.
+    read:
+      condition: Sky and precipitation in words
+      temperature: Temperature and feels-like
+      rain_chance: Chance of rain or snow, and amount if shown
+      wind: Wind speed and direction
+      uv: UV index for that time or the day's peak
+    answer: "{place}, {date} {time}: {condition}, {temperature}, {rain_chance} chance of rain, wind {wind}, UV {uv}."
+    tags: [weather, forecast, uv]
+
+  - id: accuweather.rain_timing
+    title: When the rain starts or stops
+    says:
+      - When is it going to start raining?
+      - Will the rain stop before 5?
+      - Do I have time to cycle home before the storm hits?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [accuweather.com]
+    inputs:
+      place: {label: Where, kind: place, default: here, hint: "The person's location for 'here'"}
+    open: https://www.accuweather.com/
+    steps:
+      - kind: do
+        text: Search for {place} and pick the matching location.
+      - kind: do
+        text: Open MinuteCast (minute by minute, next two hours). Where MinuteCast isn't offered, use Hourly instead and say so.
+    read:
+      summary: The headline line, like rain starting in 25 minutes
+      starts: When precipitation starts
+      stops: When it stops
+      intensity: Light, moderate or heavy, and the type (rain, snow, mix)
+      dry_window: The next dry window
+    answer: "{summary}. Starts {starts}, stops {stops} ({intensity}). Next dry spell {dry_window}."
+    needs: [location]
+    tags: [weather, rain]
+
+  - id: accuweather.pollen
+    title: Pollen and allergy forecast
+    says:
+      - Is the pollen bad in London today?
+      - Will grass pollen be high this weekend?
+      - How's the allergy forecast for Vienna this week?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [accuweather.com]
+    inputs:
+      place: {label: Where, kind: place}
+    open: https://www.accuweather.com/
+    steps:
+      - kind: do
+        text: Search for {place} and pick the matching location.
+      - kind: do
+        text: Open the allergy outlook (Health & Activities or Allergies) and read today and the coming days.
+    read:
+      today: Today's levels for tree, grass, ragweed and mould
+      worst: The type that is highest today
+      coming_days: The outlook for the next few days
+    answer: "{place} today: {today}. Worst: {worst}. Coming days: {coming_days}."
+    tags: [weather, pollen, health]
+
+  - id: iqair.air_quality
+    title: Air quality now and tomorrow
+    says:
+      - What's the air quality in Delhi right now?
+      - Is it OK to run outside in Kraków today?
+      - Is wildfire smoke making Denver's air bad?
+      - Will the air be better tomorrow in Bangkok?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [iqair.com]
+    inputs:
+      place: {label: Where, kind: place}
+    open: https://www.iqair.com/
+    steps:
+      - kind: do
+        text: Type {place} into the search field and open the city (or the nearest monitoring station).
+    read:
+      aqi: The air quality index and its band (good, moderate, unhealthy …)
+      pollutant: The main pollutant and its concentration
+      forecast: The forecast for the next days
+      advice: The health advice shown (exercise outdoors, masks, windows)
+    answer: "{place}: AQI {aqi}, mainly {pollutant}. {advice} Next days: {forecast}."
+    tags: [air-quality, health]
+
+  - id: windy.wind_forecast
+    title: Wind and waves for outdoor plans
+    says:
+      - How windy will it be in Tarifa tomorrow?
+      - Are the waves any good at Bondi this weekend?
+      - Is it too gusty to sail out of Split on Sunday?
+      - What's the wind doing on Lake Garda this afternoon?
+    kind: look
+    where: any
+    region: global
+    sites: [windy.com]
+    inputs:
+      place: {label: Where, kind: place}
+      date: {label: Day, kind: date, default: today}
+    open: https://www.windy.com/
+    steps:
+      - kind: do
+        text: Type {place} into the search box and pick the spot; open its forecast at the bottom.
+      - kind: do
+        text: Read the wind rows for {date}; for a coastal spot switch to the Waves view too.
+    read:
+      wind: Wind speed by hour, with direction
+      gusts: Gusts by hour
+      waves: Wave height and period, for a coastal spot
+      best_window: The calmest (or windiest, for kiting) hours that day
+    answer: "{place} on {date}: wind {wind}, gusts {gusts}. {waves} Best window: {best_window}."
+    tags: [weather, wind, sailing, surf]
+
+  - id: meteoalarm.warnings
+    title: Weather warnings in Europe
+    says:
+      - Are there any weather warnings in Croatia today?
+      - Any storm alerts for Tuscany tomorrow?
+      - Is there a heat warning in Spain this weekend?
+      - Any storm or heat alerts at home tomorrow?
+    kind: look
+    where: any
+    region: eu
+    sites: [meteoalarm.org]
+    inputs:
+      area: {label: Country or region, kind: place, hint: "'home' means where the person lives"}
+    open: https://meteoalarm.org/en/live/
+    steps:
+      - kind: do
+        text: Pick the country of {area} on the map or in the list, then the region if one was named.
+      - kind: do
+        text: Read the warnings for today and tomorrow.
+    read:
+      warnings: Each warning with colour level, type (wind, rain, thunderstorm, heat …), area and time window
+      highest: The highest level in force
+      advice: The advice text for the highest warning
+    answer: "{area}: {highest}. {warnings}"
+    tags: [weather, warnings]
+
+  - id: timeanddate.sun_times
+    title: Sunrise, sunset and day length
+    says:
+      - What time is sunset in Santorini on Friday?
+      - When does the sun rise tomorrow in Oslo?
+      - How long is the day in Reykjavik on December 21st?
+      - When does it get dark tonight?
+    kind: look
+    where: any
+    region: global
+    sites: [timeanddate.com]
+    inputs:
+      place: {label: Where, kind: place}
+      date: {label: Day, kind: date, default: today}
+    open: https://www.timeanddate.com/search/results.html?query={place}
+    steps:
+      - kind: click
+        note: The sunrise and sunset link (a /sun/ address) for the matching place
+      - kind: do
+        text: If {date} is not today, pick its month and read that day's row.
+    read:
+      sunrise: Sunrise time
+      sunset: Sunset time
+      day_length: Length of the day
+      twilight: Civil dawn and dusk (first light, last light)
+    answer: "{place}, {date}: sunrise {sunrise}, sunset {sunset}, last light {twilight}."
+    tags: [sun, astronomy]
+
+  - id: tideforecast.tide_times
+    title: High and low tide times
+    says:
+      - When is high tide in St Ives tomorrow?
+      - What are the tide times at Mont-Saint-Michel on Saturday?
+      - Is it low tide at Brighton around noon?
+    kind: look
+    where: any
+    region: global
+    sites: [tide-forecast.com]
+    inputs:
+      place: {label: Beach or harbour, kind: place}
+      date: {label: Day, kind: date, default: today}
+    open: https://www.tide-forecast.com/
+    steps:
+      - kind: type
+        note: The location search field
+        value: "{place}"
+      - kind: do
+        text: Pick the nearest tide station and read the table for {date}.
+    read:
+      high_tides: High tide times and heights
+      low_tides: Low tide times and heights
+      station: The station used and how far it is from the place
+    answer: "{place} on {date}: high {high_tides}, low {low_tides} ({station})."
+    tags: [tides, coast]
+
+  # ── News and library ─────────────────────────────────────────────────────
+
+  - id: googlenews.local_news
+    title: Local news
+    says:
+      - What's happening in Zagreb today?
+      - Any news about the road closures in Brooklyn this week?
+      - What's the latest from my town?
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [news.google.com]
+    inputs:
+      place: {label: Town or area, kind: place}
+      topic: {label: About, kind: text, default: ""}
+      period: {label: How recent, kind: choice, options: [1d, 7d], default: 1d}
+    open: https://news.google.com/search?q={place}%20{topic}%20when%3A{period}
+    steps:
+      - kind: do
+        text: Read the top stories; open a story only when its headline is unclear, and prefer local outlets over national ones.
+    read:
+      headlines: Up to six headlines with outlet and time
+      main_story: The biggest local story in two sentences
+    answer: "{place}: {main_story} Also: {headlines}"
+    needs: [location]
+    tags: [news, local]
+
+  - id: worldcat.find_in_library
+    title: Which library near me has a book
+    says:
+      - Which library near me has The Overstory?
+      - Can I borrow Sapiens from a library in Boston?
+      - Find a library copy of the Chicago Manual of Style near the university.
+    kind: look
+    where: prefer_chrome
+    region: global
+    sites: [search.worldcat.org]
+    inputs:
+      title: {label: Book, kind: text, hint: "Title, and author if known"}
+      near: {label: Near, kind: place}
+      format: {label: Format, kind: choice, options: [any, book, ebook, audiobook], default: any}
+    open: https://search.worldcat.org/search?q={title}
+    steps:
+      - kind: do
+        text: Open the right work (author, language, {format}).
+      - kind: do
+        text: In the find-a-copy section enter {near} and read the nearest libraries that hold it.
+    read:
+      item: Title, author and edition or format
+      libraries: The three nearest libraries holding it, with distance
+      link: The nearest library's catalogue link, to check if it's on the shelf
+    answer: "{item} is at {libraries}."
+    needs: [location]
+    tags: [library, books]

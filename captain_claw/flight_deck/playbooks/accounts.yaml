@@ -1,0 +1,1261 @@
+category: accounts
+playbooks:
+  # ── Order history and spend ────────────────────────────────────────────────
+  - id: amazon.year_spend
+    title: How much I spent on Amazon
+    says:
+      - How much did I spend on Amazon this year?
+      - What was my Amazon total for 2025?
+      - How many Amazon orders did I place last year and what did they cost?
+    kind: look
+    where: chrome
+    region: global
+    sites: [amazon.com, amazon.co.uk, amazon.de, amazon.fr, amazon.it, amazon.es, amazon.ca]
+    inputs:
+      year: {label: Year, kind: number, ask: agent, hint: "Four-digit year; this year unless the person said otherwise"}
+    open: https://www.amazon.com/your-orders/orders?timeFilter=year-{year}
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon store, open the same path on that store's domain instead.
+      - kind: do
+        text: If Amazon asks for a sign-in, hand over to the person and wait.
+      - kind: do
+        text: Note each order's date and total, then go through every page with "Next" until the year is covered.
+      - kind: do
+        text: Leave out cancelled orders; note refunds and returns separately.
+    read:
+      order_count: How many orders the year has
+      total: The sum of the order totals, in the store's currency
+      biggest: The largest order, with its date and amount
+      refunds: Refunded or returned amounts, if any
+    answer: "{total} across {order_count} Amazon orders in {year}; biggest {biggest}."
+    tags: [spending, orders, amazon]
+
+  - id: amazon.invoices
+    title: Download Amazon invoices
+    says:
+      - Download my Amazon invoices for last month.
+      - Save all my Amazon receipts from 2025 into a folder.
+      - I need the Amazon invoices for my expense report.
+    kind: look
+    where: chrome
+    region: global
+    sites: [amazon.com, amazon.co.uk, amazon.de, amazon.fr, amazon.it, amazon.es, amazon.ca]
+    inputs:
+      year: {label: Year, kind: number, ask: agent, hint: "The year the orders fall in"}
+      period: {label: Which orders, kind: text, default: the whole year, hint: "A month, a date range or specific orders"}
+      folder: {label: Save to, kind: text, default: saved/invoices/amazon}
+    open: https://www.amazon.com/your-orders/orders?timeFilter=year-{year}
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon store, open the same path on that store's domain instead.
+      - kind: do
+        text: Go through the orders that fall in {period}; for each, open "Invoice" under the order.
+      - kind: do
+        text: Where a PDF invoice is offered (sellers in EU stores), download it; otherwise open "Printable order summary" and save it as PDF.
+      - kind: do
+        text: Save each file into {folder} named by order date and order number.
+    read:
+      saved: How many invoices were saved, and where
+      total: The sum of the saved orders' totals
+      missing: Orders without an invoice, if any
+    answer: "Saved {saved}; together {total}."
+    needs: [files]
+    tags: [invoices, receipts, expenses, amazon]
+
+  - id: amazon.memberships
+    title: My Amazon memberships and subscriptions
+    says:
+      - Which Amazon subscriptions am I paying for?
+      - When does my Prime renew and how much is it?
+      - Do I still have Kindle Unlimited or Audible?
+    kind: look
+    where: chrome
+    region: global
+    sites: [amazon.com, amazon.co.uk, amazon.de, amazon.fr, amazon.it, amazon.es, amazon.ca]
+    open: https://www.amazon.com/yourmembershipsandsubscriptions
+    steps:
+      - kind: do
+        text: If the person shops on another Amazon store, open the same path on that store's domain instead.
+      - kind: do
+        text: Read every active membership and subscription; open "Manage" on one only to read its renewal date or price.
+    read:
+      active: Each active membership or subscription (Prime, Kindle Unlimited, Audible, Prime Video channels) with its price
+      renewals: The next renewal date of each
+      inactive: Recently ended or paused ones
+    answer: "Active: {active}. Next renewals: {renewals}."
+    tags: [subscriptions, prime, amazon]
+
+  - id: ebay.year_spend
+    title: How much I spent on eBay
+    says:
+      - How much did I spend on eBay this year?
+      - Add up my eBay purchases from last year.
+      - What did I buy on eBay recently?
+    kind: look
+    where: chrome
+    region: global
+    sites: [ebay.com, ebay.co.uk, ebay.de, ebay.fr, ebay.it, ebay.es]
+    inputs:
+      period: {label: Period, kind: text, default: this year, hint: "A year, or the last 60 days"}
+    open: https://www.ebay.com/mye/myebay/purchase
+    steps:
+      - kind: do
+        text: If the person uses another eBay site, open the same path there. If eBay asks for a sign-in, hand over to the person.
+      - kind: do
+        text: Set the purchase filter to {period}, then note each item's price including shipping, through every page.
+    read:
+      item_count: How many purchases the period has
+      total: The sum paid, with shipping
+      biggest: The most expensive purchase and its price
+    answer: "{total} on {item_count} eBay purchases ({period}); biggest {biggest}."
+    tags: [spending, orders, ebay]
+
+  - id: uber.trips
+    title: Uber rides and receipts
+    says:
+      - How much did I spend on Uber last month?
+      - Download my Uber receipts for March for expenses.
+      - How many Uber rides did I take this week?
+      - Save the receipt for my last Uber trip.
+    kind: look
+    where: chrome
+    region: global
+    sites: [riders.uber.com]
+    inputs:
+      period: {label: Period, kind: text, default: last month}
+      save_receipts: {label: Save receipts, kind: flag, default: false}
+      folder: {label: Save to, kind: text, default: saved/receipts/uber}
+    open: https://riders.uber.com/trips
+    steps:
+      - kind: do
+        text: If Uber asks for a sign-in, hand over to the person and wait.
+      - kind: do
+        text: Go down the trip list (use "More" to load older trips) and note each trip in {period} with date, route and fare.
+      - kind: do
+        text: If save_receipts is on, open each trip, open its receipt and save the PDF into {folder}.
+    read:
+      trip_count: How many trips fall in the period
+      total: The sum of the fares, tips included
+      biggest: The priciest trip, with date and route
+      saved: Receipts saved, if asked
+    answer: "{trip_count} Uber trips in {period}, {total} in all; priciest {biggest}."
+    needs: [files]
+    tags: [spending, rides, receipts, uber]
+
+  - id: ubereats.order_spend
+    title: How much I spent on Uber Eats
+    says:
+      - How much did I spend on Uber Eats last month?
+      - How often did I order food delivery this month?
+      - What did my Uber Eats orders cost this year?
+    kind: look
+    where: chrome
+    region: global
+    sites: [ubereats.com]
+    inputs:
+      period: {label: Period, kind: text, default: last month}
+    open: https://www.ubereats.com/orders
+    steps:
+      - kind: do
+        text: If Uber Eats asks for a sign-in, hand over to the person and wait.
+      - kind: do
+        text: Scroll the past orders, loading more until {period} is covered, and note each order's date, restaurant and total.
+    read:
+      order_count: How many orders fall in the period
+      total: The sum of the order totals, fees and tips included
+      top_place: The restaurant ordered from most often
+    answer: "{order_count} Uber Eats orders in {period}, {total} in all; most from {top_place}."
+    tags: [spending, food-delivery, uber-eats]
+
+  - id: apple.purchase_history
+    title: My Apple purchase history
+    says:
+      - What have I bought from Apple this year?
+      - How much did I spend on apps and in-app purchases last month?
+      - Which Apple subscriptions charged me recently?
+    kind: look
+    where: chrome
+    region: global
+    sites: [reportaproblem.apple.com]
+    inputs:
+      period: {label: Period, kind: text, default: the last 90 days}
+    open: https://reportaproblem.apple.com/
+    steps:
+      - kind: do
+        text: Apple asks for the person's Apple Account sign-in and a code on their device; hand over to the person and wait.
+      - kind: do
+        text: Scroll the purchase list until {period} is covered; note each item's date, name and price.
+    read:
+      purchases: Each purchase in the period with date and price
+      total: The sum paid in the period
+      subscriptions: Recurring charges among them (App Store, Apple One, iCloud+, Music, TV+) with their amounts
+    answer: "{total} with Apple in {period}. Recurring: {subscriptions}."
+    tags: [spending, app-store, subscriptions, apple]
+
+  - id: googleplay.order_history
+    title: My Google Play spending
+    says:
+      - How much have I spent on Google Play this year?
+      - What apps and in-app purchases did I pay for last month?
+      - Show my Google Play order history.
+    kind: look
+    where: chrome
+    region: global
+    sites: [play.google.com]
+    inputs:
+      period: {label: Period, kind: text, default: this year}
+    open: https://play.google.com/store/account/orderhistory
+    steps:
+      - kind: do
+        text: If the person has several Google accounts, check the avatar shows the right one first.
+      - kind: do
+        text: Scroll the orders until {period} is covered; note each one's date, item and price.
+    read:
+      order_count: How many orders fall in the period
+      total: The sum paid
+      biggest: The most expensive order with its date
+      subscriptions: Subscription charges among them
+    answer: "{total} on Google Play in {period} ({order_count} orders); biggest {biggest}."
+    tags: [spending, app-store, google-play]
+
+  # ── Subscriptions ──────────────────────────────────────────────────────────
+  - id: googleplay.subscriptions
+    title: My Google Play subscriptions
+    says:
+      - Which subscriptions am I paying for on Google Play?
+      - What app subscriptions renew this month?
+      - Am I still subscribed to anything through my Android phone?
+    kind: look
+    where: chrome
+    region: global
+    sites: [play.google.com]
+    open: https://play.google.com/store/account/subscriptions
+    read:
+      active: Each active subscription with its price and billing period
+      renewals: The next renewal date of each
+      ended: Expired or cancelled subscriptions still listed
+    answer: "Active: {active}. Next renewals: {renewals}."
+    tags: [subscriptions, google-play]
+
+  - id: googleplay.cancel_subscription
+    title: Cancel a Google Play subscription
+    says:
+      - Cancel my Duolingo subscription on Google Play.
+      - Stop the app subscription that renews next week.
+      - Turn off auto-renew for an Android app.
+    kind: act
+    where: chrome
+    region: global
+    sites: [play.google.com]
+    inputs:
+      subscription: {label: Which subscription, kind: text}
+      reason: {label: Reason, kind: text, default: "I don't use this enough"}
+    open: https://play.google.com/store/account/subscriptions
+    steps:
+      - kind: do
+        text: Find {subscription} in the list and open "Manage".
+      - kind: do
+        text: Note the price and the date access ends, then click "Cancel subscription"; this only opens the reason dialog.
+      - kind: do
+        text: Pick the reason closest to {reason} and click "Continue".
+      - kind: do
+        text: Stop at the confirmation dialog and tell the person what ends and when; they press the button.
+    read:
+      subscription: The subscription and its price
+      access_until: The date access ends after cancelling
+    stop: Cancel subscription
+    tags: [subscriptions, cancel, google-play]
+
+  - id: paypal.automatic_payments
+    title: My PayPal automatic payments
+    says:
+      - Which companies can charge my PayPal automatically?
+      - Show my PayPal automatic payments.
+      - Is that streaming service still set up to bill my PayPal?
+    kind: look
+    where: chrome
+    region: global
+    sites: [paypal.com]
+    open: https://www.paypal.com/myaccount/autopay/
+    steps:
+      - kind: do
+        text: If PayPal asks for a sign-in or a code, hand over to the person and wait.
+      - kind: do
+        text: Read the list only; open a merchant to read its last payment and terms, never press "Cancel" or "Remove".
+    read:
+      active: Each merchant with an active automatic payment, and its last charge
+      inactive: Merchants listed as inactive or cancelled
+      oldest: Active ones with no charge for over a year
+    answer: "Active: {active}. Possibly unused: {oldest}."
+    tags: [subscriptions, autopay, paypal]
+
+  - id: microsoft.subscriptions
+    title: My Microsoft subscriptions and orders
+    says:
+      - When does my Microsoft 365 renew and what does it cost?
+      - Is auto-renew on for my Xbox Game Pass?
+      - What have I bought from Microsoft lately?
+    kind: look
+    where: chrome
+    region: global
+    sites: [account.microsoft.com]
+    open: https://account.microsoft.com/services
+    steps:
+      - kind: do
+        text: If Microsoft asks for a sign-in, hand over to the person and wait.
+      - kind: do
+        text: Read each subscription card; open "Manage" only to read the renewal details.
+      - kind: open
+        url: https://account.microsoft.com/billing/orders
+        note: Only if recent purchases were asked about.
+    read:
+      subscriptions: Each subscription (Microsoft 365, Xbox Game Pass, OneDrive storage) with price
+      renewals: Renewal date and whether recurring billing is on, for each
+      orders: Recent orders with dates and amounts, if asked
+    answer: "{subscriptions}. Renewals: {renewals}."
+    tags: [subscriptions, microsoft-365, xbox, microsoft]
+
+  # ── Streaming ──────────────────────────────────────────────────────────────
+  - id: netflix.viewing_activity
+    title: What I watched on Netflix
+    says:
+      - What did I watch on Netflix last week?
+      - Which episode of that series did I stop at?
+      - Show my Netflix viewing history for this month.
+    kind: look
+    where: chrome
+    region: global
+    sites: [netflix.com]
+    inputs:
+      profile: {label: Profile, kind: text, default: the profile that is open}
+      period: {label: Period, kind: text, default: the last 7 days}
+    open: https://www.netflix.com/viewingactivity
+    steps:
+      - kind: do
+        text: Viewing activity is per profile; if {profile} is not the one shown, switch to it from the account's profile list first.
+      - kind: do
+        text: Click "Show more" until {period} is covered.
+    read:
+      titles: Each title watched in the period, with date
+      series: For series, the last episode watched
+      count: How many titles in all
+    answer: "{count} titles in {period}: {titles}."
+    tags: [streaming, history, netflix]
+
+  - id: netflix.plan_billing
+    title: My Netflix plan and billing
+    says:
+      - What Netflix plan am I on and what does it cost?
+      - When does Netflix charge me next?
+      - Show my Netflix payment history.
+    kind: look
+    where: chrome
+    region: global
+    sites: [netflix.com]
+    open: https://www.netflix.com/BillingActivity
+    steps:
+      - kind: do
+        text: If the plan name is not on the page, open "Membership" from the account menu to read it.
+    read:
+      plan: The plan name and monthly price
+      next_billing: The next billing date
+      payments: Recent payments with dates and amounts
+      extra_members: Extra members added to the plan, if any
+    answer: "{plan}; next charge on {next_billing}."
+    tags: [streaming, billing, netflix]
+
+  - id: spotify.plan_family
+    title: My Spotify plan and family members
+    says:
+      - What Spotify plan am I on?
+      - When is my next Spotify payment?
+      - Who is on my Spotify Family plan?
+      - How many free spots are left on my Spotify Family?
+    kind: look
+    where: chrome
+    region: global
+    sites: [spotify.com]
+    open: https://www.spotify.com/account/overview/
+    steps:
+      - kind: do
+        text: If Spotify asks for a sign-in, hand over to the person and wait.
+      - kind: open
+        url: https://www.spotify.com/account/family/
+        note: Only for a Family or Duo plan.
+    read:
+      plan: The plan name and price
+      next_payment: The next payment date and amount
+      members: People on a Family or Duo plan, and open spots
+    answer: "{plan}; next payment {next_payment}. Members: {members}."
+    tags: [streaming, music, family, spotify]
+
+  - id: youtube.premium_membership
+    title: My YouTube Premium membership
+    says:
+      - When does my YouTube Premium renew?
+      - How much am I paying for YouTube Premium?
+      - Who is in my YouTube family membership?
+    kind: look
+    where: chrome
+    region: global
+    sites: [youtube.com]
+    open: https://www.youtube.com/paid_memberships
+    steps:
+      - kind: do
+        text: Open "Manage membership" on the Premium card to read the billing details; touch nothing else.
+    read:
+      plan: The membership (Premium, Family, Student, Lite) and its price
+      next_billing: The next billing date
+      family: Family members sharing it, if a family plan
+      channel_memberships: Paid channel memberships listed on the page
+    answer: "{plan}, renews {next_billing}."
+    tags: [streaming, subscriptions, youtube]
+
+  # ── Cloud storage ──────────────────────────────────────────────────────────
+  - id: google.storage_usage
+    title: What fills my Google storage
+    says:
+      - How much Google storage am I using?
+      - What's taking up space in my Google Drive?
+      - Find my biggest files in Drive.
+      - My Gmail says storage is almost full, what is using it?
+    kind: look
+    where: chrome
+    region: global
+    sites: [one.google.com, drive.google.com]
+    inputs:
+      how_many: {label: Biggest files to list, kind: number, default: 10}
+    open: https://one.google.com/storage
+    steps:
+      - kind: do
+        text: Read the total and the split between Drive, Gmail and Photos.
+      - kind: open
+        url: https://drive.google.com/drive/quota
+        note: Lists Drive files from the largest down.
+      - kind: do
+        text: Read the top {how_many} files with their sizes and folders; delete nothing.
+    read:
+      used: Storage used out of the plan's total
+      split: Space taken by Drive, Gmail and Photos
+      biggest: The largest Drive files with their sizes
+      plan: The Google One plan and its renewal date, if any
+    answer: "{used} used ({split}). Biggest: {biggest}."
+    tags: [storage, cloud, google-drive, google-one]
+
+  - id: dropbox.storage_usage
+    title: My Dropbox space
+    says:
+      - How much Dropbox space do I have left?
+      - Am I close to my Dropbox limit?
+      - What Dropbox plan am I on and when does it renew?
+    kind: look
+    where: chrome
+    region: global
+    sites: [dropbox.com]
+    open: https://www.dropbox.com/account/plan
+    steps:
+      - kind: do
+        text: If Dropbox asks for a sign-in, hand over to the person and wait.
+    read:
+      used: Space used out of the plan's total
+      plan: The plan name and its price
+      renewal: The next renewal or billing date
+    answer: "{used} on {plan}; renews {renewal}."
+    tags: [storage, cloud, dropbox]
+
+  - id: icloud.storage_usage
+    title: My iCloud storage
+    says:
+      - How much iCloud storage do I have left?
+      - What's filling up my iCloud?
+      - Which iCloud+ plan do I have?
+    kind: look
+    where: chrome
+    region: global
+    sites: [icloud.com]
+    open: https://www.icloud.com/settings/
+    steps:
+      - kind: do
+        text: iCloud asks for the Apple Account sign-in and a code on the person's device; hand over to the person and wait.
+    read:
+      used: Storage used out of the plan's total
+      split: Space by category (Photos, Backups, Documents, Mail)
+      plan: The iCloud+ plan
+    answer: "{used} on {plan}: {split}."
+    tags: [storage, cloud, icloud, apple]
+
+  - id: onedrive.storage_usage
+    title: What fills my OneDrive
+    says:
+      - How much OneDrive storage am I using?
+      - What are the biggest files in my OneDrive?
+      - Is my Outlook mailbox eating my Microsoft storage?
+    kind: look
+    where: chrome
+    region: global
+    sites: [onedrive.live.com]
+    open: https://onedrive.live.com/?v=managestorage
+    steps:
+      - kind: do
+        text: If Microsoft asks for a sign-in, hand over to the person and wait.
+      - kind: do
+        text: Read the split between OneDrive and Outlook, then open "What's taking up space?" for the largest files; delete nothing.
+    read:
+      used: Storage used out of the total
+      split: Space used by OneDrive files and Outlook attachments
+      biggest: The largest files with their sizes
+    answer: "{used} used ({split}). Biggest: {biggest}."
+    tags: [storage, cloud, onedrive, microsoft]
+
+  # ── Security and privacy ───────────────────────────────────────────────────
+  - id: google.security_checkup
+    title: Google security checkup
+    says:
+      - Is my Google account secure?
+      - Run a security checkup on my Google account.
+      - Does Google flag anything wrong with my account?
+    kind: look
+    where: chrome
+    region: global
+    sites: [myaccount.google.com]
+    open: https://myaccount.google.com/security-checkup
+    steps:
+      - kind: do
+        text: Open each section that shows a warning to read it; change nothing and remove nothing.
+    read:
+      status: The overall verdict (no issues found, or how many recommended actions)
+      issues: Each recommended action and what it is about
+      two_step: Whether 2-Step Verification or passkeys are on
+      recovery: Whether a recovery phone and email are set
+    answer: "{status}. To look at: {issues}."
+    tags: [security, privacy, google]
+
+  - id: google.third_party_apps
+    title: Apps connected to my Google account
+    says:
+      - Which apps have access to my Google account?
+      - What third-party apps can read my Gmail?
+      - Show apps I signed into with Google.
+    kind: look
+    where: chrome
+    region: global
+    sites: [myaccount.google.com]
+    open: https://myaccount.google.com/connections
+    steps:
+      - kind: do
+        text: Open each app to read what it can access and since when; never press "Delete" or "Stop using Sign in with Google".
+    read:
+      apps: Each connected app or service
+      access: What each can reach (Gmail, Drive, Calendar, Contacts, or sign-in only)
+      risky: Apps with access to mail or files that look unused or unknown
+    answer: "{apps}. Worth a look: {risky}."
+    tags: [security, privacy, oauth, google]
+
+  - id: google.devices
+    title: Devices signed in to my Google account
+    says:
+      - Which devices are signed in to my Google account?
+      - Is someone else logged into my Gmail?
+      - Where was my Google account last used?
+    kind: look
+    where: chrome
+    region: global
+    sites: [myaccount.google.com]
+    open: https://myaccount.google.com/device-activity
+    steps:
+      - kind: do
+        text: Open each device to read its last activity and place; never press "Sign out".
+    read:
+      devices: Each device with its type and name
+      last_active: When and where each was last active
+      unfamiliar: Devices that look unfamiliar or long unused
+    answer: "{devices}. Check: {unfamiliar}."
+    tags: [security, devices, google]
+
+  # ── Data export ────────────────────────────────────────────────────────────
+  - id: google.takeout
+    title: Export my Google data
+    says:
+      - Download a copy of all my Google data.
+      - Export my Google Photos and Drive with Takeout.
+      - I want a backup of my Gmail.
+    kind: act
+    where: chrome
+    region: global
+    sites: [takeout.google.com]
+    inputs:
+      products: {label: What to export, kind: text, default: everything, hint: "e.g. Drive, Gmail, Photos, Calendar"}
+      file_type: {label: File type, kind: choice, options: [zip, tgz], default: zip}
+      size: {label: Part size, kind: choice, options: [1 GB, 2 GB, 4 GB, 10 GB, 50 GB], default: 2 GB}
+    open: https://takeout.google.com/
+    steps:
+      - kind: do
+        text: Unless the export is everything, click "Deselect all" and tick only {products}.
+      - kind: click
+        target: {role: button, name: Next step}
+      - kind: do
+        text: Keep "Send download link via email" and "Export once"; set the file type to {file_type} and the size to {size}.
+    read:
+      products: The products ticked for export
+      delivery: How the export will be delivered
+    stop: Create export
+    tags: [export, backup, privacy, google]
+
+  - id: facebook.download_information
+    title: Download my Facebook or Instagram data
+    says:
+      - Download all my Facebook data.
+      - Get a copy of my Instagram photos and messages.
+      - Export my Facebook posts from the last year.
+    kind: act
+    where: chrome
+    region: global
+    sites: [accountscenter.facebook.com, accountscenter.instagram.com]
+    inputs:
+      account: {label: Which account, kind: choice, options: [Facebook, Instagram, both], default: both}
+      scope: {label: What, kind: text, default: all available information}
+      date_range: {label: Date range, kind: text, default: all time}
+      format: {label: Format, kind: choice, options: [HTML, JSON], default: HTML}
+    open: https://accountscenter.facebook.com/info_and_permissions/dyi
+    steps:
+      - kind: do
+        text: Click "Download or transfer information" and pick the profiles for {account}.
+      - kind: do
+        text: Choose {scope} (or "Some of your information" with only the asked types), then "Download to device".
+      - kind: do
+        text: Set the date range to {date_range} and the format to {format}; keep media quality as it is unless asked.
+    read:
+      selection: The profiles, information types and date range picked
+      notify: Where Meta says it will notify the person when the files are ready
+    stop: Create files
+    tags: [export, backup, privacy, facebook, instagram]
+
+  # ── Refunds ────────────────────────────────────────────────────────────────
+  - id: apple.refund_request
+    title: Ask Apple for a refund
+    says:
+      - Ask Apple for a refund on an app I bought by mistake.
+      - Get my money back for that in-app purchase.
+      - I was charged for a subscription I didn't want, request a refund.
+    kind: act
+    where: chrome
+    region: global
+    sites: [reportaproblem.apple.com]
+    inputs:
+      item: {label: Which purchase, kind: text}
+      reason: {label: Reason, kind: choice, options: [didn't intend to buy, didn't intend to renew, didn't receive it, item doesn't work, other], default: didn't intend to buy}
+    open: https://reportaproblem.apple.com/
+    steps:
+      - kind: do
+        text: Apple asks for the Apple Account sign-in and a code; hand over to the person and wait.
+      - kind: do
+        text: Under "What can we help you with?" choose "Request a refund", then the reason closest to {reason}, and click "Next".
+      - kind: do
+        text: Tick {item} in the list of eligible purchases; if it is not listed, tell the person it may not be refundable here.
+    read:
+      item: The purchase picked, with date and price
+      reason: The reason chosen
+    stop: Submit
+    tags: [refund, app-store, apple]
+
+  - id: googleplay.refund_request
+    title: Ask Google Play for a refund
+    says:
+      - Request a refund for an app I bought on Google Play.
+      - My kid made an in-app purchase, get it refunded.
+      - Refund the Play Store subscription I was just charged for.
+    kind: act
+    where: chrome
+    region: global
+    sites: [support.google.com/googleplay, play.google.com]
+    inputs:
+      item: {label: Which purchase, kind: text}
+      reason: {label: Reason, kind: text, default: accidental purchase}
+    open: https://support.google.com/googleplay/workflow/9813244
+    steps:
+      - kind: do
+        text: Pick the Google account the purchase was made with, then find {item} among the recent purchases.
+      - kind: do
+        text: Choose the issue closest to {reason} and fill the short description from the person's words.
+      - kind: do
+        text: If the form says the purchase is not eligible, read out what it suggests instead and stop.
+    read:
+      item: The purchase picked, with date and price
+      eligibility: What the form says about refund eligibility
+    stop: Submit
+    tags: [refund, app-store, google-play]
+
+  # ── Payments (look only) ───────────────────────────────────────────────────
+  - id: paypal.activity
+    title: My PayPal activity
+    says:
+      - What did I pay with PayPal last month?
+      - Did that PayPal payment go through?
+      - How much money did I receive on PayPal this week?
+      - What's my PayPal balance?
+      - Did the client's PayPal payment come in?
+    kind: look
+    where: chrome
+    region: global
+    sites: [paypal.com]
+    inputs:
+      period: {label: Period, kind: text, default: the last 30 days}
+      search: {label: Merchant or person, kind: text, default: "", hint: "Optional, to narrow the list"}
+    open: https://www.paypal.com/myaccount/activities/
+    steps:
+      - kind: do
+        text: If PayPal asks for a sign-in or a code, hand over to the person and wait.
+      - kind: do
+        text: Set the date filter to {period}; if a merchant was named, search for {search}. Only read; never open "Send" or "Request".
+    read:
+      payments: Payments sent in the period, with date, merchant and amount
+      received: Money received in the period
+      pending: Pending or refunded items
+      total_sent: The sum sent
+      balance: The PayPal balance by currency, as shown on the summary
+    answer: "Sent {total_sent} in {period}. Pending: {pending}."
+    tags: [payments, paypal]
+
+  - id: paypal.statements
+    title: Download PayPal statements
+    says:
+      - Download my PayPal statement for October.
+      - Save my PayPal monthly statements for 2025 for my accountant.
+      - Get a PayPal activity report for last quarter.
+    kind: look
+    where: chrome
+    region: global
+    sites: [paypal.com]
+    inputs:
+      months: {label: Which months, kind: text, hint: "One month, a range or a whole year"}
+      folder: {label: Save to, kind: text, default: saved/statements/paypal}
+    open: https://www.paypal.com/myaccount/activities/
+    steps:
+      - kind: do
+        text: If PayPal asks for a sign-in or a code, hand over to the person and wait.
+      - kind: do
+        text: Open "Statements" from the Activity page, pick each month in {months} and download its PDF into {folder}.
+      - kind: do
+        text: If a month has no statement yet, say so instead of making a custom report.
+    read:
+      saved: The statements saved, by month
+      missing: Months with no statement available
+    answer: "Saved {saved}."
+    needs: [files]
+    tags: [statements, payments, paypal]
+
+  - id: web.bank_statements
+    title: Download bank statements
+    says:
+      - Download my bank statements for the last three months.
+      - Save my September account statement as PDF.
+      - Get this year's credit card statements from my bank.
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Bank, kind: url, hint: "The online-banking address the person signs in at"}
+      account: {label: Which account, kind: text, default: the main current account}
+      months: {label: Which months, kind: text}
+      folder: {label: Save to, kind: text, default: saved/statements/bank}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+      - kind: do
+        text: The bank will ask for a sign-in and a confirmation on the person's phone; hand over to the person and wait.
+      - kind: do
+        text: Find "Statements" or "Documents" (often under the account or the profile menu) and pick {account}.
+      - kind: do
+        text: Download the statement PDF for each month in {months} into {folder}. Only read and download; never open payments or transfers.
+    read:
+      saved: The statements saved, by month
+      missing: Months the bank does not offer yet
+    answer: "Saved {saved} for {account}."
+    needs: [files]
+    tags: [banking, statements]
+
+  - id: web.tax_documents
+    title: Download tax documents
+    says:
+      - Download my tax forms for 2025.
+      - Get my annual tax statement from my broker.
+      - Save the tax documents I need for my return.
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Where the forms are, kind: url, hint: "The tax office portal, broker, bank or payroll site the person signs in at"}
+      year: {label: Tax year, kind: number, ask: agent, hint: "Usually last year"}
+      folder: {label: Save to, kind: text, default: saved/tax}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+      - kind: do
+        text: Hand the sign-in and any code to the person and wait.
+      - kind: do
+        text: Find the "Tax documents", "Tax forms" or "Documents" section and filter it to {year}.
+      - kind: do
+        text: Download every tax form for {year} into {folder}; list forms marked as not yet available.
+    read:
+      saved: Each form saved, with its name
+      pending: Forms the site says come later, with their expected date
+    answer: "Saved {saved} for {year}. Still to come: {pending}."
+    needs: [files]
+    tags: [tax, documents]
+
+  # ── SaaS billing and invoices ──────────────────────────────────────────────
+  - id: googleworkspace.invoices
+    title: Download Google Workspace invoices
+    says:
+      - Download our Google Workspace invoices for last month.
+      - Save the Workspace invoices for 2025 for accounting.
+      - What did we pay Google for Workspace this quarter?
+    kind: look
+    where: chrome
+    region: global
+    sites: [admin.google.com]
+    inputs:
+      period: {label: Period, kind: text, default: last month}
+      folder: {label: Save to, kind: text, default: saved/invoices/google-workspace}
+    open: https://admin.google.com/ac/billing/accounts
+    steps:
+      - kind: do
+        text: This needs a Workspace admin account; if the page says no access, tell the person.
+      - kind: do
+        text: Open the billing account, go to "Transactions", set the range to {period} and download each invoice PDF into {folder}.
+    read:
+      invoices: Each invoice with date, number and amount
+      total: The sum for the period
+    answer: "{total} for {period}; invoices saved: {invoices}."
+    needs: [files]
+    tags: [invoices, saas, google-workspace]
+
+  - id: notion.invoices
+    title: Download Notion invoices
+    says:
+      - Download my Notion invoices.
+      - Save last month's Notion receipt for expenses.
+      - How much are we paying for Notion?
+    kind: look
+    where: chrome
+    region: global
+    sites: [notion.so, notion.com]
+    inputs:
+      period: {label: Period, kind: text, default: last month}
+      folder: {label: Save to, kind: text, default: saved/invoices/notion}
+    open: https://app.notion.com/
+    steps:
+      - kind: do
+        text: Open "Settings" in the sidebar, then the "Billing" tab of the workspace that pays.
+      - kind: do
+        text: Read the plan, then under "Invoices" open each one in {period} and download its PDF into {folder}.
+    read:
+      plan: The plan, seats and price
+      invoices: Each invoice saved, with date and amount
+    answer: "{plan}. Saved: {invoices}."
+    needs: [files]
+    tags: [invoices, saas, notion]
+
+  - id: slack.invoices
+    title: Download Slack invoices
+    says:
+      - Download our Slack invoices.
+      - Save Slack's billing history for this year.
+      - When is our next Slack bill and how much?
+    kind: look
+    where: chrome
+    region: global
+    sites: [slack.com]
+    inputs:
+      period: {label: Period, kind: text, default: last month}
+      folder: {label: Save to, kind: text, default: saved/invoices/slack}
+    open: https://my.slack.com/admin/billing
+    steps:
+      - kind: do
+        text: Billing is visible to owners and billing admins; if the page says no access, tell the person.
+      - kind: do
+        text: Read the plan and next bill, then open "Billing history" and download each invoice in {period} into {folder}.
+    read:
+      plan: The plan, active members billed and price
+      next_bill: The next billing date and estimated amount
+      invoices: Each invoice saved, with date and amount
+    answer: "{plan}; next bill {next_bill}. Saved: {invoices}."
+    needs: [files]
+    tags: [invoices, saas, slack]
+
+  - id: adobe.invoices
+    title: Download Adobe invoices
+    says:
+      - Download my Adobe Creative Cloud invoices.
+      - Save the Adobe receipts for this year.
+      - What am I paying Adobe every month?
+    kind: look
+    where: chrome
+    region: global
+    sites: [account.adobe.com]
+    inputs:
+      period: {label: Period, kind: text, default: last month}
+      folder: {label: Save to, kind: text, default: saved/invoices/adobe}
+    open: https://account.adobe.com/orders/billing-history
+    steps:
+      - kind: do
+        text: If Adobe asks for a sign-in, hand over to the person and wait.
+      - kind: do
+        text: Download the invoice of each charge in {period} into {folder}.
+    read:
+      invoices: Each invoice saved, with date, plan and amount
+      total: The sum for the period
+    answer: "{total}; saved {invoices}."
+    needs: [files]
+    tags: [invoices, saas, adobe]
+
+  - id: chatgpt.invoices
+    title: Download ChatGPT invoices
+    says:
+      - Download my ChatGPT Plus invoices.
+      - Save the OpenAI subscription receipts for my taxes.
+      - When does my ChatGPT subscription renew?
+    kind: look
+    where: chrome
+    region: global
+    sites: [chatgpt.com, pay.openai.com]
+    inputs:
+      period: {label: Period, kind: text, default: last month}
+      folder: {label: Save to, kind: text, default: saved/invoices/chatgpt}
+    open: https://chatgpt.com/#settings
+    steps:
+      - kind: do
+        text: In Settings open the tab with the plan (Account or Subscription) and click "Manage", then the billing portal link.
+      - kind: do
+        text: In the billing portal read the plan and renewal date, then under "Invoice history" open each invoice in {period} and download it into {folder}.
+    read:
+      plan: The plan and its price
+      renewal: The next renewal date
+      invoices: Each invoice saved, with date and amount
+    answer: "{plan}, renews {renewal}. Saved: {invoices}."
+    needs: [files]
+    tags: [invoices, ai, subscriptions, chatgpt]
+
+  - id: claude.invoices
+    title: Download Claude invoices
+    says:
+      - Download my Claude subscription invoices.
+      - Save the Claude Pro receipts for last quarter.
+      - When does my Claude plan renew?
+    kind: look
+    where: chrome
+    region: global
+    sites: [claude.ai]
+    inputs:
+      period: {label: Period, kind: text, default: last month}
+      folder: {label: Save to, kind: text, default: saved/invoices/claude}
+    open: https://claude.ai/settings/billing
+    steps:
+      - kind: do
+        text: Read the plan and renewal date, then under "Invoices" open each one in {period} and download its PDF into {folder}.
+    read:
+      plan: The plan and its price
+      renewal: The next renewal date
+      invoices: Each invoice saved, with date and amount
+    answer: "{plan}, renews {renewal}. Saved: {invoices}."
+    needs: [files]
+    tags: [invoices, ai, subscriptions, claude]
+
+  - id: web.billing_invoices
+    title: Download invoices from any service
+    says:
+      - Download the invoices from my Zoom account.
+      - Save this year's Canva receipts into a folder.
+      - Get all invoices from our hosting provider for Q3.
+      - Grab the latest invoice from Dropbox.
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Service, kind: url, hint: "The service's billing or account page"}
+      period: {label: Period, kind: text, default: last month}
+      folder: {label: Save to, kind: text, default: saved/invoices}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+      - kind: do
+        text: If the site asks for a sign-in, hand over to the person and wait.
+      - kind: do
+        text: Find "Billing", "Plan" or "Subscription" in the account or admin settings, then "Invoices", "Billing history" or "Receipts".
+      - kind: do
+        text: Download each invoice in {period} as PDF into {folder}; never change the plan or payment method.
+    read:
+      invoices: Each invoice saved, with date, number and amount
+      total: The sum for the period
+      plan: The current plan and next billing date, if shown
+    answer: "Saved {invoices}; {total} in all."
+    needs: [files]
+    tags: [invoices, saas, receipts]
+
+  # ── Loyalty ────────────────────────────────────────────────────────────────
+  - id: milesandmore.miles_balance
+    title: My Miles & More balance
+    says:
+      - How many Lufthansa miles do I have?
+      - When do my Miles & More miles expire?
+      - What's my Miles & More status?
+    kind: look
+    where: chrome
+    region: global
+    sites: [miles-and-more.com]
+    open: https://www.miles-and-more.com/
+    steps:
+      - kind: do
+        text: Click "Login" and hand the sign-in to the person; wait until the account page shows.
+      - kind: do
+        text: Open the account overview or mileage statement.
+    read:
+      miles: The award miles balance
+      status: The status level and the points or qualifying miles toward the next one
+      expiring: Miles due to expire, with the date
+    answer: "{miles} award miles; status {status}. Expiring: {expiring}."
+    tags: [loyalty, miles, airline, lufthansa]
+
+  - id: marriott.points_balance
+    title: My Marriott Bonvoy points
+    says:
+      - How many Marriott Bonvoy points do I have?
+      - How many nights until my next Bonvoy status?
+      - Do I have any free night certificates expiring?
+    kind: look
+    where: chrome
+    region: global
+    sites: [marriott.com]
+    open: https://www.marriott.com/loyalty/myAccount/default.mi
+    steps:
+      - kind: do
+        text: If Marriott shows the sign-in box, hand over to the person and wait.
+    read:
+      points: The points balance
+      status: The elite level and nights this year toward the next one
+      certificates: Free night awards with their expiry dates
+    answer: "{points} points; {status}. Free nights: {certificates}."
+    tags: [loyalty, points, hotel, marriott]
+
+  - id: web.loyalty_balance
+    title: Points balance on any loyalty program
+    says:
+      - How many Avios do I have?
+      - What's my Hilton Honors balance?
+      - Check my supermarket loyalty points.
+      - Are any of my airline miles about to expire?
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      program: {label: Program, kind: text, hint: "e.g. British Airways Avios, Hilton Honors, a store card"}
+      site: {label: Program's site, kind: url, hint: "The member sign-in page of the program"}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+      - kind: do
+        text: Hand the sign-in to the person and wait, then open the member account or statement page.
+    read:
+      balance: The points or miles balance
+      status: The tier and progress to the next one, if any
+      expiring: Points due to expire, with the date
+      vouchers: Vouchers, certificates or rewards ready to use
+    answer: "{program}: {balance}; {status}. Expiring: {expiring}."
+    tags: [loyalty, points, miles]
+
+  # ── Phone, utilities, insurance ────────────────────────────────────────────
+  - id: telekom.bill
+    title: My Telekom bill and usage
+    says:
+      - How much is my Telekom bill this month?
+      - Download my latest Deutsche Telekom invoice.
+      - How much mobile data have I used on Telekom?
+    kind: look
+    where: chrome
+    region: de
+    sites: [telekom.de]
+    inputs:
+      folder: {label: Save to, kind: text, default: saved/bills/telekom}
+    open: https://www.telekom.de/mein-magenta-kundencenter
+    steps:
+      - kind: do
+        text: Hand the Telekom login to the person and wait.
+      - kind: do
+        text: Open "Rechnungen" for the latest bill and download its PDF into {folder}.
+      - kind: do
+        text: For a mobile contract, open the contract's usage ("Verbrauch") to read the data used this cycle.
+    read:
+      amount: The latest bill's amount
+      due: The debit or due date
+      period: The billing period it covers
+      data_used: Mobile data used out of the allowance, if a mobile contract
+    answer: "{amount} for {period}, due {due}. Data: {data_used}."
+    needs: [files]
+    tags: [phone, bills, telekom]
+
+  - id: web.carrier_bill
+    title: My phone bill and usage
+    says:
+      - How much is my phone bill this month?
+      - How much mobile data do I have left?
+      - Download my latest Vodafone bill.
+      - Did my Orange bill go up?
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Carrier, kind: url, hint: "The carrier's customer account page (e.g. My Vodafone)"}
+      save_bill: {label: Save the bill, kind: flag, default: false}
+      folder: {label: Save to, kind: text, default: saved/bills/phone}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+      - kind: do
+        text: Hand the sign-in to the person and wait.
+      - kind: do
+        text: Open the bills section; read the latest bill and the one before it. If save_bill is on, download the latest PDF into {folder}.
+      - kind: do
+        text: Open usage for the current cycle and read data, minutes and roaming used.
+    read:
+      amount: The latest bill's amount
+      previous: The bill before it, for comparison
+      due: The due date
+      usage: Data and minutes used out of the allowance this cycle
+    answer: "{amount}, due {due} (before: {previous}). Usage: {usage}."
+    needs: [files]
+    tags: [phone, bills, usage]
+
+  - id: web.utility_bill
+    title: My latest utility bill
+    says:
+      - How much is my electricity bill this month?
+      - Download my latest gas bill.
+      - Is my water bill higher than last time?
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Supplier, kind: url, hint: "The electricity, gas, water or internet supplier's customer account page"}
+      folder: {label: Save to, kind: text, default: saved/bills/utilities}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+      - kind: do
+        text: Hand the sign-in to the person and wait.
+      - kind: do
+        text: Open the bills or invoices section, read the latest bill and the previous one, and download the latest PDF into {folder}.
+    read:
+      amount: The latest bill's amount
+      due: The due date or debit date
+      usage: Consumption in the period (kWh, m³), if shown
+      previous: The previous bill's amount
+    answer: "{amount}, due {due}; usage {usage} (previous bill {previous})."
+    needs: [files]
+    tags: [utilities, bills]
+
+  - id: web.insurance_documents
+    title: Download insurance policy documents
+    says:
+      - Download my car insurance policy documents.
+      - When does my home insurance renew?
+      - Save my health insurance certificate as PDF.
+    kind: look
+    where: chrome
+    region: global
+    inputs:
+      site: {label: Insurer, kind: url, hint: "The insurer's customer account page"}
+      policy: {label: Which policy, kind: text, default: all policies}
+      folder: {label: Save to, kind: text, default: saved/insurance}
+    open: "{site}"
+    steps:
+      - kind: do
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+      - kind: do
+        text: Hand the sign-in to the person and wait.
+      - kind: do
+        text: Open {policy} under "My policies" (or "Documents") and download the schedule, certificate and terms into {folder}.
+    read:
+      policy: The policy's type and cover
+      renewal: The renewal or end date
+      premium: The premium and how often it is paid
+      saved: The documents saved
+    answer: "{policy}, renews {renewal}, premium {premium}. Saved {saved}."
+    needs: [files]
+    tags: [insurance, documents]
+
+  # ── Domains ────────────────────────────────────────────────────────────────
+  - id: godaddy.domain_renewals
+    title: My GoDaddy domain renewals
+    says:
+      - When do my GoDaddy domains expire?
+      - Is auto-renew on for my domains at GoDaddy?
+      - Which of my domains renew next?
+    kind: look
+    where: chrome
+    region: global
+    sites: [dcc.godaddy.com, godaddy.com]
+    open: https://dcc.godaddy.com/control/portfolio
+    steps:
+      - kind: do
+        text: If GoDaddy asks for a sign-in, hand over to the person and wait.
+      - kind: do
+        text: Sort by expiration date and read every domain; never press "Renew".
+    read:
+      domains: Each domain with its expiration date
+      auto_renew: Whether auto-renew is on for each
+      soon: Domains expiring in the next 60 days
+    answer: "Next to expire: {soon}. Auto-renew: {auto_renew}."
+    tags: [domains, renewals, godaddy]
+
+  - id: namecheap.domain_renewals
+    title: My Namecheap domain renewals
+    says:
+      - When do my Namecheap domains expire?
+      - Are my Namecheap domains set to auto-renew?
+      - Which domains do I have at Namecheap?
+    kind: look
+    where: chrome
+    region: global
+    sites: [ap.www.namecheap.com, namecheap.com]
+    open: https://ap.www.namecheap.com/domains/list/
+    steps:
+      - kind: do
+        text: If Namecheap asks for a sign-in, hand over to the person and wait.
+      - kind: do
+        text: Sort the list by expiry and read each domain; never press "Renew" or change auto-renew.
+    read:
+      domains: Each domain with its expiry date
+      auto_renew: Whether auto-renew is on for each
+      soon: Domains expiring in the next 60 days
+    answer: "Next to expire: {soon}."
+    tags: [domains, renewals, namecheap]
+
+  - id: cloudflare.domain_renewals
+    title: My Cloudflare Registrar renewals
+    says:
+      - When do my domains at Cloudflare expire?
+      - Is auto-renew on for my Cloudflare domains?
+      - List the domains registered with Cloudflare.
+    kind: look
+    where: chrome
+    region: global
+    sites: [dash.cloudflare.com]
+    open: https://dash.cloudflare.com/
+    steps:
+      - kind: do
+        text: If Cloudflare asks for a sign-in, hand over to the person and wait; then pick the account if there are several.
+      - kind: do
+        text: Open "Domain Registration" then "Manage Domains" and read each domain; change nothing.
+    read:
+      domains: Each registered domain with its expiration date
+      auto_renew: Whether auto-renew is on for each
+      soon: Domains expiring in the next 60 days
+    answer: "Next to expire: {soon}."
+    tags: [domains, renewals, cloudflare]

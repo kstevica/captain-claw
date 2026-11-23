@@ -39,6 +39,8 @@ datas = [
     (os.path.join(PKG_DIR, "flight_deck", "crew_crush_turn.py"), os.path.join("captain_claw", "flight_deck")),
     # Captain for Chrome's page scripts, run in the headless browser too (tools/browser_page.py).
     (os.path.join(PKG_DIR, "tools", "browser_page_js"), os.path.join("captain_claw", "tools", "browser_page_js")),
+    # Web playbooks shipped with the deck (flight_deck/web_playbooks.py).
+    (os.path.join(PKG_DIR, "flight_deck", "playbooks"), os.path.join("captain_claw", "flight_deck", "playbooks")),
 ] + collect_data_files("litellm") + collect_data_files("playwright")
 
 # NOTE: Playwright Chromium browser binaries are NOT bundled here.

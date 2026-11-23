@@ -195,5 +195,5 @@ exclude = ["botport.botport*", "botport.tests*"]
 
 [tool.setuptools.package-data]
 captain_claw = ["web/static/**/*", "instructions/**/*", "flight_deck/static/**/*", "payments/*.json", "anonymize/*.json",
-                "tools/browser_page_js/*.js"]
+                "tools/browser_page_js/*.js", "flight_deck/playbooks/*.yaml"]
 botport = ["dashboard/static/**/*"]
