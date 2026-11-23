@@ -177,6 +177,7 @@ Each phase is its own PR and leaves Diligent unchanged.
 | 2 | Budget limits, validation caps and stall retries read the level; `completion_strictness` leaves modes, Ionian and Phrygian suggest Persistent | Relaxed and Persistent work when set through config or the frame |
 |   | *Phase 2 status (2026-11-23): built on branch `feat/drive-phase2` (stacked on phase 1). Relaxed keeps the one contract check and only drops the retries; Ambitious has Persistent's limits until phase 5.* | |
 | 3 | Picker in the chat box, default in agent settings, cost wording; bundle rebuild | people can choose |
+|   | *Phase 3 status (2026-11-23): built on branch `feat/drive-phase3`. The agent's own default lives in `~/.captain-claw/drive.txt` (read every turn, like the task-rephrase switch), with `drive.default` in the config as the fallback. A member of a shared agent gets no picker.* | |
 | 4 | The check before delivering | Persistent and Ambitious catch gaps |
 | 5 | Initiative, behind its own switch | Ambitious does bounded extra work |
 | 6 | Statistics per level, and a comparison on real tasks | evidence for the default values |

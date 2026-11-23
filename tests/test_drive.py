@@ -12,9 +12,10 @@ from captain_claw import drive
 
 
 @pytest.fixture()
-def cfg(monkeypatch):
+def cfg(monkeypatch, tmp_path):
     c = SimpleNamespace(drive=SimpleNamespace(default=""), cognitive_mode=SimpleNamespace(enabled=False))
     monkeypatch.setattr("captain_claw.config.get_config", lambda: c)
+    monkeypatch.setattr(drive, "SETTING_PATH", tmp_path / "drive.txt")   # never this machine's own file
     return c
 
 
@@ -168,3 +169,31 @@ def test_ionian_and_phrygian_suggest_persistent_and_any_pick_wins(cfg):
     cfg.drive.default = ""
     with drive.turn_drive("relaxed"):                                      # and a chat pick over both
         assert drive.current_name(ionian) == "relaxed"
+
+
+# ── The agent's own default: the setting file, then the config ────────
+
+
+def test_the_setting_file_wins_over_the_config_and_auto_means_none(cfg):
+    cfg.drive.default = "relaxed"
+    assert drive.agent_default() == "relaxed"
+    drive.SETTING_PATH.write_text("persistent\n")
+    assert drive.agent_default() == "persistent" == drive.current_name()
+    drive.SETTING_PATH.write_text(drive.render(None))                     # "auto": none of its own
+    assert drive.SETTING_PATH.read_text() == "auto"
+    assert drive.agent_default() is None and drive.current_name() == "diligent"
+    assert drive.render("Ambitious") == "ambitious" and drive.render("turbo") == "auto"
+
+
+def test_the_picker_and_the_deck_agree_on_levels_and_suggestions():
+    """Flight Deck's copy (services/driveLevels.ts) names the same levels and
+    the same mode suggestions as the agent."""
+    import re
+    from pathlib import Path
+
+    from captain_claw import cognitive_mode as cm
+
+    ts = (Path(drive.__file__).resolve().parents[1] / "flight-deck/src/services/driveLevels.ts").read_text()
+    assert re.findall(r"\{ id: '(\w+)', label: '(\w+)'", ts) == [(l.name, l.label) for l in drive.list_levels()]
+    suggests = dict(re.findall(r"(\w+): '(\w+)'", re.search(r"MODE_SUGGESTS[^=]*= \{([^}]*)\}", ts).group(1)))
+    assert suggests == {m.name: m.suggested_drive for m in cm.list_modes() if m.suggested_drive}

@@ -21,9 +21,14 @@ The level reaches the harness the way reasoning effort does, through a context
 variable: the chat frame sets the turn's level (:func:`turn_drive`) and tasks
 created inside the turn inherit it. A turn nobody picked a level for (a
 scheduled job, a hand-over, WhatsApp, Telegram, a link) runs at the agent's
-own default (``drive.default`` in its config), else at the level its cognitive
+own default, else at the level its cognitive
 mode suggests (Ionian and Phrygian: ``persistent``), else ``diligent`` — a
 level picked in one chat never reaches a scheduled run.
+
+The agent's own default is ``~/.captain-claw/drive.txt`` (a level name, or
+``auto`` for "none of its own"). Flight Deck's agent settings write it and the
+agent reads it on every turn, so a change applies from its next message
+without a restart. With no file, ``drive.default`` in the config decides.
 """
 
 from __future__ import annotations
@@ -31,9 +36,12 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterator
 
 DEFAULT = "diligent"
+FILENAME = "drive.txt"
+SETTING_PATH = Path("~/.captain-claw").expanduser() / FILENAME
 
 
 @dataclass(frozen=True)
@@ -119,8 +127,20 @@ def current_turn_drive() -> str | None:
     return _TURN.get()
 
 
+def render(level: Any) -> str:
+    """What the setting file holds for *level* (``auto`` = no default of its own)."""
+    return normalize(level) or "auto"
+
+
 def agent_default() -> str | None:
-    """The agent's own default level (``drive.default``), if it has one."""
+    """The agent's own default level, if it has one: the setting file when
+    there is one (``auto`` in it means none), else ``drive.default``."""
+    try:
+        return normalize(SETTING_PATH.read_text(encoding="utf-8"))
+    except OSError:
+        pass
+    except Exception:
+        return None
     try:
         from captain_claw.config import get_config
 
