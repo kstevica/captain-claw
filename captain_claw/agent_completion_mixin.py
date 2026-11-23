@@ -19,6 +19,7 @@ orchestration loop and make the completion logic testable in isolation.
 import json
 from typing import Any
 
+from captain_claw import drive
 from captain_claw.agent_stuck import MSG_EMPTY_RESPONSE
 from captain_claw.logging import get_logger
 
@@ -811,25 +812,12 @@ class AgentCompletionMixin:
                 # wastes LLM calls when the critic oscillates between
                 # contradictory feedback (e.g. "deliver sequentially" vs
                 # "missing topic X").
-                _post_scale_retry_cap = 1
-                # Also accept after just 1 retry for any task (non-scale)
-                # that already produced a substantive response.  The contract
-                # validation is advisory — blocking indefinitely causes
-                # pipeline timeouts for straightforward requests.
-                _general_retry_cap = 2
-
-                # Cognitive mode completion strictness modifier (Layer 2).
-                # High strictness (>0.7) → more retries allowed.
-                # Low strictness (<0.3) → fewer retries, accept sooner.
-                _mode_params = getattr(self, "_cognitive_mode_params", None)
-                if _mode_params and _mode_params.completion_strictness != 0.5:
-                    cs = _mode_params.completion_strictness
-                    if cs > 0.7:
-                        _post_scale_retry_cap = 2
-                        _general_retry_cap = 3
-                    elif cs < 0.3:
-                        _post_scale_retry_cap = 0
-                        _general_retry_cap = 1
+                #
+                # How many retries is the turn's Drive level (drive.py): none
+                # at Relaxed, 2 (1 post-scale) at Diligent, one more above.
+                _level = drive.current(self)
+                _post_scale_retry_cap = _level.validation_retries_after_list
+                _general_retry_cap = _level.validation_retries
                 if _scale_completed and iteration >= _post_scale_retry_cap:
                     log.info(
                         "Post-scale validation retry cap reached — accepting response",

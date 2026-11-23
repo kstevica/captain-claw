@@ -769,7 +769,7 @@ class AgentGuardMixin:
                 task_name=task_name,
                 byok=bool(getattr(self, "_byok_active", False)),
                 cognitive_mode=effective_mode_name(self),
-                drive=drive_levels.current_name(),
+                drive=drive_levels.current_name(self),
             ))
         except Exception:
             pass  # Never fail the main flow
