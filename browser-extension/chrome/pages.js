@@ -9,12 +9,19 @@
 // with every link and picture address made absolute, and the tab closes. The
 // agent's web_fetch reads it like any other page.
 //
+// A robot check where the page should be (lib/robot-check.js): with
+// hand_over (seconds the agent waits for the person), the tab comes to the
+// front for them to answer, and the page is read once they did; not answered,
+// the tab stays open for them and the agent hears why. Without, the page goes
+// back as it is (the agent's web_fetch tells a wall from a page).
+//
 // Only while the person turned it on in Flight Deck (Profile → Web pages),
 // Chrome lets Captain read every site ("Work on every site"), and it isn't
 // turned off here (Settings → Web pages). Never Flight Deck's own pages,
 // addresses on a private network or this computer, or anything but http(s).
 
 import { loadConn } from './lib/api.js'
+import { handOver, passesByItself, robotCheck, siteOf } from './lib/robot-check.js'
 import { scrollThrough, settleInPage } from './lib/settle.js'
 import { inBackgroundTab } from './search.js'
 
@@ -81,7 +88,7 @@ export async function refusal(href) {
 }
 
 /** One page for Flight Deck: what to send back as the act's result. */
-export async function runFetch(msg, isCancelled) {
+export async function runFetch(msg, isCancelled, tell = () => {}) {
   try {
     if (!(await readsPages())) {
       throw new Refusal("This browser doesn't read pages for agents now (Flight Deck → Profile → Web pages, and “Work on every site” in Captain's settings).")
@@ -89,19 +96,68 @@ export async function runFetch(msg, isCancelled) {
     const href = String(msg.url || '')
     const why = await refusal(href)
     if (why) throw new Refusal(why)
-    return await inBackgroundTab(href, GROUP_TITLE, (tabId) => settleAndRead(tabId, msg, isCancelled))
+    return await inBackgroundTab(href, GROUP_TITLE, (tabId) => settleAndRead(tabId, msg, isCancelled, tell))
   } catch (e) {
     return { ok: false, error: String(e?.message || e).slice(0, 400) }
   }
 }
 
-async function settleAndRead(tabId, msg, isCancelled) {
+const OUTCOME_WORDS = {
+  timeout: "the person didn't answer it in time — the tab is left open in their Chrome",
+  closed: 'the person closed that tab',
+  declined: "the person closed this site's check a moment ago",
+  cancelled: 'the agent stopped waiting — the tab is left open in their Chrome',
+}
+
+async function settleAndRead(tabId, msg, isCancelled, tell) {
   const id = String(msg.id || '')
-  const limit = Date.now() + Math.min(Math.max(Number(msg.wait) || 20, 5) * 1000, WAIT_MAX_MS)
+  const cancelled = () => isCancelled(id)
+  const handFor = Math.max(0, Number(msg.hand_over) || 0) * 1000
+  let limit = Date.now() + Math.min(Math.max(Number(msg.wait) || 20, 5) * 1000, WAIT_MAX_MS)
+  let robot = null
+  for (let round = 0; ; round++) {
+    const drawn = await loadAndDraw(tabId, limit, cancelled)
+    if (drawn) return robot ? { ...drawn, data: { robot } } : drawn
+    // A robot check where the page should be?
+    const check = round < 3 ? await robotCheck(tabId) : null
+    if (check?.check) {
+      if (check.passes && (await passesByItself(tabId, cancelled))) { limit = freshLimit(msg); continue }
+      if (handFor) {
+        const tab = await chrome.tabs.get(tabId).catch(() => null)
+        const site = siteOf(tab?.url || String(msg.url || ''))
+        const outcome = await handOver(tabId, {
+          site, forMs: handFor, isCancelled: cancelled, tell, vendor: check.vendor || '',
+          why: `${site} asks to prove a person is there`,
+        })
+        robot = { outcome, vendor: check.vendor || '', site }
+        if (outcome === 'solved' || outcome === 'again') { limit = freshLimit(msg); continue }
+        const named = check.vendor ? ` (${check.vendor})` : ''
+        return { ok: false, error: `${site} showed a robot check${named}; ${OUTCOME_WORDS[outcome] || 'it was not answered'}.`,
+                 data: { robot } }
+      }
+    }
+    break
+  }
+  const tab = await chrome.tabs.get(tabId).catch(() => null)
+  const where = await refusal(tab?.url || '')
+  if (where) return { ok: false, error: where }   // it ended up somewhere it mustn't be read
+  const page = await run(tabId, pageForReading)
+  if (!page) return { ok: false, error: "The page couldn't be read in this browser." }
+  return { ok: true, content: page.html.slice(0, HTML_MAX),
+           data: { url: page.url, title: page.title, type: page.type, ...(robot ? { robot } : {}) } }
+}
+
+function freshLimit(msg) {
+  return Date.now() + Math.min(Math.max(Number(msg.wait) || 20, 5) * 1000, WAIT_MAX_MS)
+}
+
+// Loaded, drawn and scrolled through — ``null`` when it is, else the answer
+// that ends the read (cancelled, closed, not a web page).
+async function loadAndDraw(tabId, limit, cancelled) {
   const left = () => limit - Date.now()
   // Loaded first …
   while (Date.now() < limit) {
-    if (isCancelled(id)) return { ok: false, error: 'Cancelled.' }
+    if (cancelled()) return { ok: false, error: 'Cancelled.' }
     const tab = await chrome.tabs.get(tabId).catch(() => null)
     if (!tab) return { ok: false, error: 'The tab was closed.' }
     if (tab.status === 'complete') break
@@ -112,19 +168,22 @@ async function settleAndRead(tabId, msg, isCancelled) {
   // … then drawn: "loaded" isn't "there" on pages that draw their sections as
   // their data arrives (lib/settle.js) …
   await run(tabId, settleInPage, [{ maxMs: Math.max(1000, Math.min(SETTLE_MS, left() - 6000)), quietMs: 900, minMs: 1500 }])
-  if (isCancelled(id)) return { ok: false, error: 'Cancelled.' }
+  if (cancelled()) return { ok: false, error: 'Cancelled.' }
   // … and scrolled through, for what's drawn only when scrolled to (feeds,
   // comments, profile sections), then drawn again.
   if (left() > 4000) {
     const went = await run(tabId, scrollThrough, [{ steps: SCROLLS, quietMs: 600, stepMaxMs: 2000, totalMs: Math.min(10000, left() - 3000) }])
     if (went?.steps) await run(tabId, settleInPage, [{ maxMs: Math.max(500, Math.min(2500, left() - 1500)), quietMs: 500 }])
   }
-  const tab = await chrome.tabs.get(tabId).catch(() => null)
-  const where = await refusal(tab?.url || '')
-  if (where) return { ok: false, error: where }   // it ended up somewhere it mustn't be read
-  const page = await run(tabId, pageForReading)
-  if (!page) return { ok: false, error: "The page couldn't be read in this browser." }
-  return { ok: true, content: page.html.slice(0, HTML_MAX), data: { url: page.url, title: page.title, type: page.type } }
+  // A page that went on to another meanwhile (a check that passed by itself
+  // reloads): loaded again before it's judged and read.
+  while (Date.now() < limit) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null)
+    if (!tab) return { ok: false, error: 'The tab was closed.' }
+    if (tab.status === 'complete') break
+    await sleep(POLL_MS)
+  }
+  return null
 }
 
 async function run(tabId, func, args = []) {

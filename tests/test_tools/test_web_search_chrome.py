@@ -10,6 +10,7 @@ changes.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -66,8 +67,10 @@ async def test_the_owners_chrome_answers_first(tool):
     assert "Timeouts in asyncio" in got.content and "Source: Example Docs · May 5, 2024" in got.content
     assert "javascript:" not in got.content and "[RESULTS: 1]" in got.content
     assert tool.api_calls == 0
+    # A job id of its own: a robot check on the way may be handed to the person (and waited for).
+    assert tool.deck_calls[0].pop("job").startswith("cw_")
     assert tool.deck_calls == [{"query": "asyncio gather timeout", "count": 5, "page": 0, "search_lang": "en",
-                                "country": "", "freshness": "", "safesearch": ""}]
+                                "country": "", "freshness": "", "safesearch": "", "origin": "", "wait": 55.0}]
 
 
 async def test_off_is_believed_for_a_while(tool):
@@ -115,3 +118,72 @@ async def test_an_older_deck_is_left_alone_for_a_while(tool):
     for _ in range(3):
         assert (await tool.execute(query="x")).success
     assert len(tool.deck_calls) == 1 and tool.api_calls == 3
+
+
+# A robot check on the way: Flight Deck answers "pending" while the person
+# answers it in their Chrome (flight_deck/browser_waits.py); the tool says so
+# in the chat once and follows until the search is done.
+
+WAITING = {"site": "www.google.com", "vendor": "Google", "why": "Google asks to confirm a person is searching",
+           "for_s": 300}
+
+
+def _deck(tool, answers, *, hang_follow=False):
+    seen: list[tuple[str, dict]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        body = json.loads(request.content)
+        seen.append((path, body))
+        if path.endswith("/wait/cancel"):
+            return httpx.Response(200, json={"cancelled": True})
+        if path.endswith("/wait/follow") and hang_follow:
+            await asyncio.sleep(30)
+        return httpx.Response(200, json=answers.pop(0))
+
+    tool.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return seen
+
+
+async def test_a_robot_check_handed_to_the_person_is_waited_for_and_said_once(tool):
+    said: list[str] = []
+    seen = _deck(tool, [
+        {"pending": "x", "waiting": WAITING},
+        {"pending": "x", "waiting": WAITING},
+        {"ok": True, "engine": "Google", "browser": "Chrome on macOS",
+         "notes": ["Google asked for a robot check; the person answered it in their Chrome."],
+         "results": [{"title": "Timeouts in asyncio", "url": "https://docs.example.org/a", "snippet": "s"}]},
+    ])
+    got = await tool.execute(query="asyncio", _stream_callback=said.append)
+    assert got.success and "Timeouts in asyncio" in got.content and tool.api_calls == 0
+    assert "the person answered it in their Chrome" in got.content
+    assert len(said) == 1 and "robot check" in said[0] and "www.google.com" in said[0] and "5 min" in said[0]
+    job = seen[0][1]["job"]
+    assert [p for p, _ in seen] == ["/fd/browser-hands/agent/search", "/fd/browser-hands/agent/wait/follow",
+                                    "/fd/browser-hands/agent/wait/follow"]
+    assert all(b == {"id": job, "wait": 25.0} for p, b in seen[1:])
+
+
+async def test_a_check_not_answered_falls_back_with_the_reason(tool):
+    _deck(tool, [
+        {"pending": "x", "waiting": WAITING},
+        {"ok": False, "why": "blocked", "engine": "Google",
+         "error": "Google asked to confirm a person is searching (a robot check) and the person didn't answer it "
+                  "in time — the check is left open in a tab of their Chrome."},
+    ])
+    got = await tool.execute(query="asyncio")
+    assert got.success and "[SEARCH ENGINE: Brave]" in got.content and tool.api_calls == 1
+    assert "left open in a tab of their Chrome" in got.content
+
+
+async def test_stopping_the_turn_stops_the_wait(tool):
+    seen = _deck(tool, [{"pending": "x", "waiting": WAITING}], hang_follow=True)
+    task = asyncio.create_task(tool.execute(query="asyncio"))
+    for _ in range(100):
+        if any(p.endswith("/wait/follow") for p, _ in seen):
+            break
+        await asyncio.sleep(0.02)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert seen[-1][0] == "/fd/browser-hands/agent/wait/cancel" and seen[-1][1] == {"id": seen[0][1]["job"]}

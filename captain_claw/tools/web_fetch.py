@@ -829,7 +829,8 @@ class WebFetchTool(Tool):
         from captain_claw.tools import web_blocked, web_chrome
 
         # The owner's own Chrome first, when they set it to read every page.
-        chrome = None if member else await web_chrome.page_from_chrome(url, "first")
+        in_chrome = {"agent": _agent, "stream": kwargs.get("_stream_callback")}
+        chrome = None if member else await web_chrome.page_from_chrome(url, "first", **in_chrome)
         try:
             cfg = get_config()
             configured_max = int(getattr(cfg.tools.web_fetch, "max_chars", 200000))
@@ -846,7 +847,8 @@ class WebFetchTool(Tool):
                     got = await self._fetch_here(url, deep_fetch, member, want_images, kwargs)
                 except Exception as e:   # turned away? the owner's Chrome may get it
                     why, _strong = web_blocked.fetch_error_reason(e)
-                    chrome = None if member or not why else await web_chrome.page_from_chrome(url, "blocked", why)
+                    chrome = (None if member or not why
+                              else await web_chrome.page_from_chrome(url, "blocked", why, **in_chrome))
                     if chrome is None:
                         raise
                     got = (chrome["html"], 200, "chrome", "", "", False)
@@ -861,7 +863,7 @@ class WebFetchTool(Tool):
                 why = (web_blocked.block_reason(status=None if mode == "deep" else status_code,
                                                 text=content, html=raw_html)
                        or web_blocked.login_wall(text=content, url=final_url, html=raw_html))
-                chrome = await web_chrome.page_from_chrome(url, "blocked", why) if why else None
+                chrome = await web_chrome.page_from_chrome(url, "blocked", why, **in_chrome) if why else None
                 if chrome is not None:
                     raw_html, status_code, mode = chrome["html"], 200, "chrome"
                     images = [] if want_images else None
@@ -870,6 +872,10 @@ class WebFetchTool(Tool):
                 web_blocked.forget(kwargs, url, web_blocked.FETCH)
                 wall_note = ""
                 browser_note = f"[Read in the person's own Chrome ({chrome['browser']}), signed in as them]\n"
+                robot = chrome.get("robot") or {}
+                if robot.get("outcome") in ("solved", "again"):
+                    browser_note += (f"[{robot.get('site') or 'The site'} showed a robot check there; "
+                                     "the person answered it]\n")
                 if chrome["url"] and chrome["url"] != url:
                     browser_note += f"[Page: {chrome['url']}]\n"
             else:

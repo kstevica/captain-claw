@@ -310,11 +310,38 @@ async function runAct(msg) {
   send({ type: 'result', id, ...result })
 }
 
+// ── a robot check handed to the person (lib/robot-check.js) ──
+
+// Flight Deck hears it (the agent waits longer, its chat says why), and the
+// panel's log shows it while it lasts.
+function tellerFor(id, agent) {
+  let entry = null
+  return (m) => {
+    send({ ...m, id })
+    if (m.joined) return
+    if (!('over' in m)) {
+      entry = { id: `${id}:check`, at: Date.now(), slug: agent.slug, name: agent.name, action: 'robot_check', state: 'working',
+                text: `Waiting for you: answer ${m.site || 'the site'}'s robot check in the tab in front` }
+      log.push(entry); if (log.length > LOG_MAX) log = log.slice(-LOG_MAX); saveLog()
+    } else if (entry) {
+      const solved = m.over === 'solved'
+      entry.state = solved ? 'done' : 'failed'
+      entry.text = solved ? `You answered ${m.site || 'the site'}'s robot check — going on` : `${m.site || 'The site'}'s robot check wasn't answered`
+      if (!solved) entry.error = { timeout: 'not in time — the tab is still open', closed: 'the tab was closed', cancelled: 'the agent stopped waiting — the tab is still open' }[m.over] || m.over
+      saveLog()
+    }
+  }
+}
+
+function agentOf(msg) {
+  return { slug: String(msg.agent?.slug || ''), name: oneLine(msg.agent?.name || msg.agent?.slug || 'Agent').slice(0, 40) }
+}
+
 // ── a web search (search.js) ──
 
 async function searchFor(msg) {
   const id = String(msg.id || '')
-  const result = await runSearch(msg, (x) => cancelled.has(x))
+  const result = await runSearch(msg, (x) => cancelled.has(x), tellerFor(id, agentOf(msg)))
   cancelled.delete(id)
   send({ type: 'result', id, ...result })
 }
@@ -323,11 +350,11 @@ async function searchFor(msg) {
 
 async function fetchFor(msg) {
   const id = String(msg.id || '')
-  const agent = { slug: String(msg.agent?.slug || ''), name: oneLine(msg.agent?.name || msg.agent?.slug || 'Agent').slice(0, 40) }
+  const agent = agentOf(msg)
   const entry = { id, at: Date.now(), slug: agent.slug, name: agent.name, action: 'fetch',
                   text: `Read ${hostOf(String(msg.url || '')) || 'a page'} in the background`, state: 'working' }
   log.push(entry); if (log.length > LOG_MAX) log = log.slice(-LOG_MAX); saveLog()
-  const result = await runFetch(msg, (x) => cancelled.has(x))
+  const result = await runFetch(msg, (x) => cancelled.has(x), tellerFor(id, agent))
   cancelled.delete(id)
   entry.state = result.ok ? 'done' : 'failed'
   if (!result.ok) entry.error = clip(String(result.error || ''), 160)

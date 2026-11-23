@@ -19,10 +19,12 @@ for the results, sends back the page's HTML without scripts and styles, and
 closes the tab. The page is read *here* — so a search engine that changes its
 markup needs a Flight Deck update, not a new extension.
 
-Anything short of results — Chrome not open, the engine asking to prove the
-person isn't a robot, a cookie question, a page that never showed results —
-answers ``ok: false`` with the reason, and the agent's tool searches with the
-deck's API engine (Brave …) instead. A shared agent's member turns never come
+Anything short of results — Chrome not open, a cookie question, a page that
+never showed results — answers ``ok: false`` with the reason, and the agent's
+tool searches with the deck's API engine (Brave …) instead. A robot check (the
+engine's, or any other the extension knows) is handed to the person when the
+agent can wait for it (``browser_waits.py``): the tab comes to the front, and
+the search goes on once they answered it; else it's ``ok: false`` too. A shared agent's member turns never come
 here (the tool doesn't ask; the grant guard refuses member markers anyway): the
 owner's browser is theirs alone.
 
@@ -520,6 +522,11 @@ class SearchBody(BaseModel):
     country: str = Field("", max_length=4)
     freshness: str = Field("", max_length=10)
     safesearch: str = Field("", max_length=10)
+    # An agent that can wait for the person (browser_waits.py): its id for the
+    # search, where its turn came from, and how long this request may hold.
+    job: str = Field("", pattern=r"^([A-Za-z0-9_-]{4,48})?$")
+    origin: str = Field("", max_length=40)
+    wait: float = Field(50.0, ge=1, le=60)
 
 
 _GATES: dict[str, asyncio.Semaphore] = {}
@@ -538,30 +545,59 @@ def _clean_code(value: str, pattern: str) -> str:
 
 
 async def _load_page(conn: Any, owner: str, slug: str, name: str, engine: Engine, url: str) -> dict:
-    """One result page in the person's browser: ``{ok, html, url} | {ok: False, error}``."""
+    """One result page in the person's browser: ``{ok, html, url} | {ok: False, error}``.
+    A robot check on it is handed to the person when the agent can wait
+    (browser_waits.py): then this waits as long as they're given."""
     from captain_claw.flight_deck import browser_hands as hands
+    from captain_claw.flight_deck import browser_waits as waits
 
     act = hands._Act(id="hs_" + secrets.token_hex(10), user_id=owner, slug=slug, agent_name=name,
-                     action="search", conn=conn, future=asyncio.get_running_loop().create_future())
+                     action="search", conn=conn, future=asyncio.get_running_loop().create_future(),
+                     job=waits.current(), page_wait_s=PAGE_WAIT_S)
     hands._ACTS[act.id] = act
+
+    async def cancel() -> None:
+        try:
+            await conn.send({"type": "cancel", "id": act.id})
+        except Exception:
+            pass
+
     try:
         try:
             await conn.send({"type": "search", "id": act.id, "engine": engine.id, "url": url,
                              "wait_for": engine.wait_for, "block_for": engine.block_for,
-                             "wait": PAGE_WAIT_S - 3})
+                             "wait": PAGE_WAIT_S - 3, "hand_over": int(waits.hand_over_s()),
+                             "agent": {"slug": slug, "name": name}})
         except Exception:
             return {"ok": False, "error": "Couldn't reach the browser; it may have just closed."}
-        try:
-            msg = await asyncio.wait_for(asyncio.shield(act.future), PAGE_WAIT_S)
-        except TimeoutError:
-            try:
-                await conn.send({"type": "cancel", "id": act.id})
-            except Exception:
-                pass
+        msg = await waits.await_act(act, PAGE_WAIT_S, cancel)
+        if msg is None:
+            if act.robot:
+                return {"ok": False, "error": _robot_words(engine, act.robot)}
             return {"ok": False, "error": f"{engine.name} didn't show results in {int(PAGE_WAIT_S)} s."}
     finally:
         hands._ACTS.pop(act.id, None)
+    if act.robot and isinstance(msg, dict):
+        data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+        if not isinstance(data.get("robot"), dict):
+            msg = {**msg, "data": {**data, "robot": act.robot}}
     return msg
+
+
+_OUTCOMES = {
+    "timeout": "the person didn't answer it in time — the check is left open in a tab of their Chrome",
+    "closed": "the person closed that tab",
+    "declined": "the person closed the last one a moment ago",
+    "cancelled": "the wait for it ended — the check is left open in a tab of their Chrome",
+    "waiting": "the person didn't answer it in time — the check is left open in a tab of their Chrome",
+}
+
+
+def _robot_words(engine: Engine, robot: dict) -> str:
+    """A check handed to the person that wasn't answered, said for the agent."""
+    outcome = str(robot.get("outcome") or "")
+    return (f"{engine.name} asked to confirm a person is searching (a robot check) and "
+            f"{_OUTCOMES.get(outcome, 'it was not answered')}.")
 
 
 async def search_in_browser(owner: str, slug: str, body: SearchBody) -> dict:
@@ -608,17 +644,31 @@ async def search_in_browser(owner: str, slug: str, body: SearchBody) -> dict:
                 notes.append(f"Stopped at {len(hits)} results to answer in time.")
                 break
             url = engine.build(body.query.strip(), first + i, lang, country, fresh, safe)
+            began = loop.time()
             msg = await _load_page(conn, owner, slug, name, engine, url)
+            data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+            robot = data.get("robot") if isinstance(data.get("robot"), dict) else None
+            if robot:
+                # The time the person took isn't the search's: the budget moves on with it.
+                deadline += max(0.0, loop.time() - began - 10)
             if not msg.get("ok"):
                 if hits:
                     notes.append(f"{engine.name} stopped after {len(hits)} results ({msg.get('error') or 'no answer'}).")
                     break
-                return {"ok": False, "why": "page", "engine": engine.name,
+                return {"ok": False, "why": "blocked" if robot else "page", "engine": engine.name,
                         "error": str(msg.get("error") or f"{engine.name} didn't answer.")}
-            data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
             found, reason = read_page(engine, str(msg.get("content") or ""), str(data.get("url") or ""))
+            if robot and robot.get("outcome") not in ("solved", "again", None):
+                reason = _robot_words(engine, robot)
+            elif not reason and not found and data.get("blocked"):
+                reason = (f"{engine.name} asked to confirm a person is searching (a robot check). "
+                          f"Open {engine.name} in that Chrome and answer it; searches go on after that.")
             if not reason and not found and data.get("ready") is False:
                 reason = f"{engine.name}'s page didn't show results in that Chrome."
+            if robot and robot.get("outcome") in ("solved", "again") and not reason:
+                note = f"{engine.name} asked for a robot check; the person answered it in their Chrome."
+                if note not in notes:
+                    notes.append(note)
             if reason:
                 if hits:
                     notes.append(f"{engine.name} stopped after {len(hits)} results: {reason}")

@@ -1,6 +1,7 @@
 """Tool registry and base tool class."""
 
 import asyncio
+import contextvars
 import fnmatch
 import re
 import shlex
@@ -30,6 +31,33 @@ _LOGGED_ARG_CHARS = 300
 # The two ToolExecutionError messages the tool-call register reads as an outcome.
 _ABORTED_MARK = "Execution aborted"
 _TIMED_OUT_MARK = "Execution timed out after"
+MORE_TIME_MAX_S = 900.0   # what a tool may ask for at once (more_time)
+
+
+class _Deadline:
+    """When a running tool call times out — a tool waiting on the person can
+    move it (:func:`more_time`)."""
+
+    def __init__(self, at: float) -> None:
+        self.at = at
+
+
+_DEADLINE: contextvars.ContextVar[_Deadline | None] = contextvars.ContextVar("tool_deadline", default=None)
+
+
+def more_time(seconds: float) -> bool:
+    """From inside a tool call: let it run *seconds* more from now (at most
+    MORE_TIME_MAX_S at once) — for a wait on the person that has just begun
+    (a robot check handed to them in their Chrome). False outside a tool call."""
+    deadline = _DEADLINE.get()
+    if deadline is None:
+        return False
+    try:
+        now = asyncio.get_running_loop().time()
+    except RuntimeError:
+        return False
+    deadline.at = max(deadline.at, now + max(0.0, min(float(seconds), MORE_TIME_MAX_S)))
+    return True
 
 
 def _loggable_args(arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1249,6 +1277,9 @@ class ToolRegistry:
                 _workflow_run_dir = getattr(file_registry, "workflow_run_dir", None)
 
             _task_kwargs: dict[str, Any] = {"context": tool_context}
+            loop = asyncio.get_running_loop()
+            deadline = _Deadline(loop.time() + timeout_seconds)
+            tool_context.run(_DEADLINE.set, deadline)
             execute_task = asyncio.create_task(
                 tool.execute(
                     **arguments,
@@ -1265,11 +1296,15 @@ class ToolRegistry:
                 **_task_kwargs,
             )
             abort_wait_task = asyncio.create_task(tool_abort_event.wait())
-            done, _ = await asyncio.wait(
-                {execute_task, abort_wait_task},
-                timeout=timeout_seconds,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            while True:
+                done, _ = await asyncio.wait(
+                    {execute_task, abort_wait_task},
+                    timeout=max(0.0, deadline.at - loop.time()),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                # The tool asked for more time meanwhile (more_time): keep waiting.
+                if done or deadline.at <= loop.time():
+                    break
 
             if execute_task in done:
                 result = await execute_task

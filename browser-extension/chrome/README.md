@@ -151,9 +151,8 @@ Each search opens the result page in a background tab — never in front, in a
 collapsed **Captain · search** group — and closes it once the results are in.
 Flight Deck reads the results out of the page. Searches show in this
 browser's history (and in your Google or Bing activity if you're signed in).
-When Chrome is closed, or the engine asks you to prove you're not a robot,
-Flight Deck's own search answers instead — answer the check in that tab's site
-once and searches go on. Turn it off in Settings → Web searches. It works with
+When Chrome is closed, Flight Deck's own search answers instead. Turn it off
+in Settings → Web searches. It works with
 **Agents can use this browser** on or off; the agents' browser tool never gets
 the search tabs.
 
@@ -173,6 +172,27 @@ scrolled through, up to eight screens, for what loads as you scroll), it goes ba
 and the tab closes. Never Flight Deck's own pages, addresses on your own
 network or this computer, or anything but http(s). An agent you stopped in
 the panel reads nothing here. Turn it off in Settings → Web pages.
+
+## A robot check on the way: you answer it, the agent goes on
+
+When a search or a page lands on a site asking you to prove you're not a
+robot — Google's "unusual traffic" page, Cloudflare's "Just a moment…", a
+reCAPTCHA, hCaptcha or Turnstile box, DataDome, PerimeterX's "Press & hold",
+Akamai, Amazon's "Enter the characters you see" … — its tab isn't closed: it
+comes out of the collapsed group to the front, and Chrome comes forward. The
+agent's chat says it's waiting for you, and the panel's log shows it. Answer
+the check there; once it's gone, the agent's search or read goes on in that
+tab, and the tab closes with the one you were on back in front.
+
+Checks that pass by themselves (Cloudflare's "Just a moment…" usually does)
+get a few seconds first. One check per site at a time: other searches on that
+site wait for the one in front. The agent waits up to five minutes when you're
+in its chat, two for a run that started on its own; not answered by then, it
+goes on without that page (Flight Deck's own search or fetch), and the tab
+stays open for you. Close the tab to say no: that site's checks aren't shown
+again for ten minutes. A page that only refuses (no check to answer) isn't
+shown. Agents from before this don't wait — the search goes to Flight Deck's
+own engine as it used to.
 
 ## Record a process — an agent does it after that
 

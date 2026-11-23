@@ -367,3 +367,163 @@ async def test_the_browser_hears_which_engine_the_person_picked(deck):
             {"type": "search_pick", "engine": "bing"}, {"type": "search_pick", "engine": ""}]
     async with SearchBrowser(deck["ws"], pat, engines=[]) as chrome:
         assert chrome.welcome["search_pick"] == ""
+
+
+# ── a robot check handed to the person (browser_waits.py) ─────────────
+
+from captain_claw.flight_deck import browser_waits as waits  # noqa: E402
+
+
+class CheckingBrowser(SearchBrowser):
+    """A browser whose search lands on a robot check: it tells Flight Deck the
+    person is asked, and answers after *after* seconds with *outcome*."""
+
+    def __init__(self, *a, outcome="solved", after=0.3, tell=True, **kw):
+        super().__init__(*a, **kw)
+        self.outcome, self.after, self.tell = outcome, after, tell
+
+    async def _serve(self):
+        try:
+            async for raw in self.ws:
+                msg = json.loads(raw)
+                self.got.append(msg)
+                if msg.get("type") == "search":
+                    asyncio.create_task(self._check(msg))
+        except websockets.ConnectionClosed:
+            pass
+
+    async def _check(self, msg):
+        id_ = msg["id"]
+        if msg.get("hand_over") and self.tell:
+            await self.ws.send(json.dumps({"type": "waiting", "id": id_, "site": "www.google.com", "vendor": "Google",
+                                           "why": "Google asks to confirm a person is searching",
+                                           "for_s": msg["hand_over"]}))
+        await asyncio.sleep(self.after)
+        if self.outcome is None:
+            return   # never answers (cancelled from Flight Deck)
+        robot = {"outcome": self.outcome, "vendor": "Google", "site": "www.google.com"}
+        if msg.get("hand_over") and self.tell:
+            await self.ws.send(json.dumps({"type": "waiting", "id": id_, "site": "www.google.com", "over": self.outcome}))
+        if self.outcome == "solved":
+            out = {"ok": True, "content": GOOGLE, "data": {"url": msg["url"], "ready": True, "robot": robot}}
+        else:
+            out = {"ok": True, "content": "", "data": {"url": "https://www.google.com/sorry/index", "ready": False,
+                                                        "blocked": True, "robot": robot}}
+        await self.ws.send(json.dumps({"type": "result", "id": id_, **out}))
+
+
+async def _follow(c, job, owner="alice"):
+    r = await c.post("/fd/browser-hands/agent/wait/follow", headers=_agent(owner), json={"id": job, "wait": 5})
+    return r
+
+
+async def test_a_robot_check_is_handed_to_the_person_and_the_search_goes_on(deck, no_resolving):
+    c = deck["client"]
+    await _pick("google")
+    pat = await deck["pat"]()
+    async with CheckingBrowser(deck["ws"], pat) as chrome:
+        first = await _search(c, count=3, job="cw_one1", origin="")
+        # The agent hears at once that the person is asked — and follows.
+        assert first["pending"] == "cw_one1"
+        assert first["waiting"]["site"] == "www.google.com" and first["waiting"]["for_s"] == 300
+        sent = [m for m in chrome.got if m["type"] == "search"][0]
+        assert sent["hand_over"] == 300 and sent["agent"] == {"slug": "scout", "name": "Scout"}
+        # Bob's agent can't follow Alice's agent's search.
+        assert (await _follow(c, "cw_one1", owner="bob")).status_code == 404
+        got = (await _follow(c, "cw_one1")).json()
+        assert got["ok"] and [h["title"] for h in got["results"]] == ["Timeouts in asyncio", "Waiting in asyncio",
+                                                                      "asyncio in 10 minutes"]
+        assert got["notes"] == ["Google asked for a robot check; the person answered it in their Chrome."]
+        assert (await _follow(c, "cw_one1")).status_code == 404   # collected: over
+    assert bh._ACTS == {} and waits._JOBS == {}
+
+
+async def test_a_run_nobody_watches_waits_less_and_an_older_agent_not_at_all(deck, no_resolving):
+    c = deck["client"]
+    await _pick("google")
+    pat = await deck["pat"]()
+    async with CheckingBrowser(deck["ws"], pat, after=0.05) as chrome:
+        first = await _search(c, job="cw_two2", origin="scheduled:task-1")
+        assert first.get("pending") or first.get("ok")
+        assert [m for m in chrome.got if m["type"] == "search"][0]["hand_over"] == 120
+        # No job: nothing is handed over (the answer comes as before).
+        plain = await _search(c)
+        assert plain["ok"] and [m for m in chrome.got if m["type"] == "search"][-1]["hand_over"] == 0
+
+
+async def test_the_person_s_time_isnt_the_page_s(deck, no_resolving, monkeypatch):
+    c = deck["client"]
+    await _pick("google")
+    pat = await deck["pat"]()
+    monkeypatch.setattr(bs, "PAGE_WAIT_S", 1.0)
+    async with CheckingBrowser(deck["ws"], pat, after=2.0):
+        first = await _search(c, job="cw_three", origin="")
+        assert first["pending"] == "cw_three"
+        got = (await _follow(c, "cw_three")).json()
+        assert got["ok"] and len(got["results"]) == 3   # 2 s with the person, a page waits 1 s
+    async with CheckingBrowser(deck["ws"], pat, after=2.0, tell=False):
+        got = await _search(c, job="cw_four4", origin="")
+        assert got["ok"] is False and "didn't show results in 1 s" in got["error"]
+
+
+async def test_a_check_not_answered_sends_the_agent_on_and_leaves_the_tab(deck, no_resolving):
+    c = deck["client"]
+    await _pick("google")
+    pat = await deck["pat"]()
+    async with CheckingBrowser(deck["ws"], pat, outcome="timeout"):
+        first = await _search(c, job="cw_five5", origin="")
+        got = (await _follow(c, first["pending"])).json()
+        assert got["ok"] is False and got["why"] == "blocked"
+        assert "didn't answer it in time" in got["error"] and "left open in a tab" in got["error"]
+
+
+async def test_the_agent_stopping_stops_the_browser_too(deck, no_resolving, monkeypatch):
+    c = deck["client"]
+    await _pick("google")
+    pat = await deck["pat"]()
+    async with CheckingBrowser(deck["ws"], pat, outcome=None) as chrome:
+        first = await _search(c, job="cw_six66", origin="")
+        assert first["pending"] == "cw_six66"
+        r = await c.post("/fd/browser-hands/agent/wait/cancel", headers=_agent(), json={"id": "cw_six66"})
+        assert r.json() == {"cancelled": True}
+        for _ in range(50):
+            if any(m["type"] == "cancel" for m in chrome.got):
+                break
+            await asyncio.sleep(0.05)
+        assert [m["type"] for m in chrome.got] == ["search", "cancel"]
+        # An agent that just stops following (gone): the browser hears it too.
+        monkeypatch.setattr(waits, "FOLLOW_GAP_S", 0.2)
+        second = await _search(c, job="cw_seven", origin="")
+        assert second["pending"] == "cw_seven"
+        for _ in range(60):
+            if [m["type"] for m in chrome.got].count("cancel") == 2:
+                break
+            await asyncio.sleep(0.05)
+        assert [m["type"] for m in chrome.got].count("cancel") == 2
+    await asyncio.sleep(0.05)
+    assert bh._ACTS == {}
+
+
+async def test_a_search_behind_another_check_of_that_site_is_told_too(deck, no_resolving):
+    """Two searches on one engine meet its check: one tab is in front, the
+    other search waits on it (joined) — its agent hears it waits too."""
+    c = deck["client"]
+    await _pick("google")
+    pat = await deck["pat"]()
+
+    class Joined(CheckingBrowser):
+        async def _check(self, msg):
+            await self.ws.send(json.dumps({"type": "waiting", "id": msg["id"], "site": "www.google.com",
+                                           "joined": True, "for_s": msg["hand_over"]}))
+            await asyncio.sleep(0.3)
+            await self.ws.send(json.dumps({"type": "waiting", "id": msg["id"], "site": "www.google.com",
+                                           "joined": True, "over": "solved"}))
+            await self.ws.send(json.dumps({"type": "result", "id": msg["id"], "ok": True, "content": GOOGLE,
+                                           "data": {"url": msg["url"], "ready": True,
+                                                    "robot": {"outcome": "again", "site": "www.google.com"}}}))
+
+    async with Joined(deck["ws"], pat):
+        first = await _search(c, count=3, job="cw_join1", origin="")
+        assert first["pending"] == "cw_join1" and first["waiting"]["site"] == "www.google.com"
+        got = (await _follow(c, "cw_join1")).json()
+        assert got["ok"] and len(got["results"]) == 3

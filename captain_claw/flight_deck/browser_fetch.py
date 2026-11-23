@@ -20,6 +20,9 @@ extension opens the page in a background tab (never in front, in a collapsed
 scripts and styles, and closes the tab; web_fetch reads that HTML like any
 other page. Anything short of a page — Chrome closed, not a web page, a site
 the person didn't list — answers ``ok: false`` and the agent fetches as before.
+A robot check where the page should be is handed to the person when the agent
+can wait for it (``browser_waits.py``): the tab comes to the front, and the page
+is read once they answered it.
 
 Never: a shared agent's member turn (the tool doesn't ask, and the grant guard
 refuses member markers), addresses on a private network or this machine
@@ -200,6 +203,10 @@ class FetchBody(BaseModel):
     # "blocked": its own fetch was turned away.
     when: str = Field("blocked", pattern=r"^(first|blocked)$")
     why: str = Field("", max_length=300)
+    # An agent that can wait for the person (browser_waits.py).
+    job: str = Field("", pattern=r"^([A-Za-z0-9_-]{4,48})?$")
+    origin: str = Field("", max_length=40)
+    wait: float = Field(50.0, ge=1, le=60)
 
 
 _GATES: dict[str, asyncio.Semaphore] = {}
@@ -247,34 +254,46 @@ async def fetch_in_browser(owner: str, slug: str, body: FetchBody) -> dict:
     from captain_claw.flight_deck.agent_names import display_name
 
     name = await display_name(slug, owner) or slug or "Agent"
+    from captain_claw.flight_deck import browser_waits as waits
+
     act = hands._Act(id="hf_" + secrets.token_hex(10), user_id=owner, slug=slug, agent_name=name,
                      action="fetch", conn=conn, future=asyncio.get_running_loop().create_future(),
-                     content_limit=MAX_HTML_CHARS)
+                     content_limit=MAX_HTML_CHARS, job=waits.current(), page_wait_s=PAGE_WAIT_S)
     hands._ACTS[act.id] = act
+
+    async def cancel() -> None:
+        try:
+            await conn.send({"type": "cancel", "id": act.id})
+        except Exception:
+            pass
+
     try:
         async with _gate(conn.token_id):
             try:
                 await conn.send({"type": "fetch", "id": act.id, "url": url, "wait": PAGE_WAIT_S - 4,
-                                 "agent": {"slug": slug, "name": name}})
+                                 "hand_over": int(waits.hand_over_s()), "agent": {"slug": slug, "name": name}})
             except Exception:
                 return {"ok": False, "why": "page", "mode": mode,
                         "error": "Couldn't reach the browser; it may have just closed."}
-            try:
-                msg = await asyncio.wait_for(asyncio.shield(act.future), PAGE_WAIT_S)
-            except TimeoutError:
-                try:
-                    await conn.send({"type": "cancel", "id": act.id})
-                except Exception:
-                    pass
+            msg = await waits.await_act(act, PAGE_WAIT_S, cancel)
+            if msg is None:
+                if act.robot:
+                    return {"ok": False, "why": "robot", "mode": mode, "robot": act.robot,
+                            "error": ("The site showed a robot check in the person's Chrome and it wasn't answered "
+                                      "in time — the check is left open in a tab there.")}
                 return {"ok": False, "why": "page", "mode": mode,
                         "error": f"The page didn't settle in the person's Chrome in {int(PAGE_WAIT_S)} s."}
     finally:
         hands._ACTS.pop(act.id, None)
-    if not msg.get("ok"):
-        return {"ok": False, "why": "page", "mode": mode, "error": str(msg.get("error") or "The browser couldn't read it.")}
     data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
+    robot = data.get("robot") if isinstance(data.get("robot"), dict) else act.robot
+    robot = {k: str(robot.get(k) or "")[:120] for k in ("site", "vendor", "outcome")} if isinstance(robot, dict) else None
+    told = {"robot": robot} if robot else {}   # a check handed to the person on the way
+    if not msg.get("ok"):
+        return {"ok": False, "why": "robot" if robot else "page", "mode": mode, **told,
+                "error": str(msg.get("error") or "The browser couldn't read it.")}
     final = str(data.get("url") or url)
     if url_refusal(final):   # it went somewhere it shouldn't have: nothing of it comes back
         return {"ok": False, "why": "refused", "mode": mode, "error": url_refusal(final)}
-    return {"ok": True, "mode": mode, "browser": conn.browser, "url": final,
+    return {"ok": True, "mode": mode, "browser": conn.browser, "url": final, **told,
             "title": str(data.get("title") or "")[:300], "html": str(msg.get("content") or "")}

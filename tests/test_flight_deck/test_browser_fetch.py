@@ -172,3 +172,58 @@ async def test_a_stopped_agent_reads_nothing_and_a_browser_not_reading_isnt_aske
         await chrome.ws.send(json.dumps({"type": "prefs", "fetch": True}))
         await asyncio.sleep(0.1)
         assert (await _fetch(c))["ok"]
+
+
+# A robot check where the page should be, handed to the person (browser_waits.py).
+
+class CheckingPageBrowser(PageBrowser):
+    def __init__(self, *a, outcome="solved", **kw):
+        super().__init__(*a, **kw)
+        self.outcome = outcome
+
+    async def _serve(self):
+        try:
+            async for raw in self.ws:
+                msg = json.loads(raw)
+                self.got.append(msg)
+                if msg.get("type") == "fetch":
+                    asyncio.create_task(self._check(msg))
+        except websockets.ConnectionClosed:
+            pass
+
+    async def _check(self, msg):
+        site = "www.linkedin.com"
+        await self.ws.send(json.dumps({"type": "waiting", "id": msg["id"], "site": site, "vendor": "Cloudflare",
+                                       "for_s": msg["hand_over"]}))
+        await asyncio.sleep(0.2)
+        await self.ws.send(json.dumps({"type": "waiting", "id": msg["id"], "site": site, "over": self.outcome}))
+        robot = {"site": site, "vendor": "Cloudflare", "outcome": self.outcome}
+        if self.outcome == "solved":
+            out = {"ok": True, "content": PAGE, "data": {"url": msg["url"], "title": "Jane Doe | LinkedIn", "robot": robot}}
+        else:
+            out = {"ok": False, "error": f"{site} showed a robot check (Cloudflare); the person closed that tab.",
+                   "data": {"robot": robot}}
+        await self.ws.send(json.dumps({"type": "result", "id": msg["id"], **out}))
+
+
+async def test_a_robot_check_on_a_page_is_handed_to_the_person(deck):
+    c = deck["client"]
+    pat = await deck["pat"]()
+    await _mode("always")
+    for outcome in ("solved", "closed"):
+        async with CheckingPageBrowser(deck["ws"], pat, outcome=outcome) as chrome:
+            r = await c.post("/fd/browser-hands/agent/fetch", headers=_agent(),
+                             json={"url": "https://www.linkedin.com/in/someone", "when": "first", "job": f"cw_{outcome}",
+                                   "origin": "chat"})
+            first = r.json()
+            assert first["pending"] == f"cw_{outcome}" and first["waiting"]["vendor"] == "Cloudflare"
+            assert [m for m in chrome.got if m["type"] == "fetch"][0]["hand_over"] == 300
+            got = (await c.post("/fd/browser-hands/agent/wait/follow", headers=_agent(),
+                                json={"id": f"cw_{outcome}", "wait": 5})).json()
+            robot = {"site": "www.linkedin.com", "vendor": "Cloudflare", "outcome": outcome}
+            if outcome == "solved":
+                assert got["ok"] and got["html"] == PAGE and got["robot"] == robot
+            else:
+                assert got["ok"] is False and got["why"] == "robot" and got["robot"] == robot
+                assert "closed that tab" in got["error"]
+    assert bh._ACTS == {}
