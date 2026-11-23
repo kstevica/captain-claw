@@ -3,9 +3,15 @@
 Maps seven musical modes (Ionian through Locrian) plus a neutral default
 to distinct cognitive approaches.  Each mode operates at three layers:
 
-  Layer 1 — Prompt injection (instruction text shaping *how* the agent thinks)
-  Layer 2 — Parameterized config (numerical modifiers for existing subsystems)
-  Layer 3 — Behavioral hooks (checked by orchestration, completion, dreaming)
+  Layer 1 — Prompt injection: the mode's text plus a shared frame
+            (``instructions/cognitive_modes/frame.md``) that says when a mode
+            applies and what it never overrides.
+  Layer 2 — Parameters: only numbers that some subsystem actually reads
+            (completion gate, nervous system, game seats).  Anything about
+            *how* the agent works lives in the prompt text, not in a number.
+
+A mode also carries a one-line ``review_lens`` for critics and checkers,
+which judge an answer rather than do the work.
 
 The mode is stored as a simple text file at
 ``~/.captain-claw/cognitive_mode.txt`` containing the mode name (e.g.
@@ -41,32 +47,13 @@ _INSTRUCTION_SUBDIR = "cognitive_modes"
 class CognitiveModeParams:
     """Layer 2 — numerical parameters that modify existing subsystems.
 
-    All values are designed to compose with existing config via
-    multiplication (modifiers) or addition (deltas).  Default values
-    are neutral — they produce no change.
+    Every field here is read by a subsystem; do not add one that is not.
+    Default values are neutral — they produce no change.
     """
 
-    # Cognitive tempo starting bias: 0.0 = adagio-leaning, 1.0 = allegro-leaning.
-    tempo_bias: float = 0.5
-
-    # Minimum read-type tool calls before the agent should write/execute.
-    # Enforced as guidance in the prompt, not as a hard gate.
-    tool_read_before_act: int = 0
-
-    # How strict the completion gate should be: 0.0 = loose, 1.0 = strict.
+    # Completion gate (agent_completion_mixin): above 0.7 allows one more
+    # validation retry before a response is accepted, below 0.3 one fewer.
     completion_strictness: float = 0.5
-
-    # Max clarifying questions before acting.
-    question_budget: int = 2
-
-    # How many alternative approaches to consider before committing.
-    exploration_breadth: int = 1
-
-    # Multiplier on response length tendency (1.0 = no change).
-    response_length_bias: float = 1.0
-
-    # Minimum confidence to state something as fact.
-    confidence_threshold: float = 0.5
 
     # Multiplier on nervous system dream_interval_messages (1.0 = no change).
     dream_interval_modifier: float = 1.0
@@ -82,8 +69,8 @@ class CognitiveModeParams:
     # Types not listed default to 1.0.
     intuition_type_weights: dict[str, float] = field(default_factory=dict)
 
-    # Hint for the reflection system — what should self-assessment focus on.
-    reflection_focus: str = ""
+    # LLM temperature for a game seat playing in this mode (games/seats.py).
+    game_temperature: float = 0.7
 
 
 @dataclass
@@ -96,6 +83,7 @@ class CognitiveMode:
     character: str              # One-line summary of cognitive character
     params: CognitiveModeParams
     instruction_file: str       # Filename in instructions/cognitive_modes/ (empty for neutra)
+    review_lens: str = ""       # What a critic in this mode looks for (empty for neutra)
 
 
 # ── Mode Registry ────────────────────────────────────────────────────
@@ -117,20 +105,17 @@ MODES: dict[str, CognitiveMode] = {
         label="The Resolver",
         character="Convergent problem-solving — seeks clear answers and closure",
         params=CognitiveModeParams(
-            tempo_bias=0.6,
-            tool_read_before_act=0,
             completion_strictness=0.9,
-            question_budget=1,
-            exploration_breadth=1,
-            response_length_bias=0.8,
-            confidence_threshold=0.7,
             dream_interval_modifier=1.2,       # dreams slightly less often
             dream_cooldown_modifier=1.2,
             maturation_cycles_delta=0,
+            game_temperature=0.5,
             intuition_type_weights={"pattern": 1.3, "hypothesis": 0.7},
-            reflection_focus="Did I resolve tasks completely? Did I deliver clear, definitive answers?",
         ),
         instruction_file="ionian.md",
+        review_lens=(
+            "Does the answer settle the question that was asked: one clear, complete result that meets the stated goal? Look for an open question left behind, a hedge where a conclusion was possible, or a goal only partly met."
+        ),
     ),
 
     "dorian": CognitiveMode(
@@ -139,20 +124,17 @@ MODES: dict[str, CognitiveMode] = {
         label="The Pragmatic Empath",
         character="Empathetic pragmatism — acknowledges complexity while finding workable paths",
         params=CognitiveModeParams(
-            tempo_bias=0.45,
-            tool_read_before_act=1,
             completion_strictness=0.6,
-            question_budget=2,
-            exploration_breadth=2,
-            response_length_bias=1.1,
-            confidence_threshold=0.5,
             dream_interval_modifier=0.9,
             dream_cooldown_modifier=0.9,
             maturation_cycles_delta=0,
+            game_temperature=0.7,
             intuition_type_weights={"connection": 1.5, "unresolved": 1.3},
-            reflection_focus="Did I account for human context and real-world constraints? Did I surface tradeoffs honestly?",
         ),
         instruction_file="dorian.md",
+        review_lens=(
+            "Would this work for the people involved, under their real constraints? Look for ignored trade-offs, steps that are impractical for them, and costs that land on someone the answer does not mention."
+        ),
     ),
 
     "phrygian": CognitiveMode(
@@ -161,20 +143,17 @@ MODES: dict[str, CognitiveMode] = {
         label="The Adversarial Analyst",
         character="Adversarial thinking — assumes things will go wrong, finds the hidden flaw",
         params=CognitiveModeParams(
-            tempo_bias=0.35,
-            tool_read_before_act=2,
             completion_strictness=0.8,
-            question_budget=3,
-            exploration_breadth=2,
-            response_length_bias=1.2,
-            confidence_threshold=0.8,
             dream_interval_modifier=0.8,       # dreams more often
             dream_cooldown_modifier=0.8,
             maturation_cycles_delta=1,          # intuitions need more cycles
+            game_temperature=0.5,
             intuition_type_weights={"unresolved": 2.0, "hypothesis": 1.5, "association": 0.6},
-            reflection_focus="What risks did I miss? What assumptions went unchallenged? What edge cases were ignored?",
         ),
         instruction_file="phrygian.md",
+        review_lens=(
+            "Look for what would make the answer fail: a false assumption, an unhandled case, a claim that was not verified, the weakest step in the reasoning."
+        ),
     ),
 
     "lydian": CognitiveMode(
@@ -183,20 +162,17 @@ MODES: dict[str, CognitiveMode] = {
         label="The Visionary Explorer",
         character="Divergent creative thinking — expands the solution space, finds unexpected connections",
         params=CognitiveModeParams(
-            tempo_bias=0.4,
-            tool_read_before_act=1,
-            completion_strictness=0.3,
-            question_budget=2,
-            exploration_breadth=4,              # consider many alternatives
-            response_length_bias=1.3,
-            confidence_threshold=0.4,           # comfortable with speculation
+            completion_strictness=0.5,
             dream_interval_modifier=0.6,        # dreams much more often
             dream_cooldown_modifier=0.6,
             maturation_cycles_delta=-1,          # intuitions surface faster
+            game_temperature=1.0,
             intuition_type_weights={"association": 2.0, "connection": 2.0, "hypothesis": 1.5, "pattern": 0.7},
-            reflection_focus="Did I explore genuinely different approaches? Did I find unexpected connections? Did I challenge conventional thinking?",
         ),
         instruction_file="lydian.md",
+        review_lens=(
+            "Is there a clearly better approach or framing that the answer missed? Look for a narrow reading of the question and for an obvious alternative that was never weighed."
+        ),
     ),
 
     "mixolydian": CognitiveMode(
@@ -205,20 +181,17 @@ MODES: dict[str, CognitiveMode] = {
         label="The Iterative Builder",
         character="Momentum-focused iteration — ship something, learn, improve, never declare done",
         params=CognitiveModeParams(
-            tempo_bias=0.75,                    # naturally fast
-            tool_read_before_act=0,
-            completion_strictness=0.3,           # loose — ship early
-            question_budget=0,                   # just start building
-            exploration_breadth=1,
-            response_length_bias=0.7,            # concise
-            confidence_threshold=0.4,
+            completion_strictness=0.5,
             dream_interval_modifier=1.3,         # dreams less (action-focused)
             dream_cooldown_modifier=1.3,
             maturation_cycles_delta=-1,
+            game_temperature=0.8,
             intuition_type_weights={"pattern": 1.3, "unresolved": 0.5},
-            reflection_focus="Did I ship something useful? Did I maintain momentum? Did I avoid over-planning?",
         ),
         instruction_file="mixolydian.md",
+        review_lens=(
+            "Is the result usable as it stands? Look for parts that are described rather than done, and for anything that would not work when actually tried."
+        ),
     ),
 
     "aeolian": CognitiveMode(
@@ -227,20 +200,17 @@ MODES: dict[str, CognitiveMode] = {
         label="The Depth Researcher",
         character="Deep analytical research — traces root causes, maps full context, values thoroughness",
         params=CognitiveModeParams(
-            tempo_bias=0.2,                     # naturally slow/contemplative
-            tool_read_before_act=3,             # read extensively before acting
             completion_strictness=0.7,
-            question_budget=2,
-            exploration_breadth=2,
-            response_length_bias=1.5,            # detailed responses
-            confidence_threshold=0.6,
             dream_interval_modifier=0.7,         # dreams more often
             dream_cooldown_modifier=0.7,
             maturation_cycles_delta=1,           # intuitions mature longer
+            game_temperature=0.5,
             intuition_type_weights={"pattern": 2.0, "connection": 1.5, "hypothesis": 1.3},
-            reflection_focus="Did I research thoroughly? Did I trace to root causes? Did I miss important context or history?",
         ),
         instruction_file="aeolian.md",
+        review_lens=(
+            "Check the grounds: is each important claim supported by evidence, is the cause given the real cause and not a symptom, and is relevant context or history missing?"
+        ),
     ),
 
     "locrian": CognitiveMode(
@@ -249,20 +219,17 @@ MODES: dict[str, CognitiveMode] = {
         label="The Deconstructionist",
         character="Radical questioning — challenges the entire framing, questions whether the problem should exist",
         params=CognitiveModeParams(
-            tempo_bias=0.3,
-            tool_read_before_act=2,
-            completion_strictness=0.2,           # may reject the task itself
-            question_budget=5,                   # asks many questions
-            exploration_breadth=3,
-            response_length_bias=1.0,
-            confidence_threshold=0.3,            # low confidence in any single answer
+            completion_strictness=0.5,
             dream_interval_modifier=0.7,
             dream_cooldown_modifier=0.7,
             maturation_cycles_delta=0,
+            game_temperature=0.9,
             intuition_type_weights={"unresolved": 2.5, "hypothesis": 2.0, "pattern": 0.5, "association": 0.5},
-            reflection_focus="Did I challenge assumptions? Did I identify accidental complexity? Did I suggest simplification or removal?",
         ),
         instruction_file="locrian.md",
+        review_lens=(
+            "Question the premise: does the answer solve the right problem, is it more complicated than it needs to be, does it rest on an assumption nobody examined?"
+        ),
     ),
 }
 
@@ -297,24 +264,22 @@ def mode_to_dict(mode: CognitiveMode) -> dict[str, Any]:
         "label": mode.label,
         "character": mode.character,
         "instruction_file": mode.instruction_file,
+        "review_lens": mode.review_lens,
         "params": {
-            "tempo_bias": mode.params.tempo_bias,
-            "tool_read_before_act": mode.params.tool_read_before_act,
             "completion_strictness": mode.params.completion_strictness,
-            "question_budget": mode.params.question_budget,
-            "exploration_breadth": mode.params.exploration_breadth,
-            "response_length_bias": mode.params.response_length_bias,
-            "confidence_threshold": mode.params.confidence_threshold,
             "dream_interval_modifier": mode.params.dream_interval_modifier,
             "dream_cooldown_modifier": mode.params.dream_cooldown_modifier,
             "maturation_cycles_delta": mode.params.maturation_cycles_delta,
             "intuition_type_weights": dict(mode.params.intuition_type_weights),
-            "reflection_focus": mode.params.reflection_focus,
+            "game_temperature": mode.params.game_temperature,
         },
     }
 
 
 # ── Prompt block builder ────────────────────────────────────────────
+
+
+_FRAME_FILE = "frame.md"
 
 
 def cognitive_mode_to_prompt_block(
@@ -324,39 +289,48 @@ def cognitive_mode_to_prompt_block(
     """Build the Layer 1 prompt text for a mode.
 
     Returns an empty string for neutra (no prompt injection).
-    For other modes, loads the instruction file from
-    ``instructions/cognitive_modes/<file>`` and wraps it.
+    For other modes: a header, the mode's own text from
+    ``instructions/cognitive_modes/<file>``, then the shared frame
+    (``frame.md``) that scopes every mode the same way.
 
     *instruction_loader* should be the agent's ``InstructionLoader``
-    instance.  If ``None``, returns only the header (no instruction body).
+    instance.  Without one (or when the mode's file is missing) there is
+    nothing useful to inject, so the result is empty.
     """
     if mode.name == "neutra" or not mode.instruction_file:
         return ""
+    if instruction_loader is None:
+        return ""
 
-    def _esc(s: str) -> str:
-        return s.replace("{", "{{").replace("}", "}}")
+    template_name = f"{_INSTRUCTION_SUBDIR}/{mode.instruction_file}"
+    try:
+        body = instruction_loader.load(template_name).strip()
+    except FileNotFoundError:
+        log.warning(
+            "Cognitive mode instruction file not found",
+            mode=mode.name, file=template_name,
+        )
+        return ""
 
-    parts: list[str] = []
-    parts.append(f"COGNITIVE MODE: {_esc(mode.label)} ({mode.name.upper()})")
-    parts.append(f"Character: {_esc(mode.character)}")
-    parts.append("")
-
-    # Load mode-specific instruction body.
-    if instruction_loader is not None:
-        template_name = f"{_INSTRUCTION_SUBDIR}/{mode.instruction_file}"
-        try:
-            body = instruction_loader.load(template_name)
-            parts.append(body)
-        except FileNotFoundError:
-            log.warning(
-                "Cognitive mode instruction file not found",
-                mode=mode.name, file=template_name,
-            )
-            parts.append(f"(Mode instruction file missing: {template_name})")
-    else:
-        parts.append("(Mode instructions not loaded — no instruction loader available)")
-
+    parts = [f"COGNITIVE MODE: {mode.label} ({mode.name.capitalize()})", "", body]
+    try:
+        frame = instruction_loader.load(f"{_INSTRUCTION_SUBDIR}/{_FRAME_FILE}").strip()
+    except FileNotFoundError:
+        frame = ""
+    if frame:
+        parts += ["", frame]
     return "\n".join(parts)
+
+
+def cognitive_mode_review_block(mode: CognitiveMode) -> str:
+    """The mode as a lens for judging an answer (critics, checkers).
+
+    A reviewer does not need the mode's working instructions — only what to
+    look for.  Empty for neutra.
+    """
+    if mode.name == "neutra" or not mode.review_lens:
+        return ""
+    return f"Review lens: {mode.label}. {mode.review_lens}"
 
 
 # ── File I/O with mtime caching ─────────────────────────────────────

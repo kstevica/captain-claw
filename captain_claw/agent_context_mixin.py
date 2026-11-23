@@ -1942,12 +1942,8 @@ class AgentContextMixin:
             if mode and mode.name != "neutra":
                 parts.append("")
                 parts.append(
-                    f"COGNITIVE MODE: Your current mode is {mode.name.upper()} "
-                    f"({mode.label}). {mode.character}. This mode shapes your "
-                    f"reasoning approach — how you prioritize, what you look for, "
-                    f"and how you structure your thinking. It operates independently "
-                    f"of cognitive tempo (speed). The mode instructions are injected "
-                    f"separately in your context."
+                    f"COGNITIVE MODE: {mode.label} ({mode.name.capitalize()}) is "
+                    f"active. Its guidance is given in its own section."
                 )
 
         # ── Live operational status ──────────────────────────────────
@@ -2037,6 +2033,15 @@ class AgentContextMixin:
             load_agent_mode,
         )
 
+        loader = getattr(self, "instructions", None)
+        # The micro/nano system prompts have no slot for the mode text.  A mode
+        # that cannot say anything must not change the numbers either, so such
+        # an agent runs without a mode.
+        if getattr(loader, "use_micro", False) is True:
+            self._cognitive_mode = None
+            self._cognitive_mode_params = None
+            return ""
+
         mode_name = load_agent_mode()
         mode = get_mode(mode_name)
 
@@ -2045,7 +2050,6 @@ class AgentContextMixin:
         self._cognitive_mode_params = mode.params
 
         # Build Layer 1 prompt text using the agent's instruction loader.
-        loader = getattr(self, "instructions", None)
         return cognitive_mode_to_prompt_block(mode, instruction_loader=loader)
 
     # ── Sister session briefing context ──────────────────────────────
@@ -3827,8 +3831,9 @@ class AgentContextMixin:
         nervous_system_block = self._build_nervous_system_block()
         briefing_block = self._build_briefing_block()
         project_block = self._build_project_block()
-        cognitive_self_awareness_block = self._build_cognitive_self_awareness_block()
+        # Mode first: the self-awareness block reads the mode this call resolves.
         cognitive_mode_block = self._build_cognitive_mode_block()
+        cognitive_self_awareness_block = self._build_cognitive_self_awareness_block()
         # How attached pictures are seen: inline by a model that sees images,
         # otherwise through image_vision / a multimodal peer.
         _sees = getattr(self, "sees_images", None)

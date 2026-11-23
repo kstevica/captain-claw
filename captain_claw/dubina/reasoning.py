@@ -32,7 +32,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from captain_claw.cognitive_mode import cognitive_mode_to_prompt_block, get_mode
+from captain_claw.cognitive_mode import cognitive_mode_review_block, get_mode
 from captain_claw.dubina.engine import Budget, Candidate, Step, Verdict
 from captain_claw.llm import LLMProvider, Message
 from captain_claw.logging import get_logger
@@ -125,7 +125,9 @@ def make_mode_critic(
     max_tokens: int = 1200,
 ) -> Critic:
     """Build a critic that reviews through one cognitive mode's lens."""
-    persona = cognitive_mode_to_prompt_block(get_mode(mode_name), instruction_loader)
+    # A critic judges an answer, so it gets the mode's review lens, not the
+    # mode's instructions for doing work.  *instruction_loader* is unused.
+    persona = cognitive_mode_review_block(get_mode(mode_name))
 
     async def critic(question: str, answer: str) -> CriticVerdict:
         system = f"{persona}\n\n{_CRITIC_INSTRUCTION}" if persona else _CRITIC_INSTRUCTION

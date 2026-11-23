@@ -198,7 +198,7 @@ proof that the engine elevates a weak local model. Reasoning track reuses the en
     N-sample answers); diverse-lens critics only when agreement < threshold or the
     step is high-stakes. A lone sample defers, forcing the vote rung.
   - Critics reuse real cognitive modes via `make_mode_critic` /
-    `cognitive_mode_to_prompt_block` (`phrygian`/`aeolian`/`locrian` refuters); pass
+    `cognitive_mode_review_block` (`phrygian`/`aeolian`/`locrian` refuters); pass
     iff a majority fail to refute.
   - `ReasonVerifier`: cheap per-candidate well-formedness; `extract_answer` +
     `agreement_score` for clustering; `make_reasoning_generator` for the rollouts.
