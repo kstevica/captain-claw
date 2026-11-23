@@ -12,7 +12,9 @@ Pinned here:
 * a run is the person's own turn to the agent, naming web_playbook with the
   values, with the link and steps written out for an agent without it, its
   stop for an act, a folder with playbook.md; what's missing is refused
-  before anything is sent; every route wants the extension's token.
+  before anything is sent; every route wants the extension's token;
+* Flight Deck's own store (/fd/playbooks, the person signed in) is the same
+  store and shelf, and words the message a run sends in the agent's chat.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ async def pdeck(deck, tmp_path, monkeypatch):  # noqa: F811
     app = FastAPI()
     app.include_router(bc.router)
     app.include_router(bp.router)
+    app.include_router(bp.owner_router)
     app.include_router(br.router)
     app.include_router(bc.owner_router)
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fd.test")
@@ -169,3 +172,30 @@ async def test_an_act_run_says_who_presses_the_last_button(pdeck):
     assert "It stops before “Cancel subscription”" in frame["content"] and "I press “Cancel subscription” myself" in frame["content"]
     assert "in my Chrome (target=\"chrome\")" in frame["content"]
     assert any("Agents can use this browser" in n for n in frame["attachment_notes"])
+
+
+async def test_flight_decks_store_is_the_same_store_and_words_the_message(pdeck):
+    c, jwt = pdeck["client"], pdeck["jwt"]
+    assert (await c.get("/fd/playbooks")).status_code == 401
+    front = (await c.get("/fd/playbooks?region=hr&per=6", headers=jwt)).json()
+    assert len(front["top"]["travel"]) == 6 and len(front["top"]["money"]) == 6
+    assert (await c.get("/fd/playbooks/search?q=track+dhl+parcel", headers=jwt)).json()["items"][0]["id"] == "dhl.track"
+    assert (await c.get("/fd/playbooks/maps.travel_time", headers=jwt)).json()["inputs"][0]["name"] == "origin"
+
+    # One shelf, whichever way in: Flight Deck's star is the panel's.
+    assert (await c.post("/fd/playbooks/maps.travel_time/shelf", headers=jwt, json={"on": True})).json()["mine"]
+    pat = {"Authorization": f"Bearer {await _pair(c, pdeck['jwt'])}"}
+    assert _ids((await c.get("/fd/clip/playbooks", headers=pat)).json()["shelf"]) == ["maps.travel_time"]
+
+    bad = await c.post("/fd/playbooks/maps.travel_time/compose", headers=jwt, json={"inputs": {"origin": "Zagreb"}})
+    assert bad.status_code == 400 and "To" in bad.json()["detail"]
+    got = (await c.post("/fd/playbooks/maps.travel_time/compose", headers=jwt,
+                        json={"inputs": {"origin": "Zagreb", "destination": "Split"}, "note": "Before noon"})).json()
+    assert got["link"] == "https://www.google.com/maps/dir/?api=1&origin=Zagreb&destination=Split&travelmode=driving"
+    text = got["content"]
+    assert text.startswith("▶️ Run the playbook “How long from A to B” for me")
+    assert "- From: Zagreb\n- To: Split\n- How: driving" in text and "This time: Before noon" in text
+    assert text.endswith('`web_playbook` · `maps.travel_time` · `{"origin": "Zagreb", "destination": "Split", "mode": "driving"}`')
+    assert "vfs:" not in text and "Without web_playbook" not in text    # short: it's the person's own bubble
+    assert not pdeck["agent"].frames   # nothing sent: Flight Deck sends it in the chat
+    assert (await c.get("/fd/playbooks/maps.travel_time", headers=jwt)).json()["runs"] == 1

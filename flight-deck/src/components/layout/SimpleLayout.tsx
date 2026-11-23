@@ -153,6 +153,7 @@ import { setProcessParent } from '../../services/docker'
 import { SimpleNav } from './SimpleNav'
 import { navEntries, type NavEntry, type NavTarget } from './navDestinations'
 import { PeoplePanel } from './PeoplePanel'
+import { PlaybookStorePanel, type PlaybookAgent } from '../playbooks/PlaybookStorePanel'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import { NetworkBadge, networkShareAction } from '../agents/NetworkShare'
 import { dockerShareKey, processShareKey, useNetworkShareStore } from '../../stores/networkShareStore'
@@ -512,6 +513,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const taskboardCount = useTaskboardStore((s) => s.needsMe)
   // People: who is on the Taskboard's tasks (the nav's People).
   const [peopleOpen, setPeopleOpen] = useState(false)
+  // Playbooks: ready-made ways to get things done on the web (the store).
+  const [playbooksOpen, setPlaybooksOpen] = useState(false)
   // With no chat open, the centre shows Today or the Agents cards (the nav picks).
   const [homeView, setHomeView] = useState<'today' | 'agents'>('today')
   // The Line's counts, for the nav's Inbox.
@@ -1129,11 +1132,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   }
   // What a phone's Back closes before it leaves a chat (or Flight Deck).
   const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen || toolsOpen || firstMateOpen
-    || anonOpen || roomsOpen || !!teamWork || !!filesData || peopleOpen
+    || anonOpen || roomsOpen || !!teamWork || !!filesData || peopleOpen || playbooksOpen
   const closePhoneOverlays = () => {
     if (taskboardOpen && peopleOpen) { closeTaskboard(); return }
     closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null); closeAnon(); closeRooms()
-    closeTeamWork(); setPeopleOpen(false); closeFirstMate()
+    closeTeamWork(); setPeopleOpen(false); closeFirstMate(); setPlaybooksOpen(false)
   }
 
   // The outcome nav. Each destination opens the view it always did (the
@@ -1141,7 +1144,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // one picked is the one in front; Today closes them and the chat, leaving
   // the home. A chat's session stays connected: its agent opens it again.
   const closeDestinations = () => {
-    setLineOpen(false); closeTaskboard(); setPeopleOpen(false); closeScheduled(); closeActivity()
+    setLineOpen(false); closeTaskboard(); setPeopleOpen(false); closeScheduled(); closeActivity(); setPlaybooksOpen(false)
   }
   const goTo = (open: () => void) => () => { closeDestinations(); open() }
   const goHome = (view: 'today' | 'agents') => () => {
@@ -1152,6 +1155,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const nav: NavEntry[] = navEntries({
     onToday: goHome('today'),
     onAgents: goHome('agents'),
+    onPlaybooks: goTo(() => setPlaybooksOpen(true)),
     onInbox: goTo(() => setLineOpen(true)),
     inboxUnread: lineUnread,
     inboxWaiting: lineWaiting,
@@ -1163,7 +1167,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     automationsRunning: scheduledRunning,
     onActivity: goTo(() => openActivity()),
   })
-  const navCurrent: NavTarget | null = lineOpen ? 'inbox'
+  const navCurrent: NavTarget | null = playbooksOpen ? 'playbooks' : lineOpen ? 'inbox'
     : taskboardOpen ? 'tasks'
       : peopleOpen ? 'people'
         : scheduledOpen ? 'automations'
@@ -1172,6 +1176,32 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // People's links into the Taskboard: it opens over People, which waits
   // under it — closing the board comes back to the same person.
   const peopleToTasks = () => openTaskboard()
+  // Playbooks: the agents a run can go to, and the run — the agent's chat
+  // opens and the playbook's message goes there as the person's own (held
+  // while the agent finishes something, as any message is).
+  const playbookAgents: PlaybookAgent[] = useMemo(() => agents
+    .filter((a) => a.kind !== 'shared' && !a.managed)
+    .map((a) => ({ id: a.id, name: a.name, reachable: a.reachable, asleep: a.asleep })), [agents])
+  const runPlaybook = (agentId: string, content: string) => {
+    const a = agents.find((x) => x.id === agentId)
+    if (!a) return
+    setPlaybooksOpen(false)
+    handleOpen(a)
+    let tries = 0
+    const attempt = () => {
+      const s = useChatStore.getState().sessions.get(a.id)
+      if (s?.connected) { useChatStore.getState().sendMessage(a.id, content); return }
+      if (++tries < (a.asleep ? 240 : 60)) { setTimeout(attempt, 250); return }
+      useNotificationStore.getState().add('warning', 'The playbook wasn\'t sent', `${a.name} didn't come up in time. Open its chat and try again.`)
+    }
+    setTimeout(attempt, 150)
+  }
+  const playbookConnections = () => {
+    setPlaybooksOpen(false)
+    if (locked) { openConnections('browser'); return }
+    try { localStorage.setItem('fd:connections-tab', 'browser') } catch { /* storage blocked: its last tab */ }
+    useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('connections')
+  }
   const peopleToTask = (taskId: string) => showTaskboardTask(taskId)
   // Drive and OneDrive folders want the user's Google or Microsoft account:
   // Connections, on that tab.
@@ -1604,6 +1634,12 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         <KioskWideDialog label="People" phone={isMobile} onClose={() => setPeopleOpen(false)}>
           <PeoplePanel onClose={() => setPeopleOpen(false)} onOpenTasks={peopleToTasks} onOpenTask={peopleToTask}
             covered={taskboardOpen} />
+        </KioskWideDialog>
+      )}
+      {playbooksOpen && (
+        <KioskWideDialog label="Playbooks" phone={isMobile} widest onClose={() => setPlaybooksOpen(false)}>
+          <PlaybookStorePanel onClose={() => setPlaybooksOpen(false)} agents={playbookAgents} preferAgentId={activeAgentId}
+            onRun={runPlaybook} onConnections={playbookConnections} />
         </KioskWideDialog>
       )}
       {lineOpen && (

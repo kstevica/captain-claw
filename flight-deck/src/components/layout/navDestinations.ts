@@ -1,18 +1,19 @@
 import type { ComponentType } from 'react'
-import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Sun } from 'lucide-react'
+import { Activity, AlarmClock, Bot, Contact, Inbox, ListChecks, Sun, Zap } from 'lucide-react'
 
 // ── Simple layout: the outcome nav's destinations ────────────────────
 //
 // What the person comes for, in plain words, above their team of agents:
 // Today (the briefing: what waits for the person, today's work), Agents (the
-// agents that are up, as cards), Inbox (the Line: what the
+// agents that are up, as cards), Playbooks (ready-made ways to get things
+// done on the web, run by an agent), Inbox (the Line: what the
 // deck and the agents said on their own), Tasks (the Taskboard), People
 // (the people on those tasks), Automations (Scheduled tasks) and Activity
 // (every tool the agents used). Each opens the same view as before; only
 // the way in changed. SimpleNav.tsx draws them. The Agent store has no entry:
 // New agent opens it.
 
-export type NavTarget = 'today' | 'agents' | 'inbox' | 'tasks' | 'people' | 'automations' | 'activity'
+export type NavTarget = 'today' | 'agents' | 'playbooks' | 'inbox' | 'tasks' | 'people' | 'automations' | 'activity'
 
 export interface NavEntry {
   id: NavTarget
@@ -32,6 +33,7 @@ export interface NavEntry {
 export function navEntries(o: {
   onToday: () => void
   onAgents: () => void
+  onPlaybooks: () => void
   onInbox: () => void
   inboxUnread: number
   inboxWaiting: number
@@ -47,6 +49,7 @@ export function navEntries(o: {
   return [
     { id: 'today', label: 'Today', icon: Sun, hint: 'What needs you, what is in progress, what got done', onSelect: o.onToday },
     { id: 'agents', label: 'Agents', icon: Bot, hint: 'Your agents that are up — pick one to chat', onSelect: o.onAgents },
+    { id: 'playbooks', label: 'Playbooks', icon: Zap, hint: 'Ready-made ways to get things done on the web — an agent runs them', onSelect: o.onPlaybooks },
     {
       id: 'inbox', label: 'Inbox', icon: Inbox, onSelect: o.onInbox,
       hint: o.inboxWaiting ? `${o.inboxWaiting} waiting for you` : o.inboxUnread ? `${o.inboxUnread} new from your agents` : 'What your agents told you on their own',
