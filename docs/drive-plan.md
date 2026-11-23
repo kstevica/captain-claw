@@ -181,6 +181,7 @@ Each phase is its own PR and leaves Diligent unchanged.
 | 4 | The check before delivering | Persistent and Ambitious catch gaps |
 |   | *Phase 4 status (2026-11-23): built on branch `feat/drive-phase4`. The check is skipped when the reply was already judged against a contract (no second opinion on the same reply), on a turn's last allowed step, and when the checker fails or answers badly. A reply that is open about what it could not do passes.* | |
 | 5 | Initiative, behind its own switch | Ambitious does bounded extra work |
+|   | *Phase 5 status (2026-11-23): built on branch `feat/drive-phase5`. The switch is `drive.initiative` in the agent's config (no UI yet). Extra work is its own step after the answer has passed every gate, so the harness knows which tool calls are extra: only read-class calls and file-writing tools run, at most 25% of the base step budget in tool calls (10), never on an automated turn or a shared agent member's turn. The answer is delivered unchanged with what was added under it.* | |
 | 6 | Statistics per level, and a comparison on real tasks | evidence for the default values |
 
 Phases 1–3 are the useful core. Phases 4 and 5 are each optional.

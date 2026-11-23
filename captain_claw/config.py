@@ -1524,6 +1524,10 @@ class DriveConfig(BaseModel):
     """
 
     default: str = ""
+    # Ambitious may add one obvious next step nobody asked for, inside the
+    # agent's workspace and with reading and file-writing tools only. Off
+    # unless turned on here; without it Ambitious behaves as Persistent.
+    initiative: bool = False
 
 
 class ScaleConfig(BaseModel):

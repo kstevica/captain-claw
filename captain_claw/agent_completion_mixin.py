@@ -33,6 +33,8 @@ _DELIVERY_LOG_ARGS = 200
 _DELIVERY_LOG_RESULT = 400
 _DELIVERY_REQUEST_CHARS = 6000
 _DELIVERY_REPLY_CHARS = 12000
+# How much of the extra-work step's own words is shown under the answer.
+_EXTRA_WORK_NOTE_CHARS = 1500
 
 
 # How many times a zero-length reply may be re-rolled before the turn gives
@@ -134,6 +136,32 @@ class AgentCompletionMixin:
             enforce_python_worker_mode=enforce_python_worker_mode,
             output_text_len=len(output_text or ""),
         )
+        # ── Extra work: its reply is not a new answer ─────────────────
+        # The answer was fixed when the extra-work step began. What comes
+        # back now only says what was added, so it passes none of the gates
+        # below (no auto-write, no contract, no second check): it is put
+        # under the answer and delivered.
+        _extra = getattr(self, "_extra_work", None)
+        if isinstance(_extra, dict) and _extra.get("active"):
+            _extra["active"] = False
+            final_response = self._extra_work_reply(output_text)
+            self._emit_tool_output(
+                "completion_gate",
+                {"step": "extra_work", "phase": "end", "calls": int(_extra.get("calls", 0)),
+                 "refused": int(_extra.get("refused", 0)), "added": final_response != _extra.get("reply")},
+                f"step=extra_work\nphase=end\ncalls={_extra.get('calls', 0)}\nrefused={_extra.get('refused', 0)}",
+            )
+            final_response = await self._deliver_final_response(
+                final_response=final_response,
+                user_input=user_input,
+                effective_user_input=effective_user_input,
+                task_contract=None,
+                scale_completed=False,
+                planning_pipeline=planning_pipeline,
+                turn_start_idx=turn_start_idx,
+            )
+            return True, final_response, finish_success, "", python_worker_attempted
+
         # Skip auto-write when the scale micro-loop just completed.
         # The micro-loop already wrote the real content to output files
         # via _execute_tool_with_guard (which does NOT add tool messages
@@ -934,8 +962,48 @@ class AgentCompletionMixin:
                 "step=delivery_check\npassed=True",
             )
 
+        # ── Extra work (Drive: Ambitious, where switched on) ──────────
+        # The asked work is done and has passed every gate. Before it is
+        # delivered, the agent gets one bounded chance to add the obvious
+        # next step; its answer stays as it is, and whatever it adds is
+        # shown under it, marked as not asked for.
+        if self._extra_work_may_start(iteration, hard_turn_iterations, turn_start_idx, final_response):
+            limit = self._extra_work_limit()
+            self._extra_work = {"active": True, "reply": final_response, "calls": 0, "refused": 0, "limit": limit}
+            completion_feedback = self.instructions.render("drive_extra_work_prompt.md", limit=limit)
+            self._emit_tool_output(
+                "completion_gate", {"step": "extra_work", "phase": "start", "limit": limit},
+                f"step=extra_work\nphase=start\nlimit={limit}",
+            )
+            log.info("Extra work offered before delivering", iteration=iteration, limit=limit)
+            return False, "", finish_success, completion_feedback, python_worker_attempted
+
         # ── Finalize: persist and return ─────────────────────────────
         log.info("All completion gates passed — finalizing response", iteration=iteration)
+        final_response = await self._deliver_final_response(
+            final_response=final_response,
+            user_input=user_input,
+            effective_user_input=effective_user_input,
+            task_contract=task_contract,
+            scale_completed=_scale_completed,
+            planning_pipeline=planning_pipeline,
+            turn_start_idx=turn_start_idx,
+        )
+        return True, final_response, finish_success, completion_feedback, python_worker_attempted
+
+    async def _deliver_final_response(
+        self,
+        *,
+        final_response: str,
+        user_input: str,
+        effective_user_input: str,
+        task_contract: dict[str, Any] | None,
+        scale_completed: Any,
+        planning_pipeline: dict[str, Any] | None,
+        turn_start_idx: int,
+    ) -> str:
+        """Persist the reply every gate let through and do what follows a
+        delivered answer; returns the text to deliver."""
         self._update_clarification_state(
             user_input=user_input,
             effective_user_input=effective_user_input,
@@ -958,15 +1026,82 @@ class AgentCompletionMixin:
             await self._auto_capture_apis(effective_user_input, final_response)
 
         # ── Playbook rating hint (once per session, complex tasks only) ──
-        final_response = self._maybe_append_playbook_hint(
+        return self._maybe_append_playbook_hint(
             final_response,
             task_contract=task_contract,
-            scale_completed=_scale_completed,
+            scale_completed=scale_completed,
             planning_pipeline=planning_pipeline,
             turn_start_idx=turn_start_idx,
         )
 
-        return True, final_response, finish_success, completion_feedback, python_worker_attempted
+    # ------------------------------------------------------------------
+    # Extra work (Drive)
+    # ------------------------------------------------------------------
+
+    def _extra_work_limit(self) -> int:
+        """Tool calls an extra-work step may make: the level's share of a
+        turn's base step budget, at least 3."""
+        base = int(getattr(self, "max_iterations", 40) or 40)
+        return max(3, round(base * drive.current(self).initiative_share))
+
+    def _extra_work_may_start(
+        self, iteration: int, hard_turn_iterations: int, turn_start_idx: int, final_response: str,
+    ) -> bool:
+        """Whether this finished turn gets the extra-work step: Ambitious with
+        the agent's switch on, once, for a person's own turn that did real
+        work and still has steps left."""
+        if getattr(self, "_extra_work", None) is not None:
+            return False                      # once per turn
+        if not (drive.current(self).initiative and drive.initiative_enabled()):
+            return False
+        if not str(final_response or "").strip():
+            return False
+        # Room for the step and its reply, with a margin: a turn near its
+        # ceiling delivers what it has.
+        if hard_turn_iterations - iteration < self._extra_work_limit() + 5:
+            return False
+        # Unasked work belongs to a person at the keyboard: a scheduled run
+        # or an automation's message would repeat it unseen. Nor on a shared
+        # agent member's turn — the workspace is the owner's.
+        origin = getattr(self, "_turn_origin", None)
+        if not (isinstance(origin, tuple) and origin and str(origin[0] or "") == "human"):
+            return False
+        if getattr(self, "_speaker_scoped", False) is True:
+            return False
+        return self._turn_did_work(turn_start_idx)
+
+    def _extra_work_rescue(self, text: Any, success: bool) -> tuple[Any, bool]:
+        """What a turn delivers when it ends with the extra-work step still
+        open: the finished answer, as a success. Anything else is unchanged."""
+        state = getattr(self, "_extra_work", None)
+        if not (isinstance(state, dict) and state.get("active")):
+            return text, success
+        state["active"] = False
+        answer = str(state.get("reply", "") or "")
+        if not answer.strip():
+            return text, success
+        log.warning("Turn ended during extra work — delivering the finished answer",
+                    calls=state.get("calls", 0), ended_with=str(text or "")[:120])
+        try:
+            self._add_session_message("assistant", answer)
+        except Exception as exc:
+            log.warning("Finished answer not added to the session", error=str(exc))
+        return answer, True
+
+    def _extra_work_reply(self, extra_text: str) -> str:
+        """The answer as delivered, with what the extra-work step added shown
+        under it — or the answer alone when the step added nothing."""
+        state = self._extra_work or {}
+        answer = str(state.get("reply", "") or "")
+        added = str(extra_text or "").strip()
+        nothing = (
+            not added
+            or int(state.get("calls", 0)) == 0          # words alone are not work
+            or added.upper().rstrip(". ").startswith(drive.NOTHING_TO_ADD)
+        )
+        if nothing:
+            return answer
+        return f"{answer}\n\n---\n**Also done (not asked for)**\n\n{added[:_EXTRA_WORK_NOTE_CHARS]}"
 
     # ------------------------------------------------------------------
     # Check before delivering (Drive)
