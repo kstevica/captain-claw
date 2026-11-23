@@ -453,11 +453,7 @@ class AgentSeat:
         base_temp = 0.7
         if self.cognitive_mode and self.cognitive_mode != "neutra":
             from captain_claw.cognitive_mode import get_mode_params
-            params = get_mode_params(self.cognitive_mode)
-            # tempo_bias ranges 0.0–1.0; map to temperature adjustment
-            # Low tempo_bias (e.g. ionian=0.3) → lower temp (more focused)
-            # High tempo_bias (e.g. lydian=0.8) → higher temp (more creative)
-            base_temp = 0.4 + (params.tempo_bias * 0.6)  # range: 0.4–1.0
+            base_temp = get_mode_params(self.cognitive_mode).game_temperature
         return base_temp
 
     async def decide(self, state: State, char_id: str) -> Intent:
