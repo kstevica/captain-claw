@@ -425,7 +425,7 @@ playbooks:
     region: global
     sites: [one.google.com, drive.google.com]
     inputs:
-      how_many: {label: Biggest files to list, kind: number, default: 10}
+      how_many: {label: Biggest files to list, kind: number, default: 10, min: 1}
     open: https://one.google.com/storage
     steps:
       - kind: do

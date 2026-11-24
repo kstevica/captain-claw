@@ -245,7 +245,7 @@ playbooks:
       destination: {label: To, kind: place}
       date: {label: Date, kind: date}
       time: {label: Around, kind: time, default: "08:00"}
-      travellers: {label: Travellers, kind: number, default: 1}
+      travellers: {label: Travellers, kind: number, default: 1, min: 1}
     open: https://www.thetrainline.com/
     steps:
       - kind: type
@@ -280,7 +280,7 @@ playbooks:
       origin: {label: From, kind: place}
       destination: {label: To, kind: place}
       date: {label: Date, kind: date}
-      travellers: {label: Travellers, kind: number, default: 1}
+      travellers: {label: Travellers, kind: number, default: 1, min: 1}
     open: https://www.omio.com/
     steps:
       - kind: type
@@ -315,7 +315,7 @@ playbooks:
       origin: {label: From, kind: place}
       destination: {label: To, kind: place}
       date: {label: Date, kind: date}
-      travellers: {label: Travellers, kind: number, default: 1}
+      travellers: {label: Travellers, kind: number, default: 1, min: 1}
     open: https://www.flixbus.com/
     steps:
       - kind: type
@@ -348,7 +348,7 @@ playbooks:
       destination: {label: To, kind: place}
       date: {label: Date, kind: date}
       time: {label: Around, kind: time, default: "09:00"}
-      travellers: {label: Travellers, kind: number, default: 1}
+      travellers: {label: Travellers, kind: number, default: 1, min: 1}
       passengers: {label: Passenger names, kind: text, hint: "First and last name of each traveller, as on their ID"}
       email: {label: Email for the tickets, kind: text}
       phone: {label: Phone for trip updates, kind: text, hint: "With the country code, e.g. +49 …"}
@@ -386,7 +386,7 @@ playbooks:
       origin: {label: From, kind: place, hint: "e.g. London St Pancras, Paris Gare du Nord, Brussels-Midi, Amsterdam Centraal"}
       destination: {label: To, kind: place}
       date: {label: Date, kind: date}
-      travellers: {label: Travellers, kind: number, default: 1}
+      travellers: {label: Travellers, kind: number, default: 1, min: 1}
     open: https://www.eurostar.com/
     steps:
       - kind: do
@@ -470,7 +470,7 @@ playbooks:
       origin: {label: From port, kind: place}
       destination: {label: To port, kind: place}
       date: {label: Date, kind: date}
-      travellers: {label: Passengers, kind: number, default: 1}
+      travellers: {label: Passengers, kind: number, default: 1, min: 1}
       vehicle: {label: Vehicle, kind: choice, options: [none, car, motorhome, motorcycle, bicycle], default: none}
     open: https://www.directferries.com/
     steps:
@@ -497,7 +497,7 @@ playbooks:
     sites: [ferryhopper.com]
     inputs:
       legs: {label: Legs, kind: text, hint: "Each leg with its date, e.g. Piraeus→Paros 10 Jun; Paros→Naxos 13 Jun"}
-      travellers: {label: Passengers, kind: number, default: 1}
+      travellers: {label: Passengers, kind: number, default: 1, min: 1}
     open: https://www.ferryhopper.com/en/
     steps:
       - kind: do
@@ -528,7 +528,7 @@ playbooks:
       destination: {label: To, kind: place}
       date: {label: Departure, kind: date}
       return_date: {label: Return, kind: date, required: false, ask: before}
-      travellers: {label: Travellers, kind: number, default: 1}
+      travellers: {label: Travellers, kind: number, default: 1, min: 1}
       cabin: {label: Class, kind: choice, options: [economy, premium economy, business, first], default: economy}
     open: https://www.google.com/travel/flights?q=Flights%20to%20{destination}%20from%20{origin}%20on%20{date}
     steps:
@@ -640,7 +640,7 @@ playbooks:
       destination: {label: Going to, kind: place}
       checkin: {label: Depart, kind: date}
       checkout: {label: Return, kind: date}
-      adults: {label: Adults, kind: number, default: 2}
+      adults: {label: Adults, kind: number, default: 2, min: 1}
     open: https://www.expedia.com/Vacation-Packages
     steps:
       - kind: do
@@ -958,8 +958,8 @@ playbooks:
       place: {label: Where, kind: place}
       checkin: {label: Check-in, kind: date}
       checkout: {label: Check-out, kind: date}
-      adults: {label: Adults, kind: number, default: 2}
-      rooms: {label: Rooms, kind: number, default: 1}
+      adults: {label: Adults, kind: number, default: 2, min: 1}
+      rooms: {label: Rooms, kind: number, default: 1, min: 1}
       wants: {label: Must have, kind: text, default: "", hint: "e.g. free cancellation, breakfast, under 150 a night, 8+ rating"}
     open: https://www.booking.com/searchresults.html?ss={place}&checkin={checkin}&checkout={checkout}&group_adults={adults}&no_rooms={rooms}&group_children=0
     steps:
@@ -986,7 +986,7 @@ playbooks:
       hotel: {label: Hotel, kind: text}
       checkin: {label: Check-in, kind: date}
       checkout: {label: Check-out, kind: date}
-      adults: {label: Adults, kind: number, default: 2}
+      adults: {label: Adults, kind: number, default: 2, min: 1}
       room: {label: Room, kind: text, default: cheapest with free cancellation}
       guest_name: {label: Guest's full name, kind: text}
       email: {label: Email for the confirmation, kind: text}
@@ -1051,7 +1051,7 @@ playbooks:
       place: {label: Where, kind: place}
       checkin: {label: Check-in, kind: date}
       checkout: {label: Check-out, kind: date}
-      adults: {label: Guests, kind: number, default: 2}
+      adults: {label: Guests, kind: number, default: 2, min: 1}
       wants: {label: Must have, kind: text, default: "", hint: "e.g. entire place, 2 bedrooms, washer, under 120 a night"}
     open: https://www.airbnb.com/s/{place}/homes?checkin={checkin}&checkout={checkout}&adults={adults}
     steps:
@@ -1080,7 +1080,7 @@ playbooks:
       hotel: {label: Hotel, kind: text, hint: "Hotel name and city"}
       checkin: {label: Check-in, kind: date}
       checkout: {label: Check-out, kind: date}
-      adults: {label: Guests, kind: number, default: 2}
+      adults: {label: Guests, kind: number, default: 2, min: 1}
     open: https://www.google.com/travel/search?q={hotel}
     steps:
       - kind: do
@@ -1323,7 +1323,7 @@ playbooks:
       car: {label: Car model, kind: text, hint: "Make, model, battery and year, e.g. Tesla Model 3 Long Range 2024"}
       origin: {label: From, kind: place}
       destination: {label: To, kind: place}
-      start_charge: {label: Starting charge %, kind: number, default: 80}
+      start_charge: {label: Starting charge %, kind: number, default: 80, max: 100}
     open: https://abetterrouteplanner.com/
     steps:
       - kind: do

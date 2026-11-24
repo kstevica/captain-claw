@@ -297,7 +297,7 @@ playbooks:
     sites: [google.com]
     inputs:
       vendors: {label: Vendors, kind: text, hint: "Two to six names, comma separated"}
-      seats: {label: Team size, kind: number, default: 10}
+      seats: {label: Team size, kind: number, default: 10, min: 1}
       must_have: {label: Must-have features, kind: text, default: ""}
     open: https://www.google.com/
     steps:
@@ -327,7 +327,7 @@ playbooks:
     sites: [google.com]
     inputs:
       company: {label: Company or product, kind: text}
-      count: {label: How many, kind: number, default: 8}
+      count: {label: How many, kind: number, default: 8, min: 1}
     open: https://www.google.com/search?q={company}%20competitors%20alternatives
     steps:
       - kind: do
@@ -578,7 +578,7 @@ playbooks:
     sites: [arxiv.org]
     inputs:
       topic: {label: Topic, kind: text}
-      count: {label: How many, kind: number, default: 10}
+      count: {label: How many, kind: number, default: 10, min: 1}
     open: https://arxiv.org/search/?query={topic}&searchtype=all&order=-announced_date_first
     steps:
       - kind: do
@@ -1281,8 +1281,8 @@ playbooks:
     inputs:
       category: {label: Kind of business, kind: text}
       city: {label: City, kind: place}
-      count: {label: How many, kind: number, default: 20}
-      min_rating: {label: Minimum rating, kind: number, default: 0}
+      count: {label: How many, kind: number, default: 20, min: 1}
+      min_rating: {label: Minimum rating, kind: number, default: 0, max: 5}
     open: https://www.google.com/maps/search/{category}%20in%20{city}
     steps:
       - kind: do

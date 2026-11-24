@@ -663,7 +663,7 @@ playbooks:
     sites: [amazon.com]
     inputs:
       item: {label: What to reorder, kind: text}
-      quantity: {label: How many, kind: number, default: 1}
+      quantity: {label: How many, kind: number, default: 1, min: 1}
     open: https://www.amazon.com/gp/buyagain
     steps:
       - kind: do
@@ -778,7 +778,7 @@ playbooks:
     sites: [instacart.com, instacart.ca]
     inputs:
       recipe: {label: Recipe, kind: text, hint: "A recipe link, or a dish name the agent finds a recipe for"}
-      servings: {label: Servings, kind: number, default: 4}
+      servings: {label: Servings, kind: number, default: 4, min: 1}
       store: {label: Store, kind: text, default: the store the person used last}
     open: https://www.instacart.com/store
     steps:

@@ -535,3 +535,36 @@ async def test_where_the_dialog_cant_reach_them_the_agent_offers_what_it_found(m
                      suggested={"destination": {"value": "Split", "from": "you said on Monday"}})
     assert not res.success
     assert "offering what you found: destination = 'Split' (you said on Monday)" in res.error
+
+
+# ── a number that can't be right ─────────────────────────────────────
+
+CHEAP = {"origin": "Zagreb", "destination": "Lanzarote", "around": "2027-01-01"}
+
+
+async def test_a_number_out_of_range_is_asked_with_its_usual_value_suggested(monkeypatch, browser, asked):
+    monkeypatch.setattr(pb, "ask_person", _real_ask_person)
+    _no_deck(monkeypatch, {"person_connected": True, "extension_set_up": True})
+    asked["reply"] = (200, {"ok": True, "answers": {"nights": 5}})
+    res = await _run(id="googleflights.cheapest_dates", inputs={**CHEAP, "nights": "-51"})
+    assert res.success, res.error
+    (q,) = asked["questions"]
+    assert q["id"] == "nights" and q["number"] is True and q["min_value"] == 0
+    assert q["suggested"] == 7 and q["suggested_from"] == "its usual value"
+    assert "“-51” can't be right: at least 0." in q["help"]
+    from captain_claw.flight_deck import person_asks
+
+    person_asks.check_questions(asked["questions"])
+    assert "set the return 5 nights after 2027-01-01" in res.content
+
+
+async def test_where_the_dialog_cant_reach_them_an_out_of_range_number_stops_the_run(monkeypatch, browser, asked):
+    monkeypatch.setattr(pb, "ask_person", _real_ask_person)
+    _no_deck(monkeypatch)
+    asked["reply"] = (200, {"ok": False, "no_answer": True, "elsewhere": True, "error": "They're in whatsapp"})
+    res = await _run(id="googleflights.cheapest_dates", inputs={**CHEAP, "nights": -51})
+    assert not res.success and browser["calls"] == []
+    assert "never pick one yourself: nights “-51” (Nights: at least 0, usually 7)" in res.error
+    assert "in your reply (the dialog can't reach them: They're in whatsapp)" in res.error
+    # A suggestion out of range is dropped, never offered.
+    assert pb.suggestions(pb.wp.by_id("googleflights.cheapest_dates"), {"nights": -3}) == {}

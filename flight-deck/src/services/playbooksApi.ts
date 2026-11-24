@@ -41,6 +41,9 @@ export interface PlaybookInput {
   default?: string | number | boolean
   options?: string[]
   hint?: string
+  // A number's range (min is 0 unless the playbook says otherwise).
+  min?: number
+  max?: number
 }
 
 export interface Playbook extends PlaybookSummary {

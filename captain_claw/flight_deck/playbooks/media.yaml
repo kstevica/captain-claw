@@ -326,7 +326,7 @@ playbooks:
     sites: [x.com, twitter.com]
     inputs:
       handle: {label: Account, kind: text, hint: "The @handle without the @"}
-      count: {label: How many, kind: number, default: 10}
+      count: {label: How many, kind: number, default: 10, min: 1}
     open: https://x.com/{handle}
     steps:
       - kind: do

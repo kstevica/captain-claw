@@ -189,6 +189,10 @@ async def test_flight_decks_store_is_the_same_store_and_words_the_message(pdeck)
 
     bad = await c.post("/fd/playbooks/maps.travel_time/compose", headers=jwt, json={"inputs": {"origin": "Zagreb"}})
     assert bad.status_code == 400 and "To" in bad.json()["detail"]
+    # A number out of range (a scrolled number box sent -51 nights) never reaches the chat.
+    bad = await c.post("/fd/playbooks/googleflights.cheapest_dates/compose", headers=jwt, json={"inputs": {
+        "origin": "Zagreb", "destination": "Lanzarote", "around": "2027-01-01", "nights": "-51"}})
+    assert bad.status_code == 400 and "nights (Nights) is at least 0 (got -51)" in bad.json()["detail"]
     got = (await c.post("/fd/playbooks/maps.travel_time/compose", headers=jwt,
                         json={"inputs": {"origin": "Zagreb", "destination": "Split"}, "note": "Before noon"})).json()
     assert got["link"] == "https://www.google.com/maps/dir/?api=1&origin=Zagreb&destination=Split&travelmode=driving"
@@ -199,3 +203,13 @@ async def test_flight_decks_store_is_the_same_store_and_words_the_message(pdeck)
     assert "vfs:" not in text and "Without web_playbook" not in text    # short: it's the person's own bubble
     assert not pdeck["agent"].frames   # nothing sent: Flight Deck sends it in the chat
     assert (await c.get("/fd/playbooks/maps.travel_time", headers=jwt)).json()["runs"] == 1
+
+
+def test_a_number_out_of_range_never_reaches_the_chat():
+    book = bp.wp.by_id("googleflights.cheapest_dates")
+    checked = bp.wp.check_values(book, {"origin": "Zagreb", "destination": "Lanzarote", "around": "2027-01-01",
+                                        "nights": "-51"})
+    assert checked["problems"] == ["nights (Nights) is at least 0 (got -51)"]
+    shown = bp.detail(book)
+    nights = next(i for i in shown["inputs"] if i["name"] == "nights")
+    assert nights["min"] == 0 and nights["default"] == 7

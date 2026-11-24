@@ -471,8 +471,9 @@ function PlaybookSheet({ id, agents, preferAgentId, chrome, onClose, onMine, onC
   const more = book?.inputs.filter((i) => !main.includes(i)) || []
   const missing = main.filter((i) => i.ask === 'before' && !String(values[i.name] ?? '').trim())
   const here = (book?.inputs || []).filter((i) => i.kind === 'place' && HERE.test(String(values[i.name] ?? 'x')))
+  const outOfRange = (book?.inputs || []).filter((i) => rangeProblem(i, values[i.name]))
   const agent = usable.find((a) => a.id === agentId)
-  const blocked = missing.length > 0 || here.length > 0
+  const blocked = missing.length > 0 || here.length > 0 || outOfRange.length > 0
   const needsChrome = book?.where === 'chrome' || book?.where === 'prefer_chrome'
 
   const run = async () => {
@@ -492,7 +493,9 @@ function PlaybookSheet({ id, agents, preferAgentId, chrome, onClose, onMine, onC
 
   const runLabel = sending ? 'Starting…' : !agent ? 'No agent is up — start one first'
     : missing.length ? `Fill in ${missing.map((i) => i.label).slice(0, 2).join(' and ')}`
-      : here.length ? `Give ${here[0].label} as a town or address` : `Run in ${agent.name}'s chat`
+      : here.length ? `Give ${here[0].label} as a town or address`
+        : outOfRange.length ? `${outOfRange[0].label} is ${rangeProblem(outOfRange[0], values[outOfRange[0].name])}`
+          : `Run in ${agent.name}'s chat`
 
   return createPortal(
     <div className="fd-fade fixed inset-0 z-[60] flex items-stretch justify-center bg-black/50 backdrop-blur-[2px] wide:items-center wide:p-4" onClick={onClose}>
@@ -645,6 +648,19 @@ function Badge({ tone, icon: Icon, children }: { tone?: 'amber' | 'emerald'; ico
   )
 }
 
+// What's wrong with a number the person typed ("at least 0"), or '': the
+// deck and the agent's tool check it again.
+function rangeProblem(i: PlaybookInput, raw: unknown): string {
+  const text = String(raw ?? '').trim()
+  if (i.kind !== 'number' || !text) return ''
+  const n = Number(text.replace(',', '.'))
+  if (!Number.isFinite(n)) return 'a number'
+  const out = (i.min !== undefined && n < i.min) || (i.max !== undefined && n > i.max)
+  if (!out) return ''
+  return i.min !== undefined && i.max !== undefined ? `${i.min} to ${i.max}`
+    : i.min !== undefined ? `at least ${i.min}` : `at most ${i.max}`
+}
+
 function Field({ i, value, set }: { i: PlaybookInput; value: string | boolean | undefined; set: (v: string | boolean) => void }) {
   const optional = !i.required || i.default !== undefined
   const dflt = i.default !== undefined && i.default !== '' && i.default !== false ? String(i.default) : ''
@@ -702,6 +718,7 @@ function Field({ i, value, set }: { i: PlaybookInput; value: string | boolean | 
   const v = typeof value === 'string' ? value : type === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(dflt) ? dflt : type === 'time' && /^\d{2}:\d{2}$/.test(dflt) ? dflt : ''
   const Icon = i.kind === 'place' ? MapPin : i.kind === 'url' ? Globe : null
   const here = i.kind === 'place' && HERE.test(String(value ?? 'x'))
+  const bad = rangeProblem(i, v)
   return (
     <label className="block">
       {label}
@@ -709,10 +726,16 @@ function Field({ i, value, set }: { i: PlaybookInput; value: string | boolean | 
         {Icon && <Icon className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />}
         <input type={type} value={v} onChange={(e) => set(e.target.value)} autoComplete="off"
           placeholder={i.kind === 'place' ? 'Town or address' : i.kind === 'url' ? 'https://…' : dflt ? `Default: ${dflt}` : ''}
-          {...(type === 'number' ? { inputMode: 'decimal' as const, step: 'any' } : {})}
+          {...(type === 'number' ? {
+            inputMode: 'decimal' as const, step: 'any', min: i.min, max: i.max, 'aria-invalid': bad ? true : undefined,
+            // A focused number box counts up or down under the wheel: scrolling
+            // the sheet over it once turned 7 nights into -51. Let go instead.
+            onWheel: (e: React.WheelEvent<HTMLInputElement>) => e.currentTarget.blur(),
+          } : {})}
           className={`${fieldCls} ${Icon ? 'pl-10' : ''}`} />
       </span>
-      {here ? <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">Type the town or address — a link can't carry where you are.</p>
+      {bad ? <p className="mt-1.5 text-xs text-red-600 dark:text-red-400">{i.label} is {bad}.</p>
+        : here ? <p className="mt-1.5 text-xs text-amber-700 dark:text-amber-300">Type the town or address — a link can't carry where you are.</p>
         : help || (type === 'date' && dflt && !v ? <p className="mt-1.5 text-xs text-zinc-500">Leave it for {dflt}.</p> : null)}
     </label>
   )
