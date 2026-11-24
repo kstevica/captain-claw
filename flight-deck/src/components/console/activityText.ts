@@ -199,7 +199,7 @@ const TOOL_ACTIVITY: Record<string, string | ((args: Args) => string)> = {
   payments: 'preparing a payment', spend: 'preparing a payment',
   ask_user: 'asking you something', ask_human: 'asking you something',
   playbooks: 'pulling up a playbook', visualize: 'drawing a chart', synthesize_flow: 'sketching a workflow',
-  personality: 'adjusting its settings', model_switch: 'adjusting its settings', reasoning_effort: 'adjusting its settings',
+  personality: 'adjusting its settings', model_switch: 'adjusting its settings', reasoning_effort: 'adjusting its settings', drive_level: 'adjusting its settings',
   sessions: 'switching topics', topics: 'switching topics', clipboard: 'using the clipboard',
   hosting: 'publishing a page', public_link: 'making a share link',
   custom_tools: 'using one of your tools', apis: 'using a connected service', direct_api: 'using a connected service',

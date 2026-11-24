@@ -53,7 +53,7 @@ LOCAL_WRITES = frozenset({"write", "edit", "workspace_write", "docx", "xlsx", "p
                           "image_manipulation", "pocket_tts"})
 # Memory: a rehearsal keeps nothing.
 MEMORY_WRITES = frozenset({"insights", "topics", "intentions", "facts", "personality", "playbooks",
-                           "project_memory", "todo", "reasoning_effort"})
+                           "project_memory", "todo", "reasoning_effort", "drive_level"})
 # What only asks the owner, or only judges text: no world changes.
 SEND_ALLOWED = frozenset({"ask_human", "jev"})
 # Code, the screen, and other runs.

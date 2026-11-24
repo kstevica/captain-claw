@@ -16,7 +16,8 @@ import { SHARED_PREFIX, sharedContainerId, sharedSliceId } from '../utils/shared
 import { clampLevel, parsePick, parseProfile, type ReasoningProfile } from '../utils/reasoningEffort'
 import { parseModelSwitch, type ModelSwitchInfo } from '../utils/modelSwitch'
 import { effortFor, useReasoningStore } from './reasoningStore'
-import { driveFor } from './driveStore'
+import { driveFor, useDriveStore } from './driveStore'
+import { parseDrive } from '../services/driveLevels'
 
 // ── Chat persistence helpers ──
 
@@ -2340,6 +2341,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     ws.on('reasoning_effort', (data) => {
       const pick = parsePick(data.level)
       if (!shared && pick) useReasoningStore.getState().setEffort(containerId, pick)
+    })
+
+    // The agent changed its web chat Drive level (its drive_level tool) — as
+    // you would in the chat box, so the picker follows.
+    ws.on('drive', (data) => {
+      const raw = String(data.level ?? '')
+      if (shared || (raw !== 'auto' && parseDrive(raw) === 'auto')) return
+      useDriveStore.getState().setDrive(containerId, parseDrive(raw))
     })
 
     // The agent switched models (its model_switch tool) — the pickers follow;

@@ -62,7 +62,8 @@ _DB_MODULES = ("nervous_system", "sister_session", "intentions", "cognitive_metr
 STUBS = ("insights", "playbooks", "datastore", "write", "edit", "typesense", "send_mail",
          "web_fetch", "shell", "google_mail", "cron", "consult_peer", "flight_deck",
          "mcp_github_create_issue", "vfs", "read", "glob", "grep", "history", "knowledge", "topics",
-         "web_search", "todo", "contacts", "docx", "xlsx", "pptx", "reasoning_effort", "activity", TOOL_NAME)
+         "web_search", "todo", "contacts", "docx", "xlsx", "pptx", "reasoning_effort", "drive_level", "activity",
+         TOOL_NAME)
 
 
 # ── isolation and fakes ──────────────────────────────────────────────

@@ -109,6 +109,8 @@ CONTENT_TURN_TOOLS: dict[str, frozenset[str] | None] = {
     "pptx": frozenset({"read", "check"}),
     # How hard the owner's agent thinks: no member data goes anywhere.
     "reasoning_effort": None,
+    # How far the owner's agent pushes: the same.
+    "drive_level": None,
     # The agent's own calls in its owner's turns: read-only, no member data.
     "activity": None,
 }
