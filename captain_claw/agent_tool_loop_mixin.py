@@ -286,13 +286,60 @@ class AgentToolLoopMixin:
     # Shell command extraction from response
     # ------------------------------------------------------------------
 
-    def _extract_command_from_response(self, content: str) -> str | None:
+    # Words a shell runs itself, so they are on no PATH.
+    _SHELL_WORDS = frozenset({
+        "alias", "bg", "break", "builtin", "case", "cd", "command", "continue",
+        "declare", "dirs", "do", "echo", "eval", "exec", "exit", "export",
+        "fg", "for", "function", "hash", "if", "jobs", "local", "popd",
+        "printf", "pushd", "pwd", "read", "return", "set", "shift", "source",
+        "test", "time", "trap", "type", "ulimit", "umask", "unalias", "unset",
+        "until", "wait", "while", ".", "[", "[[", "{", "(", "!",
+    })
+
+    @classmethod
+    def _starts_with_command_word(cls, text: str) -> bool:
+        """Whether the first word of *text* is something a shell could run.
+
+        An unlabelled code block is as often a file's content, a table or
+        sample output as it is a command.  It counts as a command only when
+        it opens with a shell word, a program on PATH or a path to one
+        (``VAR=value`` prefixes are skipped).
+        """
+        import re
+        import shutil
+
+        first_line = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+        if first_line.startswith("$ "):
+            first_line = first_line[2:].lstrip()
+        words = first_line.split()
+        while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+            words.pop(0)
+        if not words:
+            return False
+        word = words[0]
+        if word in cls._SHELL_WORDS:
+            return True
+        if word.startswith(("./", "../", "~/", "/")):
+            return True
+        if not re.match(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*$", word):
+            return False
+        return shutil.which(word) is not None
+
+    def _extract_command_from_response(
+        self, content: str, *, allow_fenced: bool = True,
+    ) -> str | None:
         """Extract shell command from model response.
 
         Looks for:
         - ```bash\\ncommand\\n``` or ```shell\\ncommand\\n```
+        - an unlabelled ``` block that opens with a command word
         - "I'll run: command"
         - "Running: command"
+
+        ``allow_fenced=False`` skips the code-block forms: the caller passes
+        it once the model has made real tool calls this turn, when a code
+        block in the reply shows something (a written file, output) and is
+        not a request to run it.
         """
         import re
 
@@ -300,17 +347,24 @@ class AgentToolLoopMixin:
             return None
 
         # Only match explicit shell/code blocks or explicit commands
+        # (pattern, is a code block, has no language label)
         patterns = [
-            r'```(?:bash|shell|sh)\s*\n(.*?)\n```',  # ```bash\ncommand\n```
-            r'```\s*\n(.*?)\n```(?:\s|$)',  # ```\ncommand\n``` followed by whitespace or end
-            r"I'(?:ll| will) run[:\s]+[`\"]?(.+?)[`\"]?(?:\n|$)",  # I'll run: `command`
-            r"(?:exec|execute)[:\s]+[`\"](.+?)[`\"]",  # exec: `command`
+            (r'```(?:bash|shell|sh)\s*\n(.*?)\n```', True, False),  # ```bash\ncommand\n```
+            (r'```\s*\n(.*?)\n```(?:\s|$)', True, True),  # ```\ncommand\n``` followed by whitespace or end
+            (r"I'(?:ll| will) run[:\s]+[`\"]?(.+?)[`\"]?(?:\n|$)", False, False),  # I'll run: `command`
+            (r"(?:exec|execute)[:\s]+[`\"](.+?)[`\"]", False, False),  # exec: `command`
         ]
 
-        for pattern in patterns:
+        for pattern, fenced, unlabelled in patterns:
+            if fenced and not allow_fenced:
+                continue
             match = re.search(pattern, content, re.DOTALL | re.IGNORECASE)
             if match:
                 cmd = match.group(1).strip()
+                # An unlabelled block that does not open with a command is
+                # content being shown (file text, a table, output), never run.
+                if unlabelled and not self._starts_with_command_word(cmd):
+                    continue
                 # Must look like a shell command (has spaces or special chars)
                 if cmd and len(cmd) > 2 and (' ' in cmd or '|' in cmd or '&' in cmd or '/' in cmd):
                     # Reject tree-drawing characters and multi-line prose.

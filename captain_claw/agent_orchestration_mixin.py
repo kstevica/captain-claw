@@ -3769,7 +3769,12 @@ class AgentOrchestrationMixin:
                 continue
 
             # ── Inline command fallback ────────────────────────────
-            command = self._extract_command_from_response(response.content)
+            # A model that already made real tool calls this turn calls the
+            # shell the same way when it wants it: a code block in its reply
+            # then shows something (the file it wrote, output) and is not run.
+            command = self._extract_command_from_response(
+                response.content, allow_fenced=_tools_executed_count == 0,
+            )
             if command:
                 _tools_executed_count += 1
                 _inline_text = str(response.content or "").strip()
