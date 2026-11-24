@@ -2271,22 +2271,40 @@ async function watchAsks() {
   showAsks([])
 }
 
+// The agent's suggested answer (ask_user's `suggested`, from the chat, its
+// memory or the person's profile): a choice starts on it, marked; a text box
+// shows it greyed and Tab writes it in, as in Flight Deck's dialog.
+const hasSuggestion = (q) => q.suggested !== undefined && q.suggested !== null && q.kind !== 'secret'
+const suggestedTag = '<span class="tag">suggested</span>'
+
 function askField(q) {
   const id = `askq-${esc(q.id)}`
+  const hint = hasSuggestion(q)
   if (q.kind === 'choice') {
-    return q.choices.map((c, i) => `<label class="opt"><input type="radio" name="${id}" value="${esc(c)}" ${q.default === c || (!q.default && i === 0 && !q.optional) ? 'checked' : ''}><div>${esc(c)}</div></label>`).join('')
+    const start = q.default ?? (hint ? q.suggested : undefined)
+    return q.choices.map((c, i) => `<label class="opt"><input type="radio" name="${id}" value="${esc(c)}" ${start === c || (start === undefined && i === 0 && !q.optional) ? 'checked' : ''}><div>${esc(c)}${hint && q.suggested === c ? ` ${suggestedTag}` : ''}</div></label>`).join('')
   }
   if (q.kind === 'multiple') {
-    return q.choices.map((c) => `<label class="opt"><input type="checkbox" name="${id}" value="${esc(c)}" ${(q.default || []).includes(c) ? 'checked' : ''}><div>${esc(c)}</div></label>`).join('')
+    const marked = hint && Array.isArray(q.suggested) ? q.suggested : []
+    return q.choices.map((c) => `<label class="opt"><input type="checkbox" name="${id}" value="${esc(c)}" ${(q.default || []).includes(c) ? 'checked' : ''}><div>${esc(c)}${marked.includes(c) ? ` ${suggestedTag}` : ''}</div></label>`).join('')
   }
   if (q.kind === 'confirm') {
-    return `<label class="opt"><input type="radio" name="${id}" value="yes" ${q.default === true ? 'checked' : ''}><div>Yes</div></label>
-      <label class="opt"><input type="radio" name="${id}" value="no" ${q.default === false ? 'checked' : ''}><div>No</div></label>`
+    const start = q.default ?? (hint ? q.suggested : undefined)
+    return `<label class="opt"><input type="radio" name="${id}" value="yes" ${start === true ? 'checked' : ''}><div>Yes${hint && q.suggested === true ? ` ${suggestedTag}` : ''}</div></label>
+      <label class="opt"><input type="radio" name="${id}" value="no" ${start === false ? 'checked' : ''}><div>No${hint && q.suggested === false ? ` ${suggestedTag}` : ''}</div></label>`
   }
   if (q.kind === 'secret') return `<input type="password" name="${id}" autocomplete="off">`
+  const ghost = hint ? ` placeholder="${esc(String(q.suggested))}" data-suggest="${esc(String(q.suggested))}"` : ''
   return q.lines > 1
-    ? `<textarea name="${id}" rows="${Math.min(q.lines, 8)}">${esc(q.default || '')}</textarea>`
-    : `<input type="text" name="${id}" value="${esc(q.default || '')}" autocomplete="off">`
+    ? `<textarea name="${id}" rows="${Math.min(q.lines, 8)}"${ghost}>${esc(q.default || '')}</textarea>`
+    : `<input type="text" name="${id}" value="${esc(q.default || '')}" autocomplete="off"${ghost}>`
+}
+
+function suggestionNote(q) {
+  if (!hasSuggestion(q)) return ''
+  const typed = !['choice', 'multiple', 'confirm'].includes(q.kind)
+  const from = q.suggested_from ? ` — ${esc(q.suggested_from)}` : ''
+  return `<div class="dim">${typed ? '<kbd>Tab</kbd> takes the suggestion' : 'Suggested'}${from}</div>`
 }
 
 // Drawn only when the questions change: a redraw would drop what's being typed.
@@ -2305,6 +2323,7 @@ function showAsks(asks) {
           <div class="ask-text">${esc(q.question)}${q.optional ? ' <span class="dim">(optional)</span>' : ''}</div>
           ${q.help ? `<div class="dim">${esc(q.help)}</div>` : ''}
           ${askField(q)}
+          ${suggestionNote(q)}
         </div>`).join('')}
       <div class="notice err" id="askError" hidden></div>
       <div class="row">
@@ -2356,6 +2375,17 @@ $askLayer.addEventListener('click', (ev) => {
 })
 $askLayer.addEventListener('keydown', (ev) => {
   if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); sendAnswer(ev.target.closest('form'), false) }
+  // Tab in an empty box with a suggestion: write it in, and on to the next question.
+  const el = ev.target
+  if (ev.key === 'Tab' && !ev.shiftKey && !ev.metaKey && !ev.ctrlKey && !ev.altKey && !ev.isComposing
+      && el.dataset?.suggest && !el.value.trim()) {
+    ev.preventDefault()
+    el.value = el.dataset.suggest
+    const qs = [...el.closest('form').querySelectorAll('.ask-q')]
+    const next = qs.slice(qs.indexOf(el.closest('.ask-q')) + 1)
+      .map((box) => box.querySelector('input:not([type=radio]):not([type=checkbox]), textarea, input')).find(Boolean)
+    ;(next || el.closest('form').querySelector('button[type=submit]'))?.focus()
+  }
 })
 
 // ── web playbooks: chips for the site in front, the store, a playbook ──

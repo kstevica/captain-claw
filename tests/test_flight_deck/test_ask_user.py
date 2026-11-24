@@ -240,3 +240,53 @@ async def test_the_question_carries_the_agents_name_as_people_call_it(deck, as_a
     await deck.db.set_settings(member, {agent_names.NAMES_SETTING: json.dumps({"helper": "Research buddy"})})
     assert await agent_names.display_name("helper", member) == "Research buddy"
     assert await agent_names.display_names(owner, ["helper", "gone"]) == {"helper": "Haiku", "gone": "gone"}
+
+
+# ── suggested answers ────────────────────────────────────────────────
+
+
+def test_a_suggested_answer_is_kept_shaped_or_dropped_never_an_answer():
+    qs = asks.check_questions([
+        {"id": "country", "question": "Registered in?", "suggested": "Croatia", "suggested_from": "the plate's format"},
+        {"id": "period", "question": "How long?", "choices": ["1 day", "10 days"], "suggested": "10 DAYS"},
+        {"id": "both", "question": "Which?", "choices": ["a", "b", "c"], "multiple": True, "suggested": ["C", "a"]},
+        {"id": "ok", "question": "Go?", "confirm": True, "suggested": "yes"},
+        {"id": "people", "question": "People?", "number": True, "integer": True, "suggested": "4"},
+        {"id": "mail", "question": "Email?", "format": "email", "suggested": "not an email"},
+        {"id": "code", "question": "Code?", "secret": True, "suggested": "1234"},
+        {"id": "blank", "question": "Note?", "suggested": "   "},
+    ])
+    got = {q["id"]: (q.get("suggested"), q.get("suggested_from")) for q in qs}
+    assert got["country"] == ("Croatia", "the plate's format") and got["period"] == ("10 days", None)
+    assert got["both"] == (["a", "c"], None) and got["ok"] == (True, None) and got["people"] == (4, None)
+    assert got["mail"] == got["code"] == got["blank"] == (None, None)
+    # Not taken, not answered: a suggestion never stands in for the person.
+    with pytest.raises(asks.AskError):
+        asks.check_answers(qs[:1], {})
+    long_from = asks.check_questions([{"id": "a", "question": "A?", "suggested": "x", "suggested_from": "y " * 200}])
+    assert len(long_from[0]["suggested_from"]) <= asks.MAX_SUGGESTED_FROM
+
+
+def test_the_tool_passes_suggestions_and_says_which_were_taken():
+    one = ask_user.questions_from({"question": "Email?", "suggested": "a@example.com", "suggested_from": "your profile"})
+    assert one == [{"id": "answer", "question": "Email?", "suggested": "a@example.com", "suggested_from": "your profile"}]
+    assert ask_user.describe_answers(one, {"answer": "a@example.com"}) == "They answered: a@example.com (your suggestion)"
+    assert ask_user.describe_answers(one, {"answer": "b@example.com"}) == "They answered: b@example.com"
+    form = [{"id": "ok", "question": "Go?", "confirm": True, "suggested": True},
+            {"id": "n", "question": "Name?", "suggested": "Alex"}]
+    words = ask_user.describe_answers(form, {"ok": True, "n": "alex"})
+    assert "- Go?: yes (your suggestion)" in words and "- Name?: alex (your suggestion)" in words
+
+
+async def test_a_suggestion_reaches_the_dialog_and_comes_back_as_their_answer(deck, as_agent, tool_line):
+    as_agent["owner"] = deck.user["id"]
+    run = asyncio.create_task(AskUserTool().execute(
+        question="Which email for the receipt?", suggested="driver@example.com", suggested_from="your profile",
+        _agent=Turn()))
+    async with _client(deck.user) as person:
+        q = await _open_question(person)
+        shown = q["questions"][0]
+        assert shown["suggested"] == "driver@example.com" and shown["suggested_from"] == "your profile"
+        await person.post(f"/fd/asks/{q['id']}", json={"answers": {"answer": "driver@example.com"}})
+    result = await asyncio.wait_for(run, 60)
+    assert result.content == "They answered: driver@example.com (your suggestion)"
