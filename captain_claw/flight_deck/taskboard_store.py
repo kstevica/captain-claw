@@ -1481,23 +1481,34 @@ class TaskboardStore:
             self._conn.commit()
         return "new"
 
-    def mode_stats(self, user_id: str, since: float = 0.0) -> list[dict]:
-        """How *user_id*'s finished turns went, per agent and cognitive mode,
-        since *since*: how many, how they ended, their tool calls and how long
-        they took. Counts only; nothing a turn said."""
+    def _turn_stats(self, user_id: str, since: float, column: str) -> list[dict]:
+        """*user_id*'s finished turns since *since*, counted per agent and
+        *column* (a turns column named in code, never from a request)."""
+        assert column in ("cognitive_mode", "drive")
         with self._lock:
             rows = self._conn.execute(
-                "SELECT agent_slug, cognitive_mode, COUNT(*) AS turns,"
+                f"SELECT agent_slug, {column}, COUNT(*) AS turns,"
                 " SUM(outcome = 'ok') AS ok, SUM(outcome = 'error') AS error,"
                 " SUM(outcome = 'blocked') AS blocked, SUM(outcome = 'cancelled') AS cancelled,"
                 " SUM(tool_calls) AS tool_calls, SUM(failed_tool_calls) AS failed_tool_calls,"
                 " AVG(CASE WHEN ended_at >= started_at THEN ended_at - started_at END) AS avg_seconds"
                 " FROM turns WHERE user_id = ? AND outcome != '' AND open_ref != ''"
                 " AND gate != ? AND COALESCE(started_at, 0) >= ?"
-                " GROUP BY agent_slug, cognitive_mode ORDER BY agent_slug, cognitive_mode",
+                f" GROUP BY agent_slug, {column} ORDER BY agent_slug, {column}",
                 (user_id, TURN_DROPPED, float(since or 0.0))).fetchall()
         return [{**dict(r), "avg_seconds": round(r["avg_seconds"], 1) if r["avg_seconds"] is not None else None}
                 for r in rows]
+
+    def mode_stats(self, user_id: str, since: float = 0.0) -> list[dict]:
+        """How *user_id*'s finished turns went, per agent and cognitive mode,
+        since *since*: how many, how they ended, their tool calls and how long
+        they took. Counts only; nothing a turn said."""
+        return self._turn_stats(user_id, since, "cognitive_mode")
+
+    def drive_stats(self, user_id: str, since: float = 0.0) -> list[dict]:
+        """The same counts per agent and Drive level (drive.py; '' = a turn
+        from before levels were recorded)."""
+        return self._turn_stats(user_id, since, "drive")
 
     def drop_turn(self, turn_id: str, agent_slug: str, agent_owner_id: str, ref: str) -> None:
         """A turn that is nobody's to see (a member's words naming no member):

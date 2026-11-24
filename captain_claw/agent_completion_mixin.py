@@ -1177,7 +1177,7 @@ class AgentCompletionMixin:
                 tools=None,
                 interaction_label="delivery_check",
                 turn_usage=turn_usage,
-                max_tokens=min(800, int(get_config().model.max_tokens)),
+                max_tokens=min(1500, int(get_config().model.max_tokens)),
             )
             payload = self._extract_json_object(response.content or "")
         except Exception as exc:

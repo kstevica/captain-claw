@@ -1137,3 +1137,18 @@ async def test_a_turn_keeps_its_drive_level(api):
     await _send(api, _open(api, a, drive="persistent"), _open(api, b), _open(api, c, drive="turbo"))
     assert api.board.get_turn(a)["drive"] == "persistent"
     assert api.board.get_turn(b)["drive"] == "" == api.board.get_turn(c)["drive"]  # unreported, unknown
+
+
+async def test_stats_count_turns_by_drive_level(api):
+    a, b, c = _tid(), _tid(), _tid()
+    await _send(api, _open(api, a, drive="relaxed"), _close(api, a, tool_calls=1))
+    await _send(api, _open(api, b, drive="persistent"), _close(api, b, tool_calls=9, failed_tool_calls=2))
+    await _send(api, _open(api, c, drive="persistent"), _close(api, c, outcome="error", tool_calls=3))
+    rows = {r["drive"]: r for r in api.board.drive_stats(api.alice)}
+    assert set(rows) == {"relaxed", "persistent"}
+    p = rows["persistent"]
+    assert (p["agent_slug"], p["turns"], p["ok"], p["error"], p["tool_calls"], p["failed_tool_calls"]) == \
+        ("helper", 2, 1, 1, 12, 2)
+    assert rows["relaxed"]["turns"] == 1 and api.board.drive_stats(api.bob) == []
+    # The per-mode counts are unchanged by the shared query.
+    assert [(r["cognitive_mode"], r["turns"]) for r in api.board.mode_stats(api.alice)] == [("", 3)]
