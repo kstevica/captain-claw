@@ -765,10 +765,15 @@ function takeFrame(key: string, id: string, pick: 'oldest' | 'newest' = 'oldest'
   return i < 0 ? null : list.splice(i, 1)[0]
 }
 
-/** A command_result answered the oldest command still unanswered. */
-function takeCommandFrame(key: string) {
+/** A command_result answered the oldest command still unanswered. A new
+ *  session's (`newTopic`) may instead answer a typed "new topic" with nothing
+ *  after it: the agent ran /new for it and no turn follows, so no "thinking"
+ *  ever takes that frame. Left unanswered, a reconnect within the minute
+ *  held it and sent it again — a second new topic in the middle of the chat.
+ *  A cue with words after it is not taken here: its turn's "thinking" is. */
+function takeCommandFrame(key: string, newTopic = false) {
   const list = _sent.get(key)
-  const i = list ? list.findIndex((f) => f.cmd) : -1
+  const i = list ? list.findIndex((f) => f.cmd || (newTopic && stripCue(f.content) === '')) : -1
   if (list && i >= 0) list.splice(i, 1)
 }
 
@@ -2719,7 +2724,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // `/clear`, etc., because no later token/usage event clears busy.
       updateSession(key, { busy: false, statusText: '' })
       // The command's frame is answered (no "thinking" ever takes it).
-      takeCommandFrame(key)
+      takeCommandFrame(key, isNew)
       // …and if the command came from the queue, retire it so the row stops
       // spinning and the next item can go out. Must run after busy is cleared
       // — tryDispatchNext refuses to send while the session is busy.
