@@ -385,7 +385,8 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
     (_re.compile(r"\bhow\s+(?:long|far)\b|\bwhere(?:'s|\s+is)\s+my\b|\btrack(?:ing)?\b|\bparcel\b|\bpackage\b|"
                  r"\bflights?\b|\btrains?\b|\bferr(?:y|ies)\b|\binvoices?\b|\breceipts?\b|\bstatements?\b|"
                  r"\bbook(?:ing)?\s+a\b|\breserv|\bsubscriptions?\b|\bcheapest\b|\bprice\s+of\b|"
-                 r"\bopen\s+now\b|\bopening\s+hours\b|\bplaybook\b", _re.I),
+                 r"\bopen\s+now\b|\bopening\s+hours\b|\bplaybook\b|\bvignettes?\b|\bvinjet\w*|\btolls?\b|"
+                 r"\bcestarin\w*", _re.I),
      frozenset({"web_playbook", "browser"})),
     # Hosting / publishing a VFS folder to the web. Without this, eco mode
     # strips the `hosting` tool's schema and the agent — knowing only that a
