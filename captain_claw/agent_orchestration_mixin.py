@@ -1625,6 +1625,9 @@ class AgentOrchestrationMixin:
         # stall ("Let me…", "I'll fetch…").  Capped by MAX_STALL_RETRIES
         # so a genuinely-stuck turn still terminates.
         self._stall_retry_count: int = 0
+        # The check before delivering (Drive, agent_completion_mixin) runs at
+        # most once per turn.
+        self._delivery_check_done: bool = False
         # Reset per-turn counter of replies turned down as made-up tool work
         # (a false send, a made-up ID, a narrated lookup): one budget for all,
         # MAX_FABRICATION_RETRIES, apart from the stall one — see the gate
