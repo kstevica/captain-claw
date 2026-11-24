@@ -76,6 +76,14 @@ class DriveLevel:
     # once, and sends it back when something asked for is missing.
     delivery_check: bool = False
 
+    # Extra work (agent_completion_mixin, agent_guard_mixin): once the asked
+    # work is delivered, the agent may add one obvious next step, with
+    # reading and file-writing tools only, using at most ``initiative_share``
+    # of a turn's base step budget in tool calls. Needs ``drive.initiative``
+    # on in the agent's config as well (:func:`initiative_enabled`).
+    initiative: bool = False
+    initiative_share: float = 0.0
+
 
 LEVELS: dict[str, DriveLevel] = {
     "relaxed": DriveLevel(
@@ -93,13 +101,14 @@ LEVELS: dict[str, DriveLevel] = {
         step_ceiling_multiplier=6, step_ceiling_cap=450, free_extension_multiplier=3,
         validation_retries=3, validation_retries_after_list=2, stall_retries=3,
         delivery_check=True),
-    # Same limits as Persistent until its extra-work part is built (plan, phase 5).
+    # Persistent's limits, plus the extra-work step.
     "ambitious": DriveLevel(
         "ambitious", "Ambitious",
-        "As Persistent for now; doing the obvious next step is still to come.",
+        "As Persistent, and may add one obvious next step where that is switched on. "
+        "Slowest, costs the most.",
         step_ceiling_multiplier=6, step_ceiling_cap=450, free_extension_multiplier=3,
         validation_retries=3, validation_retries_after_list=2, stall_retries=3,
-        delivery_check=True),
+        delivery_check=True, initiative=True, initiative_share=0.25),
 }
 
 _ALIASES = {"relax": "relaxed", "default": "", "auto": "", "normal": "diligent",
@@ -176,6 +185,44 @@ def current_name(agent: Any | None = None) -> str:
 
 def current(agent: Any | None = None) -> DriveLevel:
     return LEVELS[current_name(agent)]
+
+
+def initiative_enabled() -> bool:
+    """The agent's own switch for extra work (``drive.initiative``): off
+    unless its config turns it on. Never raises."""
+    try:
+        from captain_claw.config import get_config
+
+        return bool(get_config().drive.initiative)
+    except Exception:
+        return False
+
+
+# ── Extra work: what may run ──────────────────────────────────────────
+
+# File-writing tools an extra-work step may use, beside every tool call that
+# only reads. Everything else is refused: nothing that runs code, reaches
+# anyone, spends, schedules, or changes a store the person keeps.
+EXTRA_WORK_WRITE_TOOLS = frozenset({"write", "edit", "docx", "xlsx", "pptx", "visualize"})
+# Reading tools that are still not for an unasked step: they put a question
+# to the person.
+EXTRA_WORK_NEVER = frozenset({"ask_user", "ask_human", "request_secret"})
+NOTHING_TO_ADD = "NOTHING TO ADD"
+
+
+def extra_work_allows(tool: str, arguments: Any = None) -> bool:
+    """Whether an extra-work step may call *tool*: a call that only reads (as
+    Flight Deck's tool-call register classes it, from the tool's name and
+    action alone), or one of the file-writing tools. Unknown tools are not
+    allowed."""
+    from captain_claw.flight_deck.tool_risk import risk_for
+
+    name = str(tool or "").strip().lower()
+    if name in EXTRA_WORK_NEVER:
+        return False
+    if name in EXTRA_WORK_WRITE_TOOLS:
+        return True
+    return risk_for(name, arguments) == "read"
 
 
 def level_to_dict(level: DriveLevel) -> dict[str, Any]:

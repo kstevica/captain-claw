@@ -1628,6 +1628,9 @@ class AgentOrchestrationMixin:
         # The check before delivering (Drive, agent_completion_mixin) runs at
         # most once per turn.
         self._delivery_check_done: bool = False
+        # Drive's extra-work step: None until the asked work is delivered at
+        # Ambitious, then its state for the rest of the turn.
+        self._extra_work: dict[str, Any] | None = None
         # Reset per-turn counter of replies turned down as made-up tool work
         # (a false send, a made-up ID, a narrated lookup): one budget for all,
         # MAX_FABRICATION_RETRIES, apart from the stall one — see the gate
@@ -1805,6 +1808,10 @@ class AgentOrchestrationMixin:
                 pass
 
         def finish(text: str, success: bool = True) -> str:
+            # A turn that ends while its extra-work step is still open (out of
+            # steps, stuck, cancelled, a guard) still owes the person the
+            # answer that was finished before the step began.
+            text, success = self._extra_work_rescue(text, success)
             self._emit_thinking("", phase="done")
             self._turn_request_messages = None   # held for the made-up ID check only
             if planning_pipeline is not None:

@@ -805,6 +805,27 @@ class AgentGuardMixin:
 
         if name == tool_search.SEARCH_TOOLS_NAME and not self.tools.has_tool(name):
             return tool_search.run(self, arguments)
+        # Drive's extra-work step (agent_completion_mixin): what the agent adds
+        # unasked may only read and write files, a bounded number of times.
+        _extra = getattr(self, "_extra_work", None)
+        if isinstance(_extra, dict) and _extra.get("active"):
+            from captain_claw import drive as drive_levels
+            from captain_claw.tools.registry import ToolResult as _RefusedResult
+
+            _why = ""
+            if not drive_levels.extra_work_allows(name, arguments):
+                _extra["refused"] = int(_extra.get("refused", 0)) + 1
+                _why = (
+                    f"'{name}' is not available for extra work: only tools that read, and tools "
+                    "that write files, may be used for a step nobody asked for. Leave it, and "
+                    "finish with what you have."
+                )
+            elif int(_extra.get("calls", 0)) >= int(_extra.get("limit", 0)):
+                _why = "The tool calls allowed for extra work are used up. Finish now with what you have."
+            if _why:
+                self._audit_refused_tool(name, arguments, f"Extra work: {_why}", session_id_override)
+                return _RefusedResult(success=False, error=_why)
+            _extra["calls"] = int(_extra.get("calls", 0)) + 1
         guard_payload = json.dumps(
             {
                 "tool_name": name,
