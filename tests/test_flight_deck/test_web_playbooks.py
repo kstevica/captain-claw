@@ -311,3 +311,28 @@ def test_a_read_is_tried_only_where_the_opened_page_may_answer():
     assert not wp.answers_as_opened(wp.by_id("googleplay.cancel_subscription"))   # an act never reads first
     looks = [b for b in wp.seed() if b["kind"] == "look"]
     assert 100 < sum(map(wp.answers_as_opened, looks)) < len(looks)
+
+
+# ── number ranges ────────────────────────────────────────────────────
+
+
+def test_a_number_input_has_a_range_and_a_value_outside_it_is_the_persons_to_fix():
+    base = {"id": "x.nums", "title": "Numbers", "says": ["a", "b"], "kind": "look", "where": "any", "region": "global",
+            "sites": ["example.com"], "open": "https://example.com/?n={n}", "read": {"r": "R"}}
+    book = wp.clean_playbook({**base, "inputs": {"n": {"label": "N", "kind": "number", "default": 7}}}, "travel")
+    assert book["inputs"]["n"]["min"] == 0 and "max" not in book["inputs"]["n"]
+    book = wp.clean_playbook({**base, "inputs": {"n": {"label": "N", "kind": "number", "min": 1, "max": 9}}}, "travel")
+    assert wp.range_words(book["inputs"]["n"]) == "1 to 9"
+    checked = wp.check_values(book, {"n": "-51"})
+    assert checked["out_of_range"] == ["n"] and checked["problems"] == ["n (N) is 1 to 9 (got -51)"]
+    assert wp.check_values(book, {"n": "4"})["values"] == {"n": "4"}
+    for bad, why in (({"kind": "number", "min": 5, "max": 1}, "min is above max"),
+                     ({"kind": "text", "min": 1}, "only a number has min and max"),
+                     ({"kind": "number", "default": -2}, "out of its range"),
+                     ({"kind": "number", "max": "ten"}, "max must be a number")):
+        with pytest.raises(wp.PlaybookError, match=why):
+            wp.clean_playbook({**base, "inputs": {"n": {"label": "N", **bad}}}, "travel")
+    # The shipped ones: nights can't go below 0, people below 1.
+    assert wp.by_id("googleflights.cheapest_dates")["inputs"]["nights"]["min"] == 0
+    assert wp.by_id("booking.reserve")["inputs"]["adults"]["min"] == 1
+    assert wp.by_id("abrp.ev_route_plan")["inputs"]["start_charge"]["max"] == 100

@@ -229,7 +229,7 @@ playbooks:
     sites: [bbcgoodfood.com]
     inputs:
       dish: {label: Dish or recipe link, kind: text}
-      servings: {label: Servings wanted, kind: number}
+      servings: {label: Servings wanted, kind: number, min: 1}
       units: {label: Units, kind: choice, options: [metric, US cups and ounces, as written], default: metric}
     open: https://www.bbcgoodfood.com/search?q={dish}
     steps:
@@ -258,7 +258,7 @@ playbooks:
     sites: [bbcgoodfood.com]
     inputs:
       nights: {label: Dinners, kind: number, default: 5}
-      people: {label: People, kind: number, default: 2}
+      people: {label: People, kind: number, default: 2, min: 1}
       diet: {label: Diet or style, kind: text, default: "", hint: "Vegetarian, low-carb, kid-friendly"}
       max_minutes: {label: Most minutes per dinner, kind: number, default: 45}
     open: https://www.bbcgoodfood.com/search?q={diet}+dinner
