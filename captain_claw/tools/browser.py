@@ -834,9 +834,10 @@ class BrowserTool(Tool):
     async def _go(self, session: BrowserSession, url: str,
                   kwargs: dict[str, Any]) -> tuple[dict[str, Any], ToolResult | None]:
         """Navigate, and tell a site's bot wall from its page: a wall (or a
-        connection the site dropped) is noted for the session, and the answer
-        says what to try next — at last, asking the person for their Chrome
-        (web_blocked.py)."""
+        connection the site dropped) opens the page in the person's Chrome when
+        it's connected for agents — no asking — else it's noted for the
+        session, and the answer says what to try next (web_blocked.py). The
+        second value, when set, is the call's whole answer."""
         from captain_claw.tools import web_blocked
 
         try:
@@ -845,14 +846,62 @@ class BrowserTool(Tool):
             why = web_blocked.net_reason(str(e))
             if not why:
                 raise
-            note = await web_blocked.note_failure(kwargs, url, web_blocked.BROWSER, why)
+            moved = await self._to_their_chrome(url, why, kwargs)
+            if moved is not None:
+                return {}, moved
+            note = await web_blocked.note_failure(kwargs, url, web_blocked.BROWSER, why,
+                                                  tried_chrome=self._tried_chrome(kwargs))
             return {}, ToolResult(success=False, error=f"Browser navigate failed: {e}{note}")
         why = await self._wall_reason(session, nav_info)
         if why:
-            nav_info["wall_note"] = await web_blocked.note_failure(kwargs, url, web_blocked.BROWSER, why)
+            moved = await self._to_their_chrome(url, why, kwargs)
+            if moved is not None:
+                return {}, moved
+            nav_info["wall_note"] = await web_blocked.note_failure(kwargs, url, web_blocked.BROWSER, why,
+                                                                   tried_chrome=self._tried_chrome(kwargs))
         else:
             web_blocked.forget(kwargs, url, web_blocked.BROWSER)
         return nav_info, None
+
+    @staticmethod
+    def _tried_chrome(kwargs: dict[str, Any]) -> bool:
+        return bool(kwargs.get("_chrome_tried"))
+
+    async def _to_their_chrome(self, url: str, why: str, kwargs: dict[str, Any]) -> ToolResult | None:
+        """The site walls the headless browser: open it in the person's own
+        Chrome instead — when it's connected for agents and they haven't
+        pressed Stop — and stay there for the session. None when it isn't
+        there (or a page that just never loaded: that's no wall), or it
+        didn't get there either; then the usual note follows."""
+        from captain_claw.tools import web_blocked
+
+        if why == "the page never finished loading" or not web_blocked.can_lend_chrome(kwargs):
+            return None
+        if not web_blocked.chrome_usable(await web_blocked.chrome_status()):
+            return None
+        from captain_claw.tools.browser_chrome import ChromeHands, call_deck, note_used
+
+        kwargs["_chrome_tried"] = True
+        hands = ChromeHands({**kwargs, "url": url, "target": "chrome"})
+        try:
+            data = await call_deck("navigate", hands._args(), 40.0)
+        except Exception as e:  # noqa: BLE001 — the usual note then
+            log.info("Blocked page: the person's Chrome didn't answer", url=url, error=str(e)[:200])
+            return None
+        if not data.get("ok") or data.get("own"):
+            return None     # not theirs after all (or it failed there): the usual note
+        note_used(kwargs)
+        result = hands._shape("navigate", data)
+        if not result.success:
+            return None
+        _TARGETS[str(kwargs.get("_session_id", "")).strip() or "default"] = "chrome"
+        site = web_blocked.site_of(url) or url
+        result.content = (
+            f"{site} blocks your headless browser ({why}), so it opened in the person's own Chrome instead — "
+            "connected for agents, signed in as them. Keep working in that tab: your next browser calls go there "
+            "(target=\"chrome\"). Don't ask them about it, and don't say you couldn't get the page.\n\n"
+            + (result.content or ""))
+        return result
 
     @staticmethod
     async def _wall_reason(session: BrowserSession, nav_info: dict[str, Any]) -> str:

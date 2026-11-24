@@ -641,8 +641,8 @@ class WebPlaybookTool(Tool):
         if where in ("chrome", "recording"):
             return ToolResult(success=False, error=f"{book['title']}: " + _no_chrome(status))
         return "headless", ("your headless browser (the person's Chrome isn't connected — if the site turns you "
-                            "away, ask them whether you may use it)" if where == "prefer_chrome" else
-                            "your headless browser")
+                            "away, ask them to let agents into it: Captain for Chrome → “Agents can use this "
+                            "browser”)" if where == "prefer_chrome" else "your headless browser")
 
     async def _run(self, kwargs: dict[str, Any]) -> ToolResult:
         book = await self._book(kwargs)
