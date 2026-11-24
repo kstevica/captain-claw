@@ -262,3 +262,36 @@ The same log line shows the shell call allowed because no approval callback was
 configured in this headless run.
 
 Still unmeasured: long tool-using tasks, other models, and a running deck.
+
+## 12. The level in the prompt (2026-11-24)
+
+The first use on a running deck showed the gap in §4: a research turn ends in four
+or five steps, so no limit is reached and every level behaves alike up to the
+answer. A Relaxed run came out more thorough than an Ambitious one (the prompts
+differed, and nothing told the model its level).
+
+Since this change the turn's system prompt carries one short paragraph for the
+level in effect (`DriveLevel.guidance`, appended after the cached part; nothing at
+Diligent, so its prompt is the prompt as it was):
+
+- Relaxed: shortest path to a correct, complete answer; do not widen or polish.
+- Persistent: go past the first adequate result, primary material, check the main
+  claims.
+- Ambitious: the most thorough result; wide net, follow leads, take the deeper way.
+
+Each ends with the same frame: it sets how far to go on substantial work, never
+what counts as true or finished, and the request outranks it.
+
+Check, Haiku, real agent, one task twice per level ("Look into the project in
+docs/ and write report.md on where it stands", 14 small files):
+
+| | Relaxed | Diligent | Persistent | Ambitious |
+|---|---|---|---|---|
+| Report, words | 694, 768 | 937, 839 | 1087, 1025 | 1705, 1078 |
+| Output tokens | 4.6k, 4.0k | 4.5k, 5.5k | 9.0k, 7.4k | 13.2k, 7.4k |
+| Seconds | 23, 20 | 22, 27 | 43, 37 | 65, 37 |
+| Marked facts found (of 10) | 9, 8 | 9, 9 | 9, 9 | 9, 9 |
+
+Length and cost follow the level. Coverage does not separate them here: the folder
+is small enough that every level read all of it. Not measured: web research, long
+tasks, other models.

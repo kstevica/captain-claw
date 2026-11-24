@@ -87,13 +87,51 @@ class DriveLevel:
     initiative: bool = False
     initiative_share: float = 0.0
 
+    # What the model is told about the level (agent_context_mixin appends it
+    # to the turn's system prompt, after the cached part). The limits above
+    # only bite on long turns; this is what makes a short turn go further or
+    # stop sooner. Empty at Diligent: its prompt is the prompt as it was.
+    guidance: str = ""
+
+
+# Each says how far to go, in words that fit any kind of work. None changes
+# what counts as true or as done, and none outranks what the person asked.
+_GUIDE_FRAME = (
+    " This sets how far to go on substantial work. It never changes what "
+    "counts as true or finished, and what the person asked for outranks it: "
+    "a short question still gets a short answer."
+)
+_GUIDE_RELAXED = (
+    "Drive for this turn: Relaxed. The person wants this quick and cheap. "
+    "Take the shortest path to a correct, complete answer: use what is "
+    "already at hand first, look up only what the answer needs, and stop "
+    "when it is answered. Do not widen the search or polish." + _GUIDE_FRAME
+)
+_GUIDE_PERSISTENT = (
+    "Drive for this turn: Persistent. This work has to hold up, and the "
+    "person accepts that it takes longer and costs more. Go past the first "
+    "adequate result: use more sources or more passes than you would by "
+    "default, read the primary material rather than summaries of it, check "
+    "the main claims against something independent, and cover the parts a "
+    "careful reader would look for." + _GUIDE_FRAME
+)
+_GUIDE_AMBITIOUS = (
+    "Drive for this turn: Ambitious. The person wants the most thorough "
+    "result you can produce, and accepts the time and cost. Go well past the "
+    "first adequate result: cast a wide net before narrowing, read the "
+    "primary material rather than summaries of it, follow the leads that "
+    "turn up, check the main claims against something independent, and "
+    "include the detail someone would otherwise have to ask for next. Where "
+    "a quicker and a deeper way both exist, take the deeper one." + _GUIDE_FRAME
+)
 
 LEVELS: dict[str, DriveLevel] = {
     "relaxed": DriveLevel(
         "relaxed", "Relaxed",
         "Takes the first complete answer. Fastest and cheapest.",
         step_ceiling_multiplier=2, step_ceiling_cap=100, free_extension_multiplier=1,
-        validation_retries=0, validation_retries_after_list=0, stall_retries=2),
+        validation_retries=0, validation_retries_after_list=0, stall_retries=2,
+        guidance=_GUIDE_RELAXED),
     # The harness as it was before Drive: these are the old fixed numbers.
     "diligent": DriveLevel(
         "diligent", "Diligent",
@@ -103,7 +141,7 @@ LEVELS: dict[str, DriveLevel] = {
         "Keeps going longer and checks the result before delivering. Slower, costs more.",
         step_ceiling_multiplier=6, step_ceiling_cap=450, free_extension_multiplier=3,
         validation_retries=3, validation_retries_after_list=2, stall_retries=3,
-        delivery_check=True),
+        delivery_check=True, guidance=_GUIDE_PERSISTENT),
     # Persistent's limits, plus the extra-work step.
     "ambitious": DriveLevel(
         "ambitious", "Ambitious",
@@ -111,7 +149,8 @@ LEVELS: dict[str, DriveLevel] = {
         "Slowest, costs the most.",
         step_ceiling_multiplier=6, step_ceiling_cap=450, free_extension_multiplier=3,
         validation_retries=3, validation_retries_after_list=2, stall_retries=3,
-        delivery_check=True, initiative=True, initiative_share=0.25),
+        delivery_check=True, initiative=True, initiative_share=0.25,
+        guidance=_GUIDE_AMBITIOUS),
 }
 
 _ALIASES = {"relax": "relaxed", "default": "", "auto": "", "normal": "diligent",
@@ -202,6 +241,15 @@ def parse_switch(value: Any) -> bool | None:
 
 def render_switch(on: Any) -> str:
     return "on" if on else "off"
+
+
+def prompt_note(agent: Any | None = None) -> str:
+    """The line the turn's system prompt carries for the level in effect
+    ("" at Diligent). Never raises."""
+    try:
+        return current(agent).guidance
+    except Exception:
+        return ""
 
 
 def initiative_enabled() -> bool:
