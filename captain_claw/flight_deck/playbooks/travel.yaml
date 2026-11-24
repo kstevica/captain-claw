@@ -183,6 +183,51 @@ playbooks:
     answer: "{system}. {prices}. Buy at {where_to_buy}."
     tags: [tolls, vignette, driving]
 
+  # Labels from a real run on the official shop (German pages, 2026-11).
+  - id: asfinag.buy_vignette
+    title: Buy the Austrian digital vignette
+    says:
+      - Buy me the Austrian vignette.
+      - Let's buy the vignette for Austria.
+      - Get a 10-day vignette for Austria for my car.
+      - Order the annual Austrian motorway vignette for my plate.
+    kind: act
+    where: chrome
+    region: eu
+    sites: [shop.asfinag.at]
+    inputs:
+      plate: {label: Licence plate, kind: text, hint: "As on the plate, letters and digits"}
+      plate_country: {label: Country the car is registered in, kind: text, hint: "In English, e.g. Croatia"}
+      vehicle: {label: Vehicle, kind: choice, options: [car, motorcycle]}
+      period: {label: Vignette, kind: choice, options: [1 day, 10 days, 2 months, 1 year]}
+      start: {label: Valid from, kind: date}
+      email: {label: Email for the receipt, kind: text}
+      use_at_once: {label: Use it from that day (waives the right to withdraw), kind: flag,
+                    hint: "The shop asks this when the start is under 18 days away; without it the vignette starts on day 18"}
+    open: https://shop.asfinag.at/de/fahrzeugtypauswahl/?source=Vignette
+    steps:
+      - kind: do
+        text: 'A cookie banner first: "Nur mit essentiellen Cookies fortfahren".'
+      - kind: do
+        text: 'Pick the vehicle: "Auto (bis 3,5t)" for a car, the motorcycle one for a motorcycle.'
+      - kind: do
+        text: 'Press "Kaufen" on the {period} vignette (1-Tages-, 10-Tages-, 2-Monats- or Jahres-Vignette), then "Zum Warenkorb", then "Jetzt konfigurieren und bestellen".'
+      - kind: do
+        text: 'Fill in "Zulassungsstaat" ({plate_country}), "Kennzeichen" and "Kennzeichen (Wiederholung)" ({plate}) and "Startdatum" ({start}).'
+      - kind: do
+        text: 'If the box "Ich verlange die Nutzungsmöglichkeit …" shows (use from the start date, giving up the right to withdraw), tick it only if the person said yes to using it from that day; if they said no, stop here and tell them the shop needs it for that start date.'
+      - kind: click
+        target: {role: button, name: Weiter}
+      - kind: do
+        text: 'Fill in "E-Mail-Adresse" and "E-Mail-Adresse (Wiederholung)" ({email}). Leave the payment method, and the boxes for an account, an invoice address or a wallet file, to the person.'
+      - kind: do
+        text: 'Stop on this page ("Zahlungsinformation"): the person picks how to pay and presses "Weiter" themselves.'
+    read:
+      product: The vignette in the cart and its price
+      valid: The validity the shop shows for that start date
+    stop: Weiter
+    tags: [tolls, vignette, driving, austria]
+
   # ── Trains, buses, ferries ─────────────────────────────────────────────
 
   - id: trainline.train_search

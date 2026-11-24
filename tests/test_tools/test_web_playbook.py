@@ -4,10 +4,12 @@ Pinned here:
 
 * find lists the playbooks that fit an ask, with their inputs; show gives one
   in full; an unknown id points at close ones;
-* run opens the playbook's link through the browser tool, in the browser the
-  playbook needs — the person's Chrome when it needs their sign-in (or when
-  it's there and the site walls bots), else the headless one — and never
-  without the values it needs;
+* run opens the playbook's link through the browser tool — in the person's
+  Chrome whenever it's connected, whatever the playbook; else the headless
+  one, unless it needs their sign-in — and never without the values it needs;
+* what only the person can say, run asks them itself in one Flight Deck
+  dialog (ask_user's) and runs with their answers; where the dialog can't
+  reach them, the agent is told to ask in its reply;
 * a look whose page answers as opened comes back answered in one call (one
   quiet read on the agent's own model); otherwise the page stays open and the
   agent gets the steps with its values in them;
@@ -67,6 +69,11 @@ def browser(monkeypatch):
     monkeypatch.setattr(pb, "_STOPS", {})
     monkeypatch.setattr(pb, "_RECORDINGS", {})
     monkeypatch.setattr(browser_mod, "_TARGETS", {})
+
+    async def _cant_ask(book, names, kwargs):
+        return "cant", "it needs Flight Deck"
+
+    monkeypatch.setattr(pb, "ask_person", _cant_ask)
     return {"calls": calls, "pages": pages}
 
 
@@ -90,7 +97,7 @@ async def test_find_lists_what_fits_with_its_inputs(monkeypatch):
     res = await pb.WebPlaybookTool().execute(action="find", query="how long from Zagreb to Split by car")
     assert res.success
     first = res.content.split("\n")[1]
-    assert first.startswith("- maps.travel_time — How long from A to B (look; any browser)")
+    assert first.startswith("- maps.travel_time — How long from A to B (look; their Chrome if connected, else headless)")
     assert "inputs: origin, destination; optional: mode, depart_at" in res.content
     none = await pb.WebPlaybookTool().execute(action="find", query="zzqx")
     assert none.success and "No playbook fits" in none.content
@@ -281,7 +288,7 @@ async def test_the_persons_recordings_are_found_and_run_in_their_chrome(monkeypa
     monkeypatch.setattr(pb, "_recording", _one)
     monkeypatch.setattr(pb, "_recording_words", _words)
     found = await pb.WebPlaybookTool().execute(action="find", query="monthly VAT report")
-    assert found.content.startswith("The person's own recordings:\n- rec_0a1b2c3d4e5f — Monthly report (recording; their Chrome)")
+    assert found.content.startswith("The person's own recordings:\n- rec_0a1b2c3d4e5f — Monthly report (recording; their Chrome only)")
     res = await _run(id=REC["id"], inputs={"s3": "2026-11"})
     assert res.success and browser["calls"][0][1] == {**browser["calls"][0][1], "target": "chrome",
                                                       "url": "https://portal.example/reports"}
@@ -313,3 +320,136 @@ async def test_a_link_that_wont_open_repeats_what_it_carried(monkeypatch, browse
     res = await _run(id="ecb.reference_rate", inputs={"currency": "USD"})
     assert not res.success and "currency = 'USD' — Lowercase three-letter code" in res.error
     assert "run it again with it fixed" in res.error
+
+
+# ── the person's Chrome first ────────────────────────────────────────
+
+
+async def test_any_playbook_runs_in_their_chrome_when_its_connected(monkeypatch, browser):
+    _no_deck(monkeypatch, {"person_connected": True, "extension_set_up": True})
+    res = await _run(id="maps.travel_time", inputs={"origin": "Zagreb", "destination": "Split"})
+    assert res.success and browser["calls"][0][1]["target"] == "chrome"
+    assert "in the person's Chrome" in res.content
+    # Stopped in the panel, or not there: the headless browser does for a playbook that may.
+    for status in ({"person_connected": True, "stopped": True}, {"person_connected": False}, {}):
+        _no_deck(monkeypatch, status)
+        browser["calls"].clear()
+        await _run(id="maps.travel_time", inputs={"origin": "Zagreb", "destination": "Split"})
+        assert browser["calls"][0][1]["target"] == "headless"
+
+
+async def test_no_fit_points_at_their_chrome_when_its_connected(monkeypatch):
+    _no_deck(monkeypatch, {"person_connected": True, "extension_set_up": True})
+    res = await pb.WebPlaybookTool().execute(action="find", query="zzqx")
+    assert "No playbook fits" in res.content and pb.NO_FIT_CHROME in res.content
+    assert "ask_user, every question in one dialog" in res.content
+    _no_deck(monkeypatch, {"person_connected": False})
+    res = await pb.WebPlaybookTool().execute(action="find", query="zzqx")
+    assert pb.NO_FIT_CHROME not in res.content and "ask_user" in res.content
+
+
+# ── asking the person ────────────────────────────────────────────────
+
+
+def test_the_questions_follow_the_inputs():
+    book = pb.wp.by_id("asfinag.buy_vignette")
+    names = list(book["inputs"])
+    questions, ids = pb.ask_questions(book, names)
+    by_id = {q["id"]: q for q in questions}
+    assert ids == {n: n for n in names}
+    assert by_id["plate"]["help"].startswith("For “Buy the Austrian digital vignette”.")
+    assert by_id["vehicle"]["choices"] == ["car", "motorcycle"]
+    assert by_id["period"]["choices"] == ["1 day", "10 days", "2 months", "1 year"]
+    assert by_id["start"]["format"] == "date" and by_id["use_at_once"]["confirm"] is True
+    assert "18 days" in by_id["use_at_once"]["help"] and "help" not in by_id["email"]
+    odd = {"id": "x.y", "title": "T", "inputs": {"a" * 41: {"label": "Long", "kind": "place"}}}
+    questions, ids = pb.ask_questions(odd, ["a" * 41])
+    assert ids == {"input_1": "a" * 41} and "A town or an address." in questions[0]["help"]
+
+
+@pytest.fixture
+def asked(monkeypatch):
+    """ask_user's dialog, answered as told."""
+    from captain_claw.tools import ask_user
+
+    seen: dict[str, Any] = {"reply": (200, {"ok": True, "answers": {}})}
+
+    async def follow(questions, wait_s, agent, stream=None, waiting=""):
+        seen.update(questions=questions, wait_s=wait_s, agent=agent, waiting=waiting)
+        return seen["reply"]
+
+    monkeypatch.setattr(ask_user, "_fd_base", lambda: "http://fd.test")
+    monkeypatch.setattr(ask_user, "ask_and_follow", follow)
+    return seen
+
+
+async def test_a_run_asks_the_person_for_what_it_still_needs_and_goes_on(monkeypatch, browser, asked):
+    monkeypatch.setattr(pb, "ask_person", _real_ask_person)
+    _no_deck(monkeypatch)
+    asked["reply"] = (200, {"ok": True, "answers": {"destination": "Split"}})
+    agent = FakeAgent()
+    res = await _run(id="maps.travel_time", inputs={"origin": "Zagreb"}, _agent=agent)
+    assert res.success, res.error
+    assert [q["id"] for q in asked["questions"]] == ["destination"] and asked["agent"] is agent
+    assert "How long from A to B" in asked["waiting"] and asked["wait_s"] == pb.ASK_WAIT_S
+    assert "destination=Split" in browser["calls"][0][1]["url"]
+
+
+async def test_an_act_playbook_asks_once_then_fills_in_their_chrome(monkeypatch, browser, asked):
+    monkeypatch.setattr(pb, "ask_person", _real_ask_person)
+    _no_deck(monkeypatch, {"person_connected": True, "extension_set_up": True})
+    asked["reply"] = (200, {"ok": True, "answers": {
+        "plate_country": "Croatia", "vehicle": "car", "period": "10 days", "start": "2026-12-01",
+        "email": "driver@example.com", "use_at_once": True}})
+    res = await _run(id="asfinag.buy_vignette", inputs={"plate": "AB123CD"})
+    assert res.success, res.error
+    assert len(asked["questions"]) == 6 and "plate" not in [q["id"] for q in asked["questions"]]
+    nav = browser["calls"][0][1]
+    assert nav["target"] == "chrome" and nav["url"] == "https://shop.asfinag.at/de/fahrzeugtypauswahl/?source=Vignette"
+    assert 'Press "Kaufen" on the 10 days vignette' in res.content and "(AB123CD)" in res.content
+    assert 'Do these steps with the browser tool (target="chrome")' in res.content
+    assert "ask_user too, every question in one dialog" in res.content
+    armed = pb.armed_stop({"_session_id": "s1"})
+    assert armed["stop"] == "Weiter" and armed["left"] == 1 and armed["target"] == "chrome"
+
+
+async def test_a_run_the_person_wont_answer_doesnt_open(monkeypatch, browser, asked):
+    monkeypatch.setattr(pb, "ask_person", _real_ask_person)
+    _no_deck(monkeypatch)
+    asked["reply"] = (200, {"ok": False, "declined": True})
+    res = await _run(id="maps.travel_time", inputs={"origin": "Zagreb"})
+    assert not res.success and browser["calls"] == [] and "chose not to answer “To”" in res.error
+    asked["reply"] = (200, {"ok": False, "no_answer": True, "error": "no answer in time"})
+    res = await _run(id="maps.travel_time", inputs={"origin": "Zagreb"})
+    assert not res.success and browser["calls"] == [] and "no answer in time" in res.error
+    asked["reply"] = (200, {"ok": True, "answers": {"destination": "here"}})
+    res = await _run(id="maps.travel_time", inputs={"origin": "Zagreb"})
+    assert not res.success and browser["calls"] == []
+    assert "the person answered in the dialog" in res.error and "don't ask them again" in res.error
+
+
+async def test_where_the_dialog_cant_reach_them_the_agent_asks_in_its_reply(monkeypatch, browser, asked):
+    monkeypatch.setattr(pb, "ask_person", _real_ask_person)
+    _no_deck(monkeypatch)
+    asked["reply"] = (200, {"ok": False, "no_answer": True, "elsewhere": True,
+                            "error": "They're talking to you in whatsapp, where this dialog doesn't open"})
+    res = await _run(id="maps.travel_time", inputs={"origin": "Zagreb"})
+    assert not res.success and browser["calls"] == []
+    assert "ask them in your reply (the dialog can't reach them: They're talking to you in whatsapp" in res.error
+    from captain_claw.tools import ask_user
+
+    monkeypatch.setattr(ask_user, "_fd_base", lambda: "")
+    res = await _run(id="maps.travel_time", inputs={"origin": "Zagreb"})
+    assert "ask them in your reply (the dialog can't reach them: it needs Flight Deck)" in res.error
+
+
+_real_ask_person = pb.ask_person
+
+
+def test_every_shipped_playbooks_questions_are_a_dialog_flight_deck_takes():
+    from captain_claw.flight_deck import person_asks
+
+    for book in pb.wp.seed():
+        names = [n for n, s in book["inputs"].items() if s["required"] and "default" not in s and s["ask"] == "before"]
+        if names:
+            person_asks.check_questions(pb.ask_questions(book, names)[0])

@@ -242,7 +242,7 @@ def compose_turn(book: dict[str, Any], values: dict[str, Any], checked: dict[str
                      f"me what's ready — I press “{book['stop']}” myself.")
     steps = wp.step_lines(book, values)
     fallback = [f"Without web_playbook: open {wp.open_link(book, values)} with your browser tool"
-                + (" in my Chrome (target=\"chrome\")" if book["where"] in ("chrome", "prefer_chrome") else "")
+                + (" in my Chrome (target=\"chrome\")" if hands or book["where"] != "any" else "")
                 + (", then:" if steps else ", and read it.")]
     lines += [""] + fallback + steps
     if book.get("read"):
@@ -280,7 +280,7 @@ def brief_turn(book: dict[str, Any], values: dict[str, Any], checked: dict[str, 
         extra.append("You decide " + ", ".join(f"“{book['inputs'][n]['label']}”" for n in checked["decide"]) + ".")
     if checked.get("ask_during"):
         extra.append("Ask me for " + ", ".join(f"“{book['inputs'][n]['label']}”" for n in checked["ask_during"])
-                     + " when a step needs it.")
+                     + " with ask_user when a step needs it.")
     if book["kind"] == "act":
         extra.append(f"It stops before “{book['stop']}” — leave that page for me, I press it myself.")
     if extra:
