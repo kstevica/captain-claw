@@ -4,7 +4,7 @@
 
 New in 0.9.2. First Mate runs **factories**: standing jobs under your own account. Each one works on a charter you approve, is checked against goals you choose on every run, starts when you say, and spends from a weekly budget in tokens. You set one up once, and it keeps doing the job: drafting replies every weekday morning, building a list of leads, writing a weekly report.
 
-Every run is a [Bat](flight-deck.md#seven-orchestration-modes) run or a **list funnel**. A Bat run plans the work, does it in steps, checks itself and is judged by reviewers before it counts as done. A list funnel is the cheaper way to build a list of rows.
+Every run is a [Bat](flight-deck.md#seven-orchestration-modes) run or a **list funnel**. A Bat run plans the work, does it in steps, checks itself and is judged by reviewers before it counts as done. A list funnel is the cheaper way to build a list of rows. Since 0.9.3 the list funnel is a new factory's runner unless its result plainly isn't a list; factories you already have keep theirs.
 
 **On this page:** [What it is](#what-it-is) · [Turn it on (admins)](#turn-it-on-admins) · [Where to find it](#where-to-find-it) · [Your first factory](#your-first-factory) · [Read the charter and approve it](#read-the-charter-and-approve-it) · [Run it](#run-it) · [Budget and cap per run](#budget-and-cap-per-run) · [Watch a run](#watch-a-run) · [Read the result](#read-the-result) · [List funnels](#list-funnels) · [Mail and trust](#mail-and-trust) · [Record and checks](#record-and-checks) · [On your Line](#on-your-line) · [Archive](#archive) · [Asking an agent](#asking-an-agent) · [Limits and good to know](#limits-and-good-to-know)
 
@@ -58,7 +58,7 @@ Below them: **Needs you** (charters waiting for your approval, actions waiting f
    - With **Rewrite it as a full charter.** on (the default), First Mate adds what a run needs to be told: groups with an amount each, the columns, where each fact must come from, and what to do when one isn't found. It keeps every limit, number, name and link you gave.
    - With it off, your words become the charter as written. First Mate still drafts the name, the goals and when it starts.
    - This browser remembers your choice.
-   - One model call writes the name, the charter, its starts, its goals and up to three sealed test cases. A task whose result is a list of rows comes back with **List funnel** as its runner.
+   - One model call writes the name, the charter, its starts, its goals and up to three sealed test cases. The draft comes back with **List funnel** as its runner, unless it says the result isn't a list; then it comes back with **Agents** (0.9.3; before, only a task that was plainly a list got the funnel).
 3. **Or start from a template**: **Inbox drafts**, **Follow-up chaser**, **Weekly report**, **Price watch**, **Meeting prep** or **Research digest**. Each starts on a schedule and may not send, spend or sign up for anything.
 4. **From scratch**: click it, write a name ("Invoice chaser") and the charter, then **Create draft**.
 
@@ -79,7 +79,7 @@ Click the factory to open it. The **Charter** tab shows the draft as **Your char
 
    Untick a goal to leave it out; it stays on the list as **Off: not checked**. **All on** and **All off** switch every goal. **Add a goal…** adds your own, for example "at least 100 rows, no repeated Email".
 3. **When it runs**: **Only when I press Run now**, **Weekdays 08:00**, **Every day 08:00**, **Mondays 09:00**, or your own in the field next to them ("every 6 h", "weekly mon,thu 07:30").
-4. **How it runs**: **Agents** (workers search and reason in long turns: for research, documents, anything that isn't a list) or **List funnel** (see [List funnels](#list-funnels)).
+4. **How it runs**: **List funnel** (the usual way since 0.9.3, see [List funnels](#list-funnels)) or **Agents** (workers search and reason in long turns: for research, documents, anything that isn't a list).
 5. **Save** keeps your edits ("Changes not saved" shows until you do). **Discard draft** throws the draft away.
 6. Click **Approve and start**.
 
@@ -146,7 +146,7 @@ The factory's card on the page shows the latest result as a chip ("Result leads.
 
 A factory whose result is a list of rows ("small consulting firms in a region, each with a contact email", "every report in this folder that meets these rules") can run as a **list funnel**. Code searches, fetches pages, filters, merges duplicates and checks every row. A model is asked once per item, in a short fresh call: keep it, it came close, or drop it. Every value on the list must be on a page or in a file the run actually read. It costs far fewer tokens than agents working in long turns.
 
-**Getting one.** **Describe it → Draft it** picks **List funnel** for a list task. You can also pick it in any draft under **How it runs**. Picked for a task that isn't a list, a run goes to agents anyway.
+**Getting one.** New in 0.9.3: the list funnel is the default. **Describe it → Draft it** picks **List funnel** unless the draft says its result isn't a list, and a factory made with no runner named gets it too. Under **How it runs**, **List funnel** is listed first and **Agents** second; pick either in any draft. The built-in templates name their own runner, and existing factories keep the one they have. Picked for a task that isn't a list, a run goes to agents anyway.
 
 **Where items come from.** Web searches (list and directory pages in the results are followed), a list page, a links file, or your own files as extra data: tables (CSV, TSV, XLSX, JSON lines) and documents (PDF, Word, PowerPoint, Markdown, HTML). A pattern like `extra/report_*` stands for many files. A list built only from files never searches the web. A run first reads the links in your charter and your attached documents and writes a short brief that the rest of the run works from.
 
@@ -235,10 +235,13 @@ Agents under Flight Deck have the `first_mate` tool. On your own turns, an agent
 |---|---|
 | `list` | Every factory with its state, trust, health, last and next run, and what waits for you |
 | `status` | One factory: its charter, health, this week, trust, cases, last run and what it would do |
+| `runs` | New in 0.9.3. One factory's newest eight runs: how each ended, how long it took, and its result files as `vfs:` paths the agent reads with its file tools |
 | `run` | Like pressing **Run now**, with an optional note. A factory that asks first only rehearses |
 | `pause`, `resume` | Pause a factory (with a reason) or resume it |
 | `report` | Last week's or this week's report |
 | `draft` | Set up a new factory from your words. It waits for your approval |
+
+**A working run's folder is read-only** to your other agents (0.9.3). While a run is working, their file tools refuse to write, edit, move or delete in its folder; they can read it. The lock goes when the run ends, stops or waits for you. The run's own workers aren't held, and you can still change its files by hand in Flight Deck.
 
 An agent can't approve a charter, carry out what a factory would do or change its trust: those stay yours, on First Mate and the Line. The tool refuses inside any run or rehearsal, isn't offered on a shared agent's member turns, and follows the deck's switches.
 

@@ -80,6 +80,7 @@ New in 0.8.3, **experimental and opt-in**.
 - **Sending is off by default.** When on, an agent sends only to existing chats you whitelisted (it never starts a conversation), within a daily limit (30, up to 200), 6 a minute per chat, and never the same text to the same chat twice in 24 hours. Every message carries your signature. It never reacts, marks messages read or changes your presence. The fabrication guard catches a claimed WhatsApp send that didn't happen.
 - **Auto-replies in chats you choose.** Tick *auto-reply* on a whitelisted chat, pick one of your agents and its trigger words. The agent answers when it's named, called by a trigger word or `@word`, or replied to, and may keep talking for 15 minutes after its last message. It sees only that chat's last 30 messages and may run one web search; never your mail, files, calendar, memory or other chats. At most 10 answers an hour per chat; messages older than 10 minutes and other assistants are ignored; nobody in the chat can change its rules.
 - **Auto-reply activity** shows each decision: a one-line reason, the reply or the reason for silence, the model's reasoning, the search, tokens and time.
+- **Whether a message arrived** (0.9.3). **Sent by your agents** and **Auto-reply activity** show each message as **not delivered yet**, **delivered**, **read**, **phone asked for it again**, **WhatsApp turned it away** or, when no phone has confirmed it after 10 minutes, **not delivered**. WhatsApp taking a message isn't delivery: it can hold back what a linked device sends. Messages sent before the update show no state, and an admin turns WhatsApp Web off and on once after the update so delivery is tracked.
 - **A ban doesn't take your history.** **Disconnect** and **Switch number** ask whether to keep it; if WhatsApp bans the number or the device is removed on the phone, it's kept. Agents go on reading it, nothing is sent from it, and you delete it on the card when you want to.
 - Kill switches: `FD_WHATSAPP_WEB=off`, `FD_WHATSAPP_WEB_SEND=off`, `FD_WHATSAPP_WEB_AUTOREPLY=off`.
 
@@ -98,6 +99,8 @@ Nothing rings twice. In quiet hours only nudges reach phones, and devices get th
 ## Captain for Chrome
 
 *New in 0.8.8.* A browser extension (Chrome, Edge, Brave, Arc; Chromium 116+) that sends the page you're on to one of your agents. It reads the page **in your browser**, signed in and as you see it: a portal, an intranet, a paywalled article, a dashboard drawn by JavaScript. It also downloads the files the page links to with your session. An agent's own web tools, fetching from the server, would get a sign-in page or a bot wall instead, unless you let them search and read pages in your Chrome too (0.9.2, [below](#web-searches-and-web-pages-in-your-chrome)).
+
+**New in 0.9.3, Captain for Chrome 0.9.0:** a [robot check](#web-searches-and-web-pages-in-your-chrome) on an agent's search or page read is handed to you, and the panel has [playbooks](#playbooks-ready-made-ways-through-a-site) for the site you're on.
 
 - **Open it** with the toolbar icon, **Alt+Shift+C**, or a right-click on a page, a selection, a link or a picture. Pick an agent and an action:
 
@@ -138,6 +141,7 @@ The extension keeps a token of its own, `Browser · <browser>`, never a password
 - **Web pages**: LinkedIn, X, Facebook and other sites that turn a server away open the way they do for you. In **Profile → Personal → Web pages**, set **Read pages through my Chrome** to **Only pages that turn Flight Deck away** or **Every page**, and name the sites in **Only these sites**. Page reads need **Work on every site without asking**.
 - For LinkedIn and X: **Every page** with `linkedin.com, x.com, twitter.com`, and **Google** for searches.
 - Pages are read once they've finished drawing and been scrolled through, up to eight screens. The agent's result says it was read in your Chrome.
+- **A robot check goes to you** (0.9.3, Captain for Chrome 0.9.0). When a search or a page read meets a "prove you're human" page, the tab comes to the front, the agent's chat says it's waiting and the panel's log shows **Waiting for you**. Answer it and the search or read goes on in that tab. The agent waits up to 5 minutes when you're in its chat, 2 minutes for a run that started on its own; after that it falls back to the deck's own search or fetch and the tab stays open. Closing the tab means no: that site's checks aren't shown again for 10 minutes. The `browser` tool in your Chrome isn't covered.
 - Both are off until you pick them, and neither needs **Agents can use this browser**. When Chrome is closed, the deck searches and reads as before. The panel's **Settings** has a **Web searches** and a **Web pages** card, each with a switch to turn it off in that browser.
 
 Step by step, with example asks, safety and limits: [Web searches and pages in your Chrome](web-in-your-chrome.md).
@@ -145,6 +149,16 @@ Step by step, with example asks, safety and limits: [Web searches and pages in y
 ### Agents in this browser
 
 With **Agents can use this browser** on (panel **Settings**), your agents' `browser` tool works in this Chrome (`target="chrome"`), in tabs of their own, while you watch. Since 0.9.2 it waits for a page to finish drawing, not just loading, before it reads, and the first `page_text` scrolls through the page for sections drawn as you scroll. It also keeps working on a page where another extension put a frame, which keeps Chrome's debugger away: most actions run without it, and the few that need it (keys, hovering, dragging, clicks at a point, scripts) name the extension in the way. Setting that extension's **Site access** to **On click** in `chrome://extensions` and reloading the page clears it.
+
+### Playbooks: ready-made ways through a site
+
+*New in 0.9.3, Captain for Chrome 0.9.0.* A playbook is a known way to get something done on a website: where to go, what to fill in, what to read, where to stop. Captain ships 439.
+
+1. **Do it here**, under the page card, shows chips for the site in front of you: its playbooks and your own recordings made there. Past eight, **All N** opens the rest.
+2. **⚡** in the header opens the store, with **On this site**, **My playbooks** and **Popular**, then the categories and a search. Rows say **Looks it up** or **Fills it in**; **＋** keeps one in **My playbooks**.
+3. Open one, fill in its form and press **Run with ‹agent›**. The panel follows the run like a clip.
+
+A playbook that fills something in stops before its last button, and you press it. The same store is in Flight Deck under [Playbooks](flight-deck.md#playbooks), with the same **My playbooks**.
 
 ### Recordings: show it once, an agent does it after that
 
@@ -155,13 +169,13 @@ With **Agents can use this browser** on (panel **Settings**), your agents' `brow
 3. **Recordings → Run**: pick **Who does it**, fill in the values, add **Anything different this time? (optional)** and extra data for **Every run** or **This run only**, then press **Run with <agent>**. The agent works through the steps with its `browser` tool in tabs of its own in this Chrome, so it needs **Agents can use this browser** (the Run form offers **Let agents use this browser**). It stops to ask when a step doesn't fit the page.
 4. **Earlier runs**, under the Run button, lists each run with its status, agent, time and values.
 
-In Flight Deck, **Connections → Browser → Recordings** shows each recording's steps, its **Extra data · read before every run** (agents' files, deck files, pasted text, links, a conversation) and its runs. Runs start only from Captain for Chrome. Up to 200 recordings a person, 300 steps each; recordings are kept on the deck, so every browser you connect sees them.
+In Flight Deck, **Connections → Browser → Recordings** shows each recording's steps, its **Extra data · read before every run** (agents' files, deck files, pasted text, links, a conversation) and its runs. Runs start only from Captain for Chrome. Up to 200 recordings a person, 300 steps each; recordings are kept on the deck, so every browser you connect sees them. Since 0.9.3 a recording counts as a playbook: it shows in the **Do it here** chips on its site, and agents find it with the `web_playbook` tool.
 
 ### Updates and versions
 
 *New in 0.9.2.* The panel tells you when your Flight Deck has a newer Captain for Chrome: "Captain for Chrome <new> is ready — this one is <yours>." **Download** fetches it; unzip it over the folder you loaded the extension from and press **Reload**. **Later** hides the note for that version; the panel's **Settings** always shows it, with the panel's own version at the bottom. If the extension is newer than the deck's copy, the panel says the deck needs updating instead.
 
-**Connections → Browser** shows each connected browser's extension version, with the same note when it's behind or ahead. You can always download the deck's copy there with **Download the extension**. Extensions older than 0.5.1 can't show the note themselves. 0.9.2 ships Captain for Chrome 0.7.2.
+**Connections → Browser** shows each connected browser's extension version, with the same note when it's behind or ahead. You can always download the deck's copy there with **Download the extension**. Extensions older than 0.5.1 can't show the note themselves. 0.9.2 shipped Captain for Chrome 0.7.2; 0.9.3 ships 0.9.0.
 
 ## Captain for Mac
 

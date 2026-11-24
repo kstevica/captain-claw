@@ -343,6 +343,49 @@ Connections panel).
 - Flight Deck writes a rotating log at `<FD_DATA_DIR>/logs/flight_deck.log` (`FD_LOG_FILE` moves it or turns
   it off). Back up `first_mate.db` and `browser-recordings/` with the rest of the data folder.
 
+## What 0.9.3 changes for a team deck
+
+- **Update now: a path-traversal hole is closed.** Up to 0.9.2, Flight Deck's page handler served any path
+  it was asked for, so a request with `..` in it returned any file the deck's process could read, with no
+  sign-in, through a reverse proxy too. That includes the deck's `.env`. Do this:
+  1. Update the code and **restart every deck**, then every agent.
+  2. If the deck was reachable from outside your network, **change every secret in the deck's `.env`** and
+     in other files its process can read: model provider keys, `FD_JWT_SECRET`, mail and bot tokens. Treat
+     them as read.
+
+  After the update the page handler serves only files inside its own folder, and any request path with a
+  `..` part gets a 400 (plain, percent-encoded, encoded twice or with backslashes).
+- **Drive changes what turns cost.** Drive is how far an agent pushes (Relaxed, Diligent, Persistent,
+  Ambitious); Diligent is what agents did before.
+  - **Agents in the Ionian or Phrygian cognitive mode with no Drive default now run at Persistent**: longer
+    turns, and one more model call after every turn that used tools. To keep an agent as it was, set **How
+    far it pushes** to **Diligent** in its settings.
+  - **At Ambitious, extra work is on by default**: once the answer is done the agent may add one obvious
+    next step (reading and writing files only). Switch **At Ambitious, add the obvious next step** off per
+    agent, or set `drive.initiative: false` in the agent's config.
+  - `drive.default` in the config sets the level for turns nobody picked one for (empty means Diligent).
+    The agent's own setting, when it has one, comes first.
+  - People pick a level per chat in the chat box. Members of a shared agent don't get the picker, and the
+    `drive_level` tool refuses on turns that aren't the owner's.
+- **Captain for Chrome is 0.9.0.** Each person downloads it from **Connections → Browser**, unzips it over
+  the folder Chrome loaded and presses **Reload**. Restart Flight Deck and the agents first.
+- **Google Drive file picker** (optional, admin, once). It lets people pick single Drive files for their
+  agents (**Connections → Google → Files from your Google Drive → Pick files from Google Drive**). In your
+  Google Cloud project, enable the Google Picker API and create a browser API key; add the deck's address to
+  the OAuth client's **Authorized JavaScript origins**; paste the key into **Picker API key** in the Google
+  credentials. The section is hidden where full Drive access is already connected.
+- **WhatsApp Web: turn it off and on for the deck once after the restart** (Flight Deck keeps using a
+  running WhatsApp Web service whatever its code version), so delivery is tracked (**delivered**,
+  **read**, **not delivered** …). Messages sent before that show no state.
+- **Idle pause waits longer for slow tasks.** A scheduled task is paused after the longer of the admin's
+  days or twice the task's own period, so a weekly task waits two weeks even with the setting at 3 days.
+- **Usage on a person's own API keys is counted as theirs**, not as the deck's spend.
+- **The deck raises its own open-file limit at start**, and a deck on a host without Docker no longer runs
+  out of open files.
+- **New factories run on the list funnel** (First Mate). Existing factories and the built-in templates keep
+  their runner.
+- No new Python dependencies, no new environment variables and no migrations to run.
+
 ## What 0.9.1 changes for a team deck
 
 - **Anonymization** works for everyone with code alone. For bare names, an admin sets a **trusted model**

@@ -16,7 +16,7 @@ Video guides: **[the complete Captain guide](https://www.youtube.com/watch?v=Veh
 | **[Vatra, Basna and Council](vatra-basna-council.md)** | Your agents as a team, step by step: which one to pick, starting a run in the kiosk or the full layout, reading the result, continuing and stopping |
 | **[First Mate](first-mate.md)** | Standing jobs that run for you: turning it on, drafting and approving a charter, goals, runs, budget, results, list funnels, trust and the Line |
 | **[Web searches and pages in your Chrome](web-in-your-chrome.md)** | Your agents' searches on Google or Bing in your Chrome, and pages read signed in as you: LinkedIn, X and sites that turn a server away |
-| **[Inside an agent](agents.md)** | Every supported model, the 83 built-in tools, safety guards, the agent web UI |
+| **[Inside an agent](agents.md)** | Every supported model, the 85 built-in tools, safety guards, the agent web UI |
 | **[Architecture](architecture.md)** | Where each component lives in the code |
 | **[What's new](whats-new.md)** | Every release, newest first |
 

@@ -8,6 +8,13 @@ carry on in Flight Deck.
 
 Works in Chrome, Edge, Brave and Arc (Chromium 116+).
 
+This is version **0.9.0**, shipped with Captain Claw 0.9.3. New since 0.7.2: a
+[robot check](#a-robot-check-on-the-way-you-answer-it-the-agent-goes-on) on an
+agent's search or page read is handed to you, and the panel has
+[playbooks](#playbooks--ready-made-ways-to-get-things-done): **Do it here**
+chips for the site you're on and a store behind **⚡**. Your recordings count
+as playbooks too.
+
 ## Install
 
 1. In Flight Deck: **Connections → Browser → Download the extension**, and
@@ -26,6 +33,10 @@ The panel tells you when your Flight Deck has a newer version: **Download** it,
 unzip it over the folder you loaded, then press **Reload** (or the reload arrow
 on `chrome://extensions`). If the extension is newer than the deck's copy, it
 says that instead — the deck needs updating.
+
+Coming from 0.7.2 (Captain Claw 0.9.2): update and restart Flight Deck and the
+agents first, then download 0.9.0 from **Connections → Browser**, unzip it over
+the folder Chrome loaded and press **Reload**.
 
 ## Use
 
