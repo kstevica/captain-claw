@@ -5192,6 +5192,20 @@ class AgentContextMixin:
             # reports it apart from the static instructions.
             _dynamic = system_prompt.partition("<!-- CACHE_SPLIT -->")[2]
             self._turn_system_prompt_dynamic_tokens = self._count_tokens(_dynamic) if _dynamic.strip() else 0
+        # Drive: tell the model how far to go this turn (drive.py). Added
+        # after the cached prompt, at its very end, so the static part's
+        # cache and the per-turn prompt cache above are untouched; nothing at
+        # Diligent. The limits alone never reach a turn that ends in a few
+        # steps — without this, every level researched alike.
+        try:
+            from captain_claw import drive as _drive
+
+            _drive_note = _drive.current(self).guidance
+        except Exception:
+            _drive_note = ""
+        if _drive_note:
+            system_prompt = f"{system_prompt.rstrip()}\n\n{_drive_note}\n"
+            system_tokens += self._count_tokens(_drive_note)
         messages = [Message(role="system", content=system_prompt)]
         context_budget = max(1, int(cfg.context.max_tokens))
         # Never budget more history than the provider will actually accept.

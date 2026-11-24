@@ -197,3 +197,35 @@ def test_the_picker_and_the_deck_agree_on_levels_and_suggestions():
     assert re.findall(r"\{ id: '(\w+)', label: '(\w+)'", ts) == [(l.name, l.label) for l in drive.list_levels()]
     suggests = dict(re.findall(r"(\w+): '(\w+)'", re.search(r"MODE_SUGGESTS[^=]*= \{([^}]*)\}", ts).group(1)))
     assert suggests == {m.name: m.suggested_drive for m in cm.list_modes() if m.suggested_drive}
+
+
+# ── What the model is told ────────────────────────────────────────────
+
+
+def test_diligent_adds_nothing_to_the_prompt_and_every_other_level_says_how_far_to_go():
+    assert drive.LEVELS["diligent"].guidance == ""
+    for name in ("relaxed", "persistent", "ambitious"):
+        text = drive.LEVELS[name].guidance
+        assert text.startswith(f"Drive for this turn: {drive.LEVELS[name].label}.")
+        # The frame: never what is true or done, and the request outranks it.
+        assert "never changes what counts as true or finished" in text
+        assert "what the person asked for outranks it" in text
+        # No shouting and no fixed scripts (the lesson of the old mode texts).
+        assert not any(w.isupper() and len(w) > 3 for w in text.split())
+        assert "step 1" not in text.lower() and "always" not in text.lower()
+    assert "quick and cheap" in drive.LEVELS["relaxed"].guidance
+    assert "primary material" in drive.LEVELS["persistent"].guidance
+    assert "take the deeper one" in drive.LEVELS["ambitious"].guidance
+
+
+def test_the_prompt_line_follows_the_level_in_effect(monkeypatch, tmp_path):
+    monkeypatch.setattr(drive, "SETTING_PATH", tmp_path / "drive.txt")
+    monkeypatch.setattr(drive, "mode_suggestion", lambda agent=None: None)
+    monkeypatch.setattr("captain_claw.config.get_config",
+                        lambda: __import__("types").SimpleNamespace(
+                            drive=__import__("types").SimpleNamespace(default="", initiative=True)))
+    assert drive.prompt_note() == ""
+    with drive.turn_drive("ambitious"):
+        assert drive.prompt_note() == drive.LEVELS["ambitious"].guidance
+    (tmp_path / "drive.txt").write_text("relaxed", encoding="utf-8")
+    assert drive.prompt_note() == drive.LEVELS["relaxed"].guidance
