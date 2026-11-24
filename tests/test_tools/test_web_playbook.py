@@ -453,3 +453,37 @@ def test_every_shipped_playbooks_questions_are_a_dialog_flight_deck_takes():
         names = [n for n, s in book["inputs"].items() if s["required"] and "default" not in s and s["ask"] == "before"]
         if names:
             person_asks.check_questions(pb.ask_questions(book, names)[0])
+
+
+# ── booking forms ask up front ───────────────────────────────────────
+
+
+def test_booking_forms_ask_for_the_details_up_front():
+    import re
+
+    table = pb.wp.by_id("opentable.book_table")
+    checked = pb.wp.check_values(table, {"restaurant": "Bistro", "date": "2026-12-05", "time": "19:30",
+                                         "guest_name": "Alex Doe"})
+    assert checked["ask_before"] == ["phone", "email"]
+    questions, _ = pb.ask_questions(table, checked["ask_before"])
+    assert questions[1]["format"] == "email" and "country code" in questions[0]["help"]
+    assert "phone 555 0100, email ‹Email for the confirmation›" in "\n".join(
+        pb.wp.step_lines(table, {**checked["values"], "phone": "555 0100"}))
+    assert pb.wp.by_id("doctolib.book_appointment")["inputs"]["who"]["label"] == "Doctor, speciality or practice"
+    # A form that may or may not ask (a job application): named, asked when it gets there.
+    job = pb.wp.check_values(pb.wp.by_id("linkedin.job_application"), {"job": "Data analyst at Example"})
+    assert job["ask_before"] == [] and job["ask_during"] == ["salary", "notice", "work_permit", "start"]
+    # No shipped step leaves "ask for anything missing" to a reply.
+    for book in pb.wp.seed():
+        for step in book["steps"]:
+            text = " ".join(str(step.get(k) or "") for k in ("text", "note"))
+            if re.search(r"\bask (?:the person )?for anything\b", text, re.I):
+                assert "ask_user" in text, (book["id"], text)
+
+
+async def test_a_job_application_names_what_to_ask_when_the_form_gets_there(monkeypatch, browser):
+    _no_deck(monkeypatch, {"person_connected": True, "extension_set_up": True})
+    res = await _run(id="linkedin.job_application", inputs={"job": "Data analyst at Example"})
+    assert res.success, res.error
+    assert ("When a step needs “Salary expectation”, “Notice period”, “Work permit for the job's country”, "
+            "“Earliest start date”, ask the person with ask_user (not in your reply)") in res.content

@@ -278,6 +278,9 @@ playbooks:
       date: {label: Date, kind: date}
       time: {label: Time, kind: time}
       party: {label: People, kind: number, default: 2}
+      guest_name: {label: Name for the booking, kind: text}
+      phone: {label: Phone for the booking, kind: text, hint: "With the country code, e.g. +1 555 …"}
+      email: {label: Email for the confirmation, kind: text}
     open: https://www.opentable.com/s?term={restaurant}&covers={party}&dateTime={date}T{time}
     steps:
       - kind: do
@@ -285,7 +288,7 @@ playbooks:
       - kind: click
         target: {role: button, name: "the slot closest to {time}"}
       - kind: do
-        text: Fill in the guest details from what the agent knows about the person; ask for anything missing.
+        text: Fill in the guest details, or check the ones already there — name {guest_name}, phone {phone}, email {email}. Add a special request only if the person gave one; anything else the form asks, ask the person — all of it in one ask_user dialog.
     read:
       slot: The time and table booked for
       policy: Deposit, cancellation or card-hold rules shown
@@ -341,6 +344,9 @@ playbooks:
       date: {label: Date, kind: date}
       time: {label: Time, kind: time}
       party: {label: People, kind: number, default: 2}
+      guest_name: {label: Name for the booking, kind: text}
+      phone: {label: Phone for the booking, kind: text, hint: "With the country code, e.g. +1 555 …"}
+      email: {label: Email for the confirmation, kind: text}
     open: https://www.thefork.com/
     steps:
       - kind: do
@@ -348,7 +354,7 @@ playbooks:
       - kind: do
         text: In the booking box set {date}, the slot closest to {time} and {party} people. Mention any discount on that slot, but only pick a deal the person wants.
       - kind: do
-        text: Fill in the guest details from what the agent knows about the person; ask for anything missing.
+        text: Fill in the guest details, or check the ones already there — name {guest_name}, phone {phone}, email {email}. Add a special request only if the person gave one; anything else the form asks, ask the person — all of it in one ask_user dialog.
     read:
       slot: Restaurant, date, time and party size
       offer: The discount or set menu attached to the slot, if any
@@ -597,10 +603,12 @@ playbooks:
     region: eu
     sites: [doctolib.fr, doctolib.de, doctolib.it]
     inputs:
-      who: {label: Doctor, speciality or practice, kind: text}
+      who: {label: "Doctor, speciality or practice", kind: text}
       near: {label: Where, kind: place}
       when: {label: When, kind: text, default: earliest, hint: "earliest, or a day or range"}
       reason: {label: Reason for the visit, kind: text, required: false, ask: during}
+      patient_status: {label: "Seen this practitioner before?", kind: choice, options: [new patient, returning patient]}
+      patient: {label: Who it's for, kind: text, default: the person themselves, hint: "Or the relative's name, as in their Doctolib account"}
     open: https://www.doctolib.fr/
     steps:
       - kind: do
@@ -616,7 +624,7 @@ playbooks:
       - kind: do
         text: Pick the practitioner named, or the one with the slot that best fits {when}; open their page.
       - kind: do
-        text: Answer the visit questions (new or returning patient, type of visit, {reason}) from what the person said; ask for anything unknown. If Doctolib asks the person to sign in, hand it to them.
+        text: Answer the visit questions — {patient_status}, for {patient}, type of visit, {reason} — from what the person said; anything else it asks, ask the person — all of it in one ask_user dialog. If Doctolib asks the person to sign in, hand it to them.
       - kind: click
         target: {role: button, name: "the slot that best fits {when}"}
     read:
@@ -799,13 +807,14 @@ playbooks:
       service: {label: Service, kind: text, hint: "plumber, movers, electrician, cleaners …"}
       near: {label: Where, kind: place}
       job: {label: The job, kind: text, hint: "What needs doing, size, timing, in the person's words"}
+      email: {label: Email for the replies, kind: text}
     open: https://www.yelp.com/search?find_desc={service}&find_loc={near}
     steps:
       - kind: click
         target: {role: button, name: Request a quote}
         note: It may say Get pricing & availability.
       - kind: do
-        text: Answer the job questions from {job}; ask the person for anything it doesn't cover. Fill contact details only from what the person gave.
+        text: Answer the job questions from {job}; anything it doesn't cover, ask the person — all of it in one ask_user dialog. Contact details — {email} — only as the person gave them.
       - kind: do
         text: Keep the businesses Yelp suggests, or pick the ones the person named; show the list.
     read:

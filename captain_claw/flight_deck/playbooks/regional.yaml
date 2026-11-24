@@ -578,7 +578,7 @@ playbooks:
     open: https://www.dhl.de/de/privatkunden/pakete-empfangen/verfolgen.html?piececode={tracking}
     steps:
       - kind: do
-        text: Decline optional cookies. If details need the recipient's postcode, ask the person for it.
+        text: Decline optional cookies. If details need the recipient's postcode, ask the person for it with ask_user.
     read:
       status: The current status and the step on the progress bar
       events: Recent events with date, time and place
@@ -628,6 +628,8 @@ playbooks:
       service: {label: Service, kind: text, default: Wohnung anmelden, hint: "e.g. Wohnung anmelden, Personalausweis beantragen, Reisepass beantragen"}
       district: {label: Preferred Bürgeramt or district, kind: text, default: anywhere in Berlin}
       earliest: {label: Not before, kind: date, required: false, ask: agent}
+      full_name: {label: Full name, kind: text, hint: "As on the ID they'll bring"}
+      email: {label: Email for the confirmation, kind: text}
     open: https://service.berlin.de/dienstleistungen/
     steps:
       - kind: do
@@ -639,7 +641,7 @@ playbooks:
       - kind: do
         text: If a robot check or "too many requests" page appears, hand it to the person.
       - kind: do
-        text: Pick the earliest suitable slot, then fill in the name and email the person gives; ask for anything missing and never type an ID or tax number.
+        text: Pick the earliest suitable slot, then fill in the name ({full_name}) and email ({email}); anything else it asks, ask the person — all of it in one ask_user dialog. Never type an ID or tax number.
     read:
       slot: Date, time and Bürgeramt address of the chosen slot
       bring: Documents to bring, as the service page lists them

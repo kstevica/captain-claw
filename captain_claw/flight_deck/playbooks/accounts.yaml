@@ -762,7 +762,7 @@ playbooks:
     open: "{site}"
     steps:
       - kind: do
-        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address with ask_user (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
       - kind: do
         text: The bank will ask for a sign-in and a confirmation on the person's phone; hand over to the person and wait.
       - kind: do
@@ -792,7 +792,7 @@ playbooks:
     open: "{site}"
     steps:
       - kind: do
-        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address with ask_user (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
       - kind: do
         text: Hand the sign-in and any code to the person and wait.
       - kind: do
@@ -981,7 +981,7 @@ playbooks:
     open: "{site}"
     steps:
       - kind: do
-        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address with ask_user (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
       - kind: do
         text: If the site asks for a sign-in, hand over to the person and wait.
       - kind: do
@@ -1057,7 +1057,7 @@ playbooks:
     open: "{site}"
     steps:
       - kind: do
-        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address with ask_user (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
       - kind: do
         text: Hand the sign-in to the person and wait, then open the member account or statement page.
     read:
@@ -1115,7 +1115,7 @@ playbooks:
     open: "{site}"
     steps:
       - kind: do
-        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address with ask_user (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
       - kind: do
         text: Hand the sign-in to the person and wait.
       - kind: do
@@ -1146,7 +1146,7 @@ playbooks:
     open: "{site}"
     steps:
       - kind: do
-        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address with ask_user (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
       - kind: do
         text: Hand the sign-in to the person and wait.
       - kind: do
@@ -1176,7 +1176,7 @@ playbooks:
     open: "{site}"
     steps:
       - kind: do
-        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+        text: Check the page is {site}, the address the person gave; if they only know the name, ask them for the address with ask_user (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
       - kind: do
         text: Hand the sign-in to the person and wait.
       - kind: do

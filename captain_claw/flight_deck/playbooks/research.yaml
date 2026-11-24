@@ -20,7 +20,7 @@ playbooks:
     open: https://www.linkedin.com/search/results/people/?keywords={name}%20{company}
     steps:
       - kind: do
-        text: Open the profile whose current company and location fit; if two or more fit, ask which one.
+        text: Open the profile whose current company and location fit; if two or more fit, ask the person which with ask_user.
       - kind: do
         text: Read the headline, About, Experience and Education, then the last few posts under Activity.
       - kind: open
@@ -182,7 +182,7 @@ playbooks:
     open: https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&company={company}&type=10-K
     steps:
       - kind: do
-        text: If a list of companies comes up, open the one that matches (check state and industry); ask if unsure.
+        text: If a list of companies comes up, open the one that matches (check state and industry); if unsure, ask the person with ask_user.
       - kind: do
         text: Open the newest 10-K, then its main document (not the exhibits).
       - kind: do

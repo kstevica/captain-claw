@@ -695,7 +695,7 @@ playbooks:
     open: "{site}"
     steps:
       - kind: do
-        text: Check the page is {site}, the address the person gave; if they only know the issuer's name, ask them for the address (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
+        text: Check the page is {site}, the address the person gave; if they only know the issuer's name, ask them for the address with ask_user (or find it and confirm the domain with them) — never follow a search ad to a sign-in page.
       - kind: do
         text: If a sign-in page shows, hand it to the person to sign in; never type a password, card number or one-time code.
       - kind: do
