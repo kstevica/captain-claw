@@ -5734,7 +5734,10 @@ async def get_agent_mode(
 
 class AgentDriveUpdate(BaseModel):
     # A level name, or "" / "auto" for no default of the agent's own.
-    default: str = ""
+    # None leaves it as it is.
+    default: str | None = None
+    # Whether Ambitious may add a step nobody asked for. None leaves it.
+    initiative: bool | None = None
 
 
 def _read_agent_mode_name(agent_dir: Path, kind: str) -> str:
@@ -5785,8 +5788,26 @@ def _read_agent_drive(agent_dir: Path, kind: str) -> dict:
                 own = drive.normalize(section.get("default"))
                 break
     suggested = drive.normalize(MODES[_read_agent_mode_name(agent_dir, kind)].suggested_drive) or ""
+    # The extra-work switch, resolved the same way: file, else config, else on.
+    initiative: bool | None = None
+    try:
+        initiative = drive.parse_switch(
+            (_agent_home_cc(agent_dir, kind) / drive.INITIATIVE_FILENAME).read_text(encoding="utf-8"))
+    except OSError:
+        pass
+    if initiative is None:
+        for cfg in (_agent_home_cc(agent_dir, kind) / "config.yaml", agent_dir / "config.yaml"):
+            try:
+                data = yaml.safe_load(cfg.read_text()) or {}
+            except Exception:
+                continue
+            section = data.get("drive") if isinstance(data, dict) else None
+            if isinstance(section, dict) and isinstance(section.get("initiative"), bool):
+                initiative = section["initiative"]
+                break
     return {"default": own or "", "suggested": suggested,
             "effective": own or suggested or drive.DEFAULT,
+            "initiative": True if initiative is None else initiative,
             "levels": [drive.level_to_dict(lvl) for lvl in drive.list_levels()]}
 
 
@@ -5808,22 +5829,34 @@ async def update_agent_drive(
     kind: str, identifier: str, body: AgentDriveUpdate, request: Request,
     user: dict | None = _agent_manager_dep,
 ):
-    """Set or clear the agent's own Drive default. The setting file applies
-    from its next message; every config copy gets it too, so it holds after a
-    restart and travels with the agent's config."""
+    """Set or clear the agent's own Drive default, and turn its extra-work
+    switch on or off; a field left out stays as it is. The setting files apply
+    from its next message; every config copy gets the values too, so they hold
+    after a restart and travel with the agent's config."""
     if kind not in ("docker", "process"):
         raise HTTPException(400, "kind must be 'docker' or 'process'")
     from captain_claw import drive
 
-    raw = body.default.strip().lower()
-    level = drive.normalize(raw)
-    if raw not in ("", "auto") and level is None:
-        raise HTTPException(400, f"Unknown Drive level: {raw!r}. Valid: {', '.join(drive.LEVELS)}")
+    changes: dict = {}
+    level = None
+    if body.default is not None:
+        raw = body.default.strip().lower()
+        level = drive.normalize(raw)
+        if raw not in ("", "auto") and level is None:
+            raise HTTPException(400, f"Unknown Drive level: {raw!r}. Valid: {', '.join(drive.LEVELS)}")
+        changes["default"] = level or ""
+    if body.initiative is not None:
+        changes["initiative"] = bool(body.initiative)
     user_id = getattr(request.state, "user_id", "")
     agent_dir = _resolve_agent_dir(identifier, kind, user_id)
     for cc_dir in _agent_reasoning_dirs(agent_dir, kind):
-        if cc_dir.is_dir():
+        if not cc_dir.is_dir():
+            continue
+        if "default" in changes:
             (cc_dir / drive.FILENAME).write_text(drive.render(level), encoding="utf-8")
+        if "initiative" in changes:
+            (cc_dir / drive.INITIATIVE_FILENAME).write_text(
+                drive.render_switch(changes["initiative"]), encoding="utf-8")
     for cfg_path in _agent_config_paths(agent_dir):
         if not cfg_path.is_file():
             continue
@@ -5834,7 +5867,7 @@ async def update_agent_drive(
         if not isinstance(data, dict):
             continue
         section = data.get("drive")
-        data["drive"] = {**(section if isinstance(section, dict) else {}), "default": level or ""}
+        data["drive"] = {**(section if isinstance(section, dict) else {}), **changes}
         cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
     return {"ok": True, **_read_agent_drive(agent_dir, kind)}
 

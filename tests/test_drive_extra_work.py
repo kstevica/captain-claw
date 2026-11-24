@@ -94,6 +94,7 @@ def cfg(monkeypatch, tmp_path):
                         cognitive_mode=SimpleNamespace(enabled=False), model=SimpleNamespace(max_tokens=4000))
     monkeypatch.setattr("captain_claw.config.get_config", lambda: c)
     monkeypatch.setattr(drive, "SETTING_PATH", tmp_path / "drive.txt")
+    monkeypatch.setattr(drive, "INITIATIVE_PATH", tmp_path / "drive_initiative.txt")
     monkeypatch.setattr("captain_claw.exam_turn.active", lambda agent: False)
     monkeypatch.setattr("captain_claw.member_privacy.private_turn", lambda agent: False)
     monkeypatch.setattr("captain_claw.member_privacy.output_level", lambda agent: "")
@@ -103,7 +104,7 @@ def cfg(monkeypatch, tmp_path):
 # ── The step itself ───────────────────────────────────────────────────
 
 
-def test_only_ambitious_has_it_and_it_is_off_until_switched_on(cfg):
+def test_only_ambitious_has_it_and_it_is_on_until_switched_off(cfg):
     assert [lvl.name for lvl in drive.list_levels() if lvl.initiative] == ["ambitious"]
     assert drive.LEVELS["ambitious"].initiative_share == 0.25
     assert drive.initiative_enabled() is True
@@ -111,7 +112,18 @@ def test_only_ambitious_has_it_and_it_is_off_until_switched_on(cfg):
     assert drive.initiative_enabled() is False
     from captain_claw.config import Config
 
-    assert Config().drive.initiative is False
+    assert Config().drive.initiative is True
+
+
+def test_the_setting_file_wins_over_the_config_and_applies_at_once(cfg):
+    drive.INITIATIVE_PATH.write_text("off", encoding="utf-8")
+    assert drive.initiative_enabled() is False          # config says on
+    cfg.drive.initiative = False
+    drive.INITIATIVE_PATH.write_text("on\n", encoding="utf-8")
+    assert drive.initiative_enabled() is True
+    drive.INITIATIVE_PATH.write_text("maybe", encoding="utf-8")
+    assert drive.initiative_enabled() is False          # unreadable words: the config decides
+    assert (drive.render_switch(True), drive.render_switch(False)) == ("on", "off")
 
 
 async def test_the_answer_is_held_the_step_is_offered_and_what_it_added_goes_under_the_answer(cfg):

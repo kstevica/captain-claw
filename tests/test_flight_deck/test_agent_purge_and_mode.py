@@ -644,6 +644,7 @@ async def test_drive_reads_the_file_then_the_config_and_says_what_the_mode_sugge
         async def get():
             body = (await c.get("/fd/agent-drive/process/bob-agent", headers=_hdr(BOB))).json()
             assert [lvl["name"] for lvl in body.pop("levels")] == ["relaxed", "diligent", "persistent", "ambitious"]
+            assert body.pop("initiative") is True                      # extra work: on unless turned off
             return body
 
         assert await get() == {"default": "", "suggested": "", "effective": "diligent"}
@@ -681,6 +682,18 @@ async def test_setting_drive_writes_the_file_and_every_config_copy(deck):
 
         r = await c.put("/fd/agent-drive/process/bob-agent", headers=_hdr(BOB), json={"default": "turbo"})
         assert r.status_code == 400
+
+        # The extra-work switch: its own file, and the default is left alone.
+        r = await c.put("/fd/agent-drive/process/bob-agent", headers=_hdr(BOB), json={"initiative": False})
+        assert r.status_code == 200 and r.json()["initiative"] is False and r.json()["default"] == ""
+        assert (cc / "drive_initiative.txt").read_text() == "off"
+        assert (cc / "drive.txt").read_text() == "auto"
+        for path in (agent_dir / "config.yaml", cc / "config.yaml"):
+            assert yaml.safe_load(path.read_text())["drive"] == {"default": "", "initiative": False}
+        (cc / "drive_initiative.txt").unlink()                         # no file: the config decides
+        assert (await c.get("/fd/agent-drive/process/bob-agent", headers=_hdr(BOB))).json()["initiative"] is False
+        r = await c.put("/fd/agent-drive/process/bob-agent", headers=_hdr(BOB), json={"initiative": True})
+        assert r.json()["initiative"] is True and (cc / "drive_initiative.txt").read_text() == "on"
         # Not Carol's to change.
         r = await c.put("/fd/agent-drive/process/bob-agent", headers=_hdr(CAROL), json={"default": "ambitious"})
         assert r.status_code in (403, 404)

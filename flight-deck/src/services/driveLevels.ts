@@ -20,8 +20,8 @@ export const DRIVE_LEVELS: DriveInfo[] = [
     description: 'Works until the task is done, within the normal limits. What every agent did before this setting existed.' },
   { id: 'persistent', label: 'Persistent', hint: 'Keeps going longer. Slower, costs more.',
     description: 'More steps before it gives up and a weak answer is sent back more often. For work that has to be finished.' },
-  { id: 'ambitious', label: 'Ambitious', hint: 'As Persistent for now. Slowest, costs the most.',
-    description: 'The same limits as Persistent today. Doing the obvious next step without being asked is still to come.' },
+  { id: 'ambitious', label: 'Ambitious', hint: 'As Persistent, and may add the obvious next step. Costs the most.',
+    description: 'The limits of Persistent. When the asked work is done it may add one obvious next step nobody asked for — reading and writing files only — and says what it added under the answer.' },
 ]
 
 export const DRIVE_LABEL: Record<DriveLevel, string> = Object.fromEntries(

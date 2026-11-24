@@ -402,7 +402,11 @@ export const setAgentVision = (kind: 'process' | 'docker', id: string, vision: s
 /** Drive (drive.py): how far the agent pushes to finish a turn nobody picked
  *  a level for. `default` "" = none of its own; then its mode's suggestion,
  *  else Diligent. Applies from its next message. */
-export interface AgentDrive { default: string; suggested: string; effective: string }
+export interface AgentDrive {
+  default: string; suggested: string; effective: string
+  /** Ambitious may add a step nobody asked for. On unless turned off. */
+  initiative?: boolean
+}
 
 export const getAgentDrive = (kind: 'process' | 'docker', id: string) =>
   fdFetch<AgentDrive>(`/agent-drive/${kind}/${id}`)
@@ -411,6 +415,12 @@ export const setAgentDrive = (kind: 'process' | 'docker', id: string, level: str
   fdFetch<AgentDrive & { ok: boolean }>(`/agent-drive/${kind}/${id}`, {
     method: 'PUT',
     body: JSON.stringify({ default: level }),
+  })
+
+export const setAgentDriveInitiative = (kind: 'process' | 'docker', id: string, initiative: boolean) =>
+  fdFetch<AgentDrive & { ok: boolean }>(`/agent-drive/${kind}/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ initiative }),
   })
 
 /** Task rephrase: an extra call that rewrites a complex request before the
