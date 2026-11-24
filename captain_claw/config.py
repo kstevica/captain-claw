@@ -1515,6 +1515,17 @@ class CognitiveModeConfig(BaseModel):
     default_mode: str = "neutra"                # Default mode when no file on disk
 
 
+class DriveConfig(BaseModel):
+    """How far the harness pushes a turn (captain_claw/drive.py).
+
+    ``default``: the level for turns nobody picked one for — relaxed,
+    diligent, persistent or ambitious. Empty = diligent, the harness as it
+    was before Drive.
+    """
+
+    default: str = ""
+
+
 class ScaleConfig(BaseModel):
     """Scale loop thresholds for list processing tasks."""
 
@@ -1816,6 +1827,7 @@ class Config(BaseSettings):
     cognitive_metrics: CognitiveMetricsConfig = Field(default_factory=CognitiveMetricsConfig)
     cognitive_tempo: CognitiveTempoConfig = Field(default_factory=CognitiveTempoConfig)
     cognitive_mode: CognitiveModeConfig = Field(default_factory=CognitiveModeConfig)
+    drive: DriveConfig = Field(default_factory=DriveConfig)
     mcp_serve: MCPServeConfig = Field(default_factory=MCPServeConfig)
     mrav: MravConfig = Field(default_factory=MravConfig)
 

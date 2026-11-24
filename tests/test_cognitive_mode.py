@@ -137,6 +137,7 @@ async def test_llm_usage_rows_carry_the_mode(tmp_path, monkeypatch):
         await sm.record_llm_usage(model="m", total_tokens=7, cognitive_mode="phrygian")
         await sm.record_llm_usage(model="m", total_tokens=9, cognitive_mode="")       # no mode in effect
         rows = {r["total_tokens"]: r["cognitive_mode"] for r in await sm.query_llm_usage()}
+        assert {r["drive"] for r in await sm.query_llm_usage()} == {"", "diligent"}   # "" = the old row
     finally:
         await sm.close()
     assert rows == {0: "", 5: "aeolian", 7: "phrygian", 9: ""}

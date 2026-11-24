@@ -744,6 +744,7 @@ class AgentGuardMixin:
                             int(window.get("provider_input_tokens", 0) or 0),
                         )
 
+            from captain_claw import drive as drive_levels
             from captain_claw.cognitive_mode import effective_mode_name
 
             loop = asyncio.get_event_loop()
@@ -768,6 +769,7 @@ class AgentGuardMixin:
                 task_name=task_name,
                 byok=bool(getattr(self, "_byok_active", False)),
                 cognitive_mode=effective_mode_name(self),
+                drive=drive_levels.current_name(),
             ))
         except Exception:
             pass  # Never fail the main flow

@@ -73,6 +73,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
 
+from captain_claw import drive as drive_levels
 from captain_claw import turn_source
 from captain_claw.flight_deck import taskboard_sources, taskboard_store
 from captain_claw.flight_deck.auth import get_db
@@ -158,6 +159,7 @@ class TurnRecord(BaseModel):
     ext_refs: dict[str, Any] = Field(default_factory=dict)
     automation: dict[str, Any] = Field(default_factory=dict)
     cognitive_mode: str = Field("", max_length=32)
+    drive: str = Field("", max_length=32)
     # close
     outcome: str = Field("", max_length=16)
     reply_head: str = Field("", max_length=8000)
@@ -432,6 +434,7 @@ def _take(boot: str, who: dict[str, str], items: list[tuple[TurnRecord, _Board]]
                 "text_head": mask_text(rec.text_head)[:_HEAD_MAX], "ext_refs": _small(rec.ext_refs),
                 "automation": _automation(rec.automation, kind),
                 "cognitive_mode": _mode(rec.cognitive_mode),
+                "drive": drive_levels.normalize(rec.drive) or "",
                 "started_at": at,
             }
         else:

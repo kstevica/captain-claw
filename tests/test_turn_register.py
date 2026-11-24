@@ -21,7 +21,7 @@ from captain_claw.tools.registry import Tool, ToolRegistry, ToolResult
 OPEN_KEYS = {"seq", "phase", "turn_id", "at", "session_id", "session_name", "origin", "origin_detail",
              "channel", "source", "source_label", "speaker_id", "speaker_label", "member", "private",
              "opener", "human", "literal", "text_head", "ext_refs", "automation",
-             "cognitive_mode"}
+             "cognitive_mode", "drive"}
 CLOSE_KEYS = {"seq", "phase", "turn_id", "at", "outcome", "reply_head", "deliverables", "tool_calls",
               "failed_tool_calls"}
 
