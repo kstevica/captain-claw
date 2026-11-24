@@ -18,9 +18,20 @@ Mix providers freely — each session independently selects its model.
 | LiteRT (on-device) | `.litertlm` Gemma models running locally via an isolated subprocess worker |
 | OpenRouter | 200+ models via meta-router |
 
-## 83 built-in tools
+## 85 built-in tools
 
 Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), Microsoft 365 (Outlook mail, Calendar, OneDrive), Jev calibrated judgments (TypeSafe AI), Soniox speech in and out (`audio`), public file links, topic switching by asking (`sessions`), a read-only Telegram inbox, the StopWatch's background picture, bill payments (opt-in), WhatsApp file delivery, intentions (proactive future actions), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), Basna (read and start multi-agent ensemble runs), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
+
+New in 0.9.3:
+
+| Tool | What it does |
+|---|---|
+| `drive_level` | Reads or changes how far the agent pushes ([Drive](flight-deck.md)): `get`, or `set` to Relaxed, Diligent, Persistent or Ambitious for this turn, this chat or as the agent's default, and the extra work at Ambitious on or off. Refused on turns that aren't the owner's. |
+| `web_playbook` | The 439 shipped web playbooks and the owner's own recordings: `find` one for a task or a site, `show` its steps and inputs, `run` it. Offered wherever the agent has `browser`. A playbook that fills something in stops before a named last button, and the browser tool refuses a click on that button for the rest of the turn. |
+
+That makes **85 built-in tools** per agent (84 in the desktop app, which has no Captain Swarm). Past 16,000 tokens of tool descriptions, an agent in full mode sends only some of them in full and loads the rest with `search_tools` (on Claude models, Anthropic's own tool search); see [USAGE](../../USAGE.md).
+
+Also new in 0.9.3: the `first_mate` tool has a `runs` action (a factory's newest eight runs and their result files); `web_search` and `web_fetch` in the owner's Chrome hand a robot check to the person and go on once it's answered; a local MCP server's question becomes a card for the person; the xlsx, docx and pptx tools read their own `.bak` backups; the `flight_deck` tool's `ask` and `task` reach an agent group with `to='group:<name>'`.
 
 New in 0.9.2:
 
@@ -28,8 +39,6 @@ New in 0.9.2:
 |---|---|
 | `first_mate` | The owner's [First Mate](first-mate.md) factories: `list`, `status`, `run`, `pause`, `resume`, `report` (last week or this week so far) and `draft`, which turns the owner's words into a factory that waits on their Line for **Approve and start**. It never approves a charter, carries out what a rehearsal would do or changes trust. Offered under a deck, never on a shared agent's member turn, and refused inside a run. |
 | `request_secret` | Asks the person for a password or a one-time code in a masked box in Flight Deck. The agent gets only a reference (`secret_ref`) for the `browser` tool's `type` and `form_input`; the value stays in Flight Deck's memory for 10 minutes and 3 uses, and is scrubbed from what the browser reports back. Off Flight Deck, or with nobody there, it tells the agent to let the person sign in themselves. |
-
-That makes **83 built-in tools** per agent (82 in the desktop app, which has no Captain Swarm). Past 16,000 tokens of tool descriptions, an agent in full mode sends only some of them in full and loads the rest with `search_tools` (on Claude models, Anthropic's own tool search); see [USAGE](../../USAGE.md).
 
 Also new in 0.9.2: `web_search` can run on Google, Bing, DuckDuckGo, Yahoo or Qwant in the owner's own Chrome, and `web_fetch` can read pages there signed in as them (LinkedIn, X and sites that turn a server away), both opt-in per person; see [Web searches and pages in your Chrome](web-in-your-chrome.md). `web_fetch` keeps a page's headings, lists and tables as Markdown. The `browser` tool types secrets by reference and, in the owner's Chrome, waits for a page to finish drawing. The `flight_deck` tool can `report` to an agent's parent and `ask` or `task` its family at once.
 

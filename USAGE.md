@@ -26,6 +26,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Admin Commands](#admin-commands)
 - [Tools Reference](#tools-reference)
   - [browser](#browser)
+  - [drive_level](#drive_level--new-in-093)
+  - [web_playbook](#web_playbook--new-in-093)
   - [first_mate](#first_mate--new-in-092)
   - [request_secret](#request_secret--new-in-092)
   - [anonymize](#anonymize--new-in-091)
@@ -73,6 +75,7 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [mcp_serve](#mcp_serve)
   - [lesson_proposals](#lesson_proposals)
   - [tool_proposals](#tool_proposals)
+  - [drive](#drive)
 - [Guard System](#guard-system)
 - [Skills System](#skills-system)
 - [Datastore](#datastore)
@@ -151,6 +154,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Why did this happen?](#why-did-this-happen--new-in-092)
   - [Secrets and Its browser](#secrets-and-its-browser--new-in-092)
   - [Needs you, task cards and new words](#needs-you-task-cards-and-new-words--new-in-092)
+- [Drive — NEW in 0.9.3](#drive--new-in-093)
+- [Web playbooks — NEW in 0.9.3](#web-playbooks--new-in-093)
 - [Deck Administration — NEW in 0.8.1](#deck-administration--new-in-081)
   - [Admin console](#admin-console)
   - [Admin console → Activity](#admin-console--activity--new-in-090)
@@ -503,7 +508,7 @@ Cron is pseudo-cron managed inside the Captain Claw runtime. Guardrails remain a
 
 **Routine safety — NEW in 0.9.2.** For an agent's own jobs (`/cron`, the `cron` tool, REST), with limits from the [`cron:`](#cron) config section. Flight Deck's UI calls these jobs *automations*.
 
-- **"Did nothing" is a failure.** A prompt run that called no tool and answered empty, only announced work or narrated lookups is recorded as failed ("did nothing"). A run whose task names one of the agent's tools by its code name (`web_search`) and called none is sent back once; if it still calls none, the reply ships with a line saying nothing in it was checked.
+- **"Did nothing" is a failure.** A prompt run that called no tool and answered empty, only announced work or narrated lookups is recorded as failed ("did nothing"). A run whose task names one of the agent's tools by its code name (`web_search`) and called none is sent back once; if it still calls none, the reply ships with a line saying nothing in it was checked. Since 0.9.3 that retry runs with a tool call required (`tool_choice: "required"`) instead of a correction in words only, and a report that still ships with the nothing-was-checked line counts as turned down: compaction, memory indexing and later runs' history leave it out (the history keeps one line in its place).
 - **Auto-pause.** A recurring job pauses after `pause_after_bad_runs` (10) failed or did-nothing runs in a row; resuming resets the count.
 - **Limits on new jobs.** A new or edited job that runs the model repeats at most every `min_interval_minutes` (15; script and tool jobs may run more often), and an agent holds at most `max_active_jobs` (20) active jobs. Existing jobs keep running.
 - **Missed slots.** A daily or weekly run more than `skip_missed_after_minutes` (120) late is skipped to its next slot; `/cron run` never skips.
@@ -678,7 +683,7 @@ Smart fallback: tries plain HTTP first, then transparently retries through a hea
 
 **Structure kept (0.9.2).** The text keeps a page's headings as `#` lines, lists as `-` or numbered items and data tables as `| a | b |` rows, with a merged cell repeated down its rows so each row stands alone. Layout tables are still read as plain text, and a page the layout pass can't handle falls back to plain text. The call's timeout is 100 s.
 
-**In the person's own Chrome (0.9.2).** Under Flight Deck, when the owner turned on **Profile → Personal → Web pages** (see [Web in Your Chrome](#web-in-your-chrome--new-in-092)), `web_fetch` reads the page in their Chrome through Captain for Chrome, signed in as them. With **Every page** Chrome is asked first. With **Only pages that turn Flight Deck away** it's asked after the deck was refused: HTTP 401, 403, 429 or 999, a dropped connection, a bot check, or a sign-in wall (`/authwall`, `/login`, "Log into Facebook", "Sign in to X" and the like, at any page length). The result starts with `[Read in the person's own Chrome (<browser>), signed in as them]` and shows `[Mode: chrome]`. Anything short of a page (the setting off, Chrome closed, a site not on the list, a refused address, not an HTML page) falls back to the usual fetch without a word. Never on a shared agent's member turn. `tools.web_fetch.via_chrome: false` keeps one agent out. `web_fetch_batch` and `web_get` never go through Chrome.
+**In the person's own Chrome (0.9.2).** Under Flight Deck, when the owner turned on **Profile → Personal → Web pages** (see [Web in Your Chrome](#web-in-your-chrome--new-in-092)), `web_fetch` reads the page in their Chrome through Captain for Chrome, signed in as them. With **Every page** Chrome is asked first. With **Only pages that turn Flight Deck away** it's asked after the deck was refused: HTTP 401, 403, 429 or 999, a dropped connection, a bot check, or a sign-in wall (`/authwall`, `/login`, "Log into Facebook", "Sign in to X" and the like, at any page length). The result starts with `[Read in the person's own Chrome (<browser>), signed in as them]` and shows `[Mode: chrome]`. Anything short of a page (the setting off, Chrome closed, a site not on the list, a refused address, not an HTML page) falls back to the usual fetch without a word. Never on a shared agent's member turn. **Robot checks (0.9.3):** a "prove you're human" page is handed to the person in that tab and the read goes on once they answer it; see [Web in Your Chrome](#web-in-your-chrome--new-in-092). `tools.web_fetch.via_chrome: false` keeps one agent out. `web_fetch_batch` and `web_get` never go through Chrome.
 
 ### web_fetch_batch — NEW in 0.5.4
 
@@ -775,7 +780,7 @@ Search the web via Brave Search (default), Tavily, You.com (NEW in 0.8.0), or Ke
 
 Brave requires `BRAVE_API_KEY` or `tools.web_search.api_key`; Tavily uses `tools.web_search.tavily_api_key`; You.com uses `tools.web_search.youcom_api_key` or `YDC_API_KEY` (web and news results merged, count clamped to 20); Keenable needs no key (optional `tools.web_search.keenable_api_key` or `KEENABLE_API_KEY` uses the keyed endpoint for higher limits).
 
-**In the person's own Chrome (0.9.2).** Under Flight Deck, when the owner picked an engine in **Profile → Personal → Web searches** (see [Web in Your Chrome](#web-in-your-chrome--new-in-092)), the search runs on Google, Bing, DuckDuckGo, Yahoo or Qwant in their Chrome, in a background tab, instead of the provider above: up to 50 results a search on Google and Bing, 35 on Yahoo, 10 on DuckDuckGo and Qwant. Language, country, freshness and safe-search pass through to the engine. Anything short of results (the setting off, Chrome closed or asleep, the engine not allowed in the extension) falls back to `tools.web_search.provider`; a robot check or a cookie question falls back too, with a note asking the person to answer it once in Chrome. The agent remembers "off" for 60 s. With `enrich=true` the passages are still read on the deck. Never on a shared agent's member turn. `tools.web_search.via_chrome: false` keeps one agent out.
+**In the person's own Chrome (0.9.2).** Under Flight Deck, when the owner picked an engine in **Profile → Personal → Web searches** (see [Web in Your Chrome](#web-in-your-chrome--new-in-092)), the search runs on Google, Bing, DuckDuckGo, Yahoo or Qwant in their Chrome, in a background tab, instead of the provider above: up to 50 results a search on Google and Bing, 35 on Yahoo, 10 on DuckDuckGo and Qwant. Language, country, freshness and safe-search pass through to the engine. Anything short of results (the setting off, Chrome closed or asleep, the engine not allowed in the extension) falls back to `tools.web_search.provider`. Since 0.9.3 a robot check is handed to the person: the tab comes to the front, the chat says the agent is waiting, and the search goes on in that tab once they answer it (up to 5 minutes in a chat, 2 minutes for a run that started on its own); unanswered, the search falls back to the provider. A cookie question still falls back, with a note asking the person to answer it once in Chrome. The agent remembers "off" for 60 s. With `enrich=true` the passages are still read on the deck. Never on a shared agent's member turn. `tools.web_search.via_chrome: false` keeps one agent out.
 
 ### browser
 
@@ -1174,7 +1179,7 @@ Voice notes, pictures and files show as a short description with the id that fet
 
 **Attachments.** `attachment` downloads the file now from WhatsApp's servers (the link has to be connected) and saves it under `saved/downloads/<session>/whatsapp-<chat>/`, with `Saved to:` and the tool that reads it (`image_vision`, `pdf_extract` …). A voice note or audio comes back transcribed when a Soniox key is usable (the user's own, the team's, or the deck's); otherwise the result points at `audio`. Files over 100 MB are refused. WhatsApp keeps media on its servers only for a while: an older file comes back as expired (the phone may still have it; asking the phone to send it again is a later, opt-in step).
 
-**Sending.** Off until the owner turns it on in **Connections → WhatsApp Web → Sending**. Then it's automatic, like Gmail sending (no draft, no confirmation), but only to the chats the owner ticks on the whitelist, which lists only existing conversations: Flight Deck never starts one, and a number typed in never becomes a chat it may write to. At most 30 messages a day by default (1–200), 6 a minute to one chat, and the same text to the same chat only once a day unless the agent passes `allow_repeat`. Every message ends with the owner's WhatsApp signature ("— sent by my assistant" until they change or clear it). Each send rings the owner's bell. If WhatsApp doesn't confirm a send, it's recorded as *not confirmed* and the same text is refused until the owner checks the chat, so a retry can't double-send. A temporary ban, a link that isn't connected, or `FD_WHATSAPP_WEB_SEND=off` on the deck refuses every send. The tool's answer starts with "Sent to … on WhatsApp"; the reply guard turns down a reply that claims a WhatsApp send with no such answer behind it.
+**Sending.** Off until the owner turns it on in **Connections → WhatsApp Web → Sending**. Then it's automatic, like Gmail sending (no draft, no confirmation), but only to the chats the owner ticks on the whitelist, which lists only existing conversations: Flight Deck never starts one, and a number typed in never becomes a chat it may write to. At most 30 messages a day by default (1–200), 6 a minute to one chat, and the same text to the same chat only once a day unless the agent passes `allow_repeat`. Every message ends with the owner's WhatsApp signature ("— sent by my assistant" until they change or clear it). Each send rings the owner's bell. If WhatsApp doesn't confirm a send, it's recorded as *not confirmed* and the same text is refused until the owner checks the chat, so a retry can't double-send. **Delivery (0.9.3):** the service follows WhatsApp's receipts, and **Sent by your agents** and **Auto-reply activity** show each message as **not delivered yet**, **delivered**, **read**, **not delivered**, **phone asked for it again** or **WhatsApp turned it away**. When no phone confirms a message within 10 minutes the owner's bell rings once (then not again for 6 hours on that link). Messages sent before the upgrade show nothing. Turn WhatsApp Web off and on for the deck after the upgrade, so the running service follows receipts. A signature the agent copied into its reply is dropped before the message is signed, so it's signed once. A temporary ban, a link that isn't connected, or `FD_WHATSAPP_WEB_SEND=off` on the deck refuses every send. The tool's answer starts with "Sent to … on WhatsApp"; the reply guard turns down a reply that claims a WhatsApp send with no such answer behind it.
 
 **Auto-replies.** In **Sending**, each whitelisted chat can also be marked *auto-reply*, with one of the owner's own agents picked to answer and, optionally, a few extra trigger words. In those chats the agent answers by itself when someone mentions it — its name or a trigger word as a word in the message (`@name` too, and with a Croatian-style case ending: "captainu", "LeChucka", "Stevu" for *stevo*), or a reply to one of its messages; the owner can call it in the same way, and a WhatsApp @mention of the owner's account stays the owner's. For 15 minutes after its last message it may also join in unaddressed when it has something useful to add; it steps back as soon as the owner writes in that chat. It never answers a message that ends like another assistant's signature, even one that mentions it. Messages that arrive close together are answered once, about 8 seconds after the last; at most 10 answers an hour per chat; a message more than 10 minutes old when it arrives (after the link was down) is left to the owner. The answer is written by the agent's own model, told which words call it, with nothing but the last 30 messages of that chat (each on one line, so no message can pose as another speaker) and, if it asks, one web search — never the owner's mail, files, calendar, memory, other chats or agents, since everyone in the chat reads it. It may decide to stay silent. It's sent through the same gate as any send (limits, signature, bell). A stopped agent doesn't answer. `FD_WHATSAPP_WEB_AUTOREPLY=off` (or `FD_WHATSAPP_WEB_SEND=off`) on the deck stops every auto-reply. Flight Deck's log has one `WhatsApp auto-reply` line per answer or silence (`outcome=sent`, `skip:silent`, `skip:not addressed`, `skip:format` …), never the text. The owner sees the whole decision in **Connections → WhatsApp Web → Auto-reply activity**: the message, the outcome, the model's one-line *why*, what it answered or why it stayed silent, and under *details* each model call (a thinking model's reasoning, model, tokens), the web search and what it found, and how long it took. *Messages not for it* also lists the messages that didn't call the agent. The newest 500 decisions are kept with the link, sealed like the messages, and go when WhatsApp is disconnected. In the whitelist, the auto-reply chats and the other whitelisted chats are listed first. An agent's messages are now kept in the chat history as they're sent, so agents read the chat as it is.
 
@@ -1507,7 +1512,7 @@ Discover and communicate with peer agents in the Flight Deck environment. Always
 - **`delegate`** — fire-and-forget task delegation. Sends a task to a peer agent via `/fd/delegate-peer` and returns immediately, freeing the calling agent. The peer works independently and delivers results back as a notification when finished. Use for large/long-running tasks like research, scraping, analysis, or file creation.
 - **`spawn_agent`** — creates a new agent in the fleet; since 0.9.2 it is the caller's child ([Agent family](#agent-family--new-in-092)).
 - **`report`** (0.9.2) — sends the agent's parent a report; it reaches the parent even when it's asleep.
-- **`ask`** / **`task`** (0.9.2) — asks, or gives a task to, every agent in `to` at once (`POST /fd/family/agent/send`). An ask waits for all the answers and returns them together (4 minutes by default, 8 at most); a task returns at once, and the results come back together when all are done (20 minutes by default). Two going per caller; an agent being asked can't ask in turn. Groups need a deck with sign-in.
+- **`ask`** / **`task`** (0.9.2) — asks, or gives a task to, every agent in `to` at once (`POST /fd/family/agent/send`). An ask waits for all the answers and returns them together (4 minutes by default, 8 at most); a task returns at once, and the results come back together when all are done (20 minutes by default). Two going per caller; an agent being asked can't ask in turn. Groups need a deck with sign-in. Since 0.9.3 an agent's prompt lists **Your groups** (the groups it's in with their other members, and the owner's other groups by name), so `to='group:<name>'` works with the name it was shown; an unknown group answers with the owner's real groups, and [`colleagues`](#colleagues--new-in-090) `list` prints the groups too.
 
 Unlike `consult_peer` (which uses the static peer list pushed at connect time), `flight_deck` always queries the live fleet — so newly spawned agents are immediately discoverable.
 
@@ -1606,19 +1611,55 @@ HTML in, the page and a PNG of it out, for charts, diagrams and dashboards inste
 
 The PNG reaches the chat, Telegram, WhatsApp and the Files menu, and goes into a `.docx` or `.md` as `![caption](path)`. Script errors, failed loads, empty canvases and a blank picture come back for the agent to fix. The page never touches the host: it's served from an address that doesn't exist, every request goes through the public-only client, and WebSockets are closed.
 
+### drive_level — NEW in 0.9.3
+
+Reads or changes the agent's [Drive](#drive--new-in-093): how far it pushes to finish a turn. It changes what the person changes in Flight Deck (the chat box's **Drive** picker, or the agent's **How far it pushes** default), from any channel: the web chat, WhatsApp, Telegram, the app, glasses, voice devices. Named `drive_level`, not `drive`, because "save it to Drive" is about files. Refused on a shared agent's member turn, a public turn and a link turn ("Drive is your owner's setting — it can't be read or changed from this conversation.").
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `get` (the level in effect and why, every level, the agent's default and the extra-work switch) or `set` |
+| `level` | string | set, unless only `extra_work` is given | `auto`, `relaxed`, `diligent`, `persistent` or `ambitious`. `auto` = no pick: the agent's default, else what its cognitive mode suggests, else `diligent` |
+| `scope` | string | no | `setting` (default): change the setting, for the rest of this turn and later messages. `turn`: only the rest of this turn; the next message goes back to the setting |
+| `where` | string | no | Which setting, with `scope: setting`: `here` (default: the chat box's picker when the message came from the web chat, the agent's own default from anywhere else), `chat` (the web chat box's picker) or `default` (the agent's own default) |
+| `extra_work` | string | no | `on` or `off`: whether Ambitious may add one obvious next step nobody asked for. Can be given alone |
+
+- **`chat`** moves the picker in every Flight Deck chat open on the agent (a `drive` frame over the agent's socket). With no chat connected the tool says so and asks for the pick to be made there.
+- **`default`** writes `~/.captain-claw/drive.txt`; `extra_work` writes `~/.captain-claw/drive_initiative.txt`. Both are read on every turn, so nothing restarts.
+- A change applies at once, to the rest of the turn. A new default leaves a web chat turn on the chat box's pick when one was made.
+- The agent may use `scope: turn` on its own when a task plainly needs much more or much less than its level, and tells the person.
+
+### web_playbook — NEW in 0.9.3
+
+Known ways to get everyday things done on websites ([Web playbooks](#web-playbooks--new-in-093)): 439 shipped playbooks plus the person's own [recordings](#recordings-in-captain-for-chrome--new-in-092). Registered together with [`browser`](#browser), so an agent that has `browser` has it. The call's timeout is 240 s.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `find` (the playbooks that fit an ask, with their inputs), `show` (one in full: inputs, steps, what it reads, its stop) or `run` |
+| `query` | string | find | What the person wants, in their words |
+| `id` | string | show/run | The playbook's id from `find`, e.g. `maps.travel_time` |
+| `inputs` | object | run | The playbook's inputs by name. Dates `YYYY-MM-DD`, times `HH:MM`; a place is a town or address, never "here" |
+| `region` | string | no | find: the person's country, two letters (e.g. `hr`), to include its local sites |
+| `category` | string | no | find: only `travel`, `local`, `shopping`, `accounts`, `work`, `research`, `money`, `home`, `media` or `regional` |
+
+- **`run`** opens the playbook's link, with the values in it, through the `browser` tool, so the page stays open: in the person's Chrome when the playbook needs their sign-in (`where: chrome`), in their Chrome when it's connected and else the agent's headless browser (`prefer_chrome`), or in the headless browser (`any`). A playbook that needs the person's Chrome and can't reach it says what to set up instead of running.
+- **A look playbook** then gets one quiet call on the agent's own model to take its fields off the page. When the page as opened answers, that is the answer, in one call. Otherwise, and always for a fill-in (`act`) playbook, the agent gets the steps with its values in them and finishes with `browser` in that tab.
+- **The stop.** A fill-in playbook names the button it never presses. For the rest of the turn (45 minutes at most) `browser` refuses `click`, `double_click` and `triple_click` on a button with that name, except the clicks the playbook's own steps make on a button of that name before the end. The person presses it; a later message of theirs can ask the agent to. The guard goes by the button's name, so it doesn't catch a click by coordinates or Enter pressed in a field.
+
 ### first_mate — NEW in 0.9.2
 
 The owner's [First Mate](#first-mate--new-in-092) factories, from chat. Offered under a Flight Deck (the Line's gate), never on a shared agent's member turn. Follows the deck's First Mate switch and who may use it. Refused inside any worker run or rehearsal ("First Mate is for your owner's own turns, not inside a run.").
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `action` | string | yes | `list` (every factory: state, trust, health, last and next run, what waits for the owner), `status`, `run` (like **Run now**; a factory that asks first only rehearses), `pause`, `resume`, `report`, `draft` |
-| `factory` | string | status/run/pause/resume | The factory's name; part of it is enough when only one fits |
+| `action` | string | yes | `list` (every factory: state, trust, health, last and next run, what waits for the owner), `status`, `runs` (**NEW in 0.9.3**: a factory's newest runs, how each ended, how long it took and its result files as `vfs:` paths), `run` (like **Run now**; a factory that asks first only rehearses), `pause`, `resume`, `report`, `draft` |
+| `factory` | string | status/runs/run/pause/resume | The factory's name; part of it is enough when only one fits |
 | `note` | string | no | run: a note for this run; pause: why |
 | `week` | string | no | report: `last` (default) or `this` |
 | `words` | string | draft | What the owner wants the new factory to do, in their words, with every limit they gave |
 
 `draft` makes a factory that waits for the owner's approval (a Line card **A new factory to approve** with **Approve and start**) and never runs before it. The tool never approves a charter or what a factory would do, never carries anything out and never changes trust: the owner does that on First Mate or the Line. Route: `POST /fd/first-mate/agent/tool` (the agent's own secret; the deck resolves the owner).
+
+**A working run's folder is read-only (0.9.3).** While the deck drives a run it keeps a marker under the owner's VFS root (`.run-locks/<project>`), and the owner's other agents can't change that folder: `write`, `edit`, the office and image tools refuse, and so do the `vfs` tool's `mkdir`, `mv` and `rm`. The run's own workers aren't held. The marker goes when the run ends, stops or waits for its owner. The file panel in Flight Deck isn't locked. The `vfs` tool's `mkdir`, `mv` and `rm` also respect folders linked read-only since 0.9.3.
 
 ### request_secret — NEW in 0.9.2
 
@@ -3066,6 +3107,17 @@ tool_proposals:
   max_per_day: 4             # drafts a day (UTC)
   min_tool_calls: 8          # a turn this long is worth asking about by itself;
                              # 3 tool calls are enough when the owner's words sound like a repeated job
+```
+
+### drive
+
+NEW in 0.9.3. The fallback for an agent's [Drive](#drive--new-in-093). The agent's own setting files (`~/.captain-claw/drive.txt`, `drive_initiative.txt`) come first when they exist; Flight Deck's agent settings write both the files and these keys.
+
+```yaml
+drive:
+  default: ""        # level for turns nobody picked one for: relaxed, diligent, persistent or ambitious
+                     # "" = none of its own: what the cognitive mode suggests, else diligent
+  initiative: true   # at Ambitious, the agent may add one obvious next step nobody asked for; false = Ambitious works like Persistent
 ```
 
 ---
@@ -5127,6 +5179,8 @@ launcher is generated.
 
 Flight Deck serves both the React frontend and the FastAPI backend from a single process. No separate build step is needed for production — the built frontend is bundled with the Python package.
 
+**Open files (0.9.3).** At start the deck raises its own soft open-file limit toward 65536, never past the hard limit (10240 where macOS caps it), and the agents it starts inherit it; the log says `Open-file limit raised from … to …`. A deck on a host without Docker also no longer leaks an open file per Docker probe: "no Docker" is remembered for 60 seconds.
+
 ### Features
 
 | Feature | Description |
@@ -5202,6 +5256,8 @@ Rather than requesting a fixed list of scopes at connection time, Captain Claw l
 - `email` — Your Google account email *(required)*
 - `profile` — Your name and profile picture
 - `drive.file` — Per-file Drive access for files the app creates or the user picks
+
+**Pick files from Google Drive (0.9.3).** With the per-file scope, **Connections → Google → Files from your Google Drive → Pick files from Google Drive** opens Google's own picker (several files at once, shared drives too) and then lists what the agents can now open; picked files are granted to the app, so the agents' existing connection opens them and no others. The page gets a file-only token from Google itself; the stored token never goes to the browser. The section is hidden when the connection already has full or read-all Drive access. An admin sets it up once, in the Google Cloud project of the deck's OAuth client: enable the **Google Picker API**, create a browser API key (with website restrictions, allow the deck's address and `https://docs.google.com/*`), add the deck's address to the OAuth client's **Authorized JavaScript origins**, and paste the key into **Picker API key** under the OAuth credentials (an empty value removes it; saving it disconnects no one). `GET /fd/google/picker` returns what the page needs and no token, or why it isn't ready: `not_connected`, `no_drive_scope`, `full_drive`, `no_api_key`, `no_app_id`.
 
 **Opt-in scopes:**
 
@@ -5289,6 +5345,10 @@ Add an MCP server once in **Connections → MCP servers** and every one of your 
 
 - **`http`** — Streamable HTTP binding. Required field: `url`. **Auth:** none, the OAuth2 `client_credentials` flow (`client_id`, `client_secret`, `token_endpoint`), or (0.8.1) **OAuth sign-in** (see below); plus arbitrary extra `headers`. `Mcp-Session-Id` is captured and replayed transparently.
 - **`stdio`** — child process speaking JSON-RPC over stdin/stdout (NDJSON). **Admin-only since 0.8.0** (creating, editing, testing, probing or deleting one runs a command on the deck's host). Required field: `command`. Optional `args` (argv tail) and `env` (extra env vars merged on top of the FD process environment). The de-facto standard for local servers shipped via `npx` / `uvx` (filesystem, sqlite, github, postgres, etc.). The child is spawned lazily on the first request, auto-respawned if it dies, and terminated with SIGTERM (2 s grace) then SIGKILL on close.
+
+**A server can ask the person (0.9.3).** Over `stdio`, Flight Deck offers MCP `2025-06-18` with elicitation. When a server asks for input in the middle of a call, the question opens as a card for the person the call is for, in every Flight Deck tab and the bell, with the server's message, its fields, and **Decline** / **Send**. The card says only the person can answer it, and the model never sees it. The question goes out only when every call in flight on that server is for one person who attends the run; otherwise (different people, a scheduled run) it is cancelled at once. A card nobody answers is cancelled after 20 minutes. `http` servers are unchanged: a question from one can't be answered.
+
+**Call timing (0.9.3).** An agent's MCP call is started and then followed in short requests (`POST /fd/mcp/agent/calls`, `…/follow`, `…/cancel`), so it no longer fails after about 10 seconds. Flight Deck stops a call that is quiet for 10 minutes with no card open, or that the agent stopped following; the agent cancels it when its turn stops. The one-request `/fd/mcp/<name>/call` stays for older agents.
 
 **Parallel Search example.** For an optional, keyless HTTP search/fetch connection and a runnable smoke test, see [examples/mcp/](examples/mcp/README.md).
 
@@ -5428,6 +5488,8 @@ Three cross-mode capabilities landed in 0.7.3 for Basna, Vatra, and Code. **All 
 - **Registration is closed** after the first (admin) account — admins add people with **Add user** or invite them by email on the **Users** page (Admin → Users before 0.8.1); since 0.8.1 people can join a [waitlist](#users-invitations-and-the-waitlist) instead (`FD_REGISTRATION_OPEN=1` reopens self-signup).
 - **One deck, one state.** Several decks on one host no longer share MCP servers, code apps or the agent secret — each resolves them from `CAPTAIN_CLAW_FD_HOME`, else `FD_DATA_DIR`, else the legacy `~/.captain-claw-fd`. A deck moving to `FD_DATA_DIR` copies its `mcp_servers.json` there once to keep its servers.
 - **Chat bridges send only deliverables.** Telegram, Slack, Discord and WhatsApp auto-send a file only if this turn wrote it inside the agent's `saved/` area (never a `Path:` line from an email or web page). See [Telegram: Per-User Sessions](#telegram-per-user-sessions).
+
+**Path-traversal guard (0.9.3).** Before 0.9.3 the deck's page handler served any path it was asked for, so a request with `..` in it could return any file the deck's process could read, with no sign-in. Now the page handler serves only files inside its own `static/` folder (anything else gets `index.html`), and a guard in front of every route answers **400** to a path with a `..` part, written plainly, percent-encoded, encoded twice or with backslashes, and closes such a WebSocket with code 1008. Update every deck, and change the secrets that were in the deck's `.env` if it could be reached from outside your network.
 
 ### Confinement on a multi-user deck — NEW in 0.8.4
 
@@ -7050,6 +7112,8 @@ Locked users have no full layout and no agent options beyond what this section d
 
 Folders in the agent list, with a name and a colour. A group folds away and still shows an agent at work or a new reply. Drag an agent onto a group, or use its **⋯ → Group**; a group's own **⋯** ticks its agents, renames, recolours and orders it. **Pin** one group to the top of the list, and as many agents as you like to the top of their group. Each person has their own, on all their devices.
 
+**Agents know their groups (0.9.3).** On a deck with sign-in, each agent is told which groups it is in, who else is in them and the owner's other groups by name, and can ask or task a whole group with the [`flight_deck`](#flight_deck) tool's `to='group:<name>'`. Flight Deck reads the groups at start and again when they change. A deck without sign-in keeps groups in the browser, so its agents aren't told.
+
 ### Getting started guide — NEW in 0.8.1
 
 A kiosk user's first visit opens a step-by-step guide: what the deck is, creating an agent from an archetype, giving it work (files, the queue, new topics), connecting Google or Microsoft, the team Telegram bot, the profile, and where everything else lives. Each step shows a real screenshot of that screen in the viewer's theme — on a phone, the phone's own screens — that enlarges on a click, and where it fits a button straight to it (**Create an agent**, **Connect Google**, **Set up Telegram**, **Edit my profile**). Steps for a connection the deck doesn't offer are left out, and chips show what the user has connected already. On a phone a sideways swipe turns the page.
@@ -7078,7 +7142,8 @@ Each of the user's own agents has a **⋯** menu (on its row, and on the phone l
 - **Settings** — a wide dialog (a sheet on a phone), with two tabs since 0.8.4: *Model & thinking* holds model, vision and how it thinks, and *Reasoning effort* the rest:
   - **Model:** provider (only providers an agent can run on — `PUT /fd/agent-model` refuses others), model, API key and an optional endpoint. Switching provider drops the old provider's key and resets the endpoint to the new provider's default unless you give one.
   - **Vision:** auto / on / off (see [Native Vision](#native-vision--new-in-081)).
-  - **How it thinks:** the cognitive mode — Neutra, Ionian, Dorian, Phrygian, Lydian, Mixolydian, Aeolian or Locrian.
+  - **How it thinks:** the cognitive mode — Neutra, Ionian, Dorian, Phrygian, Lydian, Mixolydian, Aeolian or Locrian. **Rewritten in 0.9.3:** every mode's prompt is new, short and not tied to a kind of work, and ends with one shared frame (`instructions/cognitive_modes/frame.md`): the mode shows in substantial work only, the task and the person's instructions outrank it, and it never changes what counts as done or true. A mode no longer decides how hard the agent pushes or how often an answer is sent back; that is [Drive](#drive--new-in-093), and a mode only suggests a level (Ionian and Phrygian: Persistent). Each mode also has a one-line **review lens** that critics and checkers get instead of its working instructions. The parameters left are the ones something reads: the nervous system's dream interval, cooldown, maturation and intuition weights, and `game_temperature`, the temperature of a game seat in that mode (Ionian, Phrygian, Aeolian 0.5; Dorian 0.7; Mixolydian 0.8; Locrian 0.9; Lydian 1.0). An agent on the micro or nano prompts (Eco too) runs with no mode. The mode is recorded in the usage log (`llm_usage.cognitive_mode`) and on each turn; `GET /fd/taskboard/mode-stats?days=30` gives the caller's finished turns per agent and mode: how many, how they ended (ok, error, blocked, cancelled), tool calls, failed tool calls and average length.
+  - **How far it pushes (0.9.3):** the agent's own [Drive](#drive--new-in-093) default — **Not set**, **Relaxed**, **Diligent**, **Persistent** or **Ambitious** — and the switch **At Ambitious, add the obvious next step**. Applies from its next message, with no restart.
   - **Reasoning effort:** a default and a level per source, grouped — Messaging (WhatsApp, Telegram, Messenger, Discord), Apps and devices (the app, glasses, each M5Stack device), Automated (scheduled tasks, flows, other agents, autonomous work, API and MCP) and Other people (shared-agent members, public links). The web chat's level is the chat box's picker. See [Reasoning Effort](#reasoning-effort--new-in-081).
 
   Model and vision are read when the agent starts, so the dialog offers **Restart now**.
@@ -7095,6 +7160,8 @@ Each of the user's own agents has a **⋯** menu (on its row, and on the phone l
 - **More.** The composer's list has **More · N** (and the greeting has "More things I can do…"), opening a dialog with the six **Suggested** cards and a **More** list of up to 16 more. The More list is written only when asked for (8 at a time, `POST /fd/agent-skills/{slug}/more`); the dialog says when it was suggested and offers **Suggest again**, and for a list from an earlier day a banner offers new ones — it is never rewritten by itself.
 - **Cards that ask for input.** A card that works on the person's own material (an email to answer, claims to check) says what it needs. Picking it opens a dialog with its question, a text box, and **Attach a file** / **Add a picture** as the card accepts (paste and drop work too). **Start** sends the prompt, the text and the attachments; a required answer must be there first. These cards are marked in the greeting, the list and the More dialog.
 - **Reasoning effort.** The button beside "What can I do?" offers **Auto** (the model's own default) plus exactly the levels the agent's model offers. The pick is kept per agent and sent with every message. See [Reasoning Effort](#reasoning-effort--new-in-081).
+- **Drive (0.9.3).** Beside reasoning effort, the **Drive** picker sets how far the agent pushes to finish this chat's turns: **Auto** (the agent's own default), **Relaxed**, **Diligent**, **Persistent** or **Ambitious**. Kept per agent and sent with every message; a member of a shared agent has no picker. See [Drive](#drive--new-in-093).
+- **The first next step waits in the box (0.9.3).** The first of the suggested next steps under a reply shows greyed in the empty chat box, with a **Tab** key after it. **Tab** writes it into the box with the cursor at the end, to send as it is or change first. Only while the box is empty; hidden while you type, while the agent works, when the box can't send and on touch screens. The pills' **×** hides it too. In the kiosk and the full layout.
 - **New topic** and **Topics** are buttons beside the lane tabs (see the next section); the lane tabs scroll sideways without a bar.
 - **Daily allowance.** Under the lane tabs a line shows today's messages and AI tokens against the user's plan (always in the kiosk; in the full layout only near the limit). When the allowance is spent the composer closes until the UTC day resets or the user spends a free reset. See [Daily plan limits and free resets](#daily-plan-limits-and-free-resets).
 
@@ -7136,7 +7203,7 @@ After **Stop** the lane stays busy until the stopped turn has ended, and the sto
 
 - **Pictures, recordings and videos.** Pictures are described by a model that can see — the owner's library tier if it sees pictures, else the agent's own model when the agent's vision is on — and any text in them is read word for word for search. Recordings and videos are transcribed with Soniox (the sound taken out with ffmpeg) and summarised from the transcript. A file set aside for want of vision, a Soniox key or ffmpeg is taken up by the first scan that has it.
 - **Search** goes through names, titles, summaries, tags, the text, picture descriptions and full transcripts, and category and kind names. Filter by agent, category and kind (with counts) and sort; result cards highlight the matches and show text snippets.
-- **Details and preview.** The detail pane has **Open**, **Download**, **Summarise again** and a jump to the agent's chat, over a preview of the selected file: a picture, a video or audio player, a PDF's first page, rendered Markdown (tables too), a web page as a small picture of itself, or the start of a text, code or data file (CSV and TSV as a table, JSON laid out). Office files and archives say there's no preview. The PDF preview (`GET /fd/file-library/files/{id}/thumb`) needs `pypdfium2`, which comes with the `payments` extra; without it the preview offers **Open**. A file someone else wrote, or one whose agent is off, previews without scripts or images.
+- **Details and preview.** The detail pane has **Open**, **Download**, **Summarise again** and a jump to the agent's chat, over a preview of the selected file: a picture, a video or audio player, a PDF's first page, rendered Markdown (tables too), a web page as a small picture of itself, or the start of a text, code or data file (CSV and TSV as a table, JSON laid out). Since 0.9.3 an Excel file (`.xlsx`, `.xlsm`) previews as its first sheet's first rows and opens as a read-only table with a tab per visible sheet, wherever a file opens: the File library, shared folders, chat files, pinned files and First Mate results. Old `.xls` files still only download, and a formula cell saved without its result shows empty. Other office files and archives say there's no preview. The PDF preview (`GET /fd/file-library/files/{id}/thumb`) needs `pypdfium2`, which comes with the `payments` extra; without it the preview offers **Open**. A file someone else wrote, or one whose agent is off, previews without scripts or images.
 - **Actions:** **Edit** (in the [file editor](#file-editor-flight-deck)), **Present as deck**, **Public link** (see [Public file links](#public-file-links--new-in-081)), the phone's share sheet, and **Everything it keeps** for the agent's live files-and-data view.
 - **Costs.** The model calls count toward the owner's daily token allowance; a scan stops when it's spent, or after repeated model failures, and says why. **Rescan** also retries failed files.
 
@@ -7152,6 +7219,16 @@ Routes (owner-checked): `/fd/file-library/status`, `/fd/file-library/scan`, `/fd
 - **Search** goes through table names, summaries, columns and the data itself; filter by category or agent.
 - **Export** as CSV (opens straight in Excel), JSON (one object per row) or XLSX: `GET /fd/data-library/tables/{id}/export?format=csv|json|xlsx`. A CSV neutralises spreadsheet formulas in rows a shared-agent member added. **Refresh** reads the table again.
 - The model calls count toward the owner's daily token allowance, as for the File library.
+
+**Column filters (0.9.3).** The funnel in a column's header opens that column's filter, in a file's table (CSV, TSV, Excel) and in the Data library. Filters on several columns all apply; chips above the rows show them (click to change, × to remove, **Clear all**).
+
+- **Values**: tick values from the column's own, most common first with a row count each, searchable, `(empty)` included; **Show only** or **Hide** the ticked ones. Past 200 distinct values the 200 most common show and the search finds the rest.
+- **Range**: for numbers, "at least" / "at most" and a slider with two handles, with the quick picks **Top 10**, **Bottom 10**, **Above average**, **Below average**; for dates, From / To with **Today**, **Last 7 days**, **Last 30 days**, **This month**, **Last month**, **This year**, **Last year**.
+- **Condition**: contains, doesn't contain, is, isn't, starts with, ends with; =, ≠, >, ≥, <, ≤, between; on, before, after; is empty / has a value; top N / bottom N; appears more than once / only once. Top, bottom, average and repeats measure the whole column.
+
+A file's table filters in the page. The Data library filters on the deck, over the whole table: `GET /fd/data-library/tables/{id}/rows?filters=…` (a bad filter is a 400) and `GET /fd/data-library/tables/{id}/values?col=&kind=&q=&filters=&search=&limit=` for a column's values with counts.
+
+**A row in fullscreen (0.9.3).** The Data library's row panel and new-row form have a fullscreen button: the row fills the window as cards in two columns, edited in place. Esc leaves fullscreen first, then closes the row.
 
 ### Scheduled tasks — NEW in 0.8.1
 
@@ -7171,7 +7248,7 @@ Due tasks run concurrently, one at a time per agent, and wait up to 20 minutes f
 
 **When the agent is off (0.9.0).** A task no longer fails with "agent not running". An agent that is asleep is woken, as before. One that crashed, or didn't come back after a restart, is started and stays on. One its owner switched off is started about five minutes before the run (`FD_AGENT_IDLE_WAKE_LEAD_S`, default 300 seconds), then switched off again after, when no other run holds or waits on it, no task is due soon, and it isn't mid-turn. If you switch it on or off meanwhile, your choice wins. The editor says "‹agent› is off. It is turned on a few minutes before each run and off again after." This covers Flight Deck's scheduled tasks, not an agent's own `cron`.
 
-**Paused for people who are away (0.9.2).** On a deck with accounts, an hourly check (the first 10 minutes after the deck starts) pauses the scheduled tasks of anyone with no sign-in and no message to their agents for N days, together with their agents' own jobs. Nothing is deleted; one **Needs you** item on their Line, "Scheduled tasks paused (N)", says so, and they resume each task here. Admins set N under **Console → Settings → Agents → Pause scheduled tasks for people who are away**: 3, 5, 7 (default), 14, 30, 60 or 90 days, or off. It's the deck setting `scheduled_idle_pause_days` (1–365, 0 = never), not an environment variable.
+**Paused for people who are away (0.9.2).** On a deck with accounts, an hourly check (the first 10 minutes after the deck starts) pauses the scheduled tasks of anyone with no sign-in and no message to their agents for N days, together with their agents' own jobs. Nothing is deleted; one **Needs you** item on their Line, "Scheduled tasks paused (N)", says so, and they resume each task here. Admins set N under **Console → Settings → Agents → Pause scheduled tasks for people who are away**: 3, 5, 7 (default), 14, 30, 60 or 90 days, or off. It's the deck setting `scheduled_idle_pause_days` (1–365, 0 = never), not an environment variable. Since 0.9.3 a task waits the longer of that setting or twice its own period, so a weekly task pauses after two weeks away, not after N days; daily and more frequent tasks behave as before, and one-shots count as no period.
 
 **Admins see their own (0.9.2).** The Scheduled tasks window, its runs and the agents' jobs show an admin only their own and ownerless system tasks, not everyone's. An agent's own jobs are called *automations* in the UI.
 
@@ -7324,7 +7401,7 @@ A virtual data room (a ZIP or a folder) anonymized into one vault, checked, revi
 
 ## First Mate — NEW in 0.9.2
 
-Standing jobs ("factories") that run for one person under their own account. Each has a charter they approve, goals every run is checked against (**Done when**), when it runs, a cap per run and a share of a weekly token budget. Every run is a [Bat](#runs-that-finish--new-in-092) run, or a [list funnel](#the-list-funnel--new-in-092) run when the result is a list. **The step-by-step guide is [docs/guide/first-mate.md](docs/guide/first-mate.md)**; this is the reference. Design: [docs/first-mate-plan.md](docs/first-mate-plan.md).
+Standing jobs ("factories") that run for one person under their own account. Each has a charter they approve, goals every run is checked against (**Done when**), when it runs, a cap per run and a share of a weekly token budget. Every run is a [list funnel](#the-list-funnel--new-in-092) run or a [Bat](#runs-that-finish--new-in-092) run; since 0.9.3 the list funnel is a new factory's runner unless its result isn't a list. **The step-by-step guide is [docs/guide/first-mate.md](docs/guide/first-mate.md)**; this is the reference. Design: [docs/first-mate-plan.md](docs/first-mate-plan.md).
 
 **Turning it on.** Off on a new or upgraded deck. **Console → Settings → First Mate** (admins; the page's **This deck** box has the same two switches, as **First Mate on this deck** and **Admins only**):
 
@@ -7349,13 +7426,13 @@ Routes `GET`/`PUT /fd/admin/first-mate/settings`. `FD_FIRST_MATE_DISABLED=true` 
 
 **A factory.** **New factory** offers three ways in:
 
-- **Describe it** → **Draft it**: one model call writes the name, the charter, when it starts, the **Done when** goals and up to three sealed test cases, optionally for a Course goal. **Rewrite it as a full charter.** (on by default, remembered in the browser) spells out groups with an amount each, the columns, where each fact must come from and what to do when one isn't found, keeping every limit, number, name and link given; off, the words are the charter as written. A list task comes back with **List funnel** as its runner. `POST /fd/first-mate/draft` (`rephrase`, true when left out).
+- **Describe it** → **Draft it**: one model call writes the name, the charter, when it starts, the **Done when** goals and up to three sealed test cases, optionally for a Course goal. **Rewrite it as a full charter.** (on by default, remembered in the browser) spells out groups with an amount each, the columns, where each fact must come from and what to do when one isn't found, keeping every limit, number, name and link given; off, the words are the charter as written. Since 0.9.3 the draft comes back with **List funnel** as its runner unless it says the result isn't a list (before, only when it said it was one). `POST /fd/first-mate/draft` (`rephrase`, true when left out).
 - **Or start from a template**: **Inbox drafts**, **Follow-up chaser**, **Weekly report**, **Price watch**, **Meeting prep**, **Research digest** (none with grants, all on a schedule).
 - **From scratch**: a name and a charter, **Create draft**.
 
 Grants to send or organize mail are drafted only when the person's words ask for them; spending and accounts never. A new factory is a draft, and nothing runs until its charter is approved, against the exact text shown. The drawer's tabs: **Charter**, **Results**, **Data**, **Runs**, **Record**, **Checks**, **History**, and **Recipe** for a list funnel.
 
-- **Charter**: **What it does, each run**; **Done when**, goals switched on or off, each **Countable** (a script checks it) or **Judgement** (the reviewers decide); **When it runs** (**Only when I press Run now**, **Weekdays 08:00**, **Every day 08:00**, **Mondays 09:00** or any schedule); **How it runs** (**Agents** or **List funnel**); then **Approve and start** / **Approve this version**. The live charter card shows Done when, Starts, **Cap per run**, **May act** and **Trust**; **Change it** starts a new draft.
+- **Charter**: **What it does, each run**; **Done when**, goals switched on or off, each **Countable** (a script checks it) or **Judgement** (the reviewers decide); **When it runs** (**Only when I press Run now**, **Weekdays 08:00**, **Every day 08:00**, **Mondays 09:00** or any schedule); **How it runs** (**List funnel** or **Agents**; List funnel is listed first since 0.9.3); then **Approve and start** / **Approve this version**. The live charter card shows Done when, Starts, **Cap per run**, **May act** and **Trust**; **Change it** starts a new draft.
 - States: Draft, Waiting for approval, Running, Paused, Over budget, Stopped, Retired. Health: **Healthy**, **Needs a look**, **In trouble**, **Too new to say**.
 
 **When it runs.**
@@ -7381,13 +7458,13 @@ Grants to send or organize mail are drafted only when the person's words ask for
 
 **On the Line.** One thread per factory: "‹name›: done", "‹name›: the run failed", "‹name›: carried out", "‹name› would do N things", "‹name› is paused", "‹name›: version N is live", "‹name› now acts within its grants". A finished run's message starts with its result file (rows, size), its timing and anything worth a look; 👍 / 👎 and **Open First Mate** are on the card. **First Mate's week** comes at the first scan after 07:00 UTC each Monday; a quiet week sends nothing. Phones get what needs the owner, and a finished run started by hand or taking 30 minutes or more.
 
-**Agents** use the [`first_mate`](#first_mate--new-in-092) tool: list, status, run, pause, resume, report, draft; never approve, carry out or change trust.
+**Agents** use the [`first_mate`](#first_mate--new-in-092) tool: list, status, runs (0.9.3), run, pause, resume, report, draft; never approve, carry out or change trust.
 
 **Storage and routes.** `<FD_DATA_DIR>/first_mate.db`. Each factory's extra data, `_checked.csv` (**Already checked**) and `_recipe.json` (the pinned list recipe) are in `<FD_DATA_DIR>/first_mate_data/<factory>/`. Routes, for the signed-in person only, under `/fd/first-mate`: `/prefs`, `/my-agent`, `/draft`, `/templates`, `/report`, `/factories` and `/factories/{id}` with `/data`, `/checked`, `/recipe`, `/results`, `/draft`, `/submit`, `/approve`, `/decline`, `/state`, `/trust`, `/run` (`record` for a list funnel), `/runs`, `/archive`, `/cases`, `/check`, `/improve`, `/improvements`; `/runs/{id}/` `continue`, `stop`, `progress`, `approve`, `reject`, `thumbs`, `archive`, `data`. Agents: `POST /fd/first-mate/agent/tool`.
 
 ### The list funnel — NEW in 0.9.2
 
-How a factory whose result is a list runs. Code searches, fetches pages, filters, merges duplicates and checks every row; a model judges each item once, in a short fresh call (keep, came close or drop) and writes its row. Every value must be on a page or in a file that was read. Picked in the charter under **How it runs → List funnel** ("Code searches, reads and checks; a model judges each item once"); a run that isn't a list goes to agents anyway. The factory's chip reads **List funnel** (an agents factory's reads **Bat**). Plan: [docs/funnel-runner-plan.md](docs/funnel-runner-plan.md).
+How a factory whose result is a list runs, and since 0.9.3 the runner a new factory gets when none is named (a draft that says its result isn't a list still goes to agents; the built-in templates name their runner, and existing factories keep theirs). Code searches, fetches pages, filters, merges duplicates and checks every row; a model judges each item once, in a short fresh call (keep, came close or drop) and writes its row. Every value must be on a page or in a file that was read. Picked in the charter under **How it runs → List funnel** ("Code searches, reads and checks; a model judges each item once"); a run that isn't a list goes to agents anyway. The factory's chip reads **List funnel** (an agents factory's reads **Bat**). Plan: [docs/funnel-runner-plan.md](docs/funnel-runner-plan.md).
 
 - **Where items come from**: web searches (list and directory pages in the results are followed), a list page, a links file (fewer than 5 links count as reference, not items), and the owner's files: tables (CSV, TSV, XLSX, JSON lines) and documents (PDF, Word, PowerPoint, Markdown, text, HTML). A list built only from files never searches the web, and the owner's other tables are joined to fill facts. About 70 countries and any kind of item.
 - **A run** reads the charter's links and the attached documents first (up to 8 pages and 6 documents) into `shared/funnel/brief.md`; follows the factory's pinned recipe, or writes one; runs one step per group ("Find and check ‹amount› ‹group›") and a merge step. Per item: code filters on the search listing; the item's own site is read (its own links followed, up to 5 pages; a directory or guide page never counts as its site); code pulls out facts; one judging call; code checks the row (required cells, allowed values, the value on the cited page, dates, minimum and maximum).
@@ -7432,7 +7509,7 @@ Agents' `web_search` and `web_fetch` can run in the person's own Chrome through 
 | **Web searches → Search through my Chrome with** | **Off — Flight Deck's search service** (default), **Google**, **Bing**, **DuckDuckGo**, **Yahoo**, **Qwant** | `web-search:chrome`; `GET`/`PUT /fd/web-search/chrome` |
 | **Web pages → Read pages through my Chrome** | **Off — Flight Deck reads pages itself** (default), **Only pages that turn Flight Deck away** (`blocked`), **Every page** (`always`); with **Only these sites** (a site covers its subdomains; empty = any site; up to 50) | `web-fetch:chrome`; `GET`/`PUT /fd/web-fetch/chrome` |
 
-**Captain for Chrome** (0.7.2 at release; searches need 0.6.0, pages 0.7.0; Chromium 116 or later):
+**Captain for Chrome** (0.7.2 at the 0.9.2 release, 0.9.0 with 0.9.3; searches need 0.6.0, pages 0.7.0; Chromium 116 or later):
 
 - **Searches**: the panel asks once, "Run your agents' searches on ‹Engine› here?" (**Allow** / **Not in this browser**), Chrome's prompt for that engine's site only; no ask when Chrome already lets Captain read every site. Settings → **Web searches** turns it off in that browser.
 - **Pages** need **Work on every site without asking** (Settings), or **Allow** on "Let your agents read web pages here?". Settings → **Web pages** turns it off.
@@ -7442,7 +7519,8 @@ Agents' `web_search` and `web_fetch` can run in the person's own Chrome through 
 
 - **Searches**: the extension sends back the result page's HTML and the deck reads it, so an engine that changes its markup needs a Flight Deck update, not a new extension. Up to 5 result pages: 50 results on Google and Bing, 35 on Yahoo, 10 on DuckDuckGo and Qwant. Brave Search (it cloaks its result links), Startpage and Ecosia (bot walls) aren't offered.
 - **Pages**: after load, the extension waits for the page to stop drawing (about 0.9 s with no changes or requests and nothing `aria-busy`; at least 1.5 s, at most 10 s), scrolls through up to 8 screens for what loads lazily, settles again, and sends back the HTML without scripts, styles, form fields or frames (about 3 MB at most; up to 40 s a page). `web_fetch` reads it like any page.
-- **Fallbacks**: anything short of results or a page goes the usual way (the deck's search provider; the deck's own fetch), silently when the setting is off or Chrome is closed. A robot check or a cookie question on the engine falls back with a note asking the person to answer it once in Chrome. Scheduled runs use the owner's Chrome whenever it's open.
+- **Fallbacks**: anything short of results or a page goes the usual way (the deck's search provider; the deck's own fetch), silently when the setting is off or Chrome is closed. A cookie question on the engine falls back with a note asking the person to answer it once in Chrome. Scheduled runs use the owner's Chrome whenever it's open.
+- **Robot checks (0.9.3)**: when a search or a page read meets a "prove you're human" page (Google's "unusual traffic", Cloudflare, reCAPTCHA, hCaptcha, Turnstile, DataDome, PerimeterX, Arkose and the like), Captain for Chrome brings that tab to the front instead of closing it. The chat says the agent is waiting and the panel shows **Waiting for you**. Once the person answers it, the search or read goes on in the same tab: up to 5 minutes when someone is there for the turn, 2 minutes for a run that started on its own. Not answered in time, the agent falls back to the deck's own search or fetch and the tab stays open. When the person closes the tab, that site isn't handed over again in that browser for 10 minutes. Checks that pass by themselves are waited out. The [`browser`](#browser) tool in the person's Chrome isn't covered.
 - **Refused addresses**, on the deck, in the extension and again on the address the page ended at: anything but http(s); IPs that aren't global; `localhost`; single-label hosts; `.local`, `.localhost`, `.internal`, `.lan`, `.home`, `.home.arpa`, `.intranet`, `.corp`; Flight Deck's own address.
 - **Never for a shared agent's member turn.** One agent is kept out with `tools.web_search.via_chrome: false` / `tools.web_fetch.via_chrome: false`.
 - `web_fetch_batch`, `web_get` and `web_search`'s `enrich` passages stay on the deck. A page that draws only what's in view may come back partial from a background tab. Searches show in the browser's history and in Google or Bing activity when signed in there.
@@ -7487,6 +7565,83 @@ A card before an agent pays, sends, posts, shares, deletes or stores a password.
 - **Task cards.** A Bat run started from chat gets a live card in the chat (Working, Needs you, Done, Failed or Stopped, with its cost) and **Stop**, **Try again** and **Open** (full layout).
 - **One word per thing.** The UI says **Tasks** (was Taskboard), **Needs you** (was Needs me) and **automation(s)** (was cron job(s)). [docs/product-map.md](docs/product-map.md) lists the words.
 - **Fewer phone pings.** Only nudges worth a ping reach WhatsApp and Telegram; see `phone_filter` under [Autonomous Work](#autonomous-work-new-in-061).
+
+## Drive — NEW in 0.9.3
+
+How far the harness pushes a turn: how many steps it may take, how often a weak answer is sent back, whether the answer is checked before it's delivered and, at the top level, whether the agent may add one step nobody asked for. Reasoning effort is how hard the model thinks and a cognitive mode is how the agent approaches work; Drive is neither. No level lowers a guard about honesty or safety (the false-claim retries, the stuck detector, mail authority and confirmations don't read it), and Relaxed still has to deliver a complete answer. Plan and real-run results: [docs/drive-plan.md](docs/drive-plan.md).
+
+| Level | In the picker | Steps a turn may take | Sent back after a failed check | Check before delivering | Extra work |
+|---|---|---|---|---|---|
+| **Relaxed** (`relaxed`) | "Takes the first complete answer. Fastest, cheapest." | 2× the planned budget, at most 100 | never | no | no |
+| **Diligent** (`diligent`) | "The everyday level." What every agent did before 0.9.3 | 4×, at most 300 | 2 times (1 after a list run) | no | no |
+| **Persistent** (`persistent`) | "Keeps going longer. Slower, costs more." | 6×, at most 450 | 3 times (2 after a list run) | yes | no |
+| **Ambitious** (`ambitious`) | "As Persistent, and may add the obvious next step. Costs the most." | 6×, at most 450 | 3 times (2 after a list run) | yes | yes, unless switched off |
+
+Progress alone extends a turn up to 1×, 2× and 3× the planned budget at Relaxed, Diligent and Persistent/Ambitious. A reply that announces work without doing it is sent back 2 times at Relaxed and Diligent, 3 times above.
+
+**Where it's set.**
+
+- **In the chat box**: the **Drive** picker beside reasoning effort, with **Auto** ("The agent's own default") and the four levels. The pick is kept per agent and sent with every message to it. A member of a shared agent has no picker: how far it pushes is its owner's to set.
+- **In the agent's settings** (**Settings → Model & thinking → How far it pushes**): the agent's own default, **Not set** or one of the four levels, and the switch **At Ambitious, add the obvious next step**. It applies from the agent's next message, with no restart.
+- **By asking the agent**, from any channel ("be more persistent on this one", "go back to the everyday level", "don't add extra work"): it uses the [`drive_level`](#drive_level--new-in-093) tool, for the rest of the turn, for the chat box or as its default.
+
+**Which level a turn runs at**: what was picked for the turn (the chat box's pick, or what the agent set for the rest of the turn), else the agent's own default, else what its cognitive mode suggests (Ionian and Phrygian suggest Persistent), else Diligent. A turn nobody picked a level for (a scheduled task, a hand-over, WhatsApp, Telegram, a link) runs at the agent's default; a level picked in a chat never reaches a scheduled run. Tasks created inside a turn inherit its level.
+
+**The prompt line.** Every level except Diligent adds a short paragraph to the turn's system prompt, after the cached part, saying how far to go, so a one-step answer differs by level too. It says that the level never changes what counts as true or finished, and that a short question still gets a short answer.
+
+**The check before delivering** (Persistent and Ambitious). Once per turn, for a turn that did work with tools and wasn't already judged against a task contract, one more model call compares the answer with what was asked. When something asked for is missing or isn't supported by what the tools returned (up to five points), the answer is sent back once to finish them. When the check itself fails, the answer is delivered as it is: the check can add a round of work, never block a reply.
+
+**Extra work** (Ambitious, with the switch on). Once the asked work is delivered, the agent may add one obvious next step nobody asked for:
+
+- only calls that read, and the file-writing tools `write`, `edit`, `docx`, `xlsx`, `pptx` and `visualize`; never `ask_user` or `request_secret`, and nothing that runs code, sends, spends or schedules;
+- at most a quarter of the turn's base step budget in tool calls (10 at the default of 40 steps), and at least 3;
+- once per turn, only on a person's own turn that used tools and still has steps left; never on a scheduled or automated turn, or on a shared agent's member turn;
+- what it added goes under the answer as **Also done (not asked for)**; when it adds nothing, the answer goes out alone.
+
+With the switch off, Ambitious works like Persistent.
+
+**Files, config and routes.**
+
+- `~/.captain-claw/drive.txt` holds the agent's own default: a level name, or `auto` for none of its own. `~/.captain-claw/drive_initiative.txt` holds the extra-work switch, `on` or `off`. The agent reads both on every turn. With no file, [`drive.default`](#drive) and `drive.initiative` in the config decide.
+- `GET /fd/agent-drive/{kind}/{id}` (`kind`: `docker` or `process`) returns the agent's `default` ("" = none), what its mode suggests (`suggested`), the level a turn nobody picked one for runs at (`effective`), `initiative` and the `levels` with their limits. `PUT` takes `default` (a level, or `""` / `auto` to clear it) and `initiative` (true or false); a field left out stays as it is. It writes the setting files and the `drive:` section of the agent's config, so the values hold after a restart and travel with the agent's config.
+- The level is recorded with every model call (`llm_usage.drive`) and on every turn. `GET /fd/taskboard/drive-stats?days=30` (1–30 days) gives the caller's own finished turns per agent and level: how many, how they ended (ok, error, blocked, cancelled), tool calls, failed tool calls and average length in seconds.
+
+**After upgrading.** An agent in the Ionian or Phrygian mode with no Drive default now runs at Persistent: longer turns and one more model call on turns that used tools. Set **How far it pushes** to **Diligent** to keep it as it was. Extra work at Ambitious is on by default; switch it off per agent, or set `drive.initiative: false`.
+
+## Web playbooks — NEW in 0.9.3
+
+A playbook is a known way to get something done on a website: which link to open with the person's values in it, what to do on the page, what to read off it and, for one that fills something in, the last button it never presses. 0.9.3 ships **439** of them in 10 categories; the person's own [recordings](#recordings-in-captain-for-chrome--new-in-092) join the same list.
+
+- **Two kinds.** 394 **look something up** (`look`: open, read, answer) and 45 **fill something in** (`act`: fill the page in and stop before a named button, which the person presses).
+- **Rules no playbook breaks.** No step types a password or another secret, and nothing buys, pays, trades, sends or submits on its own.
+- **Which browser** (`where`): `any` (a headless browser will do), `prefer_chrome` (a public page on a site that walls bots: the person's Chrome when it's connected, else headless) or `chrome` (needs the person signed in, so only their own Chrome through Captain for Chrome).
+- **Categories**: Travel, Nearby, Shopping, Accounts & bills, Work, Research, Money, Home & life, Media & social, and Local services (by country).
+- **The seed** is `captain_claw/flight_deck/playbooks/<category>.yaml`: per playbook an id (`<site>.<task>`), a title, how people ask for it, the kind, where it runs, a region, its sites, its inputs, the link to open, optional steps, what to read, and for an `act` playbook its stop.
+
+**In Captain.** **Playbooks** in the navigation opens the store ("Ready-made ways to get things done on the web — an agent runs them"):
+
+1. Search **What do you want done?**, or pick a category: **All**, **★ Mine** (the ones you kept) or one of the ten. The front shows popular ones, **My playbooks** and a few per category. Cards say **Looks it up** or **Fills it in**, and **your Chrome** when it needs it; the star adds one to **My playbooks** or takes it off.
+2. Open a playbook: a form made from its inputs, **Who does it** (one of your agents that is up), an optional note, **How it goes**, for a fill-in one the button it stops before, and what to set up when it needs Captain for Chrome.
+3. **Run in ‹agent›'s chat** opens that agent's chat and sends the request as your own message, in plain words; the agent runs it with [`web_playbook`](#web_playbook--new-in-093).
+
+**In Captain for Chrome** (0.9.0). Under the page card, **Do it here** shows chips for the site in front of you: your own recordings made there, then up to 8 playbooks (yours first, then the ones you ran most), with **All N** when there are more. The bolt button in the header opens the same store in the panel: the search, the categories, then **On ‹site›**, **My playbooks**, **Popular** and a few per category. Rows say **Looks it up** or **Fills it in**; **＋** keeps one; opening one gives its form and **Run with ‹agent›**. The panel follows the run like a clip or a recording. What you kept is the same in both places.
+
+**For agents.** The [`web_playbook`](#web_playbook--new-in-093) tool (`find`, `show`, `run`) is registered wherever an agent has [`browser`](#browser), and its description tells the agent to use it before working a site step by step.
+
+**The stop guard and its limits.** While a fill-in playbook's stop is armed, the `browser` tool refuses a click on a button with the stop's name for the rest of the turn, and for 45 minutes at most. It reads the name from the click's own label or from the element the `ref` points at. It can't catch a click by coordinates or Enter pressed in a field, so read what an agent is about to submit. When the turn ends the stop lapses, and a later message can ask the agent to press the button.
+
+**Storage and routes.** What a person kept, and how often they ran each playbook, is in `<FD_DATA_DIR>/browser-playbooks/<user>.json` (up to 200 kept).
+
+| Route | Who | What |
+|---|---|---|
+| `GET /fd/playbooks` (`region`, `per`) | the signed-in person | The store's front: categories with counts, My playbooks, popular ones, a few per category |
+| `GET /fd/playbooks/search` (`q`, `category`, `region`, `limit`) | the signed-in person | What fits, best first; a whole category without `q` |
+| `GET /fd/playbooks/{id}` | the signed-in person | One playbook in full, with its steps in words |
+| `POST /fd/playbooks/{id}/shelf` (`{"on": bool}`) | the signed-in person | Keep it in My playbooks, or take it off |
+| `POST /fd/playbooks/{id}/compose` (`inputs`, `note`) | the signed-in person | The message that asks an agent to run it with these values, and its link; missing or wrong values are a 400; counts as a run |
+| `GET /fd/clip/playbooks`, `/search`, `/{id}`, `POST /{id}/shelf` | Captain for Chrome's token | The same, for the panel |
+| `GET /fd/clip/playbooks/for?url=` | Captain for Chrome's token | The chips for a page: playbooks for its site (the same brand on another country's domain too) and the person's recordings there |
+| `POST /fd/clip/playbooks/{id}/run` (`agent`, `inputs`, `note`, `browser`, `hands`) | Captain for Chrome's token | Hands the playbook to the agent as the person's own turn |
 
 ## Deck Administration — NEW in 0.8.1
 

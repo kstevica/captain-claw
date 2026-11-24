@@ -6,7 +6,9 @@ New in 0.9.2. Your agents can read a LinkedIn profile, a post on X, or any page 
 
 For LinkedIn and X, the short version is: **Web pages** on **Every page** for `linkedin.com, x.com, twitter.com`, and **Web searches** on **Google**. The steps are below, and [LinkedIn and X](#linkedin-and-x) explains why.
 
-**On this page:** [What it does](#what-it-does) · [What you need](#what-you-need) · [Turn on web searches](#turn-on-web-searches) · [Turn on web pages](#turn-on-web-pages) · [LinkedIn and X](#linkedin-and-x) · [How pages are read](#how-pages-are-read) · [When Chrome is closed, or a site asks](#when-chrome-is-closed-or-a-site-asks) · [Search engines](#search-engines) · [Safety and privacy](#safety-and-privacy) · [Limits](#limits) · [Troubleshooting](#troubleshooting) · [For admins](#for-admins)
+**New in 0.9.3, Captain for Chrome 0.9.0.** A robot check is handed to you and the agent goes on once you answer it; see [A robot check: you answer it, the agent goes on](#a-robot-check-you-answer-it-the-agent-goes-on). The panel also has [playbooks](#playbooks-in-the-panel) for the site in front of you.
+
+**On this page:** [What it does](#what-it-does) · [What you need](#what-you-need) · [Turn on web searches](#turn-on-web-searches) · [Turn on web pages](#turn-on-web-pages) · [LinkedIn and X](#linkedin-and-x) · [How pages are read](#how-pages-are-read) · [When Chrome is closed, or a site asks](#when-chrome-is-closed-or-a-site-asks) · [A robot check](#a-robot-check-you-answer-it-the-agent-goes-on) · [Playbooks in the panel](#playbooks-in-the-panel) · [Search engines](#search-engines) · [Safety and privacy](#safety-and-privacy) · [Limits](#limits) · [Troubleshooting](#troubleshooting) · [For admins](#for-admins)
 
 ## What it does
 
@@ -21,7 +23,7 @@ Your choice covers every agent you own. One agent can be kept out in its config;
 
 ## What you need
 
-- **Captain for Chrome 0.7.2**, connected to your deck, in Chrome, Edge, Brave or Arc (Chromium 116+). Searches need at least 0.6.0 and page reads 0.7.0; take 0.7.2 for both. To set it up the first time, see [Captain for Chrome](devices-and-channels.md#captain-for-chrome).
+- **Captain for Chrome 0.9.0** (the one 0.9.3 ships), connected to your deck, in Chrome, Edge, Brave or Arc (Chromium 116+). Searches need at least 0.6.0, page reads 0.7.0, and the robot-check hand-over and playbooks 0.9.0. To set it up the first time, see [Captain for Chrome](devices-and-channels.md#captain-for-chrome).
 - **Chrome running**, with the extension connected. No window has to be in front.
 - **You, signed in** to LinkedIn, X or whichever site you want read, in that same Chrome.
 - For page reads, **Work on every site without asking** on in the extension, or **Allow** pressed when the panel asks. Searches need only the search engine's own site.
@@ -108,9 +110,37 @@ Things to ask, once it's on:
 ## When Chrome is closed, or a site asks
 
 - **Chrome closed or asleep, or the setting off.** Searches go to the deck's search service, and the deck reads pages, as before. The agent isn't told, and nothing is missing from its result.
-- **A robot check or a cookie question on the search engine.** The deck's search service answers that search, and the result carries a note, for example: "Google asked to confirm a person is searching (a robot check). Open Google in that Chrome and answer it; searches go on after that." Answer it once in that Chrome, and later searches run there again. Your agents don't answer robot checks or cookie questions for you.
+- **A robot check.** Since 0.9.3 the tab comes to the front and the agent waits for you; see [below](#a-robot-check-you-answer-it-the-agent-goes-on). Your agents don't answer robot checks for you.
+- **A cookie question on the search engine, or a check nobody answered.** The deck's search service answers that search, and the result carries a note saying why. Answer the question once in that Chrome, and later searches run there again.
 - **A page your Chrome won't read.** A site not on your list, an address that isn't http or https, a [refused address](#safety-and-privacy), an agent you stopped in the panel, or a page that didn't settle in time. `web_fetch` carries on as if your Chrome weren't there.
 - **Just turned it on?** An agent remembers "off" for a minute, so its first searches and reads after you turn it on may still go to the deck.
+
+## A robot check: you answer it, the agent goes on
+
+New in 0.9.3 (Captain for Chrome 0.9.0). When a search or a page read in your Chrome lands on a "prove you're human" page, the tab is no longer closed.
+
+1. The tab leaves its collapsed group and comes to the front, and Chrome comes forward.
+2. The agent's chat says it's waiting for you, and the panel's log shows **Waiting for you**.
+3. Answer the check in that tab.
+4. The search or read goes on in the same tab. When it's done the tab closes, and the tab you were on comes back.
+
+- **How long it waits:** up to 5 minutes when you're in the agent's chat, 2 minutes for a run that started on its own.
+- **Not answered in time:** the agent goes on without that page, with the deck's own search or fetch. The tab stays open for you.
+- **Close the tab to say no.** That site's checks aren't shown again for 10 minutes.
+- **One check per site at a time.** Other searches on that site wait for the one in front, and answering it lets them all go on.
+- **Checks that pass by themselves** (Cloudflare's "Just a moment…" usually does) get a few seconds first.
+- **Which checks:** Google's "unusual traffic" page, Cloudflare (Turnstile too), reCAPTCHA, hCaptcha, DataDome, PerimeterX's "Press & hold", Akamai, Amazon's "Enter the characters you see" and other common ones. A page that only refuses, with nothing to answer, isn't shown.
+- **Not covered:** the `browser` tool in your Chrome (`target="chrome"`). And an agent that wasn't restarted after the update doesn't wait: its search goes to the deck's search service, as before.
+
+## Playbooks in the panel
+
+New in 0.9.3 (Captain for Chrome 0.9.0). A playbook is a known way to get something done on a website. Captain ships 439, and the panel offers the ones for the site you're on.
+
+1. Under the page card, **Do it here** shows chips: the playbooks for this site, and your own recordings made there. The same brand on another country's domain counts. Past eight, **All N** opens the rest.
+2. **⚡** in the panel's header opens the store: **On this site**, **My playbooks** and **Popular**, then the categories. Type to search everything. Each row says **Looks it up** or **Fills it in**, and **＋** adds it to **My playbooks**.
+3. Open a playbook, fill in its short form and press **Run with ‹agent›**. You follow the run in the panel like a clip.
+
+A playbook that fills something in stops before its last button, which you press yourself. Your recordings count as playbooks: they show in the chips, and an agent finds them with its `web_playbook` tool. **My playbooks** is the same shelf as in Flight Deck's [Playbooks](flight-deck.md#playbooks) store.
 
 ## Search engines
 
@@ -161,7 +191,7 @@ Three engines are left out on purpose:
 - **`web_search` with `enrich=true`** reads the passages from the top results on the deck, even when the search itself ran in your Chrome.
 - **Long threads and feeds may come back partial.** A read covers about eight screens. For more, ask the agent to open the page in your Chrome with the browser and scroll. That's the `browser` tool with `target="chrome"`, and it needs **Agents can use this browser**.
 - **Sections drawn only while they're on screen** may not draw in a background tab, so a read can miss them.
-- **Robot checks and cookie questions** are yours to answer, once, in that Chrome.
+- **Robot checks and cookie questions** are yours to answer in that Chrome. Since 0.9.3 a robot check comes to the front and the agent waits for it.
 - **About 3 MB of HTML** per page, and about 40 seconds.
 - **Tested on stand-in pages.** The waits and the sign-in wall checks were tested on stand-in pages, not against live LinkedIn or X accounts, and both sites change their pages. If a read comes back with less than you see, tell the agent what's missing, or have it use the browser.
 
@@ -171,7 +201,7 @@ Three engines are left out on purpose:
 
 1. Look at the **Web searches** card in **Profile**: its status line says what's missing.
 2. Check that an engine is picked on the card, not **Off — Flight Deck's search service**.
-3. Check the extension's version: 0.6.0 or later, 0.7.2 recommended. It's at the bottom of the panel's **Settings**, and on the browser's row in **Connections → Browser**.
+3. Check the extension's version: 0.6.0 or later, 0.9.0 recommended. It's at the bottom of the panel's **Settings**, and on the browser's row in **Connections → Browser**.
 4. In the panel's **Settings → Web searches**, **Run my agents' web searches here, on <engine>** must be on. **Not in this browser** turns it off; turn it on again there.
 5. Chrome has to be running, with the extension connected to the deck.
 6. Just turned it on? Give it a minute. Was the deck just updated? The agent needs a restart too.
@@ -184,15 +214,15 @@ Three engines are left out on purpose:
 2. Check **Only these sites**: the site the agent was given must be on it, or be a subdomain of an entry. `x.com` doesn't cover `twitter.com`.
 3. Check that you're signed in to that site in the same Chrome the extension runs in.
 4. In the panel, **Work on every site without asking** is on, and so is the **Settings → Web pages** switch.
-5. Check the extension's version: 0.7.0 or later, 0.7.2 recommended.
+5. Check the extension's version: 0.7.0 or later, 0.9.0 recommended.
 6. Check the agent isn't stopped in the panel.
 7. Read the result's first line. `[Read in the person's own Chrome …]` means your Chrome read it, and the site showed you the wall too. Without that line, the deck read it.
 
 ## For admins
 
 - **Deploy.** Pull the update, **restart Flight Deck** (the new routes and the **Profile** cards), then **restart the agents** (the new paths in `web_search` and `web_fetch`). Restart Flight Deck first: an agent that finds a deck without the new routes doesn't ask again for four minutes.
-- **The extension.** Each person updates Captain for Chrome to 0.7.2 and reloads it, as in [What you need](#what-you-need). From 0.5.1 on, the panel says when it's behind. **Connections → Browser** shows each browser's version, with a note when it's behind or ahead of the deck's copy. An extension older than 0.5.1 can't show the note itself.
-- **Older extensions** keep working for clips and the browser tool. They don't offer searches or page reads, so agents fall back to the deck.
+- **The extension.** Each person updates Captain for Chrome to 0.9.0 (0.9.3's copy) and reloads it, as in [What you need](#what-you-need). From 0.5.1 on, the panel says when it's behind. **Connections → Browser** shows each browser's version, with a note when it's behind or ahead of the deck's copy. An extension older than 0.5.1 can't show the note itself.
+- **Older extensions** keep working for clips and the browser tool. They don't offer searches or page reads, so agents fall back to the deck. The 0.7.2 that 0.9.2 shipped closes a tab that shows a robot check instead of handing it over, and has no playbooks.
 - **Per person, off by default.** Nothing changes until a person picks an engine or a page mode. There's no deck-wide switch; keep an agent out with `via_chrome: false`.
 - **Keep the search service.** The fallback is still the agent's `tools.web_search.provider` (Brave by default; Tavily, You.com or Keenable). It answers whenever a person's Chrome can't, so keep its key.
 - **When an engine changes its page,** the fix is a Flight Deck update, not a new extension.

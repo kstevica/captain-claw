@@ -12,7 +12,7 @@ A full management dashboard for running teams of AI agents. Spawn, monitor, conf
 flight-deck        # http://0.0.0.0:25080   (alias: captain-claw-fd; add --simple-chat for a kiosk)
 ```
 
-**On this page:** [Seven orchestration modes](#seven-orchestration-modes) · [Code](#code) · [Crew](#crew) · [Forge agents](#forge-agents) · [Archetypes](#archetypes) · [Captain Swarm](#captain-swarm) · [First Mate](#first-mate) · [Plan and Deep mode](#plan-and-deep-mode) · [Orchestrator / DAG mode](#orchestrator--dag-mode) · [Flows and the Observatory](#flows-and-the-observatory) · [Running the fleet](#running-the-fleet) · [The kiosk and simple layout](#the-kiosk-and-simple-layout) · [Onboarding](#onboarding) · [The Taskboard](#the-taskboard) · [The Line](#the-line) · [Custom tools](#custom-tools) · [Agents as colleagues](#agents-as-colleagues) · [Agent families](#agent-families) · [Agent files](#agent-files-export-import-and-backups) · [Course](#course) · [Your own AI keys and Profile](#your-own-ai-keys-and-profile) · [Activity and audit](#activity-and-audit) · [Running a deck for a team](#running-a-deck-for-a-team) · [Updating the deck](#updating-the-deck) · [Idle agents sleep](#idle-agents-sleep)
+**On this page:** [Seven orchestration modes](#seven-orchestration-modes) · [Code](#code) · [Crew](#crew) · [Forge agents](#forge-agents) · [Archetypes](#archetypes) · [Captain Swarm](#captain-swarm) · [First Mate](#first-mate) · [Plan and Deep mode](#plan-and-deep-mode) · [Orchestrator / DAG mode](#orchestrator--dag-mode) · [Flows and the Observatory](#flows-and-the-observatory) · [Running the fleet](#running-the-fleet) · [The kiosk and simple layout](#the-kiosk-and-simple-layout) · [Drive](#drive) · [Playbooks](#playbooks) · [Onboarding](#onboarding) · [The Taskboard](#the-taskboard) · [The Line](#the-line) · [Custom tools](#custom-tools) · [Agents as colleagues](#agents-as-colleagues) · [Agent families](#agent-families) · [Agent files](#agent-files-export-import-and-backups) · [Course](#course) · [Your own AI keys and Profile](#your-own-ai-keys-and-profile) · [Activity and audit](#activity-and-audit) · [Running a deck for a team](#running-a-deck-for-a-team) · [Updating the deck](#updating-the-deck) · [Idle agents sleep](#idle-agents-sleep)
 
 ## Seven orchestration modes
 
@@ -137,7 +137,8 @@ New in 0.9.2, **off until an admin turns it on**. First Mate runs standing jobs,
 - **Where people find it**: in the kiosk, **Settings → Your agents at work → First Mate**, or **More** under the agent column. In the classic layout (`?app=classic`), **Automation → First Mate**.
 - **A factory**: **New factory**, then **Describe it** and **Draft it**, a template, or **From scratch**. Read the charter, switch its goals on or off, and **Approve and start**. Then **Run now**, or switch on **On their own** (off for everyone at first) so schedules and new mail start runs.
 - **What comes back**: a **Results** tab with the result first and a box **Worth a look before you use it**, one thread per factory on [the Line](#the-line), and a weekly report every Monday. While a factory's trust is **Asks first**, mail is rehearsed and waits for **Carry out all, once**.
-- **Agents** get the `first_mate` tool (`list`, `status`, `run`, `pause`, `resume`, `report`, `draft`). It never approves anything for you.
+- **Agents** get the `first_mate` tool (`list`, `status`, `runs`, `run`, `pause`, `resume`, `report`, `draft`). It never approves anything for you. Since 0.9.3 `runs` gives a factory's newest runs with their result files, and a working run's folder is read-only to your other agents.
+- **Since 0.9.3 the list funnel is a new factory's runner** unless its result isn't a list. Under **How it runs**, **List funnel** comes first and **Agents** second. Factories you already have keep theirs.
 
 `FD_FIRST_MATE_DISABLED=true` stops it on a deck altogether. Step by step: [First Mate](first-mate.md).
 
@@ -185,6 +186,18 @@ Flows are written as code or in a visual Builder, compiled from plain English, s
 
 The chat-first view your team's non-admins live in is a complete place to work.
 
+**New in 0.9.3:**
+
+- **[Drive](#drive)**: a picker in the chat box for how far the agent pushes, beside the effort picker.
+- **[Playbooks](#playbooks)** in the nav, between **Agents** and **Inbox**: a store of ready-made ways to get something done on a website.
+- **Excel files open as tables** (`.xlsx`, `.xlsm`), read-only, with a tab per sheet, wherever a file opens: the File library, Shared folders, a chat's files, First Mate results. Old `.xls` files still download.
+- **Every column has a filter.** Press the funnel in a column's header: **Values** (tick them, then **Show only** or **Hide**), **Range** (with quick picks such as **Top 10**, **Above average** and **Last 30 days**) or **Condition**. Filters add up and show as chips; **Clear all** removes them. It works in the Data library and on CSV and Excel tables.
+- **A row in fullscreen**: the Data library's row panel and its new-row form open full screen, where you edit the row in place.
+- **An MCP server can ask you something.** When a local (stdio) MCP server asks for input in the middle of an agent's call, you get a card titled **‹server› asks you**, with **Decline** and **Send**. Only you can answer it: the agent can't, and the model never sees what you type. A card nobody answers is cancelled after 20 minutes, and the deck stops an MCP call that has been quiet for 10 minutes.
+- **The first next step waits in the chat box.** When a reply ends with next steps, the first one shows greyed in the empty box. Press **Tab** to write it in, then edit or send it.
+- **Agents know their groups.** An agent is told which of your agent groups it's in and who else is in them, and its `flight_deck` tool can ask or task a whole group with `to='group:<name>'`.
+- **Cognitive modes were rewritten.** The seven mode prompts are new and shorter, and a mode no longer sets how hard an agent pushes. That is [Drive](#drive) now. A mode only *suggests* a level (Ionian and Phrygian suggest Persistent) for an agent with no Drive default of its own.
+
 **Since 0.9.2** a browser tab opens the kiosk for people and the **Admin console** for admins, who move between the two with **Switch to user view** and **Switch to admin view**. The classic layout opens only in a tab with `?app=classic` (Payments review links need it too).
 
 **Since 0.9.1** it opens on **Today** when no chat is open: a greeting, **Waiting for you** (tasks that are your move, proposals and open questions, each with its own answer buttons), **Today’s priorities** and **Handled automatically**. The nav above the agent list reads **Today · Agents · Inbox · Tasks · People · Automations · Activity**: **Agents** is one card per agent with its picture and live state, **Inbox** is the [Line](#the-line), **Tasks** the [Taskboard](#the-taskboard), **People** everyone on your tasks (search, sort, a **Pending** filter), **Automations** the scheduled tasks. **New agent** opens the **Agent store** (**Featured**, **Add**, and **Advanced** for the old picker with **From a file** and **Forge agents**). There is no right column any more: an agent's files and tables open from **⋯ → Files & data**. Under the agent list, **Library · Data · Folders · More**; **More** holds Crew and Captain Swarm (where allowed), **Vatra**, **Basna** and **Council**, **[Anonymize](anonymization.md)** and **[Data rooms](data-rooms.md)**. An agent gets a picture with **⋯ → Picture**, and the chat box has a model picker beside the effort picker.
@@ -195,7 +208,7 @@ Besides that:
 - a **File library** and a **Data library** that summarise everything the agents keep;
 - **Shared folders** (0.8.3): the shared VFS as a library — recent files, your folders, agent runs, what's shared with you, linked folders, and **Google Drive** and **OneDrive** folders mounted read-only — with preview, edit, rename, drag-and-drop upload, search and a `vfs:` address to hand your agents;
 - **fullscreen** on the File library, the Data library and Shared folders (0.8.3);
-- **Scheduled tasks** that deliver to chat, email or Telegram, and that [pause after 7 days away](#idle-agents-sleep) (0.9.2);
+- **Scheduled tasks** that deliver to chat, email or Telegram, and that [pause after 7 days away](#idle-agents-sleep) (0.9.2; since 0.9.3 a task waits at least twice its own period);
 - a **[Taskboard](#the-taskboard)** of everything the agents were asked and sent, and what needs you (0.8.4);
 - one **timeline** per agent with named topics, and a **reasoning-effort** picker;
 - **agent groups**: folders in the agent list, with a name and a colour, that fold away and still show an agent at work or a new reply. Drag an agent onto a group, or use its **⋯ → Group**; a group's own **⋯** ticks its agents, renames, recolours and orders it. **Pin** one group to the top of the list, and as many agents as you like to the top of their group. Each person has their own, on all their devices;
@@ -211,6 +224,59 @@ Admins get an **Admin console**, invitations by email, a waitlist that answers a
 [![The simple layout — agents with a power switch on the left, chat in the middle, the agent's files and datastore on the right](../screenshots/simple-layout.webp)](../team-deployment.md)
 
 The chat-first **simple layout** (Cmd/Ctrl+\) with agents, chat, files and datastore — `flight-deck --simple-chat` turns it into a **kiosk** for non-admins. Before a second person logs in, set `FD_AUTH_ENABLED`, a fixed `FD_JWT_SECRET` and `FD_PUBLIC_URL` / `FD_ALLOWED_HOSTS`; the first account becomes the admin, **Admin → Users** adds the rest, and **Library → Publish to team** gives them models without pasting keys. The full checklist is [docs/team-deployment.md](../team-deployment.md).
+
+## Drive
+
+New in 0.9.3. **Drive** is how far an agent pushes to finish what you asked. Reasoning effort is how hard the model thinks; Drive is how many steps a turn may take, how often a weak answer is sent back, and whether the answer is checked before you get it. Higher levels take more steps and more tokens.
+
+| Level | What it does |
+|---|---|
+| **Relaxed** | Takes the first complete answer. Fastest, cheapest. Fewer steps, and an answer is never sent back for another try. |
+| **Diligent** | The everyday level. What every agent did before 0.9.3. |
+| **Persistent** | Keeps going longer. Slower, costs more. More steps, more tries when an answer falls short, and a check of the answer before it's delivered. |
+| **Ambitious** | As Persistent, and may add the obvious next step. Costs the most. |
+
+**Set it for a chat.**
+
+1. In the chat box, open the **Drive** picker (the gauge, beside the effort picker).
+2. Pick **Auto**, **Relaxed**, **Diligent**, **Persistent** or **Ambitious**. **Auto** means the agent's own default.
+3. Your pick is remembered per agent and goes with every message you send from that chat box. Members of a shared agent don't see the picker.
+
+**Set an agent's default.**
+
+1. Open the agent's **⋯** menu and its model settings. In **Agent settings**, on the **Model & thinking** tab, find **How far it pushes**.
+2. Pick a level, or **Not set**. Not set follows the agent's cognitive mode when the mode suggests a level (Ionian and Phrygian suggest Persistent), and is Diligent otherwise.
+3. The switch **At Ambitious, add the obvious next step** turns the extra work on or off. Off, Ambitious works like Persistent.
+
+The default applies from the agent's next message, with no restart. It is what scheduled runs, hand-overs, WhatsApp, Telegram and other channels use: a level picked in one chat box never reaches a scheduled run.
+
+**Or ask the agent.** "Be more persistent on this one", "go back to the everyday level", "don't add extra work". The agent changes it with its `drive_level` tool, from any channel: for the rest of the turn, for the chat box, or as its default. Only the agent's owner can; on a member's turn or a public link the tool refuses.
+
+**Which level a turn runs at:** your pick for the turn, else the agent's default, else what its cognitive mode suggests, else Diligent.
+
+**What Persistent and Ambitious add.**
+
+- **More room.** A turn may take up to 6 times its planned steps, 450 at most (Diligent: 4 times, 300 at most; Relaxed: 2 times, 100 at most). An answer that fails its checks is sent back up to 3 times (Diligent 2, Relaxed never).
+- **A check before delivering.** After a turn that used tools, one more model call compares the answer with what you asked, and sends it back once when something asked for is missing.
+- **The obvious next step** (Ambitious only, on your own turns). Once the answer is done, the agent may do one more thing nobody asked for. It can only read, and write files: nothing is sent, run or scheduled. It takes at most a quarter of the turn's base step budget in tool calls, and what it added is listed under the answer as **Also done (not asked for)**. Never on a scheduled run or another automation, never on a shared agent's member turn, and never after an answer that used no tools.
+- **Short turns differ too.** Every level except Diligent adds a short paragraph to the agent's prompt, so a one-step answer is quicker at Relaxed and more thorough at Persistent or Ambitious.
+
+**Cost.** Persistent and Ambitious turns are longer and make one more model call after every turn that used tools. Agents in the Ionian or Phrygian mode with **Not set** now run at Persistent; set **How far it pushes** to **Diligent** to keep one as it was. For the deck-wide settings, see [the team checklist](../team-deployment.md#what-093-changes-for-a-team-deck).
+
+## Playbooks
+
+New in 0.9.3. A **playbook** is a known way to get something done on a website: where to go, what to fill in, what to read, where to stop. Captain ships 439 of them in ten categories. Most **look something up**; some **fill something in**, and those stop before a named last button, which you press yourself.
+
+1. Open **Playbooks** in the kiosk's nav.
+2. Type in **What do you want done?**, or pick a category. **Mine** shows the ones you starred.
+3. Open a playbook. It says **Looks it up** or **Fills it in for you**, which site it's for and which browser it needs (**Any browser**, **Best in your Chrome** or **Your Chrome, signed in**), and has a short form made from what it needs. **How it goes** lists the steps.
+4. Under **Who does it**, pick one of your agents that is up.
+5. Press **Run in ‹agent›'s chat**. The chat opens and the request goes to the agent as your message; you follow it there.
+
+- **Add to mine** (the star) keeps a playbook in **My playbooks**. It is the same shelf as in [Captain for Chrome](devices-and-channels.md#captain-for-chrome), where your starred playbooks come first in the chips.
+- A playbook that needs your own Chrome says so, and offers **Set up Captain for Chrome** when the extension isn't connected or **Agents can use this browser** is off.
+- **Agents** find and run playbooks themselves with the `web_playbook` tool (`find`, `show`, `run`), wherever they have the `browser` tool. Your own [recordings](devices-and-channels.md#recordings-show-it-once-an-agent-does-it-after-that) count as playbooks too.
+- While a fill-in playbook runs, the browser tool refuses a click on its stop button for the rest of the turn. It can't catch a click by coordinates or Enter in a field, so read what an agent is about to submit.
 
 ## Onboarding
 
@@ -390,4 +456,4 @@ New in 0.8.3, off by default. **Admin console → Settings → Agents → Put id
 
 **Scheduled tasks on an agent that's off** (0.9.0): a sleeping agent is woken as before, one that crashed is started and stays on, and one its owner switched off is started about five minutes before the run and switched off again after, when nothing else needs it. A choice you make meanwhile wins.
 
-**Scheduled tasks pause for people who are away** (0.9.2, on by default on a deck with accounts). When someone hasn't signed in or written to their agents for 7 days, their scheduled tasks and the jobs their agents set up for themselves are paused. Nothing is deleted. Their Line gets one item, "Scheduled tasks paused (N)", and they resume each task under Scheduled tasks. Admins change the days (3 to 90) or turn it off under **Admin console → Settings → Agents → Pause scheduled tasks for people who are away**. Since 0.9.2 an admin's Scheduled tasks window lists only their own tasks and the deck's own, not everyone's.
+**Scheduled tasks pause for people who are away** (0.9.2, on by default on a deck with accounts). When someone hasn't signed in or written to their agents for 7 days, their scheduled tasks and the jobs their agents set up for themselves are paused. Nothing is deleted. Their Line gets one item, "Scheduled tasks paused (N)", and they resume each task under Scheduled tasks. Since 0.9.3 a task waits the longer of that setting or twice its own period, so a weekly task isn't paused after one week away. Admins change the days (3 to 90) or turn it off under **Admin console → Settings → Agents → Pause scheduled tasks for people who are away**. Since 0.9.2 an admin's Scheduled tasks window lists only their own tasks and the deck's own, not everyone's.

@@ -5,6 +5,10 @@ Code: `browser-extension/chrome/` (the extension), `captain_claw/flight_deck/bro
 (the deck side; `browser_recordings.py` for recordings), `flight-deck/src/components/BrowserPairDialog.tsx` and
 `components/connections/BrowserConnection.tsx` (pairing and Connections → Browser).
 
+The extension is at **0.9.0** (`manifest.json`), shipped with Captain Claw 0.9.3. Since 0.7.2 (Captain Claw
+0.9.2) it gained the [robot-check hand-over](#a-robot-check-handed-to-the-person) and the
+[playbook chips and store](#in-the-panel-chips-the-store-the-shelf); recordings count as playbooks.
+
 ## Why the browser does the reading
 
 The agent's own web tools fetch pages from the server: no cookies, no
@@ -448,6 +452,30 @@ set up or lent (`/fd/browsers`), the same form, "Who does it" and **Run in
 sends it as the person's message: the values as a list, the stop for an act,
 and one line for the agent (`web_playbook` · id · inputs). The shelf is one
 shelf: a star here is a star in the panel.
+
+## A robot check, handed to the person
+
+Since 0.9.3 (`lib/robot-check.js` in the extension, `browser_waits.py` on the
+deck). When an agent's `web_search` or `web_fetch` in the person's Chrome
+lands on a page asking to prove a person is there, the tab isn't closed:
+
+- It leaves the collapsed "Captain · search" / "Captain · reading" group,
+  is selected, and its window comes forward. The agent's chat says once that
+  it's waiting; the panel's log shows "Waiting for you".
+- Once the check is gone, the search or read goes on in that tab; then the
+  tab closes and the one the person was on comes back.
+- The wait is 5 minutes when someone is there for the turn (`HAND_OVER_S`),
+  2 minutes for a run that started on its own (`HAND_OVER_UNATTENDED_S`). Not
+  answered in time: the tab stays open and the agent goes on with the deck's
+  own search or fetch.
+- Closing the tab is a no: that site's checks aren't shown again for 10
+  minutes.
+- A search or read that may wait runs as a job: the agent's first request
+  returns `{"pending", "waiting"}` as soon as a check is handed over, and the
+  agent follows it until it's done. An agent from before this sends no job,
+  so nothing is handed over and it falls back as it used to.
+
+Not covered: the `browser` tool with `target="chrome"`.
 
 ## Versions: the extension against the deck's copy
 
