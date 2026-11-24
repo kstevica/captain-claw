@@ -5726,15 +5726,26 @@ async def get_agent_mode(
     cognitive_mode.txt, else its config's default mode, else neutra."""
     if kind not in ("docker", "process"):
         raise HTTPException(400, "kind must be 'docker' or 'process'")
+    user_id = getattr(request.state, "user_id", "")
+    return {"mode": _read_agent_mode_name(_resolve_agent_dir(identifier, kind, user_id), kind)}
+
+
+# ── Drive: how far the harness pushes a turn (drive.py) ──
+
+class AgentDriveUpdate(BaseModel):
+    # A level name, or "" / "auto" for no default of the agent's own.
+    default: str = ""
+
+
+def _read_agent_mode_name(agent_dir: Path, kind: str) -> str:
+    """The agent's cognitive mode as it resolves it (see get_agent_mode)."""
     from captain_claw.cognitive_mode import MODES
 
-    user_id = getattr(request.state, "user_id", "")
-    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
     cc_dir = _agent_home_cc(agent_dir, kind)
     try:
         text = (cc_dir / "cognitive_mode.txt").read_text(encoding="utf-8").strip().lower()
         if text in MODES:
-            return {"mode": text}
+            return text
     except OSError:
         pass
     for cfg in (cc_dir / "config.yaml", agent_dir / "config.yaml"):
@@ -5745,9 +5756,87 @@ async def get_agent_mode(
         section = data.get("cognitive_mode") if isinstance(data, dict) else None
         mode = str((section or {}).get("default_mode") or "").strip().lower() if isinstance(section, dict) else ""
         if mode in MODES:
-            return {"mode": mode}
+            return mode
         break
-    return {"mode": "neutra"}
+    return "neutra"
+
+
+def _read_agent_drive(agent_dir: Path, kind: str) -> dict:
+    """The agent's Drive default as it resolves it: its setting file, else its
+    config; and what its cognitive mode suggests when it has none of its own."""
+    from captain_claw import drive
+    from captain_claw.cognitive_mode import MODES
+
+    own: str | None = None
+    try:
+        own = drive.normalize((_agent_home_cc(agent_dir, kind) / drive.FILENAME).read_text(encoding="utf-8"))
+        from_file = True
+    except OSError:
+        from_file = False
+    if not from_file:
+        # The home config overlays the agent folder's, as at start-up.
+        for cfg in (_agent_home_cc(agent_dir, kind) / "config.yaml", agent_dir / "config.yaml"):
+            try:
+                data = yaml.safe_load(cfg.read_text()) or {}
+            except Exception:
+                continue
+            section = data.get("drive") if isinstance(data, dict) else None
+            if isinstance(section, dict) and "default" in section:
+                own = drive.normalize(section.get("default"))
+                break
+    suggested = drive.normalize(MODES[_read_agent_mode_name(agent_dir, kind)].suggested_drive) or ""
+    return {"default": own or "", "suggested": suggested,
+            "effective": own or suggested or drive.DEFAULT,
+            "levels": [drive.level_to_dict(lvl) for lvl in drive.list_levels()]}
+
+
+@app.get("/fd/agent-drive/{kind}/{identifier}")
+async def get_agent_drive(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """The agent's own Drive default ("" = none), what its mode suggests, and
+    the level a turn nobody picked one for runs at."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    user_id = getattr(request.state, "user_id", "")
+    return _read_agent_drive(_resolve_agent_dir(identifier, kind, user_id), kind)
+
+
+@app.put("/fd/agent-drive/{kind}/{identifier}")
+async def update_agent_drive(
+    kind: str, identifier: str, body: AgentDriveUpdate, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Set or clear the agent's own Drive default. The setting file applies
+    from its next message; every config copy gets it too, so it holds after a
+    restart and travels with the agent's config."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    from captain_claw import drive
+
+    raw = body.default.strip().lower()
+    level = drive.normalize(raw)
+    if raw not in ("", "auto") and level is None:
+        raise HTTPException(400, f"Unknown Drive level: {raw!r}. Valid: {', '.join(drive.LEVELS)}")
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    for cc_dir in _agent_reasoning_dirs(agent_dir, kind):
+        if cc_dir.is_dir():
+            (cc_dir / drive.FILENAME).write_text(drive.render(level), encoding="utf-8")
+    for cfg_path in _agent_config_paths(agent_dir):
+        if not cfg_path.is_file():
+            continue
+        try:
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        section = data.get("drive")
+        data["drive"] = {**(section if isinstance(section, dict) else {}), "default": level or ""}
+        cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+    return {"ok": True, **_read_agent_drive(agent_dir, kind)}
 
 
 # ── Task rephrase: off unless the owner turns it on (task_rephrase.py) ──

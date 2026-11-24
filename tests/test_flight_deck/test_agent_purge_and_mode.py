@@ -632,3 +632,56 @@ def test_every_provider_flight_deck_offers_is_one_an_agent_runs_on():
     offered = re.findall(r"value: '([^']+)'", block)
     assert len(offered) >= 8
     assert [p for p in offered if not is_supported_provider(p)] == []
+
+
+# ── drive ───────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_drive_reads_the_file_then_the_config_and_says_what_the_mode_suggests(deck):
+    cc = server.DATA_DIR / "bob-agent" / "data" / "home-config-parent" / ".captain-claw"
+    async with _client() as c:
+        async def get():
+            body = (await c.get("/fd/agent-drive/process/bob-agent", headers=_hdr(BOB))).json()
+            assert [lvl["name"] for lvl in body.pop("levels")] == ["relaxed", "diligent", "persistent", "ambitious"]
+            return body
+
+        assert await get() == {"default": "", "suggested": "", "effective": "diligent"}
+
+        (cc / "cognitive_mode.txt").write_text("phrygian\n")           # its mode suggests a level
+        assert await get() == {"default": "", "suggested": "persistent", "effective": "persistent"}
+
+        (cc / "config.yaml").write_text(yaml.dump({"drive": {"default": "relaxed"}}))
+        assert await get() == {"default": "relaxed", "suggested": "persistent", "effective": "relaxed"}
+
+        (cc / "drive.txt").write_text("auto\n")                        # the file wins, and says "none"
+        assert await get() == {"default": "", "suggested": "persistent", "effective": "persistent"}
+
+        assert (await c.get("/fd/agent-drive/process/bob-agent", headers=_hdr(CAROL))).status_code in (403, 404)
+
+
+@pytest.mark.asyncio
+async def test_setting_drive_writes_the_file_and_every_config_copy(deck):
+    agent_dir = server.DATA_DIR / "bob-agent"
+    cc = agent_dir / "data" / "home-config-parent" / ".captain-claw"
+    async with _client() as c:
+        r = await c.put("/fd/agent-drive/process/bob-agent", headers=_hdr(BOB), json={"default": "Persistent"})
+        assert r.status_code == 200, r.text
+        assert (r.json()["ok"], r.json()["default"], r.json()["effective"]) == (True, "persistent", "persistent")
+        assert (cc / "drive.txt").read_text() == "persistent"
+        for path in (agent_dir / "config.yaml", cc / "config.yaml"):
+            data = yaml.safe_load(path.read_text())
+            assert data["drive"] == {"default": "persistent"}
+            assert data["model"]["model"] == "bob-agent-m"  # the rest of the config stays
+
+        r = await c.put("/fd/agent-drive/process/bob-agent", headers=_hdr(BOB), json={"default": ""})
+        assert r.status_code == 200 and r.json()["default"] == "" and r.json()["effective"] == "diligent"
+        assert (cc / "drive.txt").read_text() == "auto"
+        assert yaml.safe_load((cc / "config.yaml").read_text())["drive"] == {"default": ""}
+
+        r = await c.put("/fd/agent-drive/process/bob-agent", headers=_hdr(BOB), json={"default": "turbo"})
+        assert r.status_code == 400
+        # Not Carol's to change.
+        r = await c.put("/fd/agent-drive/process/bob-agent", headers=_hdr(CAROL), json={"default": "ambitious"})
+        assert r.status_code in (403, 404)
+        assert (cc / "drive.txt").read_text() == "auto"

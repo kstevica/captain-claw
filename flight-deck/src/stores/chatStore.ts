@@ -16,6 +16,7 @@ import { SHARED_PREFIX, sharedContainerId, sharedSliceId } from '../utils/shared
 import { clampLevel, parsePick, parseProfile, type ReasoningProfile } from '../utils/reasoningEffort'
 import { parseModelSwitch, type ModelSwitchInfo } from '../utils/modelSwitch'
 import { effortFor, useReasoningStore } from './reasoningStore'
+import { driveFor } from './driveStore'
 
 // ── Chat persistence helpers ──
 
@@ -835,7 +836,11 @@ function sendFrame(key: string, content: string, opts: SendOpts | undefined, was
   // model offers (an agent that sent no levels gets nothing).
   const pick = session.reasoning && !session.shared ? effortFor(session.containerId) : 'auto'
   const reasoningEffort = pick !== 'auto' && session.reasoning ? clampLevel(pick, session.reasoning) : undefined
-  const clientMsgId = session.ws.send(frame.text, { noNextSteps: !!opts?.fromQueue, imagePaths: frame.imagePaths, reasoningEffort })
+  // The chat box's Drive pick for this agent. A shared agent's member has no
+  // picker: how far it pushes (and what that costs) is its owner's to set.
+  const drivePick = session.shared ? 'auto' : driveFor(session.containerId)
+  const drive = drivePick !== 'auto' ? drivePick : undefined
+  const clientMsgId = session.ws.send(frame.text, { noNextSteps: !!opts?.fromQueue, imagePaths: frame.imagePaths, reasoningEffort, drive })
   // Whose frame this is (the queue's, for the item in flight, or yours),
   // for the agent's answer to it: taken, or refused.
   const itemId = opts?.fromQueue ? session.queueDispatchedId ?? null : null

@@ -52,6 +52,7 @@ import {
 import { createPortal } from 'react-dom'
 import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './AgentSkills'
 import { EffortMenu } from './EffortMenu'
+import { DriveMenu } from './DriveMenu'
 import { ModelMenu } from './ModelMenu'
 import { ChatFilesMenu } from './ChatFilesMenu'
 import { SaveLessonDialog, SuggestLessonDialog } from '../layout/LessonDraft'
@@ -1389,6 +1390,13 @@ function ChatContent({
                 <EffortMenu
                   agentId={session.containerId}
                   profile={session.reasoning}
+                  disabled={!session.connected || closed}
+                  compact={isMobile}
+                />
+              )}
+              {!shared && (
+                <DriveMenu
+                  agentId={session.containerId}
                   disabled={!session.connected || closed}
                   compact={isMobile}
                 />

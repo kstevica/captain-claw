@@ -22,6 +22,7 @@ import {
   RotateCw,
   Shuffle,
   SlidersHorizontal,
+  Gauge,
   Tags,
   Target,
   Trash2,
@@ -39,12 +40,13 @@ import { KioskSkillsPanel } from './KioskAgentSkills'
 import { TopicsPanel } from '../agents/TopicsPanel'
 import { SwitchTrack } from '../common/SwitchTrack'
 import {
-  getAgentConfig, getAgentEcoMode, getAgentMode, getAgentModelSwitch, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentModelSwitch,
-  setAgentEcoMode, setAgentTaskRephrase, setAgentVision,
+  getAgentConfig, getAgentDrive, getAgentEcoMode, getAgentMode, getAgentModelSwitch, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentModelSwitch,
+  setAgentDrive, setAgentEcoMode, setAgentTaskRephrase, setAgentVision,
 } from '../../services/docker'
 import { LLM_PROVIDERS } from '../../services/tierConfig'
 import { VISION_OPTIONS, parseModelFromYaml } from '../../services/agentModel'
 import { MODES } from '../../services/cognitiveModes'
+import { DRIVE_LABEL, DRIVE_LEVELS, parseDrive, suggestedDriveFor, type DrivePick } from '../../services/driveLevels'
 import { KioskReasoningSettings } from './KioskReasoningSettings'
 import { useChatStore } from '../../stores/chatStore'
 import { useContainerStore } from '../../stores/containerStore'
@@ -338,6 +340,9 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   const [mode, setMode] = useState('neutra')
   const [modeSaved, setModeSaved] = useState(false)
   const [vision, setVision] = useState('auto')
+  // Its own Drive default (drive.py), 'auto' = none: null when the deck couldn't say.
+  const [drive, setDrive] = useState<DrivePick | null>(null)
+  const [driveSaved, setDriveSaved] = useState(false)
   // Task rephrase (task_rephrase.py): null when the deck couldn't say.
   const [rephrase, setRephrase] = useState<boolean | null>(null)
   const [rephraseSaved, setRephraseSaved] = useState(false)
@@ -361,7 +366,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   const [modelSaved, setModelSaved] = useState(false)
   // The reasoning levels are the model's: a saved change reads them afresh.
   const [modelRev, setModelRev] = useState(0)
-  const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model' | 'rephrase' | 'switch' | 'eco'>('')
+  const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model' | 'rephrase' | 'switch' | 'eco' | 'drive'>('')
   // Model and vision are read when the agent starts: changed since it last did.
   const [pendingRestart, setPendingRestart] = useState(false)
   const [restarted, setRestarted] = useState(false)
@@ -374,9 +379,11 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
       getAgentTaskRephrase(kind, key).catch(() => null),
       getAgentModelSwitch(kind, key).catch(() => null),
       getAgentEcoMode(kind, key).catch(() => null),
+      getAgentDrive(kind, key).catch(() => null),
     ])
-      .then(([m, cfg, tr, ms, ec]) => {
+      .then(([m, cfg, tr, ms, ec, dr]) => {
         if (!live) return
+        setDrive(dr ? parseDrive(dr.default) : null)
         const info = parseModelFromYaml(cfg.config_yaml || '')
         setMode(m.mode || 'neutra')
         setRephrase(tr ? tr.enabled : null)
@@ -466,6 +473,23 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
     } catch (e) {
       setVision(was)
       setError(`Couldn't change vision: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving('')
+    }
+  }
+
+  // Read on every message — no restart.
+  const pickDrive = async (next: DrivePick) => {
+    if (drive === null || next === drive || saving) return
+    const was = drive
+    setDrive(next); setSaving('drive'); setError(''); setDriveSaved(false)
+    try {
+      await setAgentDrive(kind, key, next === 'auto' ? '' : next)
+      setDriveSaved(true)
+      setTimeout(() => setDriveSaved(false), 2000)
+    } catch (e) {
+      setDrive(was)
+      setError(`Couldn't change its drive: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setSaving('')
     }
@@ -716,6 +740,38 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                 </div>
                 <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">{current.description}</p>
               </section>
+              {drive !== null && (
+                <section>
+                  <SectionTitle icon={Gauge} title="How far it pushes" saving={saving === 'drive'} saved={driveSaved} />
+                  <p className="mb-2.5 text-[11px] leading-relaxed text-zinc-500">
+                    Its Drive — how many steps it takes and how often a weak answer is sent back, when nobody picked a
+                    level in the chat box. Higher levels are slower and cost more. Applies from its next message.
+                  </p>
+                  <div role="radiogroup" aria-label="Drive" className="grid grid-cols-1 gap-1.5">
+                    {([{ id: 'auto' as DrivePick, label: 'Not set', hint: (() => {
+                      const s = suggestedDriveFor(mode)
+                      return s ? `Follows its cognitive mode: ${DRIVE_LABEL[s]}` : 'Diligent, the everyday level'
+                    })() }, ...DRIVE_LEVELS.map((l) => ({ id: l.id as DrivePick, label: l.label, hint: l.hint }))]).map((o) => {
+                      const on = o.id === drive
+                      return (
+                        <button
+                          key={o.id}
+                          role="radio"
+                          aria-checked={on}
+                          onClick={() => pickDrive(o.id)}
+                          disabled={!!saving}
+                          className={`flex min-w-0 items-baseline gap-2 rounded-lg border px-2.5 py-1.5 text-left transition-colors disabled:cursor-wait ${
+                            on ? 'border-amber-500/50 bg-amber-500/10' : 'border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900'
+                          }`}
+                        >
+                          <span className={`shrink-0 text-xs font-medium ${on ? 'text-amber-400' : 'text-zinc-200'}`}>{o.label}</span>
+                          <span className="min-w-0 truncate text-[10px] text-zinc-500">{o.hint}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                </section>
+              )}
               {rephrase !== null && (
                 <section>
                   <SectionTitle icon={PenLine} title="Rewrite requests" saving={saving === 'rephrase'} saved={rephraseSaved} />
