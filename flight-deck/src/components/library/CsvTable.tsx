@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertTriangle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsUpDown, Download, Loader2, Plus,
-  RotateCcw, Save, Trash2, X,
+  Pencil, RotateCcw, Save, Trash2, X,
 } from 'lucide-react'
 import { vfsApi, type FolderRef } from '../../services/vfsApi'
 import type { ColumnKind } from '../../services/dataLibraryApi'
@@ -58,7 +58,7 @@ function toTab(name: string, all: string[][], cut: boolean): Tab {
   }
 }
 
-export function CsvTable({ fileRef: given, path = '', urls, name, extension, onClose, onSaved }: {
+export function CsvTable({ fileRef: given, path = '', urls, name, extension, onClose, onSaved, onEditText }: {
   /** A file in a VFS folder: read from there, and (a CSV or TSV) saved back. */
   fileRef?: FolderRef
   path?: string
@@ -69,6 +69,8 @@ export function CsvTable({ fileRef: given, path = '', urls, name, extension, onC
   onClose: () => void
   /** The file was written back. */
   onSaved?: () => void
+  /** Change the file as text instead (a viewer that can edit it). */
+  onEditText?: () => void
 }) {
   const workbook = isSheetExt(extension)
   const [book, setBook] = useState<Tab[]>([])
@@ -278,6 +280,11 @@ export function CsvTable({ fileRef: given, path = '', urls, name, extension, onC
               className="flex shrink-0 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-emerald-500 disabled:opacity-40"
               title="Write the file back (Ctrl/⌘ S)">
               {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}Save
+            </button>
+          )}
+          {onEditText && (
+            <button onClick={onEditText} className={btn} title="Change the file as text">
+              <Pencil className="h-3.5 w-3.5" />Edit
             </button>
           )}
           {downloadUrl && (
