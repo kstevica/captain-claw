@@ -277,7 +277,7 @@ playbooks:
       restaurant: {label: Restaurant or area, kind: text}
       date: {label: Date, kind: date}
       time: {label: Time, kind: time}
-      party: {label: People, kind: number, default: 2}
+      party: {label: People, kind: number, default: 2, min: 1}
       guest_name: {label: Name for the booking, kind: text}
       phone: {label: Phone for the booking, kind: text, hint: "With the country code, e.g. +1 555 …"}
       email: {label: Email for the confirmation, kind: text}
@@ -311,7 +311,7 @@ playbooks:
       city: {label: City, kind: place, hint: "Resy works city by city - New York, Los Angeles, London …"}
       date: {label: Date, kind: date}
       time: {label: Time, kind: time}
-      party: {label: People, kind: number, default: 2}
+      party: {label: People, kind: number, default: 2, min: 1}
     open: https://resy.com/
     steps:
       - kind: do
@@ -343,7 +343,7 @@ playbooks:
       restaurant: {label: Restaurant or area, kind: text}
       date: {label: Date, kind: date}
       time: {label: Time, kind: time}
-      party: {label: People, kind: number, default: 2}
+      party: {label: People, kind: number, default: 2, min: 1}
       guest_name: {label: Name for the booking, kind: text}
       phone: {label: Phone for the booking, kind: text, hint: "With the country code, e.g. +1 555 …"}
       email: {label: Email for the confirmation, kind: text}
@@ -405,7 +405,7 @@ playbooks:
     inputs:
       event: {label: Event, kind: text}
       place: {label: City, kind: place}
-      tickets: {label: How many, kind: number, default: 1}
+      tickets: {label: How many, kind: number, default: 1, min: 1}
       ticket_type: {label: Ticket type, kind: text, default: cheapest}
     open: https://www.eventbrite.com/d/{place}/{event}/
     steps:
@@ -438,7 +438,7 @@ playbooks:
       artist: {label: Artist, team or show, kind: text}
       city: {label: City, kind: place}
       date: {label: Date, kind: date, required: false, ask: agent}
-      tickets: {label: How many, kind: number, default: 2}
+      tickets: {label: How many, kind: number, default: 2, min: 1}
       budget: {label: Max per ticket, kind: number, required: false, ask: agent}
     open: https://www.ticketmaster.com/search?q={artist}
     steps:

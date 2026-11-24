@@ -366,7 +366,7 @@ playbooks:
     region: global
     sites: [coinmarketcap.com]
     inputs:
-      count: {label: How many, kind: number, default: 10}
+      count: {label: How many, kind: number, default: 10, min: 1}
     open: https://coinmarketcap.com/
     read:
       total_market_cap: The total crypto market cap and its 24-hour change

@@ -297,13 +297,15 @@ def suggestions(book: dict[str, Any], raw: Any) -> dict[str, tuple[Any, str]]:
         if value is None or value == "" or value == []:
             continue
         shaped, problem = wp._shape(str(name), spec, value)
+        if not problem and spec["kind"] == "number":
+            problem = wp.range_problem(str(name), spec, shaped)
         if not problem:
             out[str(name)] = (shaped, " ".join(str(src or "").split())[:160])
     return out
 
 
-def ask_questions(book: dict[str, Any], names: list[str],
-                  suggested: dict[str, tuple[Any, str]] | None = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
+def ask_questions(book: dict[str, Any], names: list[str], suggested: dict[str, tuple[Any, str]] | None = None,
+                  notes: dict[str, str] | None = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """The dialog's questions for *names* (inputs of *book*) and question id →
     input name: a choice shows its options, a flag is yes/no, a date, a web
     address or an email (an input named ``email`` / ``…_email``) is checked by
@@ -318,6 +320,8 @@ def ask_questions(book: dict[str, Any], names: list[str],
         q: dict[str, Any] = {"id": qid, "question": str(spec.get("label") or name)[:500]}
         kind = spec.get("kind")
         helps = [f"For “{book['title']}”."] if i == 1 else []
+        if notes and name in notes:
+            helps.append(notes[name])
         if spec.get("hint"):
             helps.append(str(spec["hint"]))
         if kind == "choice" and spec.get("options"):
@@ -326,6 +330,9 @@ def ask_questions(book: dict[str, Any], names: list[str],
             q["confirm"] = True
         elif kind == "number":
             q["number"] = True
+            for key in ("min", "max"):
+                if spec.get(key) is not None:
+                    q[f"{key}_value"] = spec[key]
         elif kind == "date":
             q["format"] = "date"
         elif kind == "url":
@@ -345,7 +352,8 @@ def ask_questions(book: dict[str, Any], names: list[str],
 
 
 async def ask_person(book: dict[str, Any], names: list[str], kwargs: dict[str, Any],
-                     suggested: dict[str, tuple[Any, str]] | None = None) -> tuple[str, Any]:
+                     suggested: dict[str, tuple[Any, str]] | None = None,
+                     notes: dict[str, str] | None = None) -> tuple[str, Any]:
     """Ask the person for *names* in one Flight Deck dialog (``ask_user``'s):
     ``("answered", {input: value})``, ``("declined", "")``, ``("no_answer",
     why)`` or ``("cant", why)`` — the dialog can't reach them (no deck, a
@@ -354,7 +362,7 @@ async def ask_person(book: dict[str, Any], names: list[str], kwargs: dict[str, A
 
     if not ask_user._fd_base():
         return "cant", "it needs Flight Deck"
-    questions, ids = ask_questions(book, names, suggested)
+    questions, ids = ask_questions(book, names, suggested, notes)
     try:
         status, data = await ask_user.ask_and_follow(
             questions, ASK_WAIT_S, kwargs.get("_agent"), kwargs.get("_stream_callback"),
@@ -649,14 +657,25 @@ class WebPlaybookTool(Tool):
         if not isinstance(given, dict):
             return ToolResult(success=False, error="inputs is an object: {\"name\": value, …}.")
         checked = wp.check_values(book, given)
+        # A number they gave that can't be right (a form once sent -51 nights):
+        # theirs to fix, not the agent's to guess — asked with the rest, the
+        # playbook's usual value suggested.
+        redo = {n: given[n] for n in checked["out_of_range"]}
+        if redo:
+            given = {k: v for k, v in given.items() if k not in redo}
+            checked = wp.check_values(book, given)
         hints = {n: v for n, v in suggestions(book, kwargs.get("suggested")).items() if n not in given}
+        for n in redo:
+            if n not in hints and "default" in book["inputs"][n] and book["inputs"][n]["default"] not in ("", None):
+                hints[n] = (book["inputs"][n]["default"], "its usual value")
+        notes = {n: f"“{v}” can't be right: {wp.range_words(book['inputs'][n])}." for n, v in redo.items()}
         cant_ask = ""
-        if checked["ask_before"] and not checked["problems"]:
+        asking = list(dict.fromkeys([*checked["ask_before"], *redo]))
+        if asking and not checked["problems"]:
             # What only the person can say: asked here, in one dialog, so it's
             # never a question left in the agent's reply — with what the agent
             # found for it greyed in, for them to take with Tab.
-            asking = list(checked["ask_before"])
-            how, got = await ask_person(book, asking, kwargs, hints)
+            how, got = await ask_person(book, asking, kwargs, hints, notes)
             labels = ", ".join(f"“{book['inputs'][n]['label']}”" for n in asking)
             if how == "declined":
                 return ToolResult(success=False, error=(
@@ -676,7 +695,16 @@ class WebPlaybookTool(Tool):
                         + "\nPut their answer in the form it needs and run again; don't ask them again for it."))
             else:
                 cant_ask = got
+            if how == "answered":
+                redo = {}
         trouble: list[str] = list(checked["problems"])
+        if redo:
+            trouble.append("Can't be right, and only the person can say — ask them"
+                           + (f" in your reply (the dialog can't reach them: {cant_ask})" if cant_ask else "")
+                           + ", never pick one yourself: "
+                           + "; ".join(f"{n} “{v}” ({book['inputs'][n]['label']}: {wp.range_words(book['inputs'][n])}"
+                                       + (f", usually {book['inputs'][n]['default']}" if "default" in book["inputs"][n] else "")
+                                       + ")" for n, v in redo.items()))
         if checked["ask_before"]:
             offer = [f"{n} = {v!r}" + (f" ({src})" if src else "") for n, (v, src) in hints.items()
                      if n in checked["ask_before"]]

@@ -2643,9 +2643,21 @@ function pbPrefill(book) {
   return values
 }
 
+// What's wrong with a number typed for a playbook ("at least 0"), or '': Flight
+// Deck and the agent's tool check it again.
+function pbRange(i, raw) {
+  const text = String(raw ?? '').trim()
+  if (i.kind !== 'number' || !text) return ''
+  const n = Number(text.replace(',', '.'))
+  if (!Number.isFinite(n)) return 'a number'
+  if (!((i.min !== undefined && n < i.min) || (i.max !== undefined && n > i.max))) return ''
+  return i.min !== undefined && i.max !== undefined ? `${i.min} to ${i.max}` : i.min !== undefined ? `at least ${i.min}` : `at most ${i.max}`
+}
+
 function pbMissing(o) {
   return o.book.inputs.filter((i) => (i.required && !('default' in i) && i.ask === 'before' && !String(o.values[i.name] ?? '').trim())
-    || (i.kind === 'place' && PB_HERE.test(String(o.values[i.name] ?? 'x'))))
+    || (i.kind === 'place' && PB_HERE.test(String(o.values[i.name] ?? 'x')))
+    || pbRange(i, o.values[i.name]))
 }
 
 function pbField(i, o) {
@@ -2674,10 +2686,13 @@ function pbField(i, o) {
   const type = { date: 'date', time: 'time', number: 'number', url: 'url' }[i.kind] || 'text'
   const value = v ?? (type === 'date' && /^\d{4}-\d{2}-\d{2}$/.test(dflt) ? dflt : type === 'time' && /^\d{2}:\d{2}$/.test(dflt) ? dflt : '')
   const ph = i.kind === 'place' ? 'Town or address' : i.kind === 'url' ? 'https://…' : dflt ? `Default: ${dflt}` : ''
-  const input = `<input type="${type}" id="${id}" data-pb-input="${esc(i.name)}" value="${esc(value)}" placeholder="${esc(ph)}" ${type === 'number' ? 'inputmode="decimal" step="any"' : ''} autocomplete="off">`
+  const range = type === 'number' ? `${i.min !== undefined ? ` min="${esc(i.min)}"` : ''}${i.max !== undefined ? ` max="${esc(i.max)}"` : ''}` : ''
+  const input = `<input type="${type}" id="${id}" data-pb-input="${esc(i.name)}" value="${esc(value)}" placeholder="${esc(ph)}" ${type === 'number' ? `inputmode="decimal" step="any"${range}` : ''} autocomplete="off">`
   control = i.kind === 'place' ? `<div class="with-ic">${icon('pin', 'sm')}${input}</div>`
     : i.kind === 'url' ? `<div class="with-ic">${icon('globe', 'sm')}${input}</div>` : input
-  const here = i.kind === 'place' && PB_HERE.test(String(v ?? 'x')) ? '<div class="warn">Type the town or address — a link can\'t carry where you are.</div>' : ''
+  const bad = pbRange(i, v)
+  const here = bad ? `<div class="warn">${esc(i.label)} is ${esc(bad)}.</div>`
+    : i.kind === 'place' && PB_HERE.test(String(v ?? 'x')) ? '<div class="warn">Type the town or address — a link can\'t carry where you are.</div>' : ''
   return `<div class="pb-field">${label}${control}${here || hint || (type === 'date' && dflt && !value ? `<div class="help">Leave it for ${esc(dflt)}</div>` : '')}</div>`
 }
 
@@ -2701,7 +2716,9 @@ function viewPb() {
   const needsChrome = b.where === 'chrome' || b.where === 'prefer_chrome'
   const handsOk = S.hands.on && S.handsStatus?.state !== 'denied'
   const cat = (PB.store?.categories || []).find((c) => c.id === b.category)
-  const runLabel = o.sending ? 'Starting…' : !ag ? 'Pick an agent' : missing.length ? `Fill in ${missing.map((i) => i.label).slice(0, 2).join(' and ')}` : `Run with ${ag.name}`
+  const wrong = missing.find((i) => pbRange(i, o.values[i.name]))
+  const runLabel = o.sending ? 'Starting…' : !ag ? 'Pick an agent' : wrong ? `${wrong.label} is ${pbRange(wrong, o.values[wrong.name])}`
+    : missing.length ? `Fill in ${missing.map((i) => i.label).slice(0, 2).join(' and ')}` : `Run with ${ag.name}`
   return `
     <div class="pb-head">${back}<div class="grow"></div>
       <button class="pb-star ${b.mine ? 'on' : ''}" data-pb-shelf="${esc(b.id)}" aria-pressed="${!!b.mine}">${icon('star', 'sm')} ${b.mine ? 'In My playbooks' : 'Add to mine'}</button></div>
@@ -2836,6 +2853,12 @@ $view.addEventListener('input', (ev) => {
     if (was !== pbMissing(PB.open).length || PB.open.error) { PB.open.error = ''; render() }
   } else if (el.id === 'pbNote' && PB.open) PB.open.note = el.value
 })
+
+// A focused number box counts up or down under the wheel (scrolling past one
+// turned 7 nights into -51 in Flight Deck's store): let go of it instead.
+$view.addEventListener('wheel', (ev) => {
+  if (ev.target instanceof HTMLInputElement && ev.target.type === 'number' && document.activeElement === ev.target) ev.target.blur()
+}, { passive: true })
 
 $view.addEventListener('change', (ev) => {
   const el = ev.target

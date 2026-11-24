@@ -26,6 +26,7 @@ Seed files: ``flight_deck/playbooks/<category>.yaml``, each
       destination: {label: To, kind: place}
       mode: {label: How, kind: choice, options: [driving, transit, walking, bicycling],
              default: driving}
+      # a number takes min (0 unless set) and max: {label: Nights, kind: number, min: 0, max: 60}
     open: https://www.google.com/maps/dir/?api=1&origin={origin}&destination={destination}&travelmode={mode}
     steps:                               # optional, the recordings' step vocabulary
       - kind: do
@@ -160,6 +161,23 @@ def _clean_inputs(raw: Any, problems: list[str]) -> dict[str, dict[str, Any]]:
                     problems.append(f"input {name}: default {item['default']!r} is not one of its options")
         elif "options" in spec:
             problems.append(f"input {name}: only a choice has options")
+        if kind == "number":
+            # No number a playbook takes is below 0 unless it says so (a form's
+            # number box once scrolled itself to -51 nights).
+            for key, fallback in (("min", 0), ("max", None)):
+                bound = spec.get(key, fallback)
+                if bound is None:
+                    continue
+                if isinstance(bound, bool) or not isinstance(bound, (int, float)):
+                    problems.append(f"input {name}: {key} must be a number")
+                else:
+                    item[key] = bound
+            if "min" in item and "max" in item and item["min"] > item["max"]:
+                problems.append(f"input {name}: min is above max")
+            if has_default and isinstance(item.get("default"), (int, float)) and range_problem(name, item, item["default"]):
+                problems.append(f"input {name}: default {item['default']!r} is out of its range")
+        elif "min" in spec or "max" in spec:
+            problems.append(f"input {name}: only a number has min and max")
         hint = _s(spec.get("hint"))
         if hint:
             item["hint"] = hint[:200]
@@ -461,11 +479,14 @@ def check_values(book: dict[str, Any], given: dict[str, Any] | None) -> dict[str
     put in shape, defaults for the rest. ``{"values", "problems", "ask_before",
     "decide", "ask_during"}`` — the last three are input names still without a
     value: asked of the person before the run, the agent's own call, asked when
-    a step gets there (only for inputs the link doesn't carry)."""
+    a step gets there (only for inputs the link doesn't carry). ``out_of_range``:
+    inputs given a number outside their range (a problem too) — the person's
+    to fix, not the agent's."""
     given = dict(given or {})
     inputs = book["inputs"]
     in_open = _slots(book["open"])
-    out: dict[str, Any] = {"values": {}, "problems": [], "ask_before": [], "decide": [], "ask_during": []}
+    out: dict[str, Any] = {"values": {}, "problems": [], "ask_before": [], "decide": [], "ask_during": [],
+                           "out_of_range": []}
     for name in given:
         if name not in inputs:
             known = ", ".join(inputs) or "none"
@@ -484,11 +505,38 @@ def check_values(book: dict[str, Any], given: dict[str, Any] | None) -> dict[str
                     out["ask_before"].append(name)
             continue
         value, problem = _shape(name, spec, raw)
+        if not problem and spec["kind"] == "number":
+            problem = range_problem(name, spec, value)
+            if problem:
+                out["out_of_range"].append(name)
         if problem:
             out["problems"].append(problem)
         else:
             out["values"][name] = value
     return out
+
+
+def range_words(spec: dict[str, Any]) -> str:
+    """A number input's range in words ("at least 0", "0 to 100"), or ""."""
+    low, high = spec.get("min"), spec.get("max")
+    num = lambda n: str(int(n)) if float(n).is_integer() else str(n)  # noqa: E731
+    if low is not None and high is not None:
+        return f"{num(low)} to {num(high)}"
+    if low is not None:
+        return f"at least {num(low)}"
+    return f"at most {num(high)}" if high is not None else ""
+
+
+def range_problem(name: str, spec: dict[str, Any], value: Any) -> str:
+    """What's wrong with a number outside *spec*'s min/max, or ""."""
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return ""
+    low, high = spec.get("min"), spec.get("max")
+    if (low is not None and num < low) or (high is not None and num > high):
+        return f"{name} ({spec['label']}) is {range_words(spec)} (got {value})"
+    return ""
 
 
 def _shape(name: str, spec: dict[str, Any], raw: Any) -> tuple[Any, str]:
