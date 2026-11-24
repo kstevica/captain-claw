@@ -41,7 +41,7 @@ import { TopicsPanel } from '../agents/TopicsPanel'
 import { SwitchTrack } from '../common/SwitchTrack'
 import {
   getAgentConfig, getAgentDrive, getAgentEcoMode, getAgentMode, getAgentModelSwitch, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentModelSwitch,
-  setAgentDrive, setAgentEcoMode, setAgentTaskRephrase, setAgentVision,
+  setAgentDrive, setAgentDriveInitiative, setAgentEcoMode, setAgentTaskRephrase, setAgentVision,
 } from '../../services/docker'
 import { LLM_PROVIDERS } from '../../services/tierConfig'
 import { VISION_OPTIONS, parseModelFromYaml } from '../../services/agentModel'
@@ -343,6 +343,8 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   // Its own Drive default (drive.py), 'auto' = none: null when the deck couldn't say.
   const [drive, setDrive] = useState<DrivePick | null>(null)
   const [driveSaved, setDriveSaved] = useState(false)
+  // Whether Ambitious may add a step nobody asked for (on unless turned off).
+  const [driveExtra, setDriveExtra] = useState(true)
   // Task rephrase (task_rephrase.py): null when the deck couldn't say.
   const [rephrase, setRephrase] = useState<boolean | null>(null)
   const [rephraseSaved, setRephraseSaved] = useState(false)
@@ -384,6 +386,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
       .then(([m, cfg, tr, ms, ec, dr]) => {
         if (!live) return
         setDrive(dr ? parseDrive(dr.default) : null)
+        setDriveExtra(dr ? dr.initiative !== false : true)
         const info = parseModelFromYaml(cfg.config_yaml || '')
         setMode(m.mode || 'neutra')
         setRephrase(tr ? tr.enabled : null)
@@ -496,6 +499,22 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   }
 
   // Read on every message — no restart.
+  const toggleDriveExtra = async () => {
+    if (drive === null || saving) return
+    const next = !driveExtra
+    setDriveExtra(next); setSaving('drive'); setError(''); setDriveSaved(false)
+    try {
+      await setAgentDriveInitiative(kind, key, next)
+      setDriveSaved(true)
+      setTimeout(() => setDriveSaved(false), 2000)
+    } catch (e) {
+      setDriveExtra(!next)
+      setError(`Couldn't change it: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving('')
+    }
+  }
+
   const toggleRephrase = async () => {
     if (rephrase === null || saving) return
     const next = !rephrase
@@ -770,6 +789,21 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                       )
                     })}
                   </div>
+                  <button
+                    type="button" role="switch" aria-checked={driveExtra} aria-label="Extra work at Ambitious"
+                    onClick={toggleDriveExtra} disabled={!!saving}
+                    className="mt-2 flex w-full items-start gap-3 rounded-lg border border-zinc-800 px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900 disabled:cursor-wait"
+                  >
+                    <span className="mt-0.5"><SwitchTrack on={driveExtra} /></span>
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium text-zinc-200">At Ambitious, add the obvious next step</span>
+                      <span className="block text-[11px] leading-relaxed text-zinc-500">
+                        Once the asked work is done, it may do one more thing nobody asked for — reading and writing
+                        files only, nothing sent, run or scheduled — and lists it under the answer. Off: Ambitious
+                        works like Persistent.
+                      </span>
+                    </span>
+                  </button>
                 </section>
               )}
               {rephrase !== null && (

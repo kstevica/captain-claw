@@ -42,6 +42,9 @@ from typing import Any, Iterator
 DEFAULT = "diligent"
 FILENAME = "drive.txt"
 SETTING_PATH = Path("~/.captain-claw").expanduser() / FILENAME
+# The extra-work switch, live like the default above: ``on`` or ``off``.
+INITIATIVE_FILENAME = "drive_initiative.txt"
+INITIATIVE_PATH = Path("~/.captain-claw").expanduser() / INITIATIVE_FILENAME
 
 
 @dataclass(frozen=True)
@@ -79,8 +82,8 @@ class DriveLevel:
     # Extra work (agent_completion_mixin, agent_guard_mixin): once the asked
     # work is delivered, the agent may add one obvious next step, with
     # reading and file-writing tools only, using at most ``initiative_share``
-    # of a turn's base step budget in tool calls. Needs ``drive.initiative``
-    # on in the agent's config as well (:func:`initiative_enabled`).
+    # of a turn's base step budget in tool calls. The agent's own switch
+    # can turn it off (:func:`initiative_enabled`); it is on by default.
     initiative: bool = False
     initiative_share: float = 0.0
 
@@ -104,7 +107,7 @@ LEVELS: dict[str, DriveLevel] = {
     # Persistent's limits, plus the extra-work step.
     "ambitious": DriveLevel(
         "ambitious", "Ambitious",
-        "As Persistent, and may add one obvious next step where that is switched on. "
+        "As Persistent, and may add one obvious next step nobody asked for. "
         "Slowest, costs the most.",
         step_ceiling_multiplier=6, step_ceiling_cap=450, free_extension_multiplier=3,
         validation_retries=3, validation_retries_after_list=2, stall_retries=3,
@@ -187,9 +190,32 @@ def current(agent: Any | None = None) -> DriveLevel:
     return LEVELS[current_name(agent)]
 
 
+def parse_switch(value: Any) -> bool | None:
+    """``on``/``off`` as a setting file holds it; None for anything else."""
+    text = str(value or "").strip().lower()
+    if text in ("on", "true", "1", "yes"):
+        return True
+    if text in ("off", "false", "0", "no"):
+        return False
+    return None
+
+
+def render_switch(on: Any) -> str:
+    return "on" if on else "off"
+
+
 def initiative_enabled() -> bool:
-    """The agent's own switch for extra work (``drive.initiative``): off
-    unless its config turns it on. Never raises."""
+    """The agent's own switch for extra work: on unless it was turned off.
+    The setting file when it says so, else ``drive.initiative``. Off when
+    the setting cannot be read at all. Never raises."""
+    try:
+        own = parse_switch(INITIATIVE_PATH.read_text(encoding="utf-8"))
+        if own is not None:
+            return own
+    except OSError:
+        pass
+    except Exception:
+        return False
     try:
         from captain_claw.config import get_config
 
