@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MessageCircleQuestion, Send, X, ShieldAlert, ShieldCheck, Check, Eye, EyeOff, KeyRound, Plug } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
+import { touchKeyboard } from '../../hooks/useMediaQuery'
 import { asksApi, type AskQuestion, type OpenAsk } from '../../services/asksApi'
 import { Dialog, Button, Notice, inputCls } from '../console/parts'
 
@@ -57,36 +58,120 @@ function missing(q: AskQuestion, v: Answer): string {
   return !q.optional && (v === null || v === undefined) ? 'needs an answer' : ''
 }
 
+// The asker's suggested answer (ask_user's `suggested`): greyed in the empty
+// field with its key, as the chat box's first next step — Tab takes it and
+// moves on to the next question still waiting; on a phone, a tap on "Use".
+// It waits only while the field is empty, and is never sent untaken.
+function answered(v: Answer): boolean {
+  if (Array.isArray(v)) return v.length > 0
+  if (typeof v === 'boolean') return true
+  return v !== null && v !== undefined && String(v).trim() !== ''
+}
+
+function waiting(q: AskQuestion, v: Answer): boolean {
+  return q.suggested !== undefined && q.suggested !== null && q.kind !== 'secret' && !answered(v)
+}
+
+function suggestedAnswer(q: AskQuestion): Answer {
+  return q.kind === 'number' ? String(q.suggested) : q.suggested as Answer
+}
+
+function suggestedText(q: AskQuestion): string {
+  const s = q.suggested
+  if (s === true) return 'Yes'
+  if (s === false) return 'No'
+  return Array.isArray(s) ? s.join(', ') : String(s ?? '')
+}
+
+function isSuggested(q: AskQuestion, choice: string): boolean {
+  return Array.isArray(q.suggested) ? q.suggested.includes(choice) : q.suggested === choice
+}
+
+const TabKey = () => (
+  <kbd className="shrink-0 rounded border border-zinc-700 px-1.5 font-sans text-[11px] leading-4 text-zinc-500">Tab</kbd>
+)
+
+// Greyed in a text field, over its own placeholder (which can't end in "…").
+function Ghost({ text, multiline }: { text: string; multiline?: boolean }) {
+  return (
+    <div aria-hidden className={`pointer-events-none absolute inset-x-0 top-0 flex gap-2 border border-transparent px-3 py-2 text-base leading-relaxed text-zinc-500 ${multiline ? 'items-start' : 'items-center'}`}>
+      <span className="min-w-0 truncate">{text}</span>
+      <TabKey />
+    </div>
+  )
+}
+
+// Under the field while the suggestion waits: where it came from, and how to
+// take it when it isn't shown in the field itself (a choice, yes/no, a date).
+function SuggestionNote({ q, inField, touch, onTake }: { q: AskQuestion; inField: boolean; touch: boolean; onTake: () => void }) {
+  const from = q.suggested_from ? <span>— {q.suggested_from}</span> : null
+  if (touch) {
+    return (
+      <p className="flex flex-wrap items-center gap-1.5 text-sm text-zinc-500">
+        <button type="button" onClick={onTake}
+          className="max-w-full truncate rounded-full border border-violet-500/40 px-3 py-1 text-violet-700 dark:text-violet-300">
+          Use “{suggestedText(q)}”
+        </button>
+        {from}
+      </p>
+    )
+  }
+  return (
+    <p className="flex flex-wrap items-center gap-1.5 text-sm text-zinc-500">
+      {inField ? <span>Suggested</span> : <><TabKey /><span>takes “{suggestedText(q)}”</span></>}
+      {from}
+    </p>
+  )
+}
+
 // A text answer's format, as the browser's own input for it.
 const TEXT_INPUT: Record<string, string> = { email: 'email', uri: 'url', date: 'date', 'date-time': 'datetime-local' }
 
-function QuestionField({ q, value, onChange }: { q: AskQuestion; value: Answer; onChange: (v: Answer) => void }) {
+function QuestionField({ q, value, onChange, onKeyDown, fieldRef, touch = false }: {
+  q: AskQuestion; value: Answer; onChange: (v: Answer) => void
+  onKeyDown?: (e: React.KeyboardEvent) => void; fieldRef?: (el: HTMLFieldSetElement | null) => void; touch?: boolean
+}) {
   const label = <>{q.question}{q.optional && <span className="text-zinc-600"> (optional)</span>}</>
   // What's wrong with what's typed so far ("needs an answer" isn't shown: nothing typed yet isn't a mistake).
   const problem = q.kind === 'number' || q.kind === 'text' ? missing(q, value) : ''
+  const hint = waiting(q, value)
+  // Shown greyed in the field itself: a plain text or number box (a date box draws its own "dd.mm.yyyy").
+  const inField = hint && !touch && (q.kind === 'number' || (q.kind === 'text' && !TEXT_INPUT[q.format ?? '']?.startsWith('date')))
+  const ghostCls = inField ? ' placeholder-transparent' : ''
+  const describedBy = hint ? `ask-suggest-${q.id}` : undefined
   return (
-    <fieldset className="space-y-2">
+    <fieldset className="space-y-2" ref={fieldRef} onKeyDown={onKeyDown}>
       <legend className="mb-1 block text-base font-medium leading-snug text-zinc-100">{label}</legend>
       {q.help && <p className="text-sm leading-relaxed text-zinc-500">{q.help}</p>}
       {q.kind === 'secret' ? (
         <SecretInput value={String(value ?? '')} onChange={onChange} />
       ) : q.kind === 'number' ? (
-        <input className={answerCls} type="text" inputMode={q.integer ? 'numeric' : 'decimal'} autoComplete="off"
-          placeholder={q.min_value !== undefined && q.max_value !== undefined ? `${q.min_value}–${q.max_value}` : undefined}
-          value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />
-      ) : q.kind === 'text' ? (
-        (q.lines ?? 1) > 1 ? (
-          <textarea className={answerCls} rows={Math.max(3, q.lines ?? 3)} maxLength={q.max_length ?? 4000} value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />
-        ) : (
-          <input className={answerCls} maxLength={q.max_length ?? 4000} autoComplete="off" type={TEXT_INPUT[q.format ?? ''] ?? 'text'}
+        <div className="relative">
+          <input className={answerCls + ghostCls} type="text" inputMode={q.integer ? 'numeric' : 'decimal'} autoComplete="off"
+            aria-describedby={describedBy}
+            placeholder={q.min_value !== undefined && q.max_value !== undefined ? `${q.min_value}–${q.max_value}` : undefined}
             value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />
-        )
+          {inField && <Ghost text={suggestedText(q)} />}
+        </div>
+      ) : q.kind === 'text' ? (
+        <div className="relative">
+          {(q.lines ?? 1) > 1 ? (
+            <textarea className={answerCls + ghostCls} rows={Math.max(3, q.lines ?? 3)} maxLength={q.max_length ?? 4000} aria-describedby={describedBy}
+              value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />
+          ) : (
+            <input className={answerCls + ghostCls} maxLength={q.max_length ?? 4000} autoComplete="off" type={TEXT_INPUT[q.format ?? ''] ?? 'text'}
+              aria-describedby={describedBy} value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />
+          )}
+          {inField && <Ghost text={suggestedText(q)} multiline={(q.lines ?? 1) > 1} />}
+        </div>
       ) : q.kind === 'confirm' ? (
         <div className="flex gap-2">
           {[true, false].map((yes) => (
-            <button key={String(yes)} type="button" onClick={() => onChange(yes)}
+            <button key={String(yes)} type="button" onClick={() => onChange(yes)} aria-describedby={describedBy}
               className={`rounded-xl border px-5 py-2 text-base font-medium transition-colors ${value === yes
-                ? 'border-violet-500/60 bg-violet-500/10 text-violet-700 dark:text-violet-300' : 'border-zinc-800 text-zinc-300 hover:border-zinc-700'}`}>
+                ? 'border-violet-500/60 bg-violet-500/10 text-violet-700 dark:text-violet-300'
+                : hint && q.suggested === yes ? 'border-dashed border-violet-500/50 text-zinc-200 hover:border-violet-500/70'
+                  : 'border-zinc-800 text-zinc-300 hover:border-zinc-700'}`}>
               {yes ? 'Yes' : 'No'}
             </button>
           ))}
@@ -100,12 +185,16 @@ function QuestionField({ q, value, onChange }: { q: AskQuestion; value: Answer; 
               <label key={c} className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3.5 py-2.5 text-base transition-colors ${on
                 ? 'border-violet-500/60 bg-violet-500/5 text-zinc-100' : 'border-zinc-800 text-zinc-300 hover:border-zinc-700'}`}>
                 <input type={multi ? 'checkbox' : 'radio'} name={q.id} className="mt-1.5 shrink-0" checked={on}
+                  aria-describedby={describedBy}
                   onChange={() => {
                     if (!multi) return onChange(c)
                     const now = Array.isArray(value) ? value : []
                     onChange(on ? now.filter((x) => x !== c) : [...now, c])
                   }} />
-                <span className="min-w-0 break-words">{c}</span>
+                <span className="min-w-0 flex-1 break-words">{c}</span>
+                {hint && isSuggested(q, c) && (
+                  <span className="mt-1 shrink-0 rounded-full border border-violet-500/40 px-2 text-xs leading-5 text-violet-700 dark:text-violet-300">suggested</span>
+                )}
               </label>
             )
           })}
@@ -116,6 +205,8 @@ function QuestionField({ q, value, onChange }: { q: AskQuestion; value: Answer; 
           )}
         </div>
       )}
+      {hint && <SuggestionNote q={q} inField={inField} touch={touch} onTake={() => onChange(suggestedAnswer(q))} />}
+      {hint && <span id={describedBy} className="sr-only">Suggested: {suggestedText(q)}{q.suggested_from ? `, ${q.suggested_from}` : ''}. Press Tab to take it.</span>}
       {problem && problem !== 'needs an answer' && <p className="text-sm text-red-500 dark:text-red-400">This {problem}.</p>}
     </fieldset>
   )
@@ -150,6 +241,30 @@ function AskDialog({ ask, onDone }: { ask: OpenAsk; onDone: () => void }) {
     return () => window.clearInterval(timer)
   }, [])
   const problems = ask.questions.map((q) => missing(q, values[q.id])).filter(Boolean)
+  const touch = useMemo(() => touchKeyboard(), [])
+  const fields = useRef<Record<string, HTMLFieldSetElement | null>>({})
+  // The next question that still wants something (a suggestion to take, an
+  // answer to give) gets the focus; with none left, Send does.
+  const focusNext = useCallback((after: number, now: Record<string, Answer>) => {
+    const next = ask.questions.slice(after + 1).find((n) => waiting(n, now[n.id]) || missing(n, now[n.id]))
+    window.setTimeout(() => {
+      const el = next ? fields.current[next.id]?.querySelector<HTMLElement>('input, textarea, button')
+        : document.querySelector<HTMLElement>('[data-ask-send]:not([disabled])')
+      el?.focus()
+    }, 0)
+  }, [ask.questions])
+  // Not on a phone: a focused box would put the on-screen keyboard over the dialog.
+  useEffect(() => { if (!touch) focusNext(-1, values) }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+  // Tab in a question whose suggestion waits: take it, and on to the next.
+  const onFieldKey = (i: number) => (e: React.KeyboardEvent) => {
+    const q = ask.questions[i]
+    if (e.key !== 'Tab' || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || e.nativeEvent.isComposing) return
+    if (!waiting(q, values[q.id])) return
+    e.preventDefault()
+    const now = { ...values, [q.id]: suggestedAnswer(q) }
+    setValues(now)
+    focusNext(i, now)
+  }
   const reply = async (declined: boolean) => {
     setBusy(declined ? 'decline' : 'send')
     setError('')
@@ -166,7 +281,7 @@ function AskDialog({ ask, onDone }: { ask: OpenAsk; onDone: () => void }) {
   return (
     <Dialog title={`${ask.title} has a question`} icon={MessageCircleQuestion} onClose={onDone} keepOpen closable={false} wide footer={<>
       <Button variant="ghost" icon={X} busy={busy === 'decline'} disabled={!!busy} onClick={() => reply(true)}>Skip it</Button>
-      <Button variant="primary" icon={Send} busy={busy === 'send'} disabled={!!busy || problems.length > 0} onClick={() => reply(false)}>Send answer</Button>
+      <Button variant="primary" icon={Send} busy={busy === 'send'} disabled={!!busy || problems.length > 0} onClick={() => reply(false)} data-ask-send>Send answer</Button>
     </>}>
       <div className="space-y-4">
         <p className="text-sm leading-relaxed text-zinc-500">
@@ -176,8 +291,10 @@ function AskDialog({ ask, onDone }: { ask: OpenAsk; onDone: () => void }) {
               {ask.agent_name ? ` for ${ask.agent_name}` : ''} and needs a quick answer from you · {timeLeft}.</>}
         </p>
         {error && <Notice tone="red">{error}</Notice>}
-        {ask.questions.map((q) => (
-          <QuestionField key={q.id} q={q} value={values[q.id]} onChange={(v) => setValues((now) => ({ ...now, [q.id]: v }))} />
+        {ask.questions.map((q, i) => (
+          <QuestionField key={q.id} q={q} value={values[q.id]} touch={touch} onKeyDown={onFieldKey(i)}
+            fieldRef={(el) => { fields.current[q.id] = el }}
+            onChange={(v) => setValues((now) => ({ ...now, [q.id]: v }))} />
         ))}
         {ask.questions.some((q) => q.kind === 'secret') ? (
           <p className="flex items-start gap-1.5 text-xs leading-relaxed text-zinc-500">

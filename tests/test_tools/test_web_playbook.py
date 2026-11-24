@@ -487,3 +487,51 @@ async def test_a_job_application_names_what_to_ask_when_the_form_gets_there(monk
     assert res.success, res.error
     assert ("When a step needs “Salary expectation”, “Notice period”, “Work permit for the job's country”, "
             "“Earliest start date”, ask the person with ask_user (not in your reply)") in res.content
+
+
+# ── suggestions the agent found ──────────────────────────────────────
+
+
+def test_suggestions_are_shaped_to_their_inputs_or_dropped():
+    book = pb.wp.by_id("asfinag.buy_vignette")
+    got = pb.suggestions(book, {"plate_country": {"value": "Croatia", "from": "the plate's format"},
+                                "period": "10 DAYS", "use_at_once": "yes", "start": "25.11.2026",
+                                "email": {"value": "driver@example.com", "from": "your profile"}, "nope": "x"})
+    assert got == {"plate_country": ("Croatia", "the plate's format"), "period": ("10 days", ""),
+                   "use_at_once": (True, ""), "email": ("driver@example.com", "your profile")}
+    assert pb.suggestions(book, "not json") == {} and pb.suggestions(book, '{"vehicle": "car"}') == {"vehicle": ("car", "")}
+    questions, _ = pb.ask_questions(book, ["plate_country", "period", "email", "start"], got)
+    by_id = {q["id"]: q for q in questions}
+    assert by_id["plate_country"]["suggested"] == "Croatia" and by_id["plate_country"]["suggested_from"] == "the plate's format"
+    assert by_id["period"]["suggested"] == "10 days" and "suggested_from" not in by_id["period"]
+    assert "suggested" not in by_id["start"]
+    from captain_claw.flight_deck import person_asks
+
+    shown = {q["id"]: q for q in person_asks.check_questions(questions)}
+    assert shown["email"]["suggested"] == "driver@example.com" and shown["period"]["suggested"] == "10 days"
+
+
+async def test_a_run_asks_with_what_the_agent_found_greyed_in(monkeypatch, browser, asked):
+    monkeypatch.setattr(pb, "ask_person", _real_ask_person)
+    _no_deck(monkeypatch, {"person_connected": True, "extension_set_up": True})
+    asked["reply"] = (200, {"ok": True, "answers": {
+        "plate_country": "Croatia", "vehicle": "car", "period": "10 days", "start": "2026-12-01",
+        "email": "driver@example.com", "use_at_once": True}})
+    res = await _run(id="asfinag.buy_vignette", inputs={"plate": "AB123CD"},
+                     suggested={"plate": "ZZ999ZZ", "plate_country": {"value": "Croatia", "from": "the plate's format"},
+                                "email": {"value": "driver@example.com", "from": "your profile"}})
+    assert res.success, res.error
+    by_id = {q["id"]: q for q in asked["questions"]}
+    assert "plate" not in by_id                       # what they said wins over what was found
+    assert by_id["plate_country"]["suggested_from"] == "the plate's format"
+    assert by_id["email"]["suggested"] == "driver@example.com" and "suggested" not in by_id["start"]
+
+
+async def test_where_the_dialog_cant_reach_them_the_agent_offers_what_it_found(monkeypatch, browser, asked):
+    monkeypatch.setattr(pb, "ask_person", _real_ask_person)
+    _no_deck(monkeypatch)
+    asked["reply"] = (200, {"ok": False, "no_answer": True, "elsewhere": True, "error": "They're in whatsapp"})
+    res = await _run(id="maps.travel_time", inputs={"origin": "Zagreb"},
+                     suggested={"destination": {"value": "Split", "from": "you said on Monday"}})
+    assert not res.success
+    assert "offering what you found: destination = 'Split' (you said on Monday)" in res.error

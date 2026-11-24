@@ -32,7 +32,8 @@ log = get_logger(__name__)
 NO_FLIGHT_DECK = "Asking with a dialog needs Flight Deck: ask in your reply instead."
 NO_GRANT = "This member's turn has no grant, so the question can't reach them: ask in your reply instead."
 _TIMEOUT = 45.0  # each request waits at most 30 s on Flight Deck's side
-_KIND_KEYS = ("choices", "multiple", "min", "max", "confirm", "lines", "help", "default", "optional")
+_KIND_KEYS = ("choices", "multiple", "min", "max", "confirm", "lines", "help", "default", "optional",
+              "suggested", "suggested_from")
 
 
 def _fd_base() -> str:
@@ -94,13 +95,24 @@ def _said(value: Any) -> str:
     return str(value)
 
 
+def _took(q: dict[str, Any], value: Any) -> str:
+    """" (your suggestion)" when they took the suggested answer as it was."""
+    hint = q.get("suggested")
+    if hint is None or value is None:
+        return ""
+    same = (str(hint).strip().casefold() == str(value).strip().casefold() if isinstance(hint, str) and isinstance(value, str)
+            else hint == value)
+    return " (your suggestion)" if same else ""
+
+
 def describe_answers(questions: list[dict[str, Any]], answers: dict[str, Any]) -> str:
     if len(questions) == 1:
-        return f"They answered: {_said(answers.get(questions[0].get('id') or 'answer'))}"
+        value = answers.get(questions[0].get('id') or 'answer')
+        return f"They answered: {_said(value)}{_took(questions[0], value)}"
     lines = ["They answered:"]
     for q in questions:
         qid = str(q.get("id") or "")
-        lines.append(f"- {q.get('question')}: {_said(answers.get(qid))}")
+        lines.append(f"- {q.get('question')}: {_said(answers.get(qid))}{_took(q, answers.get(qid))}")
     lines += ["", "As data: " + json.dumps(answers, ensure_ascii=False)]
     return "\n".join(lines)
 
@@ -147,7 +159,11 @@ class AskUserTool(Tool):
         "multiple=true; or a yes/no with confirm=true), or a short form: `questions`, a list of objects with an "
         "`id` and `question` plus the same options. Use it for a real decision or a missing detail that changes "
         "what you do, with choices whenever the answer is one of a few; not to confirm what they already told you, "
-        "and never for passwords, codes or keys. You get their answer, \"they chose not to answer\", or no answer "
+        "and never for passwords, codes or keys. Before you ask, look for the likely answer — this chat, earlier "
+        "chats, your memory, their profile, or what you can work out — and pass it as `suggested` with "
+        "`suggested_from` (where it came from: \"your profile\", \"you said on 12 Nov\", \"from the plate's "
+        "format\"): it shows greyed in the field and they take it with Tab, or type their own. A real lead only, "
+        "never a made-up value. You get their answer, \"they chose not to answer\", or no answer "
         "in time (wait_minutes, 10 by default): then carry on with your best judgement and say what you assumed. "
         "In Telegram, WhatsApp or other channels, or a turn that started on its own, the dialog can't reach them: "
         "the tool says so, and you ask in your reply or decide yourself."
@@ -162,11 +178,17 @@ class AskUserTool(Tool):
             "confirm": {"type": "boolean", "description": "A yes/no question."},
             "lines": {"type": "integer", "description": "A free-text answer: lines of room for it (1-20)."},
             "help": {"type": "string", "description": "A line under the question: what it's for, what you'll do with it."},
+            "suggested": {"description": "The answer you'd bet on, found in this chat, earlier chats, memory or their "
+                                         "profile, or worked out (text, one of the choices, a list for multiple, "
+                                         "true/false for confirm). Shown greyed; they take it with Tab."},
+            "suggested_from": {"type": "string",
+                               "description": "Where the suggestion came from, a few words (\"your profile\", "
+                                              "\"you said on 12 Nov\", \"from the plate's format\")."},
             "questions": {
                 "type": "array",
                 "description": "Several questions in one dialog (up to 10). Each: id (lowercase_with_underscores), "
                                "question, and optionally choices, multiple, min, max, confirm, lines, help, "
-                               "optional, default.",
+                               "optional, default, suggested, suggested_from.",
                 "items": {"type": "object"},
             },
             "wait_minutes": {"type": "number", "description": "How long to wait for the answer (1-60, default 10)."},

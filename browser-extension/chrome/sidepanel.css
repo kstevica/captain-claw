@@ -183,6 +183,7 @@ details.include[open] > summary .ic.chev { transform: rotate(180deg); }
 .file-name { font-size: calc(12px * var(--fs)); word-break: break-word; }
 .file-meta { font-size: calc(11px * var(--fs)); color: var(--dim); }
 .tag { display: inline-block; font-size: calc(10px * var(--fs)); padding: 0 5px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); text-transform: uppercase; }
+.ask-q kbd { display: inline-block; font: inherit; font-size: calc(10px * var(--fs)); line-height: 1.4; padding: 0 4px; border: 1px solid var(--border); border-radius: 3px; color: var(--muted); }
 .link-btn {
   display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border-radius: 6px;
   border: 0; background: none; color: var(--accent-text); cursor: pointer; font-size: calc(11.5px * var(--fs));

@@ -32,6 +32,7 @@ MAX_ASKS_PER_RUN = 5
 MAX_QUESTIONS = 10
 MAX_QUESTION = 500
 MAX_HELP = 500
+MAX_SUGGESTED_FROM = 160
 MAX_CHOICES = 50
 MAX_CHOICE = 200
 MAX_ANSWER = 4000
@@ -162,8 +163,36 @@ def check_questions(raw: Any) -> list[dict[str, Any]]:
                 item["default"] = _one_answer(item, q["default"])
             except AskError:
                 raise AskError(f"Question {i}: its 'default' isn't an answer it takes.") from None
+        _suggest(item, q)
         out.append(item)
     return out
+
+
+def _suggest(item: dict[str, Any], q: dict[str, Any]) -> None:
+    """The answer the asker would bet on (an agent: from the chat, its memory,
+    the person's profile, or worked out), with where it came from. Shown greyed
+    in an empty field; the person takes it with Tab (a tap on a phone) or
+    answers their own. Never an answer by itself, and only a hint: one that
+    doesn't fit the question is dropped, never a reason to refuse it."""
+    raw = q.get("suggested")
+    if raw is None or item["kind"] == "secret":
+        return
+    if item["kind"] in ("choice", "multiple"):
+        by_fold = {c.casefold(): c for c in item["choices"]}
+        pick = lambda v: by_fold.get(v.strip().casefold(), v) if isinstance(v, str) else v  # noqa: E731
+        raw = [pick(v) for v in raw] if isinstance(raw, list) else pick(raw)
+    elif item["kind"] == "confirm" and isinstance(raw, str):
+        raw = {"yes": True, "true": True, "no": False, "false": False}.get(raw.strip().lower(), raw)
+    try:
+        value = _one_answer(item, raw)
+    except AskError:
+        return
+    if value in ("", []) or (isinstance(value, str) and not value.strip()):
+        return
+    item["suggested"] = value
+    src = q.get("suggested_from")
+    if isinstance(src, str) and src.strip():
+        item["suggested_from"] = " ".join(src.split())[:MAX_SUGGESTED_FROM]
 
 
 def _one_answer(q: dict[str, Any], value: Any) -> Any:

@@ -17,6 +17,11 @@ export interface AskQuestion {
   max?: number
   lines?: number
   default?: unknown
+  // The asker's suggested answer (an agent's, from the chat, its memory or the
+  // person's profile) and where it came from: greyed in the empty field, taken
+  // with Tab (a tap on a phone). Never an answer until taken.
+  suggested?: unknown
+  suggested_from?: string
   // text: its length and what it must look like
   min_length?: number
   max_length?: number
