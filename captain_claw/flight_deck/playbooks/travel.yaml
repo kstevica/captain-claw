@@ -349,6 +349,9 @@ playbooks:
       date: {label: Date, kind: date}
       time: {label: Around, kind: time, default: "09:00"}
       travellers: {label: Travellers, kind: number, default: 1}
+      passengers: {label: Passenger names, kind: text, hint: "First and last name of each traveller, as on their ID"}
+      email: {label: Email for the tickets, kind: text}
+      phone: {label: Phone for trip updates, kind: text, hint: "With the country code, e.g. +49 …"}
     open: https://www.flixbus.com/
     steps:
       - kind: do
@@ -358,7 +361,7 @@ playbooks:
       - kind: do
         text: Decline paid extras (seat reservation, extra bags, flexibility) unless the person asked for them.
       - kind: do
-        text: Fill in passenger names and contact details from what the agent knows; ask for anything missing.
+        text: Fill in the passengers ({passengers}) and the contact details ({email}, {phone}); anything else the form asks, ask the person — all of it in one ask_user dialog.
       - kind: do
         text: Stop at the payment step and show the ride and total.
     read:
@@ -985,14 +988,17 @@ playbooks:
       checkout: {label: Check-out, kind: date}
       adults: {label: Adults, kind: number, default: 2}
       room: {label: Room, kind: text, default: cheapest with free cancellation}
+      guest_name: {label: Guest's full name, kind: text}
+      email: {label: Email for the confirmation, kind: text}
+      phone: {label: Phone, kind: text, hint: "With the country code, e.g. +351 …"}
     open: https://www.booking.com/searchresults.html?ss={hotel}&checkin={checkin}&checkout={checkout}&group_adults={adults}&no_rooms=1&group_children=0
     steps:
       - kind: do
-        text: Open the property that matches {hotel}; if none clearly matches, list the closest ones and ask.
+        text: Open the property that matches {hotel}; if none clearly matches, ask the person which with ask_user, the closest ones as its choices.
       - kind: do
         text: Choose the room that fits "{room}", select 1, and press "I'll reserve".
       - kind: do
-        text: Fill in guest details from what the agent knows; ask for anything missing. Leave extras and add-ons off.
+        text: Fill in the guest details — {guest_name}, {email}, {phone}; anything else the form asks, ask the person — all of it in one ask_user dialog. Leave extras and add-ons off.
       - kind: do
         text: Stop before the final details (payment) page and show the summary.
     read:

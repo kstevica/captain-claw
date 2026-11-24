@@ -278,8 +278,9 @@ _ASK_HELP = {"place": "A town or an address.", "time": "24-hour, as HH:MM.",
 
 def ask_questions(book: dict[str, Any], names: list[str]) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """The dialog's questions for *names* (inputs of *book*) and question id →
-    input name: a choice shows its options, a flag is yes/no, a date or a web
-    address is checked by the dialog, the playbook's hint goes under it."""
+    input name: a choice shows its options, a flag is yes/no, a date, a web
+    address or an email (an input named ``email`` / ``…_email``) is checked by
+    the dialog, the playbook's hint goes under it."""
     questions: list[dict[str, Any]] = []
     ids: dict[str, str] = {}
     for i, name in enumerate(names[:ASK_MAX], 1):
@@ -301,6 +302,8 @@ def ask_questions(book: dict[str, Any], names: list[str]) -> tuple[list[dict[str
             q["format"] = "date"
         elif kind == "url":
             q["format"] = "uri"
+        elif kind == "text" and (name == "email" or name.endswith("_email")):
+            q["format"] = "email"
         elif kind in _ASK_HELP:
             helps.append(_ASK_HELP[kind])
         if helps:
@@ -499,8 +502,9 @@ class WebPlaybookTool(Tool):
         "find (query = what they asked) lists the ones that fit with their inputs; run (id, inputs) opens the "
         "right page — in the person's Chrome whenever it's connected — and, for a look, often answers in one "
         "call; else it leaves the page open with the steps for you to finish with `browser` there. Give run "
-        "every value they already said; it asks them for the rest itself, in a Flight Deck dialog — don't ask "
-        "for a playbook's inputs in your reply. An act playbook fills things in and stops before its final "
+        "every value you already have — what they said, or know of them (name, email, phone from their profile "
+        "or memory); it asks them for the rest itself, in a Flight Deck dialog — don't ask for a playbook's "
+        "inputs in your reply. An act playbook fills things in and stops before its final "
         "button (the person presses it). show (id) gives one in full. Use it before working a site step by step."
     )
     parameters = {
@@ -512,8 +516,9 @@ class WebPlaybookTool(Tool):
                       "description": "find: what the person wants, in their words (e.g. 'how long from Zagreb to Split')."},
             "id": {"type": "string", "description": "show/run: the playbook's id from find (e.g. 'maps.travel_time')."},
             "inputs": {"type": "object",
-                       "description": "run: the playbook's inputs by name (find/show list them) — every value the "
-                                      "person already gave; run asks them for the missing ones. Dates YYYY-MM-DD, "
+                       "description": "run: the playbook's inputs by name (find/show list them) — every value you "
+                                      "already have (what they said, what you know of them); run asks them for the "
+                                      "missing ones. Dates YYYY-MM-DD, "
                                       "times HH:MM; a place is a town or address, never 'here'."},
             "region": {"type": "string",
                        "description": "find: the person's country, two letters (e.g. 'hr'), to include its local sites."},

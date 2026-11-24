@@ -127,7 +127,7 @@ playbooks:
     open: https://www.linkedin.com/messaging/
     steps:
       - kind: do
-        text: Find the conversation that matches {who}; if more than one fits, ask which.
+        text: Find the conversation that matches {who}; if more than one fits, ask the person which with ask_user.
       - kind: do
         text: Read the thread, then draft a short, friendly reply in the person's voice that says {reply}, in the thread's language. Take free slots from the calendar if times are needed.
       - kind: type
@@ -156,6 +156,10 @@ playbooks:
     inputs:
       job: {label: Which job, kind: text, hint: "Title and company, or the job's link"}
       cv: {label: CV to use, kind: file, default: the CV already on LinkedIn}
+      salary: {label: Salary expectation, kind: text, ask: during}
+      notice: {label: Notice period, kind: text, ask: during}
+      work_permit: {label: Work permit for the job's country, kind: text, ask: during}
+      start: {label: Earliest start date, kind: text, ask: during}
     open: https://www.linkedin.com/my-items/saved-jobs/
     steps:
       - kind: do
@@ -168,7 +172,7 @@ playbooks:
       - kind: do
         text: Fill each page from the person's profile, CV and memory. Tailor free-text answers and any cover letter to this job, using only experience the person really has.
       - kind: do
-        text: Ask for anything not known (salary expectation, notice period, work permit, start date) when the form gets there; never guess these.
+        text: Only if the form asks for the salary expectation, notice period, work permit or start date, and the person hasn't said, ask them — all of those in one ask_user dialog; never guess these.
       - kind: do
         text: If the site wants a new account or a password, stop there and hand over to the person.
       - kind: do
