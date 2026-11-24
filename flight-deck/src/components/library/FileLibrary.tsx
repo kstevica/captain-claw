@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   Braces,
+  Camera,
   Download,
   Eye,
   File,
@@ -50,14 +51,18 @@ import { isMemberCreated, type Creator } from '../../utils/sharedWorkspace'
 import { fmtRelative, fmtWhen } from '../../services/schedulerApi'
 import {
   fileLibraryApi,
+  isAgenticScreenshot,
   isFolderSourceId,
   type LibraryItem,
   type LibraryPage,
+  type LibrarySection,
   type LibrarySort,
   type LibraryState,
 } from '../../services/fileLibraryApi'
 import { vfsApi, type FolderRef } from '../../services/vfsApi'
-import { FacetGroup, FullscreenButton, Highlight, ScanStatus, SourceFacetGroup, SourceName, libraryIconBtn } from './libraryParts'
+import {
+  FacetGroup, FacetRow, FacetTitle, FullscreenButton, Highlight, ScanStatus, SourceFacetGroup, SourceName, libraryIconBtn,
+} from './libraryParts'
 import { FilePreview } from './FilePreview'
 import { LibraryPick } from './LibraryPick'
 import { isUntrustedFile } from '../../utils/untrustedContent'
@@ -76,6 +81,10 @@ import { isUntrustedFile } from '../../utils/untrustedContent'
 // agents, read the same way. A folder's file is edited through the folder
 // (no agent stands behind it), and what only an agent does — present a page
 // as a deck, make a public link — isn't offered for it.
+//
+// The pictures the browser tool saves while it works are kept apart: they
+// aren't in the list, its counts or its search, but in their own section,
+// "Agentic screenshots" (Flight Deck files them without a summary).
 
 const PAGE = 60
 
@@ -130,6 +139,10 @@ const iconBtn = libraryIconBtn
 function categoryOf(item: LibraryItem): string {
   return item.category || 'pending'
 }
+
+/** A screenshot the browser tool took: its category says nothing (they are
+ *  all pictures), so it isn't shown. */
+const isShot = (item: LibraryItem) => isAgenticScreenshot(item.rel_path)
 
 /** The library's file as the agent's Files panel names it, so the shared
  *  viewer, public links and decks take it as they take one from there.
@@ -282,6 +295,10 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
   // The file asked for, until a load lists it.
   const wanted = useRef(initialFile ?? null)
   const [agent, setAgent] = useState(initialAgent || '')
+  // Asked to show one of the browser tool's screenshots: open on them.
+  const [section, setSection] = useState<LibrarySection>(
+    initialFile && isAgenticScreenshot(initialFile.relPath) ? 'screenshots' : 'files')
+  const shots = section === 'screenshots'
   const [category, setCategory] = useState('')
   const [kind, setKind] = useState('')
   const [sort, setSort] = useState<LibrarySort>('recent')
@@ -319,6 +336,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
     try {
       const res = await fileLibraryApi.files({
         q: debounced, agent, category, kind, sort, limit: Math.max(PAGE, shown.current), offset: 0,
+        section: shots ? 'screenshots' : undefined,
       })
       if (id !== reqId.current) return
       setPage(res)
@@ -333,7 +351,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
     } finally {
       if (id === reqId.current) setLoading(false)
     }
-  }, [debounced, agent, category, kind, sort])
+  }, [debounced, agent, category, kind, sort, shots])
 
   useEffect(() => { load() }, [load])
 
@@ -343,6 +361,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
     try {
       const res = await fileLibraryApi.files({
         q: debounced, agent, category, kind, sort, limit: PAGE, offset: page.items.length,
+        section: shots ? 'screenshots' : undefined,
       })
       setPage((cur) => cur && {
         ...res,
@@ -442,6 +461,12 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
   const agentOnly = !!agent && !debounced && !category && !kind
   const folderOnly = agentOnly && isFolderSourceId(agent)
   const clearFilters = () => { setQuery(''); setAgent(''); setCategory(''); setKind('') }
+  // A category or a type means nothing among screenshots; the agent and the
+  // search carry over.
+  const showSection = (s: LibrarySection) => {
+    if (s === section) return
+    setSection(s); setCategory(''); setKind(''); setSelected(null)
+  }
   // One agent's files, while it runs (and is up): the way to everything it keeps.
   const agentRunning = useProcessStore((s) => !!agent && s.processes.some((p) => p.slug === agent && p.status === 'running'))
   const openLive = onOpenLive && agent && agentRunning && (liveReady?.(agent) ?? true) ? () => onOpenLive(agent) : undefined
@@ -456,7 +481,13 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
       </span>
       <div className="min-w-0 flex-1">
         <h2 className="truncate text-base font-semibold text-zinc-100">File library</h2>
-        {!phone && <p className="truncate text-xs text-zinc-500">Every file your agents made, in their own files and your shared folders — summarised and searchable.</p>}
+        {!phone && (
+          <p className="truncate text-xs text-zinc-500">
+            {shots
+              ? 'What your agents saw while they used the browser — kept apart from your files.'
+              : 'Every file your agents made, in their own files and your shared folders — summarised and searchable.'}
+          </p>
+        )}
       </div>
       {!phone && <ScanStatus state={state} noun="file" />}
       <button onClick={rescan} disabled={running} className={iconBtn} title="Look for new files" aria-label="Look for new files">
@@ -476,7 +507,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder={phone ? 'Search files…' : 'Search summaries, tags, the text inside and what\'s said in recordings…'}
+          placeholder={shots ? 'Search screenshots…' : phone ? 'Search files…' : 'Search summaries, tags, the text inside and what\'s said in recordings…'}
           className="w-full rounded-lg border border-zinc-800 bg-zinc-900 py-2 pl-8 pr-8 text-sm text-zinc-200 placeholder-zinc-500 focus:border-violet-500/60 focus:outline-none"
         />
         {query && (
@@ -489,7 +520,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
         <button
           onClick={() => setFiltersOpen(true)}
           className={`relative flex h-9 shrink-0 items-center gap-1.5 rounded-lg border px-3 text-sm ${
-            agent || category || kind ? 'border-violet-500/50 text-violet-700 dark:text-violet-300' : 'border-zinc-800 text-zinc-400'}`}
+            agent || category || kind || shots ? 'border-violet-500/50 text-violet-700 dark:text-violet-300' : 'border-zinc-800 text-zinc-400'}`}
         >
           <SlidersHorizontal className="h-4 w-4" />Filters
         </button>
@@ -509,8 +540,9 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
   const filters = (
     <Filters
       facets={facets}
-      agent={agent} category={category} kind={kind}
-      onAgent={setAgent} onCategory={setCategory} onKind={setKind}
+      sections={page?.sections}
+      section={section} agent={agent} category={category} kind={kind}
+      onSection={showSection} onAgent={setAgent} onCategory={setCategory} onKind={setKind}
     />
   )
 
@@ -524,6 +556,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
       filtered={filtered}
       agentOnly={agentOnly}
       folderOnly={folderOnly}
+      shots={shots}
       terms={terms}
       selectedId={selected?.id ?? null}
       loadingMore={loadingMore}
@@ -543,6 +576,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
       creator={creatorOf(selected)}
       terms={terms}
       phone={phone}
+      backLabel={shots ? 'All screenshots' : 'All files'}
       viewerOpen={!!(viewing || editing)}
       onClose={() => setSelected(null)}
       onOpen={() => openFile(selected)}
@@ -656,11 +690,11 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
               {filters}
             </div>
             <div className="flex gap-2 border-t border-zinc-800 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-              <button onClick={() => { setAgent(''); setCategory(''); setKind('') }} className="h-11 flex-1 rounded-xl border border-zinc-800 text-sm font-medium text-zinc-300">
+              <button onClick={() => { setAgent(''); setCategory(''); setKind(''); showSection('files') }} className="h-11 flex-1 rounded-xl border border-zinc-800 text-sm font-medium text-zinc-300">
                 Clear
               </button>
               <button onClick={() => setFiltersOpen(false)} className="h-11 flex-1 rounded-xl bg-violet-600 text-sm font-medium text-white">
-                Show {page?.total ?? 0} file{page?.total === 1 ? '' : 's'}
+                Show {page?.total ?? 0} {shots ? 'screenshot' : 'file'}{page?.total === 1 ? '' : 's'}
               </button>
             </div>
           </div>
@@ -688,26 +722,56 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
 
 // ── Filters ──
 
-function Filters({ facets, agent, category, kind, onAgent, onCategory, onKind }: {
+function Filters({ facets, sections, section, agent, category, kind, onSection, onAgent, onCategory, onKind }: {
   facets: LibraryPage['facets'] | undefined
-  agent: string; category: string; kind: string
+  sections: LibraryPage['sections']
+  section: LibrarySection; agent: string; category: string; kind: string
+  onSection: (v: LibrarySection) => void
   onAgent: (v: string) => void; onCategory: (v: string) => void; onKind: (v: string) => void
 }) {
   if (!facets) return <div className="flex justify-center py-8 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /></div>
+  const shots = section === 'screenshots'
   return (
     <div className="flex flex-col gap-4 px-2 py-3">
-      <FacetGroup
-        title="Categories" allLabel="All files" facets={facets.categories} value={category} onChange={onCategory}
-        labelOf={(id) => CATEGORY_LABEL[id] || id}
-        dot={(id) => <span className={`h-2 w-2 shrink-0 rounded-full ${CATEGORY_DOT[id] || CATEGORY_DOT.other}`} />}
-      />
+      <SectionGroup sections={sections} value={section} onChange={onSection} />
+      {!shots && (
+        <FacetGroup
+          title="Categories" allLabel="All files" facets={facets.categories} value={category} onChange={onCategory}
+          labelOf={(id) => CATEGORY_LABEL[id] || id}
+          dot={(id) => <span className={`h-2 w-2 shrink-0 rounded-full ${CATEGORY_DOT[id] || CATEGORY_DOT.other}`} />}
+        />
+      )}
       <SourceFacetGroup agents={facets.agents} folders={facets.folders} value={agent} onChange={onAgent} />
-      {facets.kinds.length > 1 && (
+      {!shots && facets.kinds.length > 1 && (
         <FacetGroup
           title="Type" allLabel="Any type" facets={facets.kinds} value={kind} onChange={onKind}
           dot={(id) => { const Icon = KIND_ICON[id] || File; return <Icon className={`h-3.5 w-3.5 shrink-0 ${KIND_TONE[id] || 'text-zinc-500'}`} /> }}
         />
       )}
+    </div>
+  )
+}
+
+/** The person's files, or the screenshots the browser tool took: one or the other. */
+function SectionGroup({ sections, value, onChange }: {
+  sections: LibraryPage['sections']; value: LibrarySection; onChange: (v: LibrarySection) => void
+}) {
+  const rows: { id: LibrarySection; label: string; icon: ReactNode; title: string }[] = [
+    { id: 'files', label: 'Files', title: 'The files your agents made and your shared folders hold',
+      icon: <LibraryBig className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-violet-400" /> },
+    { id: 'screenshots', label: 'Agentic screenshots', title: 'What your agents saw while they used the browser',
+      icon: <Camera className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" /> },
+  ]
+  return (
+    <div>
+      <FacetTitle>Show</FacetTitle>
+      <ul className="flex flex-col gap-0.5">
+        {rows.map((r) => (
+          <li key={r.id} title={r.title}>
+            <FacetRow label={r.label} count={sections?.[r.id] ?? 0} icon={r.icon} active={value === r.id} onClick={() => onChange(r.id)} />
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -728,11 +792,14 @@ function LiveLink({ onClick }: { onClick: () => void }) {
 }
 
 function ResultList({
-  items, total, state, loading, error, filtered, agentOnly, folderOnly, terms, selectedId, loadingMore, creatorOf, onSelect, onMore, onClear, onRetry, onLive,
+  items, total, state, loading, error, filtered, agentOnly, folderOnly, shots, terms, selectedId, loadingMore, creatorOf, onSelect, onMore, onClear, onRetry, onLive,
 }: {
   items: LibraryItem[]; total: number; state: LibraryState | null; loading: boolean; error: string
   /** Only one agent's or shared folder's files (`folderOnly`: a folder's). */
-  filtered: boolean; agentOnly: boolean; folderOnly: boolean; terms: string[]; selectedId: string | null; loadingMore: boolean
+  filtered: boolean; agentOnly: boolean; folderOnly: boolean
+  /** The browser tool's screenshots, not the person's files. */
+  shots: boolean
+  terms: string[]; selectedId: string | null; loadingMore: boolean
   creatorOf: (i: LibraryItem) => Creator | null | undefined
   onSelect: (i: LibraryItem) => void; onMore: () => void; onClear: () => void; onRetry: () => void
   /** The agent filtered to, live (it runs, in the kiosk). */
@@ -746,6 +813,26 @@ function ResultList({
       <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-zinc-500">
         <AlertTriangle className="h-5 w-5 text-red-500" />{error}
         <button onClick={onRetry} className="text-sm font-medium text-violet-600 hover:underline dark:text-violet-400">Try again</button>
+      </div>
+    )
+  }
+  if (items.length === 0 && shots && !(filtered && !agentOnly)) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center px-6 text-center">
+        <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-500/15 text-blue-600 dark:text-blue-400">
+          {state?.job.running ? <Loader2 className="h-7 w-7 animate-spin" /> : <Camera className="h-7 w-7" />}
+        </span>
+        <h3 className="mt-4 text-base font-semibold text-zinc-100">No agentic screenshots</h3>
+        <p className="mt-1.5 max-w-sm text-sm leading-relaxed text-zinc-400">
+          {agentOnly
+            ? 'This agent hasn\'t taken any screenshots with the browser.'
+            : 'When an agent uses the browser, the screenshots it takes while it works collect here, apart from your files.'}
+        </p>
+        {agentOnly && (
+          <button onClick={onClear} className="mt-4 text-sm font-medium text-violet-600 hover:underline dark:text-violet-400">
+            Show every agent's screenshots
+          </button>
+        )}
       </div>
     )
   }
@@ -791,7 +878,7 @@ function ResultList({
     <div className="h-full overflow-y-auto px-3 py-3 wide:px-4">
       <div className="mb-2 flex items-center justify-between gap-2 px-1 text-[11px] text-zinc-500">
         <span className="min-w-0 truncate">
-          {total} file{total === 1 ? '' : 's'}{terms.length ? <> for “{terms.join(' ')}”</> : null}
+          {total} {shots ? 'screenshot' : 'file'}{total === 1 ? '' : 's'}{terms.length ? <> for “{terms.join(' ')}”</> : null}
         </span>
         {onLive && <LiveLink onClick={onLive} />}
       </div>
@@ -850,7 +937,7 @@ function ResultRow({ item, creator, terms, active, onClick }: {
             <Highlight text={item.title || item.filename} terms={terms} />
           </span>
           <CreatorBadge mode="owner" creator={creator} />
-          <CategoryChip id={categoryOf(item)} />
+          {!isShot(item) && <CategoryChip id={categoryOf(item)} />}
         </span>
         <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
           {item.title && item.title !== item.filename ? <><Highlight text={item.filename} terms={terms} /> · </> : null}
@@ -891,10 +978,12 @@ function ResultRow({ item, creator, terms, active, onClick }: {
 // ── One file ──
 
 function FileDetail({
-  item, creator, terms, phone, viewerOpen, onClose, onOpen, onEdit, onDownload, onShare, onPublicLink, onResummarize, onAnonymize, onTag, onAgent, onOpenAgent, onShowInFolder,
+  item, creator, terms, phone, backLabel, viewerOpen, onClose, onOpen, onEdit, onDownload, onShare, onPublicLink, onResummarize, onAnonymize, onTag, onAgent, onOpenAgent, onShowInFolder,
   onOutOfLibrary,
 }: {
   item: LibraryItem; creator: Creator | null | undefined; terms: string[]; phone: boolean
+  /** The phone's way back to the list ("All files"). */
+  backLabel: string
   /** A file is open in the viewer over the library (its preview pauses). */
   viewerOpen: boolean
   /** Edit through the running agent — or, for a shared folder's file, through the folder (null). */
@@ -949,7 +1038,8 @@ function FileDetail({
     ['Size', formatSize(item.size)],
     ['Changed', fmtWhen(item.modified)],
   ]
-  if (item.summarized_at && item.status !== 'pending') {
+  // A screenshot filed without a model was never summarised.
+  if (item.summarized_at && item.status !== 'pending' && !(isShot(item) && item.status === 'skipped')) {
     meta.push(['Summarised', `${fmtWhen(item.summarized_at)}${item.model ? ` · ${item.model.split('/').pop()}` : ''}`])
   }
 
@@ -960,7 +1050,7 @@ function FileDetail({
       <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-2.5">
         {phone ? (
           <button onClick={onClose} className="flex flex-1 items-center gap-1.5 text-sm text-violet-600 dark:text-violet-400">
-            <ArrowLeft className="h-4 w-4" />All files
+            <ArrowLeft className="h-4 w-4" />{backLabel}
           </button>
         ) : (
           <>
@@ -982,7 +1072,7 @@ function FileDetail({
           </div>
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-1.5">
-          <CategoryChip id={categoryOf(item)} />
+          {!isShot(item) && <CategoryChip id={categoryOf(item)} />}
           <span className="rounded-md bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">{item.extension.replace('.', '').toUpperCase() || 'FILE'}</span>
           <CreatorBadge mode="owner" creator={creator} />
         </div>

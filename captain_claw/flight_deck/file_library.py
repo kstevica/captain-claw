@@ -21,7 +21,9 @@ title, summary, tags, the text itself, a picture's description and what is
 said in a recording) and filterable by agent, category
 and kind. Tokens count toward the owner's daily allowance, and a scan stops
 when it is spent. Workers Flight Deck runs itself (a run's agents, a being's
-body) are not the user's library and are left out.
+body) are not the user's library and are left out. The pictures the browser
+tool saves while it works are listed apart, never summarised (see "Agentic
+screenshots" below).
 
 The user's own shared folders (``vfs:<folder>/``) can be sources too, beside
 the agents, but only what the person added: a whole folder, or single files
@@ -185,6 +187,34 @@ def kind_of(ext: str) -> str:
     return _KIND_BY_EXT.get(ext.lower(), "other")
 
 
+# ── Agentic screenshots ───────────────────────────────────────────────
+#
+# The pictures the browser tool saves while it works: browser_screenshot_<ms>
+# (tools/browser.py), browser_chrome_<ms> and browser_zoom_<ms> (the person's
+# Chrome, tools/browser_chrome.py and browser_page.py), each a .jpg in the
+# session's saved/media/<session>/ folder. They are the agent's working
+# material, not the person's files, and a busy agent takes hundreds: they stay
+# out of the library's lists, counts and search, are listed on their own
+# ("Agentic screenshots"), and are never shown to a model (a vision call each).
+# Only that exact name in that exact place counts: a file that merely says
+# "browser", or a screenshot an agent saved somewhere else on purpose, stays a
+# library file.
+SCREENSHOTS = "screenshots"
+_AGENTIC_SHOT_RE = re.compile(r"^saved/media/[^/]+/browser_[a-z]+_\d{10,}\.(?:jpe?g|png|webp)$")
+_SHOT_TITLES = {"screenshot": "Browser screenshot", "chrome": "Chrome screenshot", "zoom": "Browser close-up"}
+_SHOT_SUMMARY = "A screenshot the browser tool took while it worked. Not summarised."
+
+
+def is_agentic_screenshot(rel_path: str) -> bool:
+    """Whether a library file (by its workspace path) is a picture the browser tool saved."""
+    return bool(_AGENTIC_SHOT_RE.match(str(rel_path or "")))
+
+
+def _screenshot_title(filename: str) -> str:
+    kind = filename.split("_", 2)[1] if filename.count("_") >= 2 else ""
+    return _SHOT_TITLES.get(kind, "Browser screenshot")
+
+
 # ── Store ─────────────────────────────────────────────────────────────
 
 
@@ -202,6 +232,8 @@ class LibraryStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # The browser tool's screenshots, told apart in SQL by the same rule.
+        self._conn.create_function("agentic_shot", 1, is_agentic_screenshot, deterministic=True)
         with self._lock:
             self._conn.executescript(
                 """
@@ -399,14 +431,36 @@ class LibraryStore:
                 (*fields.values(), file_id, fingerprint))
             self._conn.commit()
 
+    def settle_screenshots(self, slugs: list[str]) -> int:
+        """The browser tool's screenshots waiting for a summary (or set aside
+        for want of one) are filed as they are: titled from their name, never
+        shown to a model. One described on request keeps its description."""
+        if not slugs:
+            return 0
+        now = time.time()
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT id, filename FROM library_files WHERE agent_slug IN ({','.join('?' * len(slugs))}) "
+                "AND (status IN ('pending', 'error') OR waiting_for != '') AND agentic_shot(rel_path)",
+                slugs).fetchall()
+            for r in rows:
+                self._conn.execute(
+                    "UPDATE library_files SET status = 'skipped', title = ?, summary = ?, category = 'media', "
+                    "tags = '[]', excerpt = '', error = '', model = '', tokens = 0, summarized_at = ?, "
+                    "waiting_for = '' WHERE id = ?",
+                    (_screenshot_title(r["filename"]), _SHOT_SUMMARY, now, r["id"]))
+            self._conn.commit()
+        return len(rows)
+
     def counts(self, slugs: list[str]) -> dict[str, int]:
+        """The library's files by status (the browser tool's screenshots aside)."""
         out = {"total": 0, "done": 0, "pending": 0, "error": 0, "skipped": 0}
         if not slugs:
             return out
         with self._lock:
             for status, n in self._conn.execute(
                     f"SELECT status, COUNT(*) FROM library_files WHERE agent_slug IN ({','.join('?' * len(slugs))}) "
-                    "GROUP BY status", slugs):
+                    "AND NOT agentic_shot(rel_path) GROUP BY status", slugs):
                 out[status] = out.get(status, 0) + int(n)
                 out["total"] += int(n)
         return out
@@ -1561,6 +1615,8 @@ async def run_scan(user: dict, job: ScanJob, retry_errors: bool = False) -> None
         if reach.ffmpeg:
             store.requeue_waiting("ffmpeg", slugs)
         store.requeue_waiting("vision", [s for s in slugs if reach.eyes(s)[0]])
+        # The browser tool's screenshots are filed without a model.
+        store.settle_screenshots(slugs)
         todo = store.pending(slugs, _MAX_SUMMARIES_PER_SCAN,
                              time.time() if retry_errors else time.time() - _ERROR_RETRY_SECONDS)
         if not todo:
@@ -1826,16 +1882,30 @@ async def library_scan(retry_errors: bool = False, user: dict = Depends(get_curr
 @router.get("/files")
 async def library_files(
     q: str = "", agent: str = "", category: str = "", kind: str = "",
-    sort: str = "recent", limit: int = 60, offset: int = 0,
+    sort: str = "recent", limit: int = 60, offset: int = 0, section: str = "",
     user: dict = Depends(get_current_user),
 ) -> dict:
     """The caller's files, searched and filtered, with the counts each
     filter would leave (computed under the other filters). ``agent`` is an
-    agent's slug or a shared folder (``vfs:<folder>``)."""
+    agent's slug or a shared folder (``vfs:<folder>``). The browser tool's
+    screenshots are listed only with ``section=screenshots`` (and then only
+    they, category and kind aside); ``sections`` counts both sides under
+    the search and the agent filter."""
     agents = await caller_sources(user)
     agent = source_key(agent, agents) if agent else ""
     terms = [t for t in q.casefold().split() if t][:8]
-    rows = await asyncio.to_thread(get_store().search, list(agents), terms)
+    found = await asyncio.to_thread(get_store().search, list(agents), terms)
+    shots = section == SCREENSHOTS
+    if shots:
+        category = kind = ""
+    sections = {"files": 0, SCREENSHOTS: 0}
+    rows: list[dict] = []
+    for r in found:
+        shot = is_agentic_screenshot(r["rel_path"])
+        if not agent or r["agent_slug"] == agent:
+            sections[SCREENSHOTS if shot else "files"] += 1
+        if shot == shots:
+            rows.append(r)
 
     def keep(r: dict, skip: str = "") -> bool:
         return ((skip == "agent" or not agent or r["agent_slug"] == agent)
@@ -1861,6 +1931,7 @@ async def library_files(
     return {
         "items": [_item(r, agents, terms) for r in page],
         "total": len(shown),
+        "sections": sections,
         "facets": {
             "agents": agent_facets,
             "folders": folder_facets,

@@ -13,6 +13,15 @@ export type LibrarySource = 'agent' | 'folder'
 export const folderSourceId = (folder: string) => `vfs:${folder}`
 export const isFolderSourceId = (id: string) => id.startsWith('vfs:')
 
+/** The library's two sides: the person's files, and the pictures the browser
+ *  tool saves while it works ("Agentic screenshots"), listed apart. */
+export type LibrarySection = 'files' | 'screenshots'
+
+/** A picture the browser tool saved (saved/media/<session>/browser_<kind>_<ms>.jpg),
+ *  told apart as Flight Deck tells it (file_library.is_agentic_screenshot). */
+export const isAgenticScreenshot = (relPath: string) =>
+  /^saved\/media\/[^/]+\/browser_[a-z]+_\d{10,}\.(?:jpe?g|png|webp)$/.test(relPath)
+
 import { refreshAccessToken, useAuthStore } from '../stores/authStore'
 
 export type LibraryStatus = 'pending' | 'done' | 'error' | 'skipped'
@@ -58,6 +67,8 @@ export interface Facet { id: string; label: string; count: number }
 export interface LibraryPage {
   items: LibraryItem[]
   total: number
+  /** How many each side holds, under the search and the agent filter. */
+  sections?: Record<LibrarySection, number>
   facets: { agents: Facet[]; folders?: Facet[]; categories: Facet[]; kinds: Facet[] }
 }
 
@@ -91,6 +102,9 @@ export interface LibraryQuery {
   sort?: LibrarySort
   limit?: number
   offset?: number
+  /** 'screenshots': only the browser tool's pictures (category and kind aside).
+   *  Without it, the person's files, those left out. */
+  section?: 'screenshots'
 }
 
 /** JSON from a Flight Deck route, with the FD token; a refusal's `detail` as the error.
