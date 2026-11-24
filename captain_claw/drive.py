@@ -222,6 +222,14 @@ def mode_suggestion(agent: Any | None = None) -> str | None:
 def current_name(agent: Any | None = None) -> str:
     """The level in effect: the turn's pick, else the agent's own default,
     else what its cognitive mode suggests, else ``diligent``. Never raises."""
+    override = getattr(agent, "_turn_drive_override", None) if agent is not None else None
+    if isinstance(override, str):
+        # What the agent set for the rest of the turn (its drive_level tool):
+        # a level, or "auto" = no pick, so its default decides.
+        if override in LEVELS:
+            return override
+        if override == "auto":
+            return agent_default() or mode_suggestion(agent) or DEFAULT
     return _TURN.get() or agent_default() or mode_suggestion(agent) or DEFAULT
 
 

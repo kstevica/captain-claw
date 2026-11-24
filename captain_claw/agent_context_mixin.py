@@ -53,6 +53,15 @@ _REASONING_TALK_RE = re.compile(
     r"|\bthinking\s+(?:harder|more|less|level|mode|budget|off|on)\b|razmi[šs]lj\w*|rezonir\w*",
     re.I,
 )
+# A message about how far the agent pushes (EN / HR): "drive level", a level's
+# name, "more thorough", "extra work", "temeljitije", "ambiciozno" … Never a
+# bare "drive": that is where files live.
+_DRIVE_TALK_RE = re.compile(
+    r"\bdrive\s+(?:level|setting|mode|to\s+(?:relaxed|diligent|persistent|ambitious))\b"
+    r"|\b(?:relaxed|diligent|persistent|ambitious)\b|\b(?:more|less)\s+thorough\w*\b"
+    r"|\bextra\s+work\b|ambiciozn\w*|temeljit\w*|upornij\w*|opu[šs]ten\w*",
+    re.I,
+)
 # "[Flight Deck] Agent '<name>' has <event> the fleet …" (anywhere in a notice).
 _FLEET_NOTICE_RE = re.compile(
     r"\[Flight Deck\] Agent '(?P<name>[^']*)' has (?P<event>\w+) the fleet"
@@ -118,6 +127,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "model_switch": "Read or change the AI model you run on, among your provider's models (same key and endpoint): a smarter one for a hard task, a cheaper one for simple work. Works from EVERY channel: when the user asks to switch, use a smarter/cheaper model or go back to the default, call set from wherever they asked; never say only Flight Deck can change it. scope 'setting' = this conversation from now on; 'turn' = this turn only. On your own only when get says your owner allowed it (then scope 'turn', and say so).",
     "activity": "Your own tool calls as Flight Deck recorded them (read-only): list = what you did and how each call ended (overnight, in scheduled tasks, in this conversation) — check it before saying an action happened; summary = tools that keep failing, calls you repeat, what the guard blocked.",
     "reasoning_effort": "Read or change how hard you think (off…max, auto = model default). Works from EVERY channel — web chat, WhatsApp, Telegram, the app, glasses, devices: when the user asks to set, raise or lower it (or to think harder/less), call set from wherever they asked; never say only Flight Deck can change it. Applies at once and to later messages from that channel. On your own, for a task needing much more or less thinking, use scope 'turn' and say so.",
+    "drive_level": "Read or change your Drive: how far you push to finish a turn (relaxed, diligent, persistent, ambitious; auto = your default) — not reasoning effort, and nothing to do with Google Drive. Works from EVERY channel: when the user asks you to be more or less thorough, more ambitious or persistent, quicker and cheaper, or to set the Drive level, call set (the web chat: the chat box's picker; anywhere else: your own default). Never say it can only be changed in Flight Deck. scope 'turn' = this turn only; extra_work on/off = whether Ambitious may add one unasked step.",
     "xlsx_extract": "Extract a single .xlsx file into markdown tables. ONLY for .xlsx files — never use on .pdf/.docx/.pptx. For multiple files in a folder use summarize_files instead.",
     "pptx_extract": "Extract a single .pptx file into markdown. ONLY for .pptx files — never use on .pdf/.docx/.xlsx. For multiple files in a folder use summarize_files instead.",
     "pocket_tts": "Convert text to local speech audio and save as MP3",
@@ -173,6 +183,7 @@ _TOOL_PROMPT_DESCRIPTIONS_NANO: dict[str, str] = {
     "pptx": "powerpoint decks",
     "self_check": "status",
     "reasoning_effort": "think harder/less (any channel)",
+    "drive_level": "how far you push: relaxed…ambitious (any channel)",
     "model_switch": "switch to a smarter/cheaper model of your provider (any channel)",
     "activity": "your own tool calls",
     "xlsx_extract": "xlsx→md",
@@ -204,6 +215,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "self_check": "test your connections (models, Flight Deck, Google, Microsoft, mail, search, MCP…) + server status; read-only",
     "activity": "your own recorded tool calls: list (what you did, did it really happen) / summary (what keeps failing); read-only",
     "reasoning_effort": "get/set how hard you think (off…max, auto) from any channel — user asks → set, never 'only Flight Deck'; scope 'turn' = this turn only",
+    "drive_level": "get/set how far you push a turn (relaxed, diligent, persistent, ambitious, auto) from any channel — user asks to be more/less thorough → set, never 'only Flight Deck'; scope 'turn' = this turn only; extra_work on/off; not Google Drive",
     "model_switch": "get/set the model you run on among your provider's models (smarter/cheaper) from any channel — user asks → set; on your own only if get says allowed (scope 'turn')",
     "xlsx_extract": "single .xlsx → markdown (ONLY .xlsx, never .pdf; for multiple files use summarize_files)",
     "pptx_extract": "single .pptx → markdown (ONLY .pptx, never .pdf; for multiple files use summarize_files)",
@@ -2606,6 +2618,7 @@ class AgentContextMixin:
         "pptx": ["pptx"],
         "self_check": ["self_check"],
         "reasoning_effort": ["reasoning_effort"],
+        "drive_level": ["drive_level"],
         "model_switch": ["model_switch"],
         "activity": ["activity"],
         "xlsx_extract": ["xlsx_extract"],
@@ -2774,6 +2787,9 @@ class AgentContextMixin:
             elif tool_name == "reasoning_effort":
                 from captain_claw.tools.reasoning_effort import ReasoningEffortTool
                 self.tools.register(ReasoningEffortTool())
+            elif tool_name == "drive_level":
+                from captain_claw.tools.drive_level import DriveLevelTool
+                self.tools.register(DriveLevelTool())
             elif tool_name == "model_switch":
                 from captain_claw.tools.model_switch import ModelSwitchTool
                 self.tools.register(ModelSwitchTool())
@@ -4827,6 +4843,18 @@ class AgentContextMixin:
                 f" To change your reasoning effort as asked, call reasoning_effort set — it works "
                 f"from {label} and changes the level for {label} (or the source named); never "
                 "tell the user it can only be changed in Flight Deck."
+            )
+        try:
+            has_drive = self.tools.has_tool("drive_level")
+        except Exception:
+            has_drive = False
+        from captain_claw import turn_source
+
+        if (has_drive and turn_source.channel_of(source) not in {"public", "member", "link"}
+                and _DRIVE_TALK_RE.search(self._recent_user_text())):
+            line += (
+                " To change how far you push (your Drive level) as asked, call drive_level set — "
+                f"it works from {label}; never tell the user it can only be changed in Flight Deck."
             )
         return line
 

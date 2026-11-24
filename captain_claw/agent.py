@@ -597,6 +597,8 @@ class Agent(
         self._turn_source = (source, turn_source.label_for(source, label) if source else "")
         # A level the agent set for one turn only (reasoning_effort tool) ends with it.
         self._turn_effort_override = None
+        # …and a Drive level it set for one turn only (drive_level tool).
+        self._turn_drive_override = None
         # …and so does a model switched to for one turn only (model_switch), if
         # the last turn didn't put it back; the admin's model list is fetched
         # again when it is old (llm/model_switch.py).

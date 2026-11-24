@@ -52,6 +52,7 @@ EXAM_TOOLS: dict[str, frozenset[str] | None] = {
     "xlsx": frozenset({"read", "check"}),
     "pptx": frozenset({"read", "check"}),
     "reasoning_effort": frozenset({"get"}),
+    "drive_level": frozenset({"get"}),
     "model_switch": frozenset({"get"}),
 }
 

@@ -825,6 +825,8 @@ class ToolsConfig(BaseModel):
         # Every agent can change how hard it thinks, as the user would in
         # Flight Deck (the chat box picker, Settings → Reasoning effort).
         "reasoning_effort",
+        # …and how far it pushes a turn (the chat box's Drive picker).
+        "drive_level",
         # …and which of its provider's models it runs on (the chat box's
         # model picker).
         "model_switch",

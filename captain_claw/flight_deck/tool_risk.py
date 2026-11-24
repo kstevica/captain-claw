@@ -53,6 +53,7 @@ _TOOL_RISK: dict[str, str] = {
     "image_manipulation": "write", "anonymize": "write",
     "synthesize_flow": "write", "pocket_tts": "write", "clipboard": "write",
     "reasoning_effort": "write",
+    "drive_level": "write",
     "model_switch": "write",
     # run
     "shell": "exec", "terminal": "exec", "desktop_action": "exec", "scripts": "exec",

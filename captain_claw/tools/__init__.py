@@ -99,6 +99,7 @@ from captain_claw.tools.pptx_tool import PptxTool
 from captain_claw.tools.xlsx_tool import XlsxTool
 from captain_claw.tools.self_check import SelfCheckTool
 from captain_claw.tools.reasoning_effort import ReasoningEffortTool
+from captain_claw.tools.drive_level import DriveLevelTool
 from captain_claw.tools.activity import ActivityTool
 
 __all__ = [
@@ -202,5 +203,6 @@ __all__ = [
     "CvTool",
     "SelfCheckTool",
     "ReasoningEffortTool",
+    "DriveLevelTool",
     "ActivityTool",
 ]
