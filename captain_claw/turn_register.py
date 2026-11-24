@@ -442,7 +442,7 @@ def _open_record(agent: Any, turn: Turn) -> dict[str, Any]:
         # compared by mode.
         "cognitive_mode": effective_mode_name(agent),
         # …and the Drive level the turn runs at (drive.py).
-        "drive": drive.current_name(),
+        "drive": drive.current_name(agent),
     }
 
 

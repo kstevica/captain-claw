@@ -7,7 +7,8 @@ to distinct cognitive approaches.  Each mode operates at three layers:
             (``instructions/cognitive_modes/frame.md``) that says when a mode
             applies and what it never overrides.
   Layer 2 — Parameters: only numbers that some subsystem actually reads
-            (completion gate, nervous system, game seats).  Anything about
+            (nervous system, game seats).  How far the harness pushes a
+            turn is Drive's job (drive.py); a mode only suggests a level.  Anything about
             *how* the agent works lives in the prompt text, not in a number.
 
 A mode also carries a one-line ``review_lens`` for critics and checkers,
@@ -51,10 +52,6 @@ class CognitiveModeParams:
     Default values are neutral — they produce no change.
     """
 
-    # Completion gate (agent_completion_mixin): above 0.7 allows one more
-    # validation retry before a response is accepted, below 0.3 one fewer.
-    completion_strictness: float = 0.5
-
     # Multiplier on nervous system dream_interval_messages (1.0 = no change).
     dream_interval_modifier: float = 1.0
 
@@ -84,6 +81,9 @@ class CognitiveMode:
     params: CognitiveModeParams
     instruction_file: str       # Filename in instructions/cognitive_modes/ (empty for neutra)
     review_lens: str = ""       # What a critic in this mode looks for (empty for neutra)
+    # The Drive level (drive.py) an agent in this mode runs at when neither a
+    # chat nor the agent's own settings picked one.  "" = no suggestion.
+    suggested_drive: str = ""
 
 
 # ── Mode Registry ────────────────────────────────────────────────────
@@ -105,7 +105,6 @@ MODES: dict[str, CognitiveMode] = {
         label="The Resolver",
         character="Convergent problem-solving — seeks clear answers and closure",
         params=CognitiveModeParams(
-            completion_strictness=0.9,
             dream_interval_modifier=1.2,       # dreams slightly less often
             dream_cooldown_modifier=1.2,
             maturation_cycles_delta=0,
@@ -113,6 +112,7 @@ MODES: dict[str, CognitiveMode] = {
             intuition_type_weights={"pattern": 1.3, "hypothesis": 0.7},
         ),
         instruction_file="ionian.md",
+        suggested_drive="persistent",
         review_lens=(
             "Does the answer settle the question that was asked: one clear, complete result that meets the stated goal? Look for an open question left behind, a hedge where a conclusion was possible, or a goal only partly met."
         ),
@@ -124,7 +124,6 @@ MODES: dict[str, CognitiveMode] = {
         label="The Pragmatic Empath",
         character="Empathetic pragmatism — acknowledges complexity while finding workable paths",
         params=CognitiveModeParams(
-            completion_strictness=0.6,
             dream_interval_modifier=0.9,
             dream_cooldown_modifier=0.9,
             maturation_cycles_delta=0,
@@ -143,7 +142,6 @@ MODES: dict[str, CognitiveMode] = {
         label="The Adversarial Analyst",
         character="Adversarial thinking — assumes things will go wrong, finds the hidden flaw",
         params=CognitiveModeParams(
-            completion_strictness=0.8,
             dream_interval_modifier=0.8,       # dreams more often
             dream_cooldown_modifier=0.8,
             maturation_cycles_delta=1,          # intuitions need more cycles
@@ -151,6 +149,7 @@ MODES: dict[str, CognitiveMode] = {
             intuition_type_weights={"unresolved": 2.0, "hypothesis": 1.5, "association": 0.6},
         ),
         instruction_file="phrygian.md",
+        suggested_drive="persistent",
         review_lens=(
             "Look for what would make the answer fail: a false assumption, an unhandled case, a claim that was not verified, the weakest step in the reasoning."
         ),
@@ -162,7 +161,6 @@ MODES: dict[str, CognitiveMode] = {
         label="The Visionary Explorer",
         character="Divergent creative thinking — expands the solution space, finds unexpected connections",
         params=CognitiveModeParams(
-            completion_strictness=0.5,
             dream_interval_modifier=0.6,        # dreams much more often
             dream_cooldown_modifier=0.6,
             maturation_cycles_delta=-1,          # intuitions surface faster
@@ -181,7 +179,6 @@ MODES: dict[str, CognitiveMode] = {
         label="The Iterative Builder",
         character="Momentum-focused iteration — ship something, learn, improve, never declare done",
         params=CognitiveModeParams(
-            completion_strictness=0.5,
             dream_interval_modifier=1.3,         # dreams less (action-focused)
             dream_cooldown_modifier=1.3,
             maturation_cycles_delta=-1,
@@ -200,7 +197,6 @@ MODES: dict[str, CognitiveMode] = {
         label="The Depth Researcher",
         character="Deep analytical research — traces root causes, maps full context, values thoroughness",
         params=CognitiveModeParams(
-            completion_strictness=0.7,
             dream_interval_modifier=0.7,         # dreams more often
             dream_cooldown_modifier=0.7,
             maturation_cycles_delta=1,           # intuitions mature longer
@@ -219,7 +215,6 @@ MODES: dict[str, CognitiveMode] = {
         label="The Deconstructionist",
         character="Radical questioning — challenges the entire framing, questions whether the problem should exist",
         params=CognitiveModeParams(
-            completion_strictness=0.5,
             dream_interval_modifier=0.7,
             dream_cooldown_modifier=0.7,
             maturation_cycles_delta=0,
@@ -265,8 +260,8 @@ def mode_to_dict(mode: CognitiveMode) -> dict[str, Any]:
         "character": mode.character,
         "instruction_file": mode.instruction_file,
         "review_lens": mode.review_lens,
+        "suggested_drive": mode.suggested_drive,
         "params": {
-            "completion_strictness": mode.params.completion_strictness,
             "dream_interval_modifier": mode.params.dream_interval_modifier,
             "dream_cooldown_modifier": mode.params.dream_cooldown_modifier,
             "maturation_cycles_delta": mode.params.maturation_cycles_delta,

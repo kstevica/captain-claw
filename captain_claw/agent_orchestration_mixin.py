@@ -18,7 +18,7 @@ from captain_claw.agent_stuck import (
     MSG_STUCK,
     budget_partial,
 )
-from captain_claw import fabrication_guard, jev_progress, loop_guards, mail_authority, msg_origin, turn_deliverables
+from captain_claw import drive, fabrication_guard, jev_progress, loop_guards, mail_authority, msg_origin, turn_deliverables
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
 from captain_claw.llm import Message, is_reasoning_backfill_placeholder
@@ -84,14 +84,16 @@ def _floating_ceiling() -> int:
     return max(0, min(value, 100_000))
 
 
-def _turn_limits(planned: int) -> tuple[int, int]:
+def _turn_limits(planned: int, level: drive.DriveLevel | None = None) -> tuple[int, int]:
     """A turn's hard ceiling and the point up to which progress alone extends it
-    (past it, Jev decides where set up). Generous by design: 4x planned, at most
-    300. With a floating budget, progress alone extends it all the way to that
-    budget's ceiling: cutting a working turn off is the worse failure, and the
-    stuck detector, not this budget, stops one going nowhere."""
-    hard = max(planned, min(300, planned * 4))
-    free = planned * 2
+    (past it, Jev decides where set up). Set by the turn's Drive level
+    (drive.py); at Diligent, generous by design: 4x planned, at most 300. With
+    a floating budget, progress alone extends it all the way to that budget's
+    ceiling: cutting a working turn off is the worse failure, and the stuck
+    detector, not this budget, stops one going nowhere."""
+    level = level or drive.current()
+    hard = max(planned, min(level.step_ceiling_cap, planned * level.step_ceiling_multiplier))
+    free = planned * level.free_extension_multiplier
     floating = _floating_ceiling()
     if floating:
         hard = max(hard, floating)
@@ -475,6 +477,7 @@ _STALL_FIRST_LINE_RE = _re.compile(
 # Maximum number of silent stall retries per turn. Two is enough to
 # convert most weak-model stalls into a useful turn without driving an
 # infinite re-roll loop when the model genuinely has nothing to add.
+# The least any turn gets; a Drive level may allow more (drive.py), never fewer.
 MAX_STALL_RETRIES = 2
 
 # Finish reasons that mean a text answer stopped before it was done: the
@@ -2450,7 +2453,8 @@ class AgentOrchestrationMixin:
         # Up to free_extension_limit a turn that is making progress is extended
         # with no judge; past it Jev (where set up) decides each extension. A
         # floating budget (CLAW_FLOATING_BUDGET) moves both out to its ceiling.
-        hard_turn_iterations, free_extension_limit = _turn_limits(planned_turn_iterations)
+        drive_level = drive.current(self)
+        hard_turn_iterations, free_extension_limit = _turn_limits(planned_turn_iterations, drive_level)
         soft_turn_iterations = planned_turn_iterations
         extension_step = max(6, min(30, max(1, planned_turn_iterations // 2)))
         max_stagnant_iterations = 6
@@ -4090,7 +4094,7 @@ class AgentOrchestrationMixin:
                      and not (_stall_resp_text.strip() and _only_thanks(user_input)))
                     or _false_claim or _false_web_claim
                 )
-                and self._stall_retry_count < MAX_STALL_RETRIES
+                and self._stall_retry_count < max(MAX_STALL_RETRIES, drive.current(self).stall_retries)
             ):
                 self._stall_retry_count += 1
                 _has_tools = bool(tool_defs)
@@ -4133,7 +4137,7 @@ class AgentOrchestrationMixin:
                 log.warning(
                     "Stall detected, silent retry",
                     attempt=self._stall_retry_count,
-                    max_retries=MAX_STALL_RETRIES,
+                    max_retries=max(MAX_STALL_RETRIES, drive.current(self).stall_retries),
                     force_tool=_force_tool,
                     preview=_stall_resp_text[:120],
                 )

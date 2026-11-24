@@ -175,6 +175,7 @@ Each phase is its own PR and leaves Diligent unchanged.
 | 1 | `drive.py`, the context variable, config default, the frame field, recording in logs | none: every turn records "diligent" |
 |   | *Phase 1 status (2026-11-23): built on branch `feat/drive-phase1`, not yet merged. The mode suggestion (§4.2 point 3) moves to phase 2 with the rest of the behaviour.* | |
 | 2 | Budget limits, validation caps and stall retries read the level; `completion_strictness` leaves modes, Ionian and Phrygian suggest Persistent | Relaxed and Persistent work when set through config or the frame |
+|   | *Phase 2 status (2026-11-23): built on branch `feat/drive-phase2` (stacked on phase 1). Relaxed keeps the one contract check and only drops the retries; Ambitious has Persistent's limits until phase 5.* | |
 | 3 | Picker in the chat box, default in agent settings, cost wording; bundle rebuild | people can choose |
 | 4 | The check before delivering | Persistent and Ambitious catch gaps |
 | 5 | Initiative, behind its own switch | Ambitious does bounded extra work |

@@ -82,6 +82,8 @@ def test_mode_to_dict_matches_params():
         d = cm.mode_to_dict(mode)
         assert set(d["params"]) == {f.name for f in dataclasses.fields(cm.CognitiveModeParams)}
         assert d["review_lens"] == mode.review_lens
+        assert d["suggested_drive"] == mode.suggested_drive
+        assert "completion_strictness" not in d["params"]   # how far to push is Drive's (drive.py)
 
 
 def test_game_temperatures_follow_the_modes():
