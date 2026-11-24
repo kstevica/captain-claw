@@ -40,14 +40,21 @@ interface FileViewerProps {
 
 export function FileViewer(props: FileViewerProps) {
   const { file, host = '', port = 0, auth = '', urls, onClose } = props
-  // An Excel workbook reads as a table, a tab for each sheet (read-only).
-  if (isSheetFile(file)) {
+  // An Excel workbook reads as a table, a tab for each sheet (read-only). So
+  // does a CSV or TSV, until it is edited: that is done on its text (the
+  // table's Edit, or a file list's own), as before.
+  const delimited = ['.csv', '.tsv'].includes(file.extension.toLowerCase())
+  const canEdit = !props.readOnly
+  const [textFor, setTextFor] = useState<string | null>(null)
+  const asText = (canEdit && !!props.startInEdit) || textFor === file.physical
+  if (isSheetFile(file) || (delimited && !asText)) {
     return (
       <CsvTable key={file.physical} name={file.filename} extension={file.extension} onClose={onClose}
+        onEditText={delimited && canEdit ? () => setTextFor(file.physical) : undefined}
         urls={urls ?? { view: getViewUrl(host, port, file.physical, auth), download: getDownloadUrl(host, port, file.physical, auth) }} />
     )
   }
-  return <TextFileViewer {...props} />
+  return <TextFileViewer {...props} startInEdit={props.startInEdit || textFor === file.physical} />
 }
 
 function TextFileViewer({ file, host = '', port = 0, auth = '', urls, readOnly, onSave, startInEdit, onClose, onPrev, onNext, hasPrev, hasNext }: FileViewerProps) {
