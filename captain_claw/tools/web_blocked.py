@@ -11,19 +11,21 @@ through.
 So the ``browser`` tool and ``web_fetch`` report what blocked them here, per
 session and site:
 
-* one of them blocked → its result says to try the other once;
+* the person's Chrome is connected for agents (``GET /fd/browser-hands/agent
+  /status``) and they haven't pressed Stop → it's used, without asking: the
+  browser tool opens the blocked page there by itself (``browser.py``), and a
+  blocked fetch is told to go there (``go_chrome_note``). "Agents can use this
+  browser" is the person's yes; the agent never says it can't finish while
+  their Chrome is there;
+* otherwise, one of them blocked → its result says to try the other once;
 * both blocked → the result tells the agent to ask the person, with
-  ``ask_user``, whether it may use their Chrome — and the question fits what
-  Flight Deck knows (``GET /fd/browser-hands/agent/status``): their Chrome is
-  connected for agents (ask may I), Captain for Chrome is set up but not open
-  to agents (ask them to turn on "Agents can use this browser"), or it isn't
-  set up at all (recommend installing it, and how). If they stopped this agent
-  in the extension, it doesn't ask.
+  ``ask_user``, and the question fits what Flight Deck knows: Captain for
+  Chrome is set up but not open to agents (ask them to turn on "Agents can use
+  this browser"), or it isn't set up at all (recommend installing it, and
+  how). If they stopped this agent in the extension, it doesn't ask.
 
-Nothing here acts on its own: the agent asks, and only on a yes goes on with
-``browser(target="chrome")``. A shared agent's member turn gets none of this
-(the owner's Chrome is never theirs to ask for), and without Flight Deck
-there's nobody's Chrome to offer.
+A shared agent's member turn gets none of this (the owner's Chrome is never
+theirs), and without Flight Deck there's nobody's Chrome to offer.
 """
 
 from __future__ import annotations
@@ -318,10 +320,37 @@ async def chrome_status() -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-async def note_failure(kwargs: dict[str, Any], url: str, via: str, why: str, *, strong: bool = True) -> str:
+def chrome_usable(status: dict[str, Any] | None) -> bool:
+    """The person's own Chrome is connected for agents and they haven't
+    stopped this one (an older deck says only ``connected``)."""
+    if not status or status.get("stopped"):
+        return False
+    return bool(status.get("person_connected", status.get("connected") and not status.get("own_connected")))
+
+
+def can_lend_chrome(kwargs: dict[str, Any]) -> bool:
+    """Whether this turn may use the owner's Chrome at all: not a member's turn
+    on a shared agent, and there's a Flight Deck to reach it through."""
+    from captain_claw.fd_client import flight_deck_base
+
+    return bool(flight_deck_base()) and not _member_turn(kwargs)
+
+
+def go_chrome_note(site: str, url: str, why: str) -> str:
+    """The page is blocked here and the person's Chrome is connected: go there."""
+    return ("\n\n--- Blocked here: use their Chrome ---\n"
+            f"{site} blocks you here ({why}). The person's own Chrome is connected for agents — go on there now: "
+            f"browser(action=\"navigate\", url=\"{url}\", target=\"chrome\"), then page_text / read_page in that "
+            "tab. Don't ask first, and don't tell them you couldn't get the page while their Chrome is there.")
+
+
+async def note_failure(kwargs: dict[str, Any], url: str, via: str, why: str, *, strong: bool = True,
+                       tried_chrome: bool = False) -> str:
     """Remember that *via* (``"browser"`` / ``"fetch"``) couldn't get *url* —
-    and the note for the agent: try the other way, or (both failed) ask the
-    person for their Chrome. ``""`` when there's nothing to say."""
+    and the note for the agent: go to the person's Chrome when it's connected
+    (unless *tried_chrome*: it just failed there), else try the other way, or
+    (both failed) ask the person for their Chrome. ``""`` when there's nothing
+    to say."""
     site = site_of(url)
     if not site or not why or via not in (BROWSER, FETCH):
         return ""
@@ -336,6 +365,13 @@ async def note_failure(kwargs: dict[str, Any], url: str, via: str, why: str, *, 
     rec["url"] = str(url).strip()
     other = FETCH if via == BROWSER else BROWSER
     seen_other = rec.get(other)
+    blocked = strong or bool(seen_other and seen_other.get("strong"))
+    status: dict[str, Any] | None = None
+    if blocked and not tried_chrome and can_lend_chrome(kwargs):
+        status = await chrome_status()
+        if chrome_usable(status):
+            rec["hinted"] = True
+            return go_chrome_note(site, rec["url"], why)
     if not seen_other:
         if not strong:
             return ""
@@ -355,7 +391,8 @@ async def note_failure(kwargs: dict[str, Any], url: str, via: str, why: str, *, 
                 f"{site} still blocks you ({why}). If you haven't yet, ask the person (ask_user) once whether you "
                 "may use their own Chrome (browser target=\"chrome\"); if they said no, don't ask again — say you "
                 "couldn't get it.")
-    status = await chrome_status()
+    if status is None:
+        status = await chrome_status()
     from captain_claw.fd_client import flight_deck_base
 
     if status is None and not flight_deck_base():
@@ -380,11 +417,8 @@ def ask_chrome_note(site: str, url: str, browser_why: str, fetch_why: str, statu
     if status and status.get("stopped"):
         return head + ("They stopped you using their Chrome in Captain for Chrome, so don't use it or ask: tell "
                        f"them {site} blocks you, and that letting you use their Chrome again would get it.")
-    if status and status.get("person_connected", status.get("connected") and not status.get("own_connected")):
-        return head + (
-            "Their Chrome is connected for agents. Ask first, once:\n"
-            f"ask_user(question=\"{question} May I open it in your Chrome (Captain for Chrome) instead?\", "
-            "confirm=true, help=\"I'll work in a tab of my own there; you can watch and stop me.\")\n" + go + tail)
+    if chrome_usable(status):
+        return go_chrome_note(site, url, browser_why or fetch_why)
     if status and status.get("extension_set_up"):
         return head + (
             "Captain for Chrome is set up in their browser but isn't open to agents right now (Chrome is closed, or "
