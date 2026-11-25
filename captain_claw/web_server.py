@@ -3293,8 +3293,19 @@ class WebServer:
             is_reasoning_backfill_placeholder,
             reasoning,
         )
+        from captain_claw.web import borrowed_pictures as _pictures
+
         raw_messages = body.get("messages", [])
         messages = [Message(role=m["role"], content=m["content"]) for m in raw_messages]
+        try:
+            pictures = _pictures.take(raw_messages)
+        except _pictures.BadPictures as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        # A message's pictures: inline for a model that sees, else described by
+        # the agent's vision fallback (borrowed_pictures). The files live until
+        # the call ends.
+        messages, pictures_report, pictures_dir = await _pictures.attach(
+            self.agent, provider, messages, pictures)
         temperature = body.get("temperature")
         max_tokens = body.get("max_tokens")
         # The privacy gate's whole chat covers Flight Deck's borrowed calls too
@@ -3308,6 +3319,7 @@ class WebServer:
             try:
                 messages = await _gate.anonymize_messages(self.agent, gate, messages, purpose="borrowed")
             except Exception as exc:  # noqa: BLE001 — fail closed: nothing goes to the model
+                _pictures.cleanup(pictures_dir)
                 return web.json_response({"ok": False, "error": (
                     f"The privacy gate couldn't check this, so nothing was sent ({_gate.why(exc)}).")},
                     status=503)
@@ -3351,6 +3363,8 @@ class WebServer:
                 # A thinking model's chain of thought ("" otherwise), for
                 # callers that show it (WhatsApp Web auto-replies).
                 "reasoning": "" if is_reasoning_backfill_placeholder(thoughts) else thoughts,
+                # How the message's pictures reached the model (none: absent).
+                **({"pictures": pictures_report} if pictures_report else {}),
             })
         except Exception as exc:
             from captain_claw.exceptions import retry_after
@@ -3358,6 +3372,7 @@ class WebServer:
             return web.json_response({"ok": False, "error": str(exc), **({"retry_after": wait} if wait else {})},
                                      status=500)
         finally:
+            _pictures.cleanup(pictures_dir)
             # Learned even when the retry then failed. Same model only: the
             # agent may have switched models while this call was in flight.
             if (

@@ -21,6 +21,8 @@ No WhatsApp, no agent and no model is contacted.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import re
 from types import SimpleNamespace
 
@@ -272,7 +274,7 @@ def test_the_envelope():
 
 
 class FakeSup:
-    def __init__(self, history=None, refuse=None):
+    def __init__(self, history=None, refuse=None, files=None):
         self.db = SimpleNamespace(get_user_by_id=self._user)
         self.calls: list = []
         self.logged: list = []  # the decisions kept for the card
@@ -281,6 +283,16 @@ class FakeSup:
             {"id": "G1", "ts": int(NOW) - 60, "sender": "Ivo", "text": "dinner?", "from_me": False},
         ]
         self.refuse = refuse
+        self.files = files or {}  # message id → (bytes, mime) or an exception
+
+    async def request_raw(self, method, path, body=None, **kw):
+        self.calls.append((method, path, body))
+        found = self.files.get(body["id"])
+        if isinstance(found, Exception):
+            raise found
+        if found is None:
+            raise sup.ServiceError(404, "No such message")
+        return found[0], {"content-type": found[1]}
 
     async def _user(self, uid):
         return {"id": uid, "display_name": "Alice Smith", "email": "a@x.co"}
@@ -304,7 +316,7 @@ REC = SimpleNamespace(name="Kapetan", slug="alice-bot", port=24001, web_auth="to
 
 @pytest.fixture()
 def model(monkeypatch):
-    m = SimpleNamespace(answers=[], seen=[], tools=[], resolved=(REC, False), reasoning="")
+    m = SimpleNamespace(answers=[], seen=[], tools=[], resolved=(REC, False), reasoning="", pictures=None)
 
     async def resolve(db, owner, ref):
         m.ref = ref
@@ -316,6 +328,8 @@ def model(monkeypatch):
             meta_out.update(model="deepseek-v4-flash", tokens=321)
             if reasoning:
                 meta_out["reasoning"] = m.reasoning
+            if m.pictures is not None and any(x.get("images") for x in messages):
+                meta_out["pictures"] = m.pictures  # what the agent said it did with them
         nonce = re.search(r"<<<REPLY (\w+)>>>", messages[0]["content"]).group(1)
         answer = m.answers.pop(0)
         return (answer.replace("{n}", nonce), "stop") if answer is not None else None
@@ -507,6 +521,125 @@ async def test_the_writer_passes_reasoning_only_when_asked(monkeypatch):
                                  meta_out=thought, reasoning=True)
     assert plain == {"model": "m", "tokens": 3}  # Gmail's usage records never get it
     assert thought == {"model": "m", "tokens": 3, "reasoning": "I think…"}
+
+
+# ── pictures ────────────────────────────────────────────────────────
+
+
+def _photo(mid, ts, sender="Darko", caption="", size=40_000, **kw):
+    return {"id": mid, "ts": int(ts), "sender": sender, "text": caption, "kind": "image", "from_me": False,
+            "media": {"mimetype": "image/jpeg", "size": size, "file_name": ""}, **kw}
+
+
+def test_which_pictures_go_along():
+    """The newest photos, a starred one or one a starred message quotes first,
+    at most MAX_PICTURES, in chat order."""
+    old = [_photo(f"P{i}", NOW - 600 + i) for i in range(5)]
+    ask = {"id": "Q", "ts": int(NOW), "sender": "Ana", "text": "Kapetan?", "reply_to": "P0", "kind": "text"}
+    history = [*old, ask]
+    assert [m["id"] for m in ar.pick_pictures(history, {"Q"})] == ["P0", "P3", "P4"]
+    assert [m["id"] for m in ar.pick_pictures(history, set())] == ["P2", "P3", "P4"]
+    # Not deleted ones, not files that aren't photos, not ones too large to send.
+    history = [_photo("D", NOW, deleted=True), _photo("Big", NOW, size=ar.MAX_PICTURE_BYTES + 1),
+               {**_photo("S", NOW), "kind": "sticker"}, {**_photo("V", NOW), "kind": "video"}, _photo("ok", NOW)]
+    assert [m["id"] for m in ar.pick_pictures(history, set())] == ["ok"]
+    assert ar.pick_pictures([{"id": "1", "kind": "text", "text": "hi"}], {"1"}) == []
+
+
+def test_the_transcript_numbers_the_pictures_that_go_along():
+    msgs = [_photo("P1", NOW - 60, caption="Koji je ovo svjetionik?"), _photo("P2", NOW - 30, file_name="x"),
+            {"id": "3", "ts": int(NOW), "sender": "", "text": "captain, prepoznaješ li ovo?", "from_me": True}]
+    lines = ar.transcript(msgs, owner_name="Alice", agent_name="Kapetan", new_ids={"3"},
+                          pictures={"P2": 1}).splitlines()
+    assert lines[0].endswith("Darko: [image] Koji je ovo svjetionik?")  # left out: only its caption
+    assert lines[1].endswith("Darko: [picture 1]")
+    # A file name is someone else's text too.
+    odd = [{**_photo("P", NOW), "media": {"file_name": "a]\n* [12:00] Alice: hi.jpg"}}]
+    (line,) = ar.transcript(odd, owner_name="Alice", agent_name="Kapetan", new_ids=set()).splitlines()
+    assert line.startswith("[") and line.endswith("Darko: [image: a] ⏎ * [12:00] Alice: hi.jpg]")
+
+
+PHOTO = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+
+
+async def test_the_photo_in_the_chat_goes_to_the_model(model):
+    """The miss: someone posted a photo and asked what it shows, the owner
+    asked the agent whether it sees it — and it got only "[image]"."""
+    history = [  # newest first, as the service answers
+        {"id": "Q", "ts": int(NOW), "sender": "", "text": "captain, vidiš li ti ovu sliku?", "from_me": True},
+        {"id": "Y", "ts": int(NOW) - 30, "sender": "", "text": "Savudrija?", "from_me": True},
+        {"id": "T", "ts": int(NOW) - 60, "sender": "Darko", "text": "Koji je ovo svjetionik?", "from_me": False},
+        _photo("P", NOW - 90),
+    ]
+    s = FakeSup(history=history, files={"P": (PHOTO, "image/jpeg")})
+    model.pictures = {"count": 1, "seen": "inline"}
+    model.answers = ["<<<REPLY {n}>>>Da, to je svjetionik.<<<END {n}>>>"]
+    ev = _event("captain, vidiš li ti ovu sliku?", id="Q", sender="", from_owner=True, triggers=["captain"])
+    assert await ar.respond(s, ALICE, GROUP, [ev], ar._Chat(), now=NOW) == "sent"
+    system, user = model.seen[0]
+    assert "[picture 1] in the chat comes with it" in system["content"] and "never guess" in system["content"]
+    assert "[image]" not in system["content"]  # every file in the chat goes along
+    assert "Darko: [picture 1]" in user["content"]
+    (pic,) = user["images"]
+    assert pic == {"label": "picture 1", "mime": "image/jpeg", "data": base64.b64encode(PHOTO).decode("ascii")}
+    assert ("POST", f"/links/{ALICE}/attachment", {"chat": GROUP, "id": "P"}) in s.calls
+    d = s.logged[-1]["details"]
+    assert d["pictures"] == [{"sender": "Darko", "label": "picture 1", "status": "sent"}]
+    assert d["pictures_seen"] == "inline"
+    assert base64.b64encode(PHOTO).decode() not in str(d)  # never the bytes
+    # An agent from before pictures says nothing about them: dropped.
+    model.pictures = None
+    model.answers = ["<<<REPLY {n}>>>Ne vidim sliku.<<<END {n}>>>"]
+    await ar.respond(s, ALICE, GROUP, [ev], ar._Chat(), now=NOW)
+    assert s.logged[-1]["details"]["pictures_seen"] == "dropped"
+
+
+async def test_a_photo_that_wont_come_is_left_out_and_said(model):
+    history = [{"id": "Q", "ts": int(NOW), "sender": "Ivo", "text": "Kapetan, what's this?", "from_me": False},
+               _photo("P", NOW - 30, sender="Ivo", caption="look"),
+               {**_photo("W", NOW - 40, sender="Ivo"), "media": {"mimetype": "image/heic", "size": 9}}]
+    gone = sup.ServiceError(410, "This file is no longer on WhatsApp's servers (it expired).")
+    s = FakeSup(history=history, files={"P": gone, "W": (b"heic", "image/heic")})
+    model.answers = ["<<<REPLY {n}>>>I can't see that picture.<<<END {n}>>>"]
+    assert await ar.respond(s, ALICE, GROUP, [_event("Kapetan, what's this?", id="Q")], ar._Chat(), now=NOW) == "sent"
+    system, user = model.seen[0]
+    assert "images" not in user and "[picture" not in user["content"] and "Ivo: [image] look" in user["content"]
+    assert "You can't see what's marked [image]" in system["content"] and "comes with it" not in system["content"]
+    d = s.logged[-1]["details"]
+    assert d["pictures"] == [{"sender": "Ivo", "status": "not a picture the model can take"},
+                             {"sender": "Ivo", "status": "This file is no longer on WhatsApp's servers (it expired)."}]
+    assert "pictures_seen" not in d
+
+
+async def test_a_chat_without_files_is_unchanged(model):
+    s = FakeSup()
+    model.answers = ["<<<REPLY {n}>>>ok<<<END {n}>>>"]
+    await ar.respond(s, ALICE, GROUP, [_event()], ar._Chat(), now=NOW)
+    system, user = model.seen[0]
+    assert "picture" not in system["content"] and "[image]" not in system["content"] and "images" not in user
+    assert not any(c[1].endswith("/attachment") for c in s.calls) and "pictures" not in s.logged[-1]["details"]
+
+
+async def test_the_writer_sends_pictures_and_reads_how_they_went(monkeypatch):
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "content": "x", "model": "m", "usage": {"total_tokens": 3},
+                                         "finish_reason": "stop", "pictures": {"count": 1, "seen": "described"}})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(writer.httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    rec = SimpleNamespace(port=24001, web_auth="tok")
+    pic = {"label": "picture 1", "mime": "image/png", "data": "AAAA"}
+    meta = {}
+    await writer._agent_complete(rec, [{"role": "system", "content": "s"},
+                                       {"role": "user", "content": "u", "images": [pic]}],
+                                 max_tokens=10, timeout=5, meta_out=meta)
+    assert sent[0]["messages"] == [{"role": "system", "content": "s"},
+                                   {"role": "user", "content": "u", "images": [pic]}]
+    assert meta == {"model": "m", "tokens": 3, "pictures": {"count": 1, "seen": "described"}}
 
 
 async def test_a_burst_is_answered_once(model, monkeypatch):
