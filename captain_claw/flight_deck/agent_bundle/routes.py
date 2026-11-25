@@ -22,7 +22,14 @@
     PUT    /fd/agent-bundle/signing                 (admin) the trusted fingerprints, and "only trusted"
 
 An admin acting for a user (``X-FD-Act-As``) works on that user's agents, as
-on the other agent routes. Made bundles and uploads are swept after a day.
+on the other agent routes, with one limit: nothing of the person's own leaves
+through these routes. Act-as is not a login-as (see ``auth.act_as_target``),
+and the deck keeps people's conversations and scheduled tasks from admins
+everywhere else. So while acting, an export holds only who the agent is and its
+onboarding (a Template), the review of what it learned isn't shown, the full
+backups (scheduled ones and the one taken before an import) can be made,
+restored and deleted but not downloaded, and the backups' copy folder can't be
+moved. Made bundles and uploads are swept after a day.
 """
 
 from __future__ import annotations
@@ -63,6 +70,20 @@ _KEEP_SAFETY_S = 7 * 24 * 3600      # the backup taken before an import into an 
 def _owner(user: dict) -> str:
     from captain_claw.flight_deck.auth import _fd_auth_enabled
     return str(user.get("id") or "") if _fd_auth_enabled() else ""
+
+
+# What an admin acting for someone may take out of that person's agent.
+ACTING_CATEGORIES = frozenset({"identity", "onboarding"})
+ACTING_REFUSED = ("You're acting for someone, so a bundle of their agent holds only who it is and its "
+                  "onboarding (a Template). Their conversations, what it learned, their files, data and "
+                  "scheduled tasks stay theirs.")
+ACTING_NO_DOWNLOAD = ("You're acting for someone: their full backups hold their conversations, memory and "
+                      "files, so they can be restored here but only they can download one.")
+
+
+def _acting(request: Request) -> bool:
+    """Whether an admin is making this request for someone else (``X-FD-Act-As``)."""
+    return bool(getattr(request.state, "acting_admin_id", ""))
 
 
 def _sweep() -> None:
@@ -110,12 +131,14 @@ async def agent_packages(slug: str, user: dict = Depends(get_managed_user)) -> d
 
 
 @router.get("/review/{slug}")
-async def review_agent(slug: str, user: dict = Depends(get_managed_user)) -> dict:
+async def review_agent(slug: str, request: Request, user: dict = Depends(get_managed_user)) -> dict:
     """What the agent learned, per insight category, and its contacts — for the
     person exporting it to decide what goes."""
     from captain_claw.flight_deck import server as srv
 
     srv._verify_process_owner(slug, _owner(user))
+    if _acting(request):
+        raise HTTPException(403, ACTING_REFUSED)
     return await asyncio.to_thread(review.review, srv.DATA_DIR / slug)
 
 
@@ -129,10 +152,13 @@ async def export_agent(slug: str, body: ExportBody, request: Request,
     entry = srv._verify_process_owner(slug, owner_id)
     preset = body.preset if body.preset in export.PRESETS else "full"
     categories = set(body.categories) if body.categories else set(export.PRESETS[preset])
+    if _acting(request) and (catalog.normalize_categories(categories) - ACTING_CATEGORIES
+                             or body.contacts or body.passphrase):
+        raise HTTPException(403, ACTING_REFUSED)
     options = export.Options(
         insight_categories=set(body.insight_categories) if body.insight_categories is not None else None,
         exclude_insights=set(body.exclude_insights),
-        contacts=(preset == "full") if body.contacts is None else body.contacts,
+        contacts=(preset == "full" and not _acting(request)) if body.contacts is None else body.contacts,
         passphrase=body.passphrase, package=body.package)
     _sweep()
     try:
@@ -145,8 +171,11 @@ async def export_agent(slug: str, body: ExportBody, request: Request,
 
 
 @router.get("/exports/{bundle_id}/download")
-async def download_export(bundle_id: str, user: dict = Depends(get_managed_user)) -> FileResponse:
+async def download_export(bundle_id: str, request: Request, user: dict = Depends(get_managed_user)) -> FileResponse:
     path, record = _record("exports", bundle_id, _owner(user))
+    # One the person made themselves may hold more (an older record says nothing: refused too).
+    if _acting(request) and (set(record.get("categories") or ["?"]) - ACTING_CATEGORIES):
+        raise HTTPException(403, ACTING_REFUSED)
     return FileResponse(path, media_type="application/zip",
                         filename=str(record.get("file_name") or f"agent{archive.EXTENSION}"))
 
@@ -362,7 +391,9 @@ async def _into_existing(path: Path, agent: dict[str, Any], slug: str, mode: str
 
 
 @router.get("/safety/{bundle_id}/download")
-async def download_safety(bundle_id: str, user: dict = Depends(get_managed_user)) -> FileResponse:
+async def download_safety(bundle_id: str, request: Request, user: dict = Depends(get_managed_user)) -> FileResponse:
+    if _acting(request):
+        raise HTTPException(403, ACTING_NO_DOWNLOAD)
     path, record = _record("safety", bundle_id, _owner(user))
     return FileResponse(path, media_type="application/zip",
                         filename=str(record.get("file_name") or f"agent{archive.EXTENSION}"))
@@ -405,10 +436,19 @@ async def list_backups(user: dict = Depends(get_managed_user)) -> dict:
 
 
 @router.put("/backups/settings")
-async def save_backup_settings(body: BackupSettings, user: dict = Depends(get_managed_user)) -> dict:
+async def save_backup_settings(body: BackupSettings, request: Request,
+                               user: dict = Depends(get_managed_user)) -> dict:
     owner_id = _owner(user)
     kept = await backups.load(owner_id)
-    return {"settings": await backups.save(owner_id, {**kept, **body.model_dump()})}
+    new = body.model_dump()
+    # A copy of every backup goes to that folder: while acting it stays where the person put it.
+    if _acting(request):
+        folder = str(kept.get("folder") or "")
+        if "folder" in body.model_fields_set and backups.clean({"folder": body.folder})["folder"] != folder:
+            raise HTTPException(403, "You're acting for someone: only they choose the folder their backups "
+                                     "are copied to.")
+        new["folder"] = folder
+    return {"settings": await backups.save(owner_id, {**kept, **new})}
 
 
 class RunBody(BaseModel):
@@ -434,7 +474,9 @@ def _backup(owner_id: str, bundle_id: str) -> tuple[Path, dict[str, Any]]:
 
 
 @router.get("/backups/{bundle_id}/download")
-async def download_backup(bundle_id: str, user: dict = Depends(get_managed_user)) -> FileResponse:
+async def download_backup(bundle_id: str, request: Request, user: dict = Depends(get_managed_user)) -> FileResponse:
+    if _acting(request):
+        raise HTTPException(403, ACTING_NO_DOWNLOAD)
     path, record = _backup(_owner(user), bundle_id)
     return FileResponse(path, media_type="application/zip",
                         filename=str(record.get("file_name") or f"agent{archive.EXTENSION}"))

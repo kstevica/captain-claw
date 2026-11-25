@@ -519,9 +519,11 @@ export function AgentImportDialog({ asUser, ownerLabel, agents = [], into, onClo
             {!undone && done.safety_backup && (
               <div className="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 p-3 text-xs text-zinc-400">
                 <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-500" />
-                <span className="min-w-0 flex-1">A backup of it was taken first (kept a week).</span>
-                <button onClick={() => void downloadSafety(done.safety_backup!, asUser).catch((e) => setErr(String(e)))}
-                  className="font-medium text-violet-700 hover:underline dark:text-violet-300">Download</button>
+                <span className="min-w-0 flex-1">A backup of it was taken first (kept a week{asUser ? '; only its owner can download it' : ''}).</span>
+                {!asUser && (
+                  <button onClick={() => void downloadSafety(done.safety_backup!, asUser).catch((e) => setErr(String(e)))}
+                    className="font-medium text-violet-700 hover:underline dark:text-violet-300">Download</button>
+                )}
                 <button onClick={undo} disabled={!!busy}
                   className="inline-flex items-center gap-1 font-medium text-red-700 hover:underline disabled:opacity-50 dark:text-red-300">
                   {busy === 'making' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}Undo
