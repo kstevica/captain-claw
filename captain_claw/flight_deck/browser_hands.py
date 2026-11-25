@@ -227,6 +227,7 @@ _ACT_WORDS: dict[str, tuple[str, str]] = {
     "zoom": ("Looking closer", "Looked closer"),
     "read_page": ("Reading the page", "Read the page"),
     "page_text": ("Reading the page", "Read the page"),
+    "read": ("Reading pages", "Read pages"),
     "find": ("Looking for something on the page", "Looked for something on the page"),
     "page_files": ("Listing the page's files", "Listed the page's files"),
     "download": ("Downloading files", "Downloaded files"),

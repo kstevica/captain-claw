@@ -47,6 +47,10 @@ const ZOOM_W = 1200
 const FILE_MAX = 25 * 1024 * 1024
 const FILES_MAX = 20
 const TEXT_DEFAULT = 30000
+const READ_MAX = 6              // pages one read takes
+const READ_TOTAL = 60000        // characters a read of several pages gives, shared between them
+const READ_PER_MIN = 8000
+const READ_PAGE_MS = 48000      // one page of a read, all in (Flight Deck waits 55 s for the act)
 const GROUP_COLORS = ['blue', 'purple', 'cyan', 'green', 'orange', 'pink', 'yellow', 'red', 'grey']
 const IS_MAC = /mac/i.test(navigator.userAgentData?.platform || navigator.userAgent || '')
 
@@ -325,6 +329,10 @@ function describeAct(action, a) {
     case 'read_page': return 'Read the page'
     case 'find': return `Looked for “${clip(a.query || a.text || '', 40)}”`
     case 'page_text': return 'Read the text'
+    case 'read': {
+      const n = Array.isArray(a.urls) ? a.urls.length : a.url ? 1 : 0
+      return n === 1 ? `Read ${hostOf(a.urls?.[0] || a.url) || 'a page'}` : `Read ${n} pages`
+    }
     case 'page_files': return 'Listed the files'
     case 'download': return 'Downloaded files'
     case 'save_page': return 'Saved the page'
@@ -1011,6 +1019,38 @@ function fieldSays(info) {
   return `${info.what} now reads ${JSON.stringify(info.value ?? '')}.`
 }
 
+// page_text's head (title, address, what the page has) and its body.
+function textParts(cap, tab) {
+  const facts = [cap.tables?.length ? `${cap.tables.length} tables` : '', cap.files?.length ? `${cap.files.length} files (page_files lists them)` : '',
+    cap.selection ? 'a selection' : ''].filter(Boolean)
+  const head = `# ${cap.meta?.title || tab.title || ''}\n${cap.meta?.url || tab.url}${facts.length ? `\nThe page has ${facts.join(', ')}.` : ''}\n\n`
+  const body = (cap.selection ? `Selected on the page:\n> ${cap.selection.replace(/\n/g, '\n> ')}\n\n` : '') + (cap.markdown || '(no text found)')
+  return { head, body }
+}
+
+// One page of a read, in its own background tab: there, drawn, read.
+async function readInTab(tabId, url, per, ctx) {
+  let plain = false
+  try {
+    await attach(tabId)
+  } catch (e) {
+    if (!OTHER_EXTENSION.test(String(e?.message || e))) throw e
+    const page = await goPlain(tabId)
+    if (!page.scriptable) throw new Refusal(noScripting(page))
+    plain = true
+  }
+  const done = plain ? await plainNavigate(tabId, url) : await navigateTab(tabId, url)
+  guardTab(await chrome.tabs.get(tabId), ctx.conn)   // where it landed, after redirects
+  await waitDrawn(tabId, { maxMs: 8000, quietMs: 700, minMs: 1000 })
+  const went = await scrollToLoad(tabId, { steps: 6, quietMs: 500, stepMaxMs: 2000, totalMs: 8000 })
+  if (went?.steps) await waitDrawn(tabId, { maxMs: 2500, quietMs: 500 })
+  const { head, body } = textParts(await capturePage(tabId), await chrome.tabs.get(tabId))
+  const part = body.slice(0, per)
+  const rest = body.length - part.length
+  return head + part + (rest > 0 ? `\n\n… (${rest.toLocaleString()} more characters — navigate there and page_text with offset=${part.length})` : '')
+    + (done ? '' : '\n(It was still loading after 30 s.)')
+}
+
 async function capturePage(tabId) {
   let v
   if (plainTabs.has(tabId)) {
@@ -1636,15 +1676,58 @@ const ACTIONS = {
       const went = await scrollToLoad(tab.id, { steps: 10, quietMs: 600, stepMaxMs: 2500, totalMs: 12000 })
       if (went?.steps) await waitDrawn(tab.id, { maxMs: 3000, quietMs: 500 })
     }
-    const cap = await capturePage(tab.id)
-    const facts = [cap.tables?.length ? `${cap.tables.length} tables` : '', cap.files?.length ? `${cap.files.length} files (page_files lists them)` : '',
-      cap.selection ? 'a selection' : ''].filter(Boolean)
-    const head = `# ${cap.meta?.title || tab.title || ''}\n${cap.meta?.url || tab.url}${facts.length ? `\nThe page has ${facts.join(', ')}.` : ''}\n\n`
-    const body = (cap.selection ? `Selected on the page:\n> ${cap.selection.replace(/\n/g, '\n> ')}\n\n` : '') + (cap.markdown || '(no text found)')
+    const { head, body } = textParts(await capturePage(tab.id), tab)
     const max = Math.min(Math.max(Number(args.max_chars) || TEXT_DEFAULT, 1000), 200000)
     const part = body.slice(offset, offset + max)
     const rest = body.length - offset - part.length
     return { content: head + part + (rest > 0 ? `\n\n… (${rest.toLocaleString()} more characters — page_text with offset=${offset + part.length})` : '') }
+  },
+
+  // Several pages at once: each in a background tab of the agent's own group
+  // — opened, waited for, scrolled through, read as Markdown — then closed.
+  // The agent's current tab stays its current tab; nothing comes to the front.
+  async read(ctx, args = ctx.args) {
+    const raw = Array.isArray(args.urls) ? args.urls : args.url ? [args.url] : []
+    const urls = [...new Set(raw.map((u) => String(u || '').trim()).filter(Boolean))].slice(0, READ_MAX)
+    if (!urls.length) throw new Refusal('Say which pages: urls=[…] (up to 6), or url.')
+    const n = urls.length
+    const asked = Number(args.max_chars) || 0
+    const per = asked ? Math.min(Math.max(asked, 1000), 200000) : n === 1 ? TEXT_DEFAULT : Math.max(READ_PER_MIN, Math.floor(READ_TOTAL / n))
+    const was = (await agentGroup(ctx.agent))?.current ?? null
+    // The tabs one after another (the first may make the agent's group), then the pages all at once.
+    const jobs = []
+    for (const one of urls) {
+      try {
+        const url = checkUrl(one, ctx.conn)
+        jobs.push({ url, tab: await newTab(ctx.agent, { front: false }) })
+      } catch (e) {
+        jobs.push({ url: one, error: cleanError(e) })
+      }
+    }
+    const keep = async () => {
+      const g = await agentGroup(ctx.agent)
+      if (g && g.current !== was) { g.current = was; saveGroups() }
+    }
+    await keep()
+    const got = await Promise.all(jobs.map((j) => {
+      if (j.error) return j
+      const reading = readInTab(j.tab.id, j.url, per, ctx)
+      reading.catch(() => {})   // given up on below: its tab closes under it
+      return withTimeout(reading, READ_PAGE_MS, 'It took too long to load and read.')
+        .then((text) => ({ url: j.url, text }), (e) => ({ url: j.url, error: cleanError(e) }))
+    }))
+    for (const j of jobs) {
+      if (!j.tab) continue
+      await detach(j.tab.id)
+      plainTabs.delete(j.tab.id)
+      await chrome.tabs.remove(j.tab.id).catch(() => {})
+    }
+    await keep()
+    const ok = got.filter((g) => g.text)
+    if (!ok.length) throw new Refusal(`Couldn't read ${n === 1 ? 'it' : 'any of them'}:\n${got.map((g) => `- ${g.url}: ${g.error || 'nothing came back'}`).join('\n')}`)
+    const parts = got.map((g, i) => (n > 1 ? `━━ ${i + 1}/${n} ━━\n` : '') + (g.text || `Couldn't read ${g.url}: ${g.error}`))
+    const said = ok.length < n ? `Read ${ok.length} of ${n} pages` : `Read ${n} page${n === 1 ? '' : 's'}`
+    return { content: `${said}, each in a tab of its own (closed again — your current tab is where it was).\n\n${parts.join('\n\n')}` }
   },
 
   async page_files(ctx, args = ctx.args) {

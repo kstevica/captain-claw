@@ -162,6 +162,19 @@ async def test_live_an_agent_pairs_and_uses_its_own_chrome(tmp_path, monkeypatch
             await chrome("click", ref=_ref(tree, "Press me"))
             text = (await chrome("page_text")).content
             assert "Hello from the portal" in text and "Clicked it" in text
+
+            # Several pages at once: each in a background tab of its own group, waited for (one draws
+            # itself after loading), read, closed — the agent's own tab stays its current tab.
+            (site / "late.html").write_text(
+                "<!doctype html><title>Late One</title><div id=app>Loading…</div><script>addEventListener('load', "
+                "() => setTimeout(() => { app.textContent = 'Drawn after the load' }, 1200))</script>")
+            before = (await chrome("tabs")).content
+            got = (await chrome("read", urls=[f"http://127.0.0.1:{site_port}/late.html",
+                                              f"http://127.0.0.1:{site_port}/index.html", "ftp://files.example"])).content
+            assert "Read 2 of 3 pages" in got and "Drawn after the load" in got and "Hello from the portal" in got
+            assert "Couldn't read ftp://files.example" in got and "━━ 3/3 ━━" in got
+            assert (await chrome("tabs")).content == before, "its tabs are as they were, the same one current"
+
             shot = await chrome("screenshot")
             assert "Path:" in shot.content
 

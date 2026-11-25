@@ -193,3 +193,33 @@ async def test_the_end_of_a_run_that_used_chrome_tells_flight_deck_once(deck, tm
     Agent._turn_over_browser(agent)
     await asyncio.sleep(0)
     assert told == [True]
+
+
+async def test_read_goes_to_the_deck_as_one_act(deck, tmp_path):
+    deck["answers"]["read"] = {"ok": True, "content": "Read 2 pages, each in a tab of its own …"}
+    r = await BrowserTool().execute("read", target="chrome", url="https://a.com", urls=["b.com", "https://a.com"],
+                                    max_chars=5000, **_kw(tmp_path))
+    assert r.success and r.content.startswith(bc.WEB_CONTENT_NOTE)
+    assert deck["calls"][-1] == ("read", {"urls": ["https://a.com", "b.com"], "max_chars": 5000}, 55.0)
+    nothing = await BrowserTool().execute("read", target="chrome", **_kw(tmp_path))
+    assert not nothing.success and "urls" in nothing.error
+
+
+async def test_an_older_extension_reads_them_one_by_one(deck, tmp_path):
+    deck["answers"].update({
+        "read": {"ok": False, "error": "“read” isn't something this browser does (Captain for Chrome 0.10.0)."},
+        "tabs": {"ok": True, "content": "Your tabs:\n- tab 7: Mail — https://mail.x\n- tab 9 (current): Docs — https://docs.x"},
+        "tab_new": {"ok": True, "content": "Opened tab 41 (now current): A — https://a.com"},
+        "page_text": {"ok": True, "content": "# A\nhttps://a.com\n\nHello"},
+    })
+    r = await BrowserTool().execute("read", target="chrome", urls=["https://a.com", "https://b.com"], **_kw(tmp_path))
+    assert r.success, r.error
+    sent = [(a, args) for a, args, _ in deck["calls"]]
+    assert sent == [
+        ("read", {"urls": ["https://a.com", "https://b.com"]}),
+        ("tabs", {}),
+        ("tab_new", {"url": "https://a.com"}), ("page_text", {"max_chars": 30000, "tab_id": 41}), ("tab_close", {"tab_id": 41}),
+        ("tab_new", {"url": "https://b.com"}), ("page_text", {"max_chars": 30000, "tab_id": 41}), ("tab_close", {"tab_id": 41}),
+        ("tab_select", {"tab_id": 9}),
+    ], "each page in a tab of its own, closed, and back to the tab that was current"
+    assert r.content.startswith(bc.WEB_CONTENT_NOTE) and "━━ 2/2 ━━" in r.content and "one after another" in r.content

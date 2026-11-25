@@ -573,6 +573,13 @@ class BrowserSession:
 
     # -- page management ------------------------------------------------------
 
+    async def new_page(self) -> Any:
+        """A page of its own in this browser, beside the current one (which
+        stays the current one) — for reading pages at once (browser ``read``)."""
+        if self._context is None:
+            await self.start()
+        return await self._context.new_page()
+
     async def ensure_page(self) -> Any:
         """Return the active page, starting the browser if needed."""
         if not self.is_alive:
@@ -595,8 +602,15 @@ class BrowserSession:
         status = response.status if response else 0
         ok = response.ok if response else False
 
-        # Wait a bit for dynamic content
-        await asyncio.sleep(self._config.default_wait_seconds)
+        # Wait for the page to be drawn — no change to its DOM and no data
+        # arriving for a moment (Captain for Chrome's wait after a navigation,
+        # lib/settle.js) — rather than a fixed pause: a plain page goes on in
+        # about a second, one that draws itself after loading gets the time it
+        # needs. A fixed pause only when the page can't be looked at.
+        from captain_claw.tools.browser_page import settle
+
+        if await settle(self, page, max_ms=8000, quiet_ms=800, min_ms=1000) is None:
+            await asyncio.sleep(self._config.default_wait_seconds)
 
         title = await page.title()
 
