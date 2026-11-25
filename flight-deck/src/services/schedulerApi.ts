@@ -100,8 +100,11 @@ export interface AgentCronJob {
   agent_state: 'on' | 'asleep' | 'off'
   kind: string
   task: string
-  /** "agent" when the agent wrote it; "" for one a person set up (/cron, the agent panel). */
+  /** "agent" when the agent wrote it; "plan_limit" for a carry-on after the plan's usage
+   *  limit; "" for one a person set up (/cron, the agent panel). */
   author: string
+  /** A carry-on's plan: "ChatGPT", "Claude", or "" (unknown, or not a carry-on). */
+  limit_plan?: string
   /** The agent's own text: "daily 10:00", "every 3h", "weekly fri 17:00", "in 2 hours", "once at …". */
   schedule: string
   schedule_type: string

@@ -12,6 +12,7 @@ import {
   CircleSlash,
   Copy,
   History,
+  Hourglass,
   Inbox,
   ListChecks,
   Loader2,
@@ -856,6 +857,21 @@ function agentJobTitle(task: string): string {
   return line.length > 120 ? `${line.slice(0, 117)}…` : line || 'Scheduled job'
 }
 
+/** A job the agent set itself when the plan's usage limit stopped it, to
+ *  carry on in that chat after the reset (limit_carry_on). */
+function isLimitCarryOn(job: AgentCronJob): boolean {
+  return job.author === 'plan_limit'
+}
+
+/** "the ChatGPT plan's usage limit", or "the plan's usage limit" when it didn't say whose. */
+function limitName(job: AgentCronJob): string {
+  return job.limit_plan ? `the ${job.limit_plan} plan's usage limit` : "the plan's usage limit"
+}
+
+function agentJobName(job: AgentCronJob): string {
+  return isLimitCarryOn(job) ? 'Carry on after the usage limit' : agentJobTitle(job.task)
+}
+
 function AgentJobRow({ job, agentName, active, onClick }: {
   job: AgentCronJob; agentName: string; active: boolean; onClick: () => void
 }) {
@@ -870,7 +886,7 @@ function AgentJobRow({ job, agentName, active, onClick }: {
       <AgentJobIcon job={job} />
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
-          <span className="truncate text-sm font-medium text-zinc-100">{agentJobTitle(job.task)}</span>
+          <span className="truncate text-sm font-medium text-zinc-100">{agentJobName(job)}</span>
           {(paused || done) && (
             <span className="shrink-0 rounded bg-zinc-800 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-zinc-400">{done ? 'Done' : 'Paused'}</span>
           )}
@@ -899,7 +915,8 @@ function AgentJobIcon({ job }: { job: AgentCronJob }) {
   }
   if (!job.enabled) return <span className={`${base} bg-zinc-800 text-zinc-500`}><Pause className="h-4 w-4" /></span>
   if (job.last_status === 'failed') return <span className={`${base} bg-red-500/10 text-red-600 dark:text-red-400`}><AlertTriangle className="h-4 w-4" /></span>
-  return <span className={`${base} bg-sky-500/10 text-sky-600 dark:text-sky-400`}><Bot className="h-4 w-4" /></span>
+  const Icon = isLimitCarryOn(job) ? Hourglass : Bot
+  return <span className={`${base} bg-sky-500/10 text-sky-600 dark:text-sky-400`}><Icon className="h-4 w-4" /></span>
 }
 
 /** An agent job's run in the shape the run cards take. Its result went to
@@ -965,7 +982,8 @@ function AgentJobDetail({ job, agentName, query, onDeleted, onChanged, onOpenCha
   const { runs, loading, reload } = useAgentRuns(job)
   const done = isFinishedAgentOneShot(job)
   const paused = !job.enabled && !done
-  const title = agentJobTitle(job.task)
+  const title = agentJobName(job)
+  const carryOn = isLimitCarryOn(job)
 
   const shown = useMemo(() => {
     const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
@@ -996,7 +1014,9 @@ function AgentJobDetail({ job, agentName, query, onDeleted, onChanged, onOpenCha
           <h3 className="line-clamp-2 text-lg font-semibold leading-tight text-zinc-100">{title}</h3>
           <p className="mt-0.5 text-xs text-zinc-500">{describeAgentSchedule(job)} · {agentName}</p>
           <span className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-sky-500/10 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-300">
-            <Bot className="h-3 w-3" />{job.author === 'agent' ? `${agentName} set this up in chat` : `In ${agentName}'s own schedule`}
+            {carryOn
+              ? <><Hourglass className="h-3 w-3" />Carries on when {limitName(job)} resets</>
+              : <><Bot className="h-3 w-3" />{job.author === 'agent' ? `${agentName} set this up in chat` : `In ${agentName}'s own schedule`}</>}
           </span>
         </div>
         <div className="flex items-center gap-1">
@@ -1064,7 +1084,9 @@ function AgentJobDetail({ job, agentName, query, onDeleted, onChanged, onOpenCha
         <span className={`mt-1 block whitespace-pre-wrap text-sm text-zinc-300 ${taskOpen ? '' : 'line-clamp-2'}`}>{job.task}</span>
       </button>
       <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
-        {agentName} runs this itself, in the chat it was set up in. To change what it does or when, ask {agentName} there.
+        {carryOn
+          ? <>{agentName} set this up itself when {limitName(job)} stopped it, to carry on in that chat once the limit resets. Delete it if you don't want it to.</>
+          : <>{agentName} runs this itself, in the chat it was set up in. To change what it does or when, ask {agentName} there.</>}
       </p>
 
       <div className="mb-3 mt-6 flex flex-wrap items-center gap-2">

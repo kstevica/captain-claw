@@ -424,6 +424,8 @@ def test_carry_on_is_listed_in_flight_deck_and_can_be_removed(tmp_path, monkeypa
         assert len(shown) == 1 and shown[0]["id"] == got.job_id
         assert shown[0]["task"] == lc.CARRY_ON_TEXT and shown[0]["schedule_type"] == "once"
         assert shown[0]["enabled"] is True and shown[0]["next_run_at"] == NOW + 3600 + 90
+        # Its label in Scheduled tasks says it's a carry-on, and whose limit.
+        assert shown[0]["author"] == "plan_limit" and shown[0]["limit_plan"] == "ChatGPT"
 
         assert await sm.delete_cron_job(got.job_id)
         assert await carry_ons(sm) == []
