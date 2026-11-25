@@ -13,7 +13,17 @@ set):
   chat, a WhatsApp number, a Telegram chat or the automation that sent it;
 * a **close** record when it ends: how (``ok``, ``error``, ``blocked`` by a
   guard, ``cancelled``), the start of the reply, the files saved during the
-  turn and how many tool calls it made and how many of those failed.
+  turn, how many tool calls it made and how many of those failed, and what
+  the agent's own checks said about it (:func:`note_check`).
+
+**Checks.** The guards that judge a turn — a reply claiming what no tool did
+(``fabrication_guard``), a claimed delegation or web search, an announced step
+never taken, a completion gate, the write-loop STOP, the duplicate-call guard,
+a call a guard refused — note here what they found and what came of it, while
+the turn runs. The close carries one entry per check and kind: how often it
+fired and how it ended (:data:`CHECK_OUTCOMES`). Only the check's name and
+kind travel, never the text it judged. What a person reviews of the turn
+starts from this (docs/review-ramp-plan.md).
 
 What an automation runs for comes from where it starts the turn: Flight
 Deck's chat frame names an Autonomous Work action or a connected system's
@@ -62,6 +72,21 @@ INGEST_PATH = "/fd/taskboard/agent/turns"
 
 OUTCOMES = ("ok", "error", "blocked", "cancelled")
 
+# What came of a check that fired:
+# * sent_back — the agent was told to fix it and carried on;
+# * fixed     — sent back, and the reply that ended the turn passed that check
+#               (only for the checks that judge every reply: REPLY_CHECKS);
+# * flagged   — it went out anyway: retries ran out, or a note was added to it;
+# * blocked   — the check stopped it (a tool call refused, a claim never shown).
+CHECK_OUTCOMES = ("sent_back", "fixed", "flagged", "blocked")
+_CHECK_RANK = {"sent_back": 0, "fixed": 0, "blocked": 1, "flagged": 2}
+# Checks run on every reply that could end the turn: one sent back that never
+# went out flagged was fixed by the time the turn ended.
+REPLY_CHECKS = frozenset({"fabrication", "false_claim", "stall"})
+_CHECK_NOTES_MAX = 200     # noted in one turn (a runaway loop stays bounded)
+_CHECKS_MAX = 20           # entries on a close
+_CHECK_NAME_RE = re.compile(r"^[a-z0-9_]{1,40}$")
+
 _HEAD_MAX = 1000          # text_head / reply_head, after masking
 _BATCH = 200
 _SPOOL_CAP = 20_000
@@ -99,6 +124,7 @@ class Turn:
     started_at: float
     tool_calls: int = 0         # counted by tool_audit as the turn's calls start
     failed_tool_calls: int = 0  # … and end in an error, a timeout or an abort
+    checks: list[tuple[str, str, str]] = field(default_factory=list)   # (check, kind, outcome), as noted
     closed: bool = False
     _tokens: tuple[contextvars.Token, contextvars.Token] | None = field(default=None, repr=False)
 
@@ -177,6 +203,42 @@ def current() -> Turn | None:
     """The turn running in this context (None outside one, or once it closed)."""
     turn = _CURRENT.get()
     return turn if turn is not None and not turn.closed else None
+
+
+def note_check(check: str, outcome: str, kind: str = "") -> None:
+    """A check on the running turn fired: *check* (``fabrication``,
+    ``false_claim``, ``stall``, ``completion_gate``, ``write_loop``,
+    ``duplicate_call``, ``refused_call``), what it found (*kind*, e.g.
+    ``false_mail_send``) and what came of it (:data:`CHECK_OUTCOMES`).
+    Nothing outside a turn; never raises."""
+    try:
+        turn = current()
+        if turn is None or len(turn.checks) >= _CHECK_NOTES_MAX:
+            return
+        check = str(check or "").strip().lower()
+        kind = re.sub(r"[^a-z0-9_]+", "_", str(kind or "").strip().lower())[:40].strip("_")
+        if _CHECK_NAME_RE.match(check) and outcome in CHECK_OUTCOMES:
+            turn.checks.append((check, kind, outcome))
+    except Exception:
+        pass
+
+
+def settle_checks(noted: list[tuple[str, str, str]], outcome: str) -> list[dict[str, Any]]:
+    """A turn's checks as its close carries them: one entry per check and
+    kind, in the order they first fired, with how often (``count``) and how
+    it ended — the worst of what came of it; a reply check that was only ever
+    sent back in a turn that ended ``ok`` was ``fixed``."""
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for check, kind, result in noted:
+        entry = merged.setdefault((check, kind), {"check": check, "kind": kind, "outcome": result, "count": 0})
+        entry["count"] += 1
+        if _CHECK_RANK.get(result, 0) > _CHECK_RANK.get(entry["outcome"], 0):
+            entry["outcome"] = result
+    out = list(merged.values())[:_CHECKS_MAX]
+    for entry in out:
+        if entry["outcome"] == "sent_back" and entry["check"] in REPLY_CHECKS and outcome == "ok":
+            entry["outcome"] = "fixed"
+    return out
 
 
 def enabled() -> bool:
@@ -558,6 +620,7 @@ def close_turn(turn: Turn | None, outcome: str, reply: Any = "", *, agent: Any =
             "outcome": outcome if outcome in OUTCOMES else "error",
             "reply_head": _head(reply),
             "tool_calls": int(turn.tool_calls), "failed_tool_calls": int(turn.failed_tool_calls),
+            "checks": settle_checks(turn.checks, outcome),
         }
         base, slug = _saved_folder(agent) if agent is not None else (None, "")
         pending = None

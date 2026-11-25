@@ -13,7 +13,7 @@ import os
 import re
 from typing import Any
 
-from captain_claw import exam_turn, jev_block_review, loop_guards, mail_authority
+from captain_claw import exam_turn, jev_block_review, loop_guards, mail_authority, turn_register
 from captain_claw.config import get_config
 from captain_claw.context_spill import SPILL_TOOLS as _SPILL_TOOLS
 from captain_claw.context_spill import governor_enabled as _governor_enabled
@@ -1513,6 +1513,7 @@ class AgentToolLoopMixin:
                     dup_msg = _review.message
             if _dup_count >= _dup_max and not (_review is not None and _review.release):
                 log.info("Blocking duplicate tool call", tool=tc.name, call_id=tc.id, count=_dup_count)
+                turn_register.note_check("duplicate_call", "blocked", _tool_lower)
                 self._add_session_message(
                     role="tool",
                     content=dup_msg,

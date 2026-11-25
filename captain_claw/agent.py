@@ -460,6 +460,11 @@ class Agent(
 
     def _emit_tool_output(self, tool_name: str, arguments: dict[str, Any], output: str) -> None:
         """Forward raw tool output to UI callback when configured."""
+        if tool_name == "completion_gate" and isinstance(arguments, dict) and arguments.get("passed") is False:
+            # A gate that kept the turn from finishing (a file not written, a
+            # script never run…): the turn register keeps which one.
+            from captain_claw import turn_register
+            turn_register.note_check("completion_gate", "sent_back", str(arguments.get("step") or ""))
         if self.session and tool_name in _TRACED_TOOL_OUTPUTS:
             # Only rows something reads back are persisted: the rephrase
             # (shown on transcript replay) and the scale loop's progress

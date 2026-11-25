@@ -778,8 +778,13 @@ class AgentGuardMixin:
                             session_id_override: str | None) -> None:
         """A guard refused the call before the registry saw it: still record
         it in Flight Deck's tool-call register (tool_audit.py)."""
-        from captain_claw import tool_audit
+        from captain_claw import tool_audit, turn_register
 
+        # Which guard: "Extra work: …", "Guard: …", "Blast radius: …"; else the approval's own note.
+        head = str(reason or "").split(":", 1)[0].strip().lower()
+        turn_register.note_check("refused_call", "blocked",
+                                 {"extra work": "extra_work", "guard": "guard",
+                                  "blast radius": "blast_radius"}.get(head, "approval"))
         tool_audit.refused(
             name, {**(arguments or {}), "_agent": self}, reason,
             session_id=str(session_id_override or "").strip() or self._current_session_slug(),
