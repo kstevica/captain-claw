@@ -45,6 +45,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from captain_claw.flight_deck import side_call_health
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.file_library import (
     ScanJob,
@@ -567,7 +568,8 @@ async def summarize_table(t: dict, tier: dict, owner_id: str, agent_name: str) -
     # through all of them and never wrote the JSON.
     with reasoning.quiet_call():
         reply = await model_reply(tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES),
-                                  _prompt(t, agent_name), owner_id, max_tokens=_MAX_TOKENS)
+                                  _prompt(t, agent_name), owner_id, max_tokens=_MAX_TOKENS,
+                                  feature=side_call_health.DATA_DESCRIPTIONS)
     try:
         data = reply_json(reply.text)
     except ValueError:

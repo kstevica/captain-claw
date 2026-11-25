@@ -282,7 +282,8 @@ def model(monkeypatch: pytest.MonkeyPatch):
              "company": "Bridges Ltd. designs footbridges.\n\nIt writes plainly.",
              "instructions": "Answer in English.\nUse metric units.", "notes": ["LinkedIn could not be read."]}
 
-    async def fake_reply(tier, system, user, owner_id, max_tokens=4000, request_timeout=None, images=None):
+    async def fake_reply(tier, system, user, owner_id, max_tokens=4000, request_timeout=None, images=None,
+                         feature=""):
         calls.append({"tier": tier, "system": system, "user": user, "owner": owner_id})
         return ModelReply(json.dumps(reply), 1234)
 

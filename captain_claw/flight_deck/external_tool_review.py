@@ -18,6 +18,7 @@ import logging
 from typing import Any
 
 from captain_claw.flight_deck import external_tools as xt
+from captain_claw.flight_deck import side_call_health
 
 log = logging.getLogger(__name__)
 
@@ -175,7 +176,8 @@ async def review(uid: str, slug: str, title: str, what: str,
         with reasoning.call_effort(reasoning.normalize_level("low")):
             reply = await asyncio.wait_for(
                 file_library.model_reply(tier, SYSTEM, prompt(slug, title, what, own, added), uid,
-                                         max_tokens=MAX_TOKENS, request_timeout=TIMEOUT_S),
+                                         max_tokens=MAX_TOKENS, request_timeout=TIMEOUT_S,
+                                         feature=side_call_health.TOOL_REVIEWS),
                 TIMEOUT_S + 10)
     except TimeoutError:
         raise ReviewError(f"{model} took too long to answer. Try again, or build it as written.") from None

@@ -76,7 +76,8 @@ def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             raise state.soniox_fail
         return Transcript(text=state.transcript)
 
-    async def call_model(tier, system, user, owner_id, max_tokens=700, request_timeout=None, images=None):
+    async def call_model(tier, system, user, owner_id, max_tokens=700, request_timeout=None, images=None,
+                         feature=""):
         state.calls.append({"tier": tier, "system": system, "user": user, "images": images,
                             "max_tokens": max_tokens, "effort": reasoning.requested_effort()})
         model = tier.get("model")

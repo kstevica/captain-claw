@@ -21,6 +21,7 @@ import logging
 from typing import Any
 
 from captain_claw.flight_deck import first_mate_store as fms
+from captain_claw.flight_deck import side_call_health
 from captain_claw.flight_deck.first_mate_store import FirstMateError
 
 log = logging.getLogger(__name__)
@@ -152,5 +153,5 @@ async def ask(store: fms.FirstMateStore, owner_id: str, system: str, user: str, 
                 return None
     from captain_claw.flight_deck.bat_routes import call_timeout
     reply = await file_library.model_reply(reader, system, user, fms.norm_user(owner_id), max_tokens=max_tokens,
-                                           request_timeout=call_timeout())
+                                           request_timeout=call_timeout(), feature=side_call_health.FIRST_MATE)
     return reply.text or ""
