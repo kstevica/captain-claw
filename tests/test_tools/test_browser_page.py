@@ -33,9 +33,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_the_page_scripts_are_the_extensions_own():
-    for name in ("hands-page.js", "capture.js"):
+    for name, there in (("hands-page.js", "hands-page.js"), ("capture.js", "capture.js"), ("settle.js", "lib/settle.js")):
         shipped = (browser_page.JS_DIR / name).read_bytes()
-        extension = (ROOT / "browser-extension" / "chrome" / name).read_bytes()
+        extension = (ROOT / "browser-extension" / "chrome" / there).read_bytes()
         assert shipped == extension, f"captain_claw/tools/browser_page_js/{name} differs from the extension's — copy it over"
     pyproject = (ROOT / "pyproject.toml").read_text()
     assert "tools/browser_page_js/*.js" in pyproject, "the scripts must ship with the package"
@@ -184,3 +184,79 @@ async def test_live_the_extensions_page_actions_work_headless(tmp_path, monkeypa
         if session is not None:
             await session.close()
 
+
+
+LATE = """<!doctype html><html><head><title>Late Page</title></head><body><h1>Report</h1><div id="app">Loading…</div>
+<script>addEventListener('load', () => setTimeout(() => {
+  document.getElementById('app').innerHTML = '<h2>Quarterly numbers</h2><p>Revenue grew 12 percent</p>' }, 1200))</script>
+</body></html>"""
+
+LAZY = """<!doctype html><html><head><title>Lazy Page</title></head><body><h1>Long article</h1>
+<div style="height:3000px">Top part</div><div id="more">…</div>
+<script>new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting))
+  document.getElementById('more').textContent = 'Loaded when scrolled to' }).observe(document.getElementById('more'))</script>
+</body></html>"""
+
+
+@pytest.mark.skipif(not _chromium_available(), reason="Playwright's Chromium isn't installed")
+async def test_live_reads_wait_for_the_page_and_read_reads_several(tmp_path, monkeypatch):
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "late.html").write_text(LATE)
+    (site / "lazy.html").write_text(LAZY)
+    (site / "plain.html").write_text("<!doctype html><title>Plain</title><p>Just a plain page.</p>")
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    server = ThreadingHTTPServer(("127.0.0.1", port), partial(SimpleHTTPRequestHandler, directory=str(site)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    cfg = BrowserToolConfig(default_wait_seconds=0.1, viewport_width=1280, viewport_height=800)
+    monkeypatch.setattr(browser_mod, "get_config", lambda: SimpleNamespace(tools=SimpleNamespace(browser=cfg)))
+    monkeypatch.setattr(browser_mod, "_TARGETS", {})
+    sid = f"read-{tmp_path.name}"
+    kw = {"_runtime_base_path": str(tmp_path), "_session_id": sid}
+    tool = BrowserTool()
+    base = f"http://127.0.0.1:{port}"
+
+    class Agent:
+        async def _execute_tool_with_guard(self, name, arguments, interaction_label, session_id_override=None, **_):
+            rest = {k: v for k, v in arguments.items() if k != "action"}
+            return await tool.execute(arguments["action"], **rest, **kw)
+
+    async def run():
+        # Opened and read in one call: the page drawn after its load is there.
+        r = await tool.execute("batch", steps=[{"action": "navigate", "url": f"{base}/late.html"},
+                                               {"action": "page_text"}], _agent=Agent(), **kw)
+        assert r.success, r.error
+        assert "Revenue grew 12 percent" in r.content and "Step 2/2 (page_text)" in r.content
+        # What's drawn only when scrolled to is read too.
+        r = await tool.execute("navigate", url=f"{base}/lazy.html", **kw)
+        assert r.success, r.error
+        r = await tool.execute("page_text", **kw)
+        assert "Loaded when scrolled to" in r.content, r.content[-500:]
+
+        session = browser_mod._BROWSER_SESSIONS[sid]
+        here = session.current_url
+        pages = len((await session.ensure_page()).context.pages)
+        r = await tool.execute("read", urls=[f"{base}/late.html", f"{base}/plain.html", "ftp://files.example",
+                                             f"{base}/lazy.html"], **kw)
+        assert r.success, r.error
+        assert r.content.startswith(browser_page.WEB_CONTENT_NOTE) and "Read 3 of 4 pages" in r.content
+        assert "Revenue grew 12 percent" in r.content and "Just a plain page." in r.content
+        assert "Loaded when scrolled to" in r.content
+        assert "Couldn't read ftp://files.example: only web pages" in r.content
+        assert r.content.index("Revenue grew") < r.content.index("Just a plain") < r.content.index("Loaded when"), \
+            "in the order asked"
+        assert session.current_url == here, "the current page stays where it was"
+        assert len((await session.ensure_page()).context.pages) == pages, "the pages it opened are closed"
+        none = await tool.execute("read", urls=["ftp://nope"], **kw)
+        assert not none.success and "only web pages" in none.error
+
+    try:
+        await asyncio.wait_for(run(), 150)
+    finally:
+        sess = browser_mod._BROWSER_SESSIONS.pop(sid, None)
+        if sess is not None:
+            await sess.close()
+        server.shutdown()

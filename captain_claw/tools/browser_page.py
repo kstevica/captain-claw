@@ -14,6 +14,11 @@ Actions here: read_page, find, form_input, page_text, page_files, download
 save_page (.mhtml), back, forward, hover, double_click, right_click,
 triple_click, drag, scroll_to, zoom, javascript, upload_file — and click and
 type with a ``ref`` or a ``coordinate``.
+
+Reads wait for the page to be drawn the way the extension waits
+(``settle.js``: no change to the DOM and no data arriving for a moment), and
+page_text scrolls through it first for what's drawn only when scrolled to.
+:func:`read_pages` reads several pages at once, each in a page of its own.
 """
 
 from __future__ import annotations
@@ -36,6 +41,9 @@ log = get_logger(__name__)
 JS_DIR = Path(__file__).with_name("browser_page_js")
 WORLD_NAME = "captain-hands"
 TEXT_DEFAULT = 30_000
+READ_MAX = 6                # pages one read takes
+READ_TOTAL = 60_000         # characters a read of several pages gives, shared between them
+READ_PER_MIN = 8_000
 FILE_MAX = 25 * 1024 * 1024
 FILES_MAX = 20
 UPLOAD_MAX = 15 * 1024 * 1024
@@ -143,6 +151,179 @@ def world_for(session: Any, page: Any) -> PageWorld:
         w = PageWorld(page)
         worlds[id(page)] = w
     return w
+
+
+# -- waiting for the page to be drawn (the extension's lib/settle.js) ----------
+
+def _settle_call(fn: str, opts: dict[str, Any]) -> str:
+    body = _source("settle.js").replace("export function ", "function ")
+    return f"(() => {{\n{body}\nreturn {fn}({json.dumps(opts)})\n}})()"
+
+
+async def _in_page(session: Any, page: Any, fn: str, opts: dict[str, Any], timeout: float) -> dict[str, Any] | None:
+    try:
+        value = (await world_for(session, page).evaluate(_settle_call(fn, opts), timeout=timeout)).get("value")
+    except Exception:  # noqa: BLE001 — a page that can't be waited on is read as it is
+        return None
+    return value if isinstance(value, dict) else None
+
+
+async def settle(session: Any, page: Any, *, max_ms: int = 8000, quiet_ms: int = 800,
+                 min_ms: int = 0) -> dict[str, Any] | None:
+    """Wait until *page* stops changing (loaded, its DOM quiet and no data
+    arriving for *quiet_ms*, at least *min_ms* gone), never longer than
+    *max_ms*. What it saw, or None when it couldn't look. Never raises."""
+    opts = {"maxMs": max_ms, "quietMs": quiet_ms, "minMs": min_ms}
+    return await _in_page(session, page, "settleInPage", opts, max_ms / 1000 + 4)
+
+
+async def scroll_through(session: Any, page: Any, *, steps: int = 10, quiet_ms: int = 600,
+                         step_max_ms: int = 2500, total_ms: int = 12000) -> dict[str, Any] | None:
+    """Scroll down a screen at a time for what's drawn only when scrolled to,
+    then back. Never raises."""
+    opts = {"steps": steps, "quietMs": quiet_ms, "stepMaxMs": step_max_ms, "totalMs": total_ms}
+    return await _in_page(session, page, "scrollThrough", opts, total_ms / 1000 + 5)
+
+
+async def drawn_for_reading(session: Any, page: Any) -> None:
+    """What page_text waits for (the extension's page_text does the same)."""
+    await settle(session, page, max_ms=6000, quiet_ms=700)
+    went = await scroll_through(session, page)
+    if went and went.get("steps"):
+        await settle(session, page, max_ms=3000, quiet_ms=500)
+
+
+def _page_parts(cap: dict[str, Any], title: str, url: str) -> tuple[str, str]:
+    """page_text's head (title, address, what the page has) and its body."""
+    meta = cap.get("meta") or {}
+    facts = [f"{len(cap['tables'])} tables" if cap.get("tables") else "",
+             f"{len(cap['files'])} files (page_files lists them)" if cap.get("files") else "",
+             "a selection" if cap.get("selection") else ""]
+    facts = [f for f in facts if f]
+    head = (f"# {meta.get('title') or title}\n{meta.get('url') or url}"
+            + (f"\nThe page has {', '.join(facts)}." if facts else "") + "\n\n")
+    sel = cap.get("selection")
+    sel_text = sel.get("text") if isinstance(sel, dict) else sel
+    body = (("Selected on the page:\n> " + str(sel_text).replace("\n", "\n> ") + "\n\n") if sel_text else "") \
+        + (cap.get("markdown") or "(no text found)")
+    return head, body
+
+
+# -- several pages at once -------------------------------------------------------
+
+def read_urls(kwargs: dict[str, Any]) -> list[str]:
+    """The pages a read names (url and urls), once each, at most READ_MAX."""
+    raw = kwargs.get("urls")
+    urls = [raw] if isinstance(raw, str) else list(raw) if isinstance(raw, (list, tuple)) else []
+    if kwargs.get("url"):
+        urls.insert(0, kwargs.get("url"))
+    out: list[str] = []
+    for u in urls:
+        text = str(u or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return out[:READ_MAX]
+
+
+def _web_address(text: str) -> str:
+    """An http(s) address for *text* (``example.com`` → ``https://example.com``), or ""."""
+    if not re.match(r"^[a-z][a-z0-9+.-]*:", text, re.I):
+        text = "https://" + text
+    return text if re.match(r"^https?://[^/\s]", text, re.I) else ""
+
+
+def _short_error(exc: BaseException) -> str:
+    text = str(exc).split("\n")[0].strip()
+    text = re.sub(r"^(Page\.goto|page\.goto|Error): ", "", text)
+    return _clip(text or type(exc).__name__, 200)
+
+
+async def _read_one(session: Any, url: str, per: int, blocked: Any) -> dict[str, Any]:
+    from captain_claw.tools import web_blocked
+
+    why = blocked(url) if blocked else ""
+    if why:
+        return {"url": url, "error": why}
+    address = _web_address(url)
+    if not address:
+        return {"url": url, "error": "only web pages (http/https) can be read"}
+    page = await session.new_page()
+    try:
+        resp = await page.goto(address, wait_until="domcontentloaded", timeout=25000)
+        status = resp.status if resp else 0
+        await settle(session, page, max_ms=8000, quiet_ms=700, min_ms=1000)
+
+        async def _wall() -> str:
+            title = await page.title()
+            text = await page.evaluate("() => ((document.body && document.body.innerText) || '').slice(0, 4000)")
+            html = ""
+            if len(str(text or "").strip()) < web_blocked.SHORT_PAGE_CHARS:
+                html = await page.evaluate(
+                    "() => (document.documentElement ? document.documentElement.outerHTML : '').slice(0, 40000)")
+            return web_blocked.block_reason(status=status, title=str(title or ""), text=str(text or ""),
+                                            html=str(html or ""))
+
+        wall = await _wall()
+        for _ in range(3):   # a bot check that clears itself moves on within seconds
+            if not wall.startswith("a bot check"):
+                break
+            await asyncio.sleep(2.0)
+            wall = await _wall()
+        if wall:
+            return {"url": page.url, "error": (f"the site turned the browser away ({wall}) — the person's own "
+                                               "Chrome (target=\"chrome\") may get it")}
+        went = await scroll_through(session, page, steps=6, quiet_ms=500, step_max_ms=2000, total_ms=8000)
+        if went and went.get("steps"):
+            await settle(session, page, max_ms=2500, quiet_ms=500)
+        cap = await world_for(session, page).capture()
+        head, body = _page_parts(cap, await page.title(), page.url)
+        part = body[:per]
+        rest = len(body) - len(part)
+        more = (f"\n\n… ({rest:,} more characters — navigate there and page_text with offset={len(part)})"
+                if rest > 0 else "")
+        return {"url": page.url, "text": f"{head}{part}{more}"}
+    except Exception as exc:  # noqa: BLE001 — one page failing doesn't stop the others
+        return {"url": url, "error": _short_error(exc)}
+    finally:
+        worlds = getattr(session, "_page_worlds", None)
+        if isinstance(worlds, dict):
+            worlds.pop(id(page), None)
+        try:
+            await page.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def read_pages(session: Any, kwargs: dict[str, Any], blocked: Any = None) -> ToolResult:
+    """``read``: each page in a page of its own, all at once — opened, waited
+    for, scrolled through, read as Markdown, closed. The current page stays
+    where it was. *blocked(url)* says why a page isn't for the browser ("" when it is)."""
+    urls = read_urls(kwargs)
+    if not urls:
+        return ToolResult(success=False, error="read needs the pages: urls=[…] (up to 6), or url.")
+    try:
+        asked = int(kwargs.get("max_chars") or 0)
+    except (TypeError, ValueError):
+        asked = 0
+    n = len(urls)
+    per = min(max(asked, 1000), 200_000) if asked else (TEXT_DEFAULT if n == 1 else max(READ_PER_MIN, READ_TOTAL // n))
+    got = await asyncio.gather(*(_read_one(session, u, per, blocked) for u in urls))
+    return reading(got, n)
+
+
+def reading(got: list[dict[str, Any]], n: int) -> ToolResult:
+    """The answer to a read, from each page's ``{url, text}`` or ``{url, error}``."""
+    ok = [g for g in got if g.get("text")]
+    if not ok:
+        return ToolResult(success=False, error="Couldn't read " + ("it" if n == 1 else "any of them") + ":\n"
+                          + "\n".join(f"- {g.get('url')}: {g.get('error') or 'nothing came back'}" for g in got))
+    parts = []
+    for i, g in enumerate(got, 1):
+        mark = f"━━ {i}/{n} ━━\n" if n > 1 else ""
+        parts.append(mark + (g["text"] if g.get("text") else f"Couldn't read {g.get('url')}: {g.get('error')}"))
+    said = (f"Read {len(ok)} of {n} pages" if len(ok) < n else f"Read {n} page{'s' if n != 1 else ''}")
+    head = f"{said}, each in a tab of its own (closed again — your current page is where it was).\n\n"
+    return ToolResult(success=True, content=f"{WEB_CONTENT_NOTE}\n\n{head}" + "\n\n".join(parts))
 
 
 def _downloads_dir(kwargs: dict[str, Any], site: str) -> Path:
@@ -327,6 +508,7 @@ class HeadlessPage:
             max_chars = min(max(int(k.get("max_chars") or 40000), 2000), 200000)
         except (TypeError, ValueError):
             max_chars = 40000
+        await settle(self.session, await self.page(), max_ms=4000, quiet_ms=500)
         text = await (await self.world()).helper("tree", {
             "filter": "all" if k.get("filter") == "all" else "interactive",
             "refId": str(k.get("ref") or ""), "maxChars": max_chars})
@@ -334,6 +516,7 @@ class HeadlessPage:
 
     async def _find(self) -> ToolResult:
         query = str(self.kwargs.get("query") or self.kwargs.get("text") or "")
+        await settle(self.session, await self.page(), max_ms=4000, quiet_ms=500)
         text = await (await self.world()).helper("find", {"query": query})
         return ToolResult(success=True, content=f"{WEB_CONTENT_NOTE}\n\n{text}")
 
@@ -360,24 +543,20 @@ class HeadlessPage:
 
     async def _page_text(self) -> ToolResult:
         page = await self.page()
-        cap = await (await self.world()).capture()
-        meta = cap.get("meta") or {}
-        facts = [f"{len(cap['tables'])} tables" if cap.get("tables") else "",
-                 f"{len(cap['files'])} files (page_files lists them)" if cap.get("files") else "",
-                 "a selection" if cap.get("selection") else ""]
-        facts = [f for f in facts if f]
-        head = (f"# {meta.get('title') or await page.title()}\n{meta.get('url') or page.url}"
-                + (f"\nThe page has {', '.join(facts)}." if facts else "") + "\n\n")
-        sel = cap.get("selection")
-        sel_text = sel.get("text") if isinstance(sel, dict) else sel
-        body = (("Selected on the page:\n> " + str(sel_text).replace("\n", "\n> ") + "\n\n") if sel_text else "") \
-            + (cap.get("markdown") or "(no text found)")
         k = self.kwargs
         try:
             offset = max(0, int(k.get("offset") or 0))
             max_chars = min(max(int(k.get("max_chars") or TEXT_DEFAULT), 1000), 200000)
         except (TypeError, ValueError):
             offset, max_chars = 0, TEXT_DEFAULT
+        # The first read goes through the whole page (the next parts, with
+        # offset, read it as it is) — as the extension's page_text does.
+        if offset:
+            await settle(self.session, page, max_ms=6000, quiet_ms=700)
+        else:
+            await drawn_for_reading(self.session, page)
+        cap = await (await self.world()).capture()
+        head, body = _page_parts(cap, await page.title(), page.url)
         part = body[offset:offset + max_chars]
         rest = len(body) - offset - len(part)
         more = (f"\n\n… ({rest:,} more characters — page_text with offset={offset + len(part)})" if rest > 0 else "")

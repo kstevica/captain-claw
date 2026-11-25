@@ -147,6 +147,9 @@ works here (`target="chrome"`), signed in as you, while you watch:
   console and network log, runs a script — and does what this panel does:
   reads the page as Markdown, lists its files, downloads them **with your
   session** into `vfs:web-clips/…`, saves the whole page as `.mhtml`.
+- **Several pages at once** (`read`, up to 6): each opens in a background tab
+  of the agent's group, is waited for and read, and closes again — the
+  agent's own tab stays where it was, and nothing comes to the front.
 - Chrome shows "Captain for Chrome started debugging this browser" while an
   agent works — that's how it clicks and types for real. Pressing **Cancel**
   on that bar stops the agents that were working.

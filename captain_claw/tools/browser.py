@@ -139,7 +139,12 @@ class BrowserTool(Tool):
         "Control a browser for interacting with web applications: a headless one (default), or — "
         "target=\"chrome\" — the person's OWN Chrome through Captain for Chrome, signed in as them, in tabs "
         "of your own tab group while they watch (use it when a page needs their sign-in or they ask for their "
-        "browser; it sticks for the session until close). In BOTH browsers prefer read_page/find → refs (ref_12) "
+        "browser; it sticks for the session until close). Several steps you already know? Send them as ONE "
+        "batch: steps=[{\"action\": \"navigate\", \"url\": …}, {\"action\": \"page_text\"}] (up to 10, in order, "
+        "each checked like a call of its own, stopping at the first that fails) — e.g. navigate → page_text, or "
+        "form_input on each field → click submit. Several pages to read? read with urls=[…] (up to 6): each opens "
+        "in a tab of its own, is waited for, read as Markdown and closed — your current page stays. "
+        "In BOTH browsers prefer read_page/find → refs (ref_12) "
         "→ click/type/form_input with ref; screenshot gives coordinates. Both: read_page, find, form_input, "
         "page_text (the page as Markdown), page_files, download (headless: into saved/downloads/; Chrome: with "
         "their session into vfs:web-clips/), save_page (.mhtml), back, forward, hover, double_click, right_click, "
@@ -170,6 +175,8 @@ class BrowserTool(Tool):
             "action": {
                 "type": "string",
                 "enum": [
+                    "batch",
+                    "read",
                     "open",
                     "navigate",
                     "screenshot",
@@ -319,10 +326,22 @@ class BrowserTool(Tool):
             },
             "width": {"type": "integer", "description": "Chrome resize: window width."},
             "height": {"type": "integer", "description": "Chrome resize: window height."},
+            "steps": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": (
+                    "batch: the steps, in order — each a browser call's own arguments with its action, e.g. "
+                    "[{\"action\": \"form_input\", \"ref\": \"ref_3\", \"value\": \"Ana\"}, "
+                    "{\"action\": \"click\", \"ref\": \"ref_9\"}]. Up to 10, at most 3 pictures."
+                ),
+            },
             "urls": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "download: the files to fetch with the browser's cookies (from page_files).",
+                "description": (
+                    "read: the pages to read (up to 6), each in a tab of its own. download: the files to fetch "
+                    "with the browser's cookies (from page_files)."
+                ),
             },
             "all": {
                 "type": "boolean",
@@ -349,7 +368,10 @@ class BrowserTool(Tool):
             },
             "max_chars": {
                 "type": "integer",
-                "description": "read_page / page_text: at most this many characters (default 40000 / 30000).",
+                "description": (
+                    "read_page / page_text / read: at most this many characters (default 40000 / 30000; read: "
+                    "per page, less when there are several)."
+                ),
             },
             "offset": {
                 "type": "integer",
@@ -527,9 +549,19 @@ class BrowserTool(Tool):
         pass  # sessions stored in module-level _BROWSER_SESSIONS
 
     def timeout_for(self, arguments: dict[str, Any]) -> float:
-        """Most actions take seconds; installing an extension may wait for the person's OK."""
-        if str(arguments.get("action") or "").strip().lower() in ("extension_install", "extension_connect"):
+        """Most actions take seconds; installing an extension may wait for the
+        person's OK; a batch gets each step's time, a read a page's and more."""
+        action = str(arguments.get("action") or "").strip().lower()
+        if action in ("extension_install", "extension_connect"):
             return 720.0
+        if action == "batch":
+            from captain_claw.tools import browser_batch
+
+            return browser_batch.timeout(self, arguments.get("steps"))
+        if action == "read":
+            from captain_claw.tools.browser_page import read_urls
+
+            return min(75.0 + 20.0 * max(len(read_urls(arguments)) - 1, 0), 240.0)
         return float(self.timeout_seconds)
 
     @staticmethod
@@ -597,6 +629,13 @@ class BrowserTool(Tool):
     async def execute(self, action: str, **kwargs: Any) -> ToolResult:
         """Run an action; a ``secret_ref`` (request_secret) is typed for the
         model without its value ever reaching it (see :func:`_with_secret`)."""
+        if str(action or "").strip().lower() == "batch":
+            # Each step goes the way a call of its own goes (browser_batch.py).
+            from captain_claw.tools import browser_batch
+
+            if kwargs.get("secret_ref"):
+                return ToolResult(success=False, error="secret_ref goes on the step that types it, not on the batch.")
+            return await browser_batch.run(self, kwargs)
         ref = kwargs.pop("secret_ref", None)
         session_key = self._session_key(kwargs)
         if ref:
@@ -677,7 +716,7 @@ class BrowserTool(Tool):
         log.info("Dispatching browser action", action=action)
 
         _DISPATCH: dict[str, str] = {
-            "open": "_open", "navigate": "_navigate", "screenshot": "_screenshot",
+            "open": "_open", "navigate": "_navigate", "read": "_read", "screenshot": "_screenshot",
             "click": "_click", "type": "_type", "press_key": "_press_key",
             "scroll": "_scroll", "wait": "_wait", "status": "_status", "close": "_close",
             "observe": "_observe", "act": "_act",
@@ -940,6 +979,16 @@ class BrowserTool(Tool):
                 return ""
         nav_info["title"] = title
         return why
+
+    async def _read(self, **kwargs: Any) -> ToolResult:
+        """Several pages at once, each in a page of its own (browser_page.read_pages)."""
+        from captain_claw.tools.browser_page import read_pages
+
+        session = self._get_session(self._session_key(kwargs))
+        if not session.is_alive:
+            await session.start(headless=kwargs.get("headless"))
+        return await read_pages(session, kwargs, blocked=lambda u: (
+            self._gdrive_block_msg(u) if self._blocks_drive_url(u) else ""))
 
     async def _screenshot(self, **kwargs: Any) -> ToolResult:
         """Take a screenshot of the current page."""
