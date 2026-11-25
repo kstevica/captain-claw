@@ -595,6 +595,10 @@ class Agent(
         hinted, label = source_hint if isinstance(source_hint, tuple) and len(source_hint) == 2 else ("", "")
         source = turn_source.resolve(hinted=hinted, channel=channel, origin=origin, origin_detail=detail)
         self._turn_source = (source, turn_source.label_for(source, label) if source else "")
+        # What the person typed, when the turn's text holds more (msg_origin.hint_turn_provenance).
+        words = getattr(self, "_turn_words_hint", None)
+        self._turn_words_hint = None
+        self._turn_words = words if isinstance(words, str) else None
         # A level the agent set for one turn only (reasoning_effort tool) ends with it.
         self._turn_effort_override = None
         # …and a Drive level it set for one turn only (drive_level tool).

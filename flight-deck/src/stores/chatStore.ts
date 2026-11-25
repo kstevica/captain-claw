@@ -466,7 +466,7 @@ async function _flushMessages() {
               ...(m.task ? { task: m.task } : {}),
               ...(m.automation ? { automation: m.automation } : {}),
               ...(m.narration ? { narration: true } : {}),
-              ...(m.healed ? { healed: true } : {}),
+              ...(m.healed ? { healed: true, ...(m.healedFrom ? { agent_session: m.healedFrom } : {}) } : {}),
               ...(m.note ? { note: m.note } : {}),
               ...(m.fileSize !== undefined ? { file_size: m.fileSize } : {}),
               // Any other system row says it is one, so a reload never takes
@@ -2208,7 +2208,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           // an empty new one below.)
           const replayTurns = pendingReplay.length ? replayTurnsToAdd(key, pendingReplay) : []
           reconcileTopic(key)
-          for (const m of replayTurns) addMessage(key, { ...m, replay: false, healed: true })
+          for (const m of replayTurns) addMessage(key, healedRow(m, sid))
         })
       )
     }
@@ -4056,6 +4056,8 @@ function replayToMessage(d: Record<string, unknown>): ChatMessage | null {
   // as the live frame did, so it also matches its row in the log.
   const automation = String(d.automation_label || '')
   let content = rawContent
+  // The person's own words, when the agent's copy of their turn holds more.
+  if (role === 'user' && typeof d.words === 'string') content = personTurn(d.words, rawContent)
   if (automation) {
     const nl = content.indexOf('\n')
     const head = nl < 0 ? '' : content.slice(0, nl)
@@ -4239,13 +4241,44 @@ function trimWindow(s: ChatSession, keep: 'newest' | 'oldest'): ChatSession {
   return { ...s, messages: kept, hasNewer: true, windowEndRowId: endRowId }
 }
 
+/** An attachment line: the chat writes "[Attached file: name → path]", the
+ *  agent's own copy "[Attached file: path]"; images the same on both. */
+const ATTACHMENT_LINE = /^\[Attached (?:image|file):\s*.+\]$/
+
+/** Lines the agent adds to a turn of the person's with an attachment
+ *  (web/chat_handler.build_attachment_prefix): the attachment lines, a
+ *  bridge's notes and its guidance for a picture or a video. Never the
+ *  person's words — a turn saved before the replay carried those (`words`)
+ *  still matches its row in the log without them. */
+const AGENT_ADDED_LINES = [
+  ATTACHMENT_LINE,
+  /^\[Attachment note:.*\]$/,
+  /^\((?:The image\(s\) above are attached|An automatic visual description of the image\(s\)|The attached video\(s\) are being analyzed)/,
+]
+
+/** A replayed turn of the person's as the chat writes one sent here: what
+ *  they typed (the replay's `words`, when the agent's copy holds more), then
+ *  its attachment lines. Glasses, 2026-11-25: the agent's copy of a turn with
+ *  a picture — its guidance for the picture first — matched nothing in the
+ *  log, and the chat saved it again, guidance and all. */
+function personTurn(words: string, stored: string): string {
+  const refs = stored.split('\n').map((line) => line.trim()).filter((line) => ATTACHMENT_LINE.test(line))
+  return [words.trim(), refs.join('\n')].filter(Boolean).join('\n\n')
+}
+
+/** A turn the log is missing, as it is added and saved: flagged, with the
+ *  agent session it came from (db.add_chat_messages checks short lines there). */
+function healedRow(m: ChatMessage, agentSessionId?: string): ChatMessage {
+  return { ...m, replay: false, healed: true, ...(agentSessionId ? { healedFrom: agentSessionId } : {}) }
+}
+
 /** What identifies a turn when matching the agent's replay against the log:
- *  the role and the words (whitespace folded, attached-image lines dropped —
- *  the agent words those itself). */
+ *  the role and the words (whitespace folded, the lines the agent adds to an
+ *  attachment dropped — it words those itself). */
 function turnKey(m: ChatMessage): string {
   const text = m.content
     .split('\n')
-    .filter((line) => !/^\[Attached image:\s*.+\]$/.test(line.trim()))
+    .filter((line) => !AGENT_ADDED_LINES.some((re) => re.test(line.trim())))
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim()
@@ -4316,7 +4349,8 @@ function oldestPersistedTime(messages: ChatMessage[]): number | null {
  *  turns it is missing are appended as persisted rows, so the log heals. */
 function mergeReplay(key: string, replayed: ChatMessage[], sid?: string): ChatMessage[] {
   const added = replayTurnsToAdd(key, replayed, sid)
-  for (const m of added) addMessage(key, { ...m, replay: false, healed: true })
+  const from = sid ?? useChatStore.getState().sessions.get(key)?.agentSessionId ?? ''
+  for (const m of added) addMessage(key, healedRow(m, from))
   return added
 }
 

@@ -1241,6 +1241,7 @@ async def handle_chat(
     task = asyncio.create_task(_run_agent(
         server, ws, agent, effective_content, naming_task,
         naming_after_turn=naming_after,
+        person_words=content,
         is_public=is_public,
         turn_channel=turn_channel,
         turn_source=_src,
@@ -1825,6 +1826,7 @@ async def _run_agent(
     turn_source_label: str = "",
     non_image_attached: bool = False,
     task: dict | None = None,
+    person_words: str | None = None,
 ) -> None:
     """Background coroutine that drives the agent and finalises the turn.
 
@@ -2046,7 +2048,8 @@ async def _run_agent(
             from captain_claw import msg_origin as _msg_origin
 
             _msg_origin.hint_turn_provenance(
-                agent, channel=turn_channel, source=turn_source, source_label=turn_source_label)
+                agent, channel=turn_channel, source=turn_source, source_label=turn_source_label,
+                words=person_words)
             # A WhatsApp turn: what it produces for the user goes back into
             # that chat once the reply is out.
             _wa_turn_start = len(agent.session.messages) if getattr(agent, "session", None) else 0

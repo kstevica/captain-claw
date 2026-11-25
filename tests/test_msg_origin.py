@@ -299,3 +299,40 @@ def test_a_persons_turn_input_is_never_a_code_corrective():
     assert not msg_origin.is_code_corrective({**note, "turn_input": True})
     assert not msg_origin.is_code_corrective({"role": "user", "content": "what's new?"})
     assert not msg_origin.is_code_corrective({**note, "role": "assistant"})
+
+
+def test_the_persons_words_ride_on_the_turns_opener_only():
+    """A turn with a picture holds the picture's line and the agent's guidance
+    before what was typed; the opener keeps the typed words too, so a chat
+    matching the replay against its log knows the turn (glasses, 2026-11-25:
+    the chat saved the agent's copy a second time, guidance and all)."""
+    from captain_claw import member_privacy
+    from captain_claw.web.ws_handler import _build_replay_batch
+
+    agent = _agent()
+    typed = "How do I get back to that channel?"
+    stored = ("[Attached image: /w/image-1.png]\n(The image(s) above are attached and you can SEE them "
+              f"directly — describe/analyze them from what you see.)\n{typed}")
+    member_privacy.begin_turn(agent)
+    msg_origin.hint_turn_provenance(agent, channel="web", words=typed)
+    Agent._set_turn_origin(agent, stored, None, "web", None)
+    agent._add_session_message("user", stored)
+    agent._add_session_message("assistant", "Open it from the sidebar.")
+    agent._add_session_message("user", "Your last response was completely empty. Write the answer now.")
+    first, _reply, corrective = agent.session.messages
+    assert first["words"] == typed and first["content"] == stored
+    assert "words" not in corrective
+    replay = [m for m in _build_replay_batch(agent.session) if m["role"] == "user"]
+    assert replay[0]["words"] == typed and "words" not in replay[1]
+
+    # A plain turn (nothing added to what was typed) carries no words.
+    member_privacy.begin_turn(agent)
+    msg_origin.hint_turn_provenance(agent, channel="web", words="hello")
+    Agent._set_turn_origin(agent, "hello", None, "web", None)
+    agent._add_session_message("user", "hello")
+    assert "words" not in agent.session.messages[-1]
+    # …and a turn nobody hinted (a bridge that doesn't say) none either.
+    member_privacy.begin_turn(agent)
+    Agent._set_turn_origin(agent, stored, None, "web", None)
+    agent._add_session_message("user", stored)
+    assert "words" not in agent.session.messages[-1]

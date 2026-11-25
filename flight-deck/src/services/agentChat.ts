@@ -27,6 +27,9 @@ export interface ChatMessage {
   /** A turn the log was missing, added from the agent's replay (mergeReplay):
    *  saved flagged, so Flight Deck drops it if the log has it after all. */
   healed?: boolean
+  /** The agent session a healed turn came from: Flight Deck checks a short
+   *  line ("no", "E-ink?") against that session's part of the log. */
+  healedFrom?: string
   tool_name?: string
   tool_arguments?: Record<string, unknown>
   tool_output?: string
