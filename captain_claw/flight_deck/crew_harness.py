@@ -25,8 +25,10 @@ import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 _EVENT_TEXT_MAX = 8000
 _INPUT_FIELDS = ("command", "cmd", "file_path", "filePath", "path", "pattern", "query", "url",
@@ -57,6 +59,95 @@ _PASSING = re.compile(
 _LASTING = re.compile(
     r"usage limit|limit reached|hit your .*limit|today's .*tokens|quota|billing|credit|payment|api.?key|invalid.*key|unauthori[sz]ed"
     r"|authenticat|forbidden|permission|context.*(?:length|too long|exceed)|\b(?:400|401|402|403|404)\b", re.IGNORECASE)
+
+
+# The account's plan ran out — Claude's 5-hour or weekly limit, Codex's usage
+# limit — which comes back by itself at a known time; a refused key or an empty
+# balance never does, even when it's said with the word "limit".
+_PLAN_LIMIT = re.compile(r"usage limit|usage_limit_reached|limit reached|hit your (?:[\w-]+ )?limit"
+                         r"|out of (?:extra )?usage|(?:5|five)-hour limit|weekly limit", re.IGNORECASE)
+_NOT_TIMED = re.compile(r"credit balance|billing|payment required|insufficient|api.?key|invalid.*key"
+                        r"|unauthori[sz]ed|authenticat", re.IGNORECASE)
+LIMIT_LONGEST_S = 8 * 24 * 3600   # a reset said to be further off than this isn't believed
+_RESET_EPOCH = re.compile(r"limit reached\|(\d{10})\b", re.IGNORECASE)
+_RESET_SECONDS = re.compile(r"resets?_in_seconds\W{0,3}(\d+)|retry.after\W{0,3}(\d+)\s*(?:s|secs?|seconds)\b",
+                            re.IGNORECASE)
+_RESET_IN = re.compile(r"(?:try again|resets?|available again|back)\s+in\s+((?:\d+\s*[a-z]+[\s,]*(?:and\s+)?)+)",
+                       re.IGNORECASE)
+_DURATION = re.compile(r"(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b", re.IGNORECASE)
+_RESET_AT = re.compile(
+    r"(?:resets?|try again|available again)(?:\s+at|\s+on)?\s+"
+    r"(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?,?\s+(?:at\s+)?)?"
+    r"(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap]\.?\s?m\.?)?(?![\d:])"
+    r"(?:\s*\((?P<tz>[A-Za-z_]+(?:/[A-Za-z0-9_+-]+)+|UTC)\))?", re.IGNORECASE)
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+_UNIT_S = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+
+
+def plan_limit(text: str) -> bool:
+    """Did the turn stop on the account's usage limit — one that resets by itself?"""
+    return bool(_PLAN_LIMIT.search(text or "")) and not _NOT_TIMED.search(text or "")
+
+
+def _reset_said(text: str, now: float, local: tzinfo | None) -> float | None:
+    """When the limit resets, as the CLI said it in words: an epoch after "limit
+    reached|", seconds to wait, "try again in 2 days 3 hours", or a clock time
+    ("resets 5pm (Europe/Zagreb)", "try again at 9:49 PM", "resets Nov 30, 5pm")
+    in the zone it names, else the computer's own."""
+    m = _RESET_EPOCH.search(text)
+    if m:
+        return float(m.group(1))
+    m = _RESET_SECONDS.search(text)
+    if m:
+        return now + float(m.group(1) or m.group(2))
+    m = _RESET_IN.search(text)
+    if m:
+        total = sum(int(n) * _UNIT_S[unit[0].lower()] for n, unit in _DURATION.findall(m.group(1)))
+        if total:
+            return now + total
+    for m in _RESET_AT.finditer(text):
+        hour, minute, ap = int(m.group("h")), int(m.group("m") or 0), (m.group("ap") or "").lower()
+        if not ap and not m.group("m") and not m.group("mon"):
+            continue   # a bare number ("resets 5 …") isn't surely a time
+        if ap.startswith("p") and hour < 12:
+            hour += 12
+        elif ap.startswith("a") and hour == 12:
+            hour = 0
+        if hour > 23 or minute > 59:
+            continue
+        try:
+            zone = ZoneInfo(m.group("tz")) if m.group("tz") else local
+        except Exception:  # noqa: BLE001 — a zone this computer doesn't know: its own
+            zone = local
+        today = datetime.fromtimestamp(now, zone) if zone else datetime.fromtimestamp(now).astimezone()
+        if m.group("mon"):
+            month, day = _MONTHS.index(m.group("mon")[:3].lower()) + 1, int(m.group("day"))
+            try:
+                at = today.replace(month=month, day=day, hour=hour, minute=minute, second=0, microsecond=0)
+                if at.timestamp() < now - 86400:
+                    at = at.replace(year=at.year + 1)
+            except ValueError:
+                continue
+        else:
+            at = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if at.timestamp() <= now:
+                at += timedelta(days=1)
+        return at.timestamp()
+    return None
+
+
+def limit_reset(state: TurnState, text: str, now: float, local: tzinfo | None = None) -> float | None:
+    """When the account limit that stopped a turn resets (epoch seconds), or
+    None when nothing says, or it's further off than :data:`LIMIT_LONGEST_S`.
+    First what Claude Code reported of its limit windows (the one turned down,
+    else one used up), then what the CLI said in words."""
+    windows = [w for w in state.limits.values() if isinstance(w, dict) and int(w.get("resets_at") or 0) > now]
+    hit = ([w for w in windows if str(w.get("status") or "").lower() == "rejected"]
+           or [w for w in windows if isinstance(w.get("used"), (int, float)) and w["used"] >= 1])
+    at = float(max(int(w["resets_at"]) for w in hit)) if hit else _reset_said(text or "", now, local)
+    if at is None or at <= now or at - now > LIMIT_LONGEST_S:
+        return None
+    return at
 
 
 @dataclass
