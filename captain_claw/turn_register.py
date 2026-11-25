@@ -126,6 +126,13 @@ def bind_automation(kind: str, ref: Any, name: Any = "") -> contextvars.Token:
     return _AUTOMATION_REF.set(value)
 
 
+def automation() -> tuple[str, str]:
+    """The automation the turns in this context run for, as ``(kind, ref)``
+    (``("cron", <job id>)``), or ``("", "")`` for a person's turn."""
+    kind, ref, _name = _AUTOMATION_REF.get()
+    return kind, ref
+
+
 def reset_automation(token: contextvars.Token | None) -> None:
     if token is None:
         return

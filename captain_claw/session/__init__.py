@@ -1510,6 +1510,7 @@ class SessionManager:
         *,
         enabled: bool | None = None,
         payload: dict[str, Any] | None = None,
+        schedule: dict[str, Any] | None = None,
         next_run_at: str | None = None,
         last_run_at: str | None = None,
         last_status: str | None = None,
@@ -1536,6 +1537,9 @@ class SessionManager:
         if payload is not None:
             assignments.append("payload = ?")
             params.append(json.dumps(payload))
+        if schedule is not None:
+            assignments.append("schedule = ?")
+            params.append(json.dumps(schedule))
         if enabled is not None:
             assignments.append("enabled = ?")
             params.append(1 if enabled else 0)

@@ -5324,6 +5324,10 @@ Common non-Codex aliases — `gpt-5-mini`, `gpt-5.1-mini`, `gpt-5.2-mini`, `gpt-
 
 The `CodexAuthManager` decodes the JWT `exp` claim with a 60-second safety margin. Before every request, `_ensure_fresh_auth()` is a cheap cache hit when the token is still valid. On a 401 response, the provider forces a refresh and retries the request exactly once (in both `complete()` and `complete_streaming()`). Under Flight Deck, the token source is `GET /fd/codex/access_token` — so every sub-agent Flight Deck spawns shares one centrally-managed connection, even across hosts. Without Flight Deck, the manager reads `~/.codex/auth.json` directly for standalone installs.
 
+**When the plan's usage limit is used up:**
+
+The ChatGPT backend refuses with a 429 that names the limit (`usage_limit_reached`, usually with `resets_at`). The agent doesn't retry it — waiting seconds won't help. The turn ends with a plain message such as *"The ChatGPT plan's usage limit is used up; I'll carry on by myself at 17:05 CET (in 2 h 10 min). To cancel, remove it under Scheduled tasks."* and a one-shot job in the agent's own scheduled jobs carries on in the same chat 90 s after the reset (`CLAW_LIMIT_MARGIN_SECONDS`). The job is kept in the agent's `sessions.db`, so it survives the agent sleeping or restarting (Flight Deck wakes the agent before it's due). It's listed in Flight Deck → Scheduled tasks → Set up by agents, where it can be removed. A message written in the meantime runs as normal; if the limit is still on, the same job moves to the new reset, never a second one. When the refusal doesn't say when it resets, the agent tries again every 30 minutes, six times at most, then waits for a message. Ordinary rate limits, refused keys, billing and empty balances are not treated as a plan limit. The parser is `captain_claw/plan_limit.py`, the carry-on `captain_claw/limit_carry_on.py`.
+
 **Endpoints:**
 
 - `GET /fd/codex/status` — `configured`, `connected`, `email`, `plan`, `account_id`, `expires_at`, `seconds_until_expiry`, `stale`, `access_token_preview`, `auth_path`.
