@@ -171,7 +171,7 @@ function permitted() {
 }
 
 const live = (ws) => !!ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
-const sameLent = (a, b) => a.hands === b.hands && a.search.join() === b.search.join() && a.fetch === b.fetch
+const sameLent = (a, b) => a.hands === b.hands && a.search.join() === b.search.join() && a.fetch === b.fetch && a.primary === b.primary
 
 async function ensureConnected() {
   await loadState()
@@ -179,7 +179,9 @@ async function ensureConnected() {
   const got = await chrome.storage.local.get(['hands', 'handsStopped']).catch(() => ({}))
   prefs = { on: false, front: false, ...(got.hands || {}) }
   stopped = new Set(Array.isArray(got.handsStopped) ? got.handsStopped : [])
-  decks = (await loadDecks().catch(() => null))?.decks || []
+  const listed = await loadDecks().catch(() => null)
+  decks = listed?.decks || []
+  const inUse = listed?.use?.url || ''
   const hands = prefs.on && permitted()
   if ((!hands || !decks.length) && attached.size) detachAll()
   // A deck disconnected, or connected again with a new token: its socket goes.
@@ -190,7 +192,9 @@ async function ensureConnected() {
   statuses = Object.fromEntries(Object.entries(statuses).filter(([url]) => decks.some((d) => d.url === url)))
   if (Object.keys(statuses).length !== before) saveStatuses()
   for (const conn of decks) {
-    const want = { hands, search: await servedEngines(conn.url), fetch: await readsPages(conn.url) }
+    // primary: the deck in use in this panel. Another browser of the person's
+    // on the same deck comes second for its agents (browser_hands.live_connections).
+    const want = { hands, search: await servedEngines(conn.url), fetch: await readsPages(conn.url), primary: conn.url === inUse }
     const link = links.get(conn.url)
     if (!want.hands && !want.search.length && !want.fetch) {
       if (link) dropLink(conn.url)
@@ -243,7 +247,7 @@ function connect(conn, lent) {
     // An agent's own (headless) browser is named after the agent by Flight Deck.
     sock.send(JSON.stringify({ type: 'hello', token: conn.token, browser: conn.agent ? `Headless · ${conn.agent}` : browserLabel(),
                                version: VERSION, stopped: stoppedOn(conn.url), hands: link.lent.hands, search: link.lent.search,
-                               fetch: link.lent.fetch }))
+                               fetch: link.lent.fetch, primary: link.lent.primary }))
     clearInterval(link.pingTimer)
     link.pingTimer = setInterval(() => send(link, { type: 'ping' }), PING_MS)
   }
@@ -297,8 +301,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
     stopped = new Set(changes.handsStopped.newValue || [])
     for (const link of links.values()) send(link, { type: 'stopped', agents: stoppedOn(link.conn.url) })
   }
-  // A deck connected or disconnected (decks), or seeded the old way (conn).
-  if (changes.decks || changes.conn) ensureConnected()
+  // A deck connected or disconnected (decks), seeded the old way (conn), or
+  // another one put in use (deck): each deck hears whether it's the one in use.
+  if (changes.decks || changes.conn || changes.deck) ensureConnected()
 })
 chrome.permissions?.onAdded.addListener(() => ensureConnected())
 chrome.permissions?.onRemoved.addListener(() => ensureConnected())

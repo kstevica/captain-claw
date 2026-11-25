@@ -9,7 +9,8 @@ person, while they watch:
 
   agent (``browser`` tool, ``target="chrome"``)
       POST /fd/browser-hands/agent/act  {action, args}
-  → Flight Deck picks that agent's owner's browser (the one they used last)
+  → Flight Deck picks that agent's owner's browser (one where this deck is
+    the deck in use, then the one they used last)
       {"type": "act", id, agent: {slug, name}, action, args}   over the socket
   ← {"type": "result", id, ok, content, image?, data?, error?}
   → the agent gets the result (a screenshot as a base64 JPEG)
@@ -134,6 +135,7 @@ class _Conn:
     connected_at: float = field(default_factory=_now)
     last_seen: float = field(default_factory=_now)
     focused_at: float = 0.0     # the person was last at this browser (window focus)
+    primary: bool = False       # this deck is the one in use in that browser's panel
     stopped: tuple[str, ...] = ()   # agents the person stopped in the panel
     agent_slug: str = ""        # an agent's own (headless) browser: only that agent uses it
     hands: bool = True          # lent to the agents' browser tool (older extensions connect only then)
@@ -309,10 +311,12 @@ def activity(user_id: str) -> dict:
 
 def live_connections(user_id: str) -> list[_Conn]:
     """Every socket of the person's browsers that's open now — lent to the
-    agents' browser tool, running their web searches, or both — freshest first."""
+    agents' browser tool, running their web searches, or both. First the
+    browsers where this deck is the one in use (Captain for Chrome can be on
+    several decks; extensions before 0.11.1 don't say), then freshest first."""
     now = _now()
     live = [c for c in _CONNS.get(str(user_id), []) if not c.closed and now - c.last_seen < STALE_S]
-    return sorted(live, key=lambda c: max(c.focused_at, c.connected_at), reverse=True)
+    return sorted(live, key=lambda c: (c.primary, max(c.focused_at, c.connected_at)), reverse=True)
 
 
 def connections(user_id: str) -> list[_Conn]:
@@ -582,13 +586,16 @@ async def hands_ws(ws: WebSocket) -> None:
 def _apply_prefs(conn: _Conn, msg: dict) -> None:
     """What the browser lends: its hands (``hands``, absent = yes — older
     extensions only connect then) and the search engines it serves
-    (``search``). An agent's own headless browser never runs searches."""
+    (``search``). An agent's own headless browser never runs searches.
+    ``primary``: this deck is the one in use in its panel."""
     from captain_claw.flight_deck.browser_search import ENGINES
 
     if "hands" in msg:
         conn.hands = bool(msg.get("hands"))
     if "fetch" in msg:
         conn.reads_pages = bool(msg.get("fetch")) and not conn.agent_slug
+    if "primary" in msg:
+        conn.primary = bool(msg.get("primary"))
     raw = msg.get("search")
     if isinstance(raw, list) and not conn.agent_slug:
         conn.search_engines = tuple(e for e in dict.fromkeys(str(x) for x in raw[:20]) if e in ENGINES)
