@@ -157,6 +157,8 @@ def stage(agent_dir: Path, staging: Path, categories: set[str], *, workspace_mov
             if not keep:
                 snap.unlink()
                 continue
+            if part.key == "sessions" and "cron_jobs" in keep and "conversations" not in categories:
+                strip_job_runs(snap)
             stores.keep_only(snap, set(keep), blank=part.secret_columns)
             counts = stores.counts(snap)
             if not any(counts.get(t) for t in keep):
@@ -199,17 +201,50 @@ _JOB_FIELDS = ("name", "schedule", "tz", "prompt", "prompt_author", "delivery_ki
                "delivery", "enabled", "ignore_quiet_hours")
 
 
-def _schedules(owner_id: str, slug: str) -> list[dict[str, Any]]:
+def _schedules(owner_id: str, slug: str) -> tuple[list[dict[str, Any]], int]:
+    """Its scheduled tasks in Flight Deck, and how many run a flow (those
+    stay out: a flow is the person's, not the agent's)."""
     from captain_claw.flight_deck import fd_scheduler
     out: list[dict[str, Any]] = []
+    flows = 0
     try:
         for job in fd_scheduler.get_store().list(owner_id or None):
-            if str(job.get("agent_slug") or "") != slug or job.get("flow_id"):
+            if str(job.get("agent_slug") or "") != slug:
+                continue
+            if job.get("flow_id"):
+                flows += 1
                 continue
             out.append({k: job.get(k) for k in _JOB_FIELDS})
     except Exception as exc:
         log.warning("agent bundle: its scheduled tasks couldn't be read", agent=slug, error=type(exc).__name__)
-    return out
+    return out, flows
+
+
+# The agent's own cron jobs (sessions.db): what their runs said, and where
+# they ran, is conversation — it goes only with the conversations.
+_JOB_RUN_COLUMNS = {"chat_history": "'[]'", "monitor_history": "'[]'", "last_error": "NULL",
+                    "run_session_id": "''"}
+
+
+def strip_job_runs(db: Path) -> None:
+    """The agent's own cron jobs in the snapshot *db* without their run
+    history (the vacuum that follows leaves none of it in the file)."""
+    with closing(sqlite3.connect(str(db))) as c:
+        have = {r[1] for r in c.execute('PRAGMA table_info("cron_jobs")')}
+        sets = [f'"{col}" = {value}' for col, value in _JOB_RUN_COLUMNS.items() if col in have]
+        if sets:
+            c.execute(f"UPDATE cron_jobs SET {', '.join(sets)}")
+            c.commit()
+
+
+def agent_job_count(parts: dict[str, Any]) -> int:
+    """How many of its own cron jobs the staged (or bundled) parts hold."""
+    sessions = parts.get("sessions") if isinstance(parts.get("sessions"), dict) else {}
+    tables = sessions.get("tables") if isinstance(sessions.get("tables"), dict) else {}
+    try:
+        return int(tables.get("cron_jobs") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def person_ref(owner_id: str) -> str:
@@ -321,11 +356,16 @@ async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: 
                 (fd_dir / "chats.json").write_text(json.dumps(chats, ensure_ascii=False), encoding="utf-8")
                 counts["chat_messages"] = len(chats.get("messages") or [])
         if "schedules" in categories:
-            jobs = _schedules(owner_id, slug)
+            jobs, flows = _schedules(owner_id, slug)
             if jobs:
                 (fd_dir / "schedules.json").write_text(json.dumps(jobs, ensure_ascii=False, indent=1),
                                                        encoding="utf-8")
-                counts["schedules"] = len(jobs)
+            # Flight Deck's and its own (set up with its cron tool) — one count, as in Scheduled tasks.
+            if jobs or agent_job_count(staged["parts"]):
+                counts["schedules"] = len(jobs) + agent_job_count(staged["parts"])
+            if flows:
+                staged["notes"].append(f"{flows} scheduled task(s) that run a flow stayed out — "
+                                       "a flow isn't part of the agent.")
         manifest = {
             "format": archive.FORMAT,
             "format_version": archive.FORMAT_VERSION,

@@ -272,15 +272,16 @@ async def import_bundle(upload_id: str, body: ImportBody, request: Request,
     notes = [*ref.get("notes", []), *extra["notes"]]
     if restore.needs_key(config):
         notes.append(f"It has no key for {config.provider} yet — give it one in its Settings.")
-    if extra["schedules"]:
-        notes.append(f"{extra['schedules']} scheduled task(s) came with it, switched off — turn them on "
+    schedules = extra["schedules"] + int(ref.get("agent_jobs") or 0)   # Flight Deck's and its own cron jobs
+    if schedules:
+        notes.append(f"{schedules} scheduled task(s) came with it, switched off — turn them on "
                      "in Scheduled tasks.")
     if bundle.has("secrets.enc") and not keys:
         notes.append("Its keys stayed in the file (no passphrase was given).")
     log.info("agent imported", agent=slug, owner=owner_id or "-", notes=len(notes))
     return {"ok": True, "slug": slug, "name": name, "web_auth": result.web_auth,
             "fleet_instructions": result.fleet_instructions, "chat_messages": extra["chat_messages"],
-            "schedules": extra["schedules"], "connections": extra.get("connections", []),
+            "schedules": schedules, "connections": extra.get("connections", []),
             "keys_restored": bool(keys), "needs_key": restore.needs_key(config), "notes": notes}
 
 
@@ -348,12 +349,13 @@ async def _into_existing(path: Path, agent: dict[str, Any], slug: str, mode: str
             await asyncio.to_thread(srv._do_start_process, slug)
     log.info("agent bundle imported into an agent", agent=slug, owner=owner_id or "-", mode=mode)
     notes = [*done["notes"], *fd["notes"]]
-    if fd["schedules"]:
-        notes.append(f"{fd['schedules']} scheduled task(s) came with it, switched off.")
+    schedules = fd["schedules"] + int(done.get("agent_jobs") or 0)    # Flight Deck's and its own cron jobs
+    if schedules:
+        notes.append(f"{schedules} scheduled task(s) came with it, switched off.")
     return {"ok": True, "slug": slug, "name": str(entry.get("name") or slug), "mode": mode, "into": True,
             "counts": restore.headline(done["stores"]),
             "files": {k: done["files"].get(k, 0) for k in ("written", "kept")},
-            "chat_messages": fd["chat_messages"], "schedules": fd["schedules"], "connections": fd["connections"],
+            "chat_messages": fd["chat_messages"], "schedules": schedules, "connections": fd["connections"],
             "restarted": was_running, "notes": notes, "package": done.get("package"),
             "taken_out": done.get("taken_out") or {}, "from_version": int((earlier or {}).get("version") or 0),
             "safety_backup": {k: backup[k] for k in ("id", "file_name", "size")} if backup else None}
