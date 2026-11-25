@@ -85,10 +85,15 @@ async def _creds_resolver(db, owner: str) -> Callable[[str], dict]:
 
 async def _complete(
     creds: dict, system: str, user: str, *, max_tokens: int, temperature: float,
-    timeout: float | None, usage_out: dict | None,
+    timeout: float | None, usage_out: dict | None, owner: str = "", feature: str = "",
 ) -> OwnerCompletion:
     """Run one completion on resolved *creds*. Raises :class:`OwnerTierError`
-    (502 on any LLM error, 504 past *timeout*) and nothing else."""
+    (502 on any LLM error, 504 past *timeout*) and nothing else. A call for a
+    background *feature* says how it went (side_call_health)."""
+    from captain_claw.flight_deck import side_call_health
+
+    who = (owner, feature, str(creds.get("provider") or ""), str(creds.get("model") or ""),
+           str(creds.get("base_url") or ""))
     try:
         from captain_claw.llm import Message, create_provider
         provider = create_provider(
@@ -108,12 +113,17 @@ async def _complete(
             max_tokens=max_tokens)
         resp = await (call if timeout is None else asyncio.wait_for(call, timeout))
     except Exception as e:  # noqa: BLE001 — surface the real LLM error to the caller
+        await side_call_health.failed(*who, error=e)
         if timeout is not None and isinstance(e, TimeoutError):
             log.warning("llm complete timed out", timeout=timeout)
             raise OwnerTierError(504, f"LLM call timed out after {timeout:g}s") from None
         log.error("llm complete failed", exc_info=True)
         raise OwnerTierError(502, f"LLM call failed: {e}") from e
 
+    if (resp.content or "").strip():
+        await side_call_health.ok(*who)
+    else:
+        await side_call_health.failed(*who, error=None)
     usage = getattr(resp, "usage", None)
     if usage_out is not None and isinstance(usage, dict):
         usage_out.update(usage)
@@ -126,10 +136,11 @@ async def _complete(
 async def complete_for_owner(
     db, owner: str, tier: str, system: str, user: str, *,
     max_tokens: int, temperature: float,
-    timeout: float | None = None, usage_out: dict | None = None,
+    timeout: float | None = None, usage_out: dict | None = None, feature: str = "",
 ) -> OwnerCompletion:
     """One completion on *owner*'s ``tier`` — ``POST /fd/llm/complete`` without
     the HTTP. *user* is the user message; an empty *system* sends none.
+    *feature*: the background work it's for, when it is (side_call_health).
 
     Returns ``(content, finish_reason, provider, model)`` with ``content``
     stripped. Raises :class:`OwnerTierError` for every outcome the route turns
@@ -142,7 +153,7 @@ async def complete_for_owner(
         raise OwnerTierError(400, f"no model configured for the '{tier}' tier")
     return await _complete(creds, system, user, max_tokens=max_tokens,
                            temperature=temperature, timeout=timeout,
-                           usage_out=usage_out)
+                           usage_out=usage_out, owner=owner, feature=feature)
 
 
 def _unattended(order: Iterable[str]) -> list[str]:
@@ -183,7 +194,7 @@ async def first_owner_tier(
 async def complete_with_fallback(
     db, owner: str, order: Iterable[str], system: str, user: str, *,
     max_tokens: int, temperature: float,
-    timeout: float | None = None, usage_out: dict | None = None,
+    timeout: float | None = None, usage_out: dict | None = None, feature: str = "",
 ) -> OwnerCompletion:
     """:func:`complete_for_owner` for an unattended decision: tries the tiers
     of *order* (:data:`CLASSIFIER_TIER_ORDER`, :data:`JUDGE_TIER_ORDER`) in
@@ -226,10 +237,19 @@ async def complete_with_fallback(
         try:
             return await _complete(creds, system, user, max_tokens=max_tokens,
                                    temperature=temperature, timeout=timeout,
-                                   usage_out=usage_out)
+                                   usage_out=usage_out, owner=owner, feature=feature)
         except OwnerTierError as e:
             last = e
     raise last
+
+
+@router.get("/side-call-health")
+async def side_call_health_now(user: dict = Depends(get_current_user)) -> dict:
+    """The caller's background models that aren't working now — what their
+    Line told them about (side_call_health): model, why, what waits on it."""
+    from captain_claw.flight_deck import side_call_health
+
+    return {"problems": side_call_health.problems(user.get("id"))}
 
 
 class CompleteRequest(BaseModel):

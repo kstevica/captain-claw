@@ -39,6 +39,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from captain_claw.flight_deck import side_call_health
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.file_library import (
     _auth_enabled,
@@ -524,11 +525,12 @@ async def _model_skills(tier: dict, make_up: dict, done: dict, owner_id: str,
     limit = _TOP if offered is None else _MORE_BATCH
     try:
         content, _tokens = await call_model(tier, system, user, owner_id, max_tokens=_MAX_TOKENS,
-                                            request_timeout=_CALL_TIMEOUT)
+                                            request_timeout=_CALL_TIMEOUT, feature=side_call_health.SKILL_CARDS)
         return parse_skills(content, sources)[:limit]
     except ValueError:
         content, _tokens = await call_model(tier, system, f"{user}\n\n{_RETRY_NUDGE}", owner_id,
-                                            max_tokens=_MAX_TOKENS, request_timeout=_CALL_TIMEOUT)
+                                            max_tokens=_MAX_TOKENS, request_timeout=_CALL_TIMEOUT,
+                                            feature=side_call_health.SKILL_CARDS)
         return parse_skills(content, sources)[:limit]
 
 

@@ -54,7 +54,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
 from captain_claw import gmail_compose, gmail_inbound, jev_client
-from captain_claw.flight_deck import auth, jev_routes, llm_routes
+from captain_claw.flight_deck import auth, jev_routes, llm_routes, side_call_health
 from captain_claw.flight_deck.gmail_autoreply_config import MAX_TOPICS, Topic
 from captain_claw.logging import get_logger
 
@@ -813,7 +813,7 @@ async def _ask_tiers(db: Any, owner: str, order: Sequence[str], system: str, use
         try:
             out = await llm_routes.complete_with_fallback(
                 db, owner, (tier,), system, user, max_tokens=max_tokens, temperature=0,
-                timeout=timeout, usage_out=usage)
+                timeout=timeout, usage_out=usage, feature=side_call_health.EMAIL_AUTOREPLY)
         except llm_routes.OwnerTierError as exc:
             if key is not None:
                 asked.add(key)

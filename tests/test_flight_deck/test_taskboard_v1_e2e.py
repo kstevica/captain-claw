@@ -124,7 +124,8 @@ async def deck(env, tmp_path, monkeypatch):  # noqa: F811
     async def resolve_tier(user_id, prefer=("fast", "balanced")):
         return model.tier
 
-    async def model_reply(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+    async def model_reply(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None,
+                          feature=""):
         model.calls.append(SimpleNamespace(system=system, prompt=user, owner=owner_id))
         title = next((t for k, t in model.titles.items() if k in user), "")
         out = {"title": title, "ask": "", "requester": "", "parties": [], "due_at": None,
