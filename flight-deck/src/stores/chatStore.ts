@@ -326,8 +326,9 @@ function loadQueueSlice(containerId: string): LoadedQueueSlice | null {
 // A message written while the agent is still on a turn (or away) is not sent
 // into it: the agent would only refuse it ("busy"). It waits on the lane,
 // shown under the transcript as queued, and goes by itself once the agent is
-// free — oldest first, one turn each. Kept in localStorage like the queue, so
-// a reload (a phone that dropped the page) doesn't lose it.
+// free. Several waiting go together, as one message (heldBatches). Kept in
+// localStorage like the queue, so a reload (a phone that dropped the page)
+// doesn't lose it.
 
 export interface HeldMessage {
   id: string
@@ -342,6 +343,45 @@ export interface HeldMessage {
 
 let _heldCounter = 0
 function nextHeldId() { return `h-${Date.now()}-${++_heldCounter}` }
+
+/** How the held messages go, oldest first: the sizes of the batches, each one
+ *  message. All that wait go together — except that one opening with a
+ *  new-topic cue starts a batch of its own, since the agent acts on a cue only
+ *  at the start of a message (the next batch then goes when that turn ends). */
+function heldBatches(held: HeldMessage[]): number[] {
+  const sizes: number[] = []
+  held.forEach((h, i) => {
+    if (i === 0 || stripCue(h.content) !== null) sizes.push(1)
+    else sizes[sizes.length - 1]++
+  })
+  return sizes
+}
+
+/** Where each held message stands in heldBatches, for its bubble: its batch
+ *  (0 goes next), how many go with it, and whether it is the batch's last —
+ *  the bubble that says when they go. */
+export interface HeldPlace { batch: number; size: number; last: boolean }
+
+export function heldPlaces(held: HeldMessage[]): HeldPlace[] {
+  const out: HeldPlace[] = []
+  heldBatches(held).forEach((size, batch) => {
+    for (let j = 0; j < size; j++) out.push({ batch, size, last: j === size - 1 })
+  })
+  return out
+}
+
+/** The first batch of held messages (heldBatches) as the one message that
+ *  goes, and what waits after it. */
+function takeHeldBatch(held: HeldMessage[]): { batch: HeldMessage; rest: HeldMessage[] } {
+  const n = heldBatches(held)[0] ?? 0
+  const taken = held.slice(0, n)
+  const batch: HeldMessage = n === 1 ? taken[0] : {
+    id: nextHeldId(),
+    content: taken.map((h) => h.content.trim()).join('\n\n'),
+    at: taken[0].at,
+  }
+  return { batch, rest: held.slice(n) }
+}
 
 function _heldLSKey(containerId: string): string {
   return `fd.held.${_sliceId(containerId)}`
@@ -976,8 +1016,8 @@ function dropTakenHeld(key: string, rows: ChatMessage[], whole: boolean) {
 }
 
 // The agent went free: shortly after (its turn's trailing frames land first),
-// the oldest held message goes — before the queue's next task, whose kick
-// comes later and then finds the agent busy with it.
+// what is held goes, as one message — before the queue's next task, whose
+// kick comes later and then finds the agent busy with it.
 const HELD_FLUSH_MS = 300
 const _heldFlushes = new Map<string, ReturnType<typeof setTimeout>>()
 
@@ -998,9 +1038,10 @@ function cancelHeldFlush(key: string) {
   _heldFlushes.delete(key)
 }
 
-/** Send the oldest held message, if the agent can take it now (connected,
- *  free, a Stop not still landing, today's allowance left). One per turn: the
- *  next goes when that turn ends. True when one went. */
+/** Send what is held, if the agent can take it now (connected, free, a Stop
+ *  not still landing, today's allowance left): every message waiting, as one
+ *  message and one turn — up to one opening with a new-topic cue, which goes
+ *  (with any after it) when that turn ends (heldBatches). True when one went. */
 function flushHeld(key: string): boolean {
   const state = useChatStore.getState()
   const s = state.sessions.get(key)
@@ -1008,9 +1049,9 @@ function flushHeld(key: string): boolean {
   const q = useQuotaStore.getState().status
   if (q?.blocked && !q.exempt) return false
   cancelHeldFlush(key)
-  const [next, ...rest] = s.held
+  const { batch, rest } = takeHeldBatch(s.held)
   updateSession(key, { held: rest })
-  state.sendMessage(key, next.content, { released: true })
+  state.sendMessage(key, batch.content, { released: true })
   return true
 }
 
@@ -1964,11 +2005,12 @@ interface ChatStore {
   sendMessage: (containerId: string, content: string, opts?: SendOpts) => string | undefined
   /** Withdraw a held message before it goes. */
   cancelHeld: (key: string, id: string) => void
-  /** Hand a held message to the running turn now, as a note the agent reads
-   *  at its next step (instead of waiting for the turn to end). False when no
-   *  turn is on to take it. If the turn ends as it goes, it is held again and
-   *  sent as its own message. */
-  sendHeldInTurn: (key: string, id: string) => boolean
+  /** Hand what is held to the running turn now — the messages that would go
+   *  together once the agent is free (heldBatches), as one note the agent
+   *  reads at its next step, instead of waiting for the turn to end. False
+   *  when no turn is on to take it. If the turn ends as it goes, it is held
+   *  again (as that one message) and sent by itself. */
+  sendHeldInTurn: (key: string) => boolean
   /** Wake the agent of a chat that is held asleep (see ChatSession.asleep). */
   wakeAgent: (key: string) => void
   sendBtw: (containerId: string, content: string) => void
@@ -2229,9 +2271,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const wakeSends = _sendOnWake.get(key)
       _sendOnWake.delete(key)
       for (const w of wakeSends ?? []) sendFrame(key, w.content, w.opts, w.wasBusy, w.msgId)
-      // Messages held while the agent was busy or away: the oldest goes in a
-      // moment (a turn the agent reports meanwhile holds it back; one it is
-      // still on refuses it, and it waits again).
+      // Messages held while the agent was busy or away go in a moment, as one
+      // (a turn the agent reports meanwhile holds them back; one it is still
+      // on refuses them, and they wait again).
       scheduleHeldFlush(key)
       // If we hydrated a queue with pending items and auto-mode is on, kick
       // off the first dispatch now that the socket is live — and the same
@@ -3248,9 +3290,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       && (session.held.length > 0 || (!sleeping && (session.busy || session.stopping || !session.connected)))
     if (hold) {
       updateSession(containerId, { held: [...session.held, { id: nextHeldId(), content, at: Date.now() }] })
-      // Asleep: waking it is asking for it (the oldest goes on its welcome).
+      // Asleep: waking it is asking for it (what is held goes on its welcome).
       if (session.asleep && !session.connected) get().wakeAgent(containerId)
-      // Free already (only behind others waiting): it goes in a moment.
+      // Free already (only behind others waiting): it goes with them in a moment.
       else scheduleHeldFlush(containerId)
       return undefined
     }
@@ -3289,16 +3331,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     updateSession(key, { held: session.held.filter((h) => h.id !== id) })
   },
 
-  sendHeldInTurn: (key, id) => {
+  sendHeldInTurn: (key) => {
     const session = get().sessions.get(key)
-    const held = session?.held.find((h) => h.id === id)
-    if (!session || !held) return false
+    if (!session?.held.length) return false
     // Only a turn that is on can take it. (`stopping`: the turn is ending on
     // your word — a note for its remaining steps would be lost.)
     if (!session.busy || session.stopping || !session.connected) return false
-    session.ws.sendBtw(held.content, { runningOnly: true })
-    _inserts.set(key, [...(_inserts.get(key) ?? []), { kind: 'held', held }])
-    updateSession(key, { held: session.held.filter((h) => h.id !== id) })
+    // What would go once the agent is free goes now, as one note.
+    const { batch, rest } = takeHeldBatch(session.held)
+    session.ws.sendBtw(batch.content, { runningOnly: true })
+    _inserts.set(key, [...(_inserts.get(key) ?? []), { kind: 'held', held: batch }])
+    updateSession(key, { held: rest })
     return true
   },
 
