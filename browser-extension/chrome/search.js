@@ -38,11 +38,11 @@ class Refusal extends Error {}
 /** One result page for Flight Deck: what to send back as the act's result.
  * *tell* sends Flight Deck a word about this act meanwhile (a check handed
  * to the person). */
-export async function runSearch(msg, isCancelled, tell = () => {}) {
+export async function runSearch(msg, isCancelled, tell = () => {}, deck = '') {
   const engine = SEARCH_ENGINES[String(msg.engine || '')]
   try {
     if (!engine) throw new Refusal(`“${msg.engine}” isn't a search engine this browser runs.`)
-    if (!(await servedEngines()).includes(msg.engine)) {
+    if (!(await servedEngines(deck)).includes(msg.engine)) {
       throw new Refusal(`Searches on ${engine.name} aren't on in this browser (Captain → Settings → Web searches).`)
     }
     let url

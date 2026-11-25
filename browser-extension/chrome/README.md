@@ -8,9 +8,13 @@ carry on in Flight Deck.
 
 Works in Chrome, Edge, Brave and Arc (Chromium 116+).
 
-This is version **0.9.0**, shipped with Captain Claw 0.9.3. New since 0.7.2: a
+This is version **0.10.0**. New since 0.9: the browser can be connected to
+[several Flight Decks](#several-flight-decks) at once — agents on each of them
+can use it, and the panel works with the one you pick at its top.
+
+Before that, 0.9.0 (shipped with Captain Claw 0.9.3) handed a
 [robot check](#a-robot-check-on-the-way-you-answer-it-the-agent-goes-on) on an
-agent's search or page read is handed to you, and the panel has
+agent's search or page read to you, and gave the panel
 [playbooks](#playbooks--ready-made-ways-to-get-things-done): **Do it here**
 chips for the site you're on and a store behind **⚡**. Your recordings count
 as playbooks too.
@@ -26,6 +30,36 @@ as playbooks too.
 
 No password is kept in the extension — it holds a token of its own, which you
 can disconnect from Connections → Browser (or from the extension's settings).
+
+## Several Flight Decks
+
+One browser can be connected to more than one Flight Deck — a work deck and a
+home one, say. Click the deck's name under **Captain** at the top of the
+panel: **Your Flight Decks** lists them, with **Use**, **Open Flight Deck** and
+**Disconnect** for each, and **Connect another Flight Deck** pairs one more the
+same way as the first (each deck gives the browser a token of its own).
+
+- **The deck in use** is the one the panel works with: the agents you send a
+  page to, recordings, playbooks, Recent. Switching keeps what each deck had —
+  the agent you picked there, its lenses. A run you started keeps following its
+  own deck after you switch, and Recent says which deck each one went to.
+- **Agents on every deck** can use this browser, run their web searches and
+  read pages here, whichever deck is in use. Each agent works in tabs of its
+  own; with two decks connected its tab group says which deck it's from
+  (“Researcher · work”), and the panel names the deck beside the agent. **Stop**
+  stops that one agent on that one deck. The panel switches to an agent that
+  starts working only when it's on the deck in use.
+- Each deck's own choices stay its own: the search engine picked in its
+  Profile → Web searches, and whether it reads pages here (Profile → Web
+  pages). The switches in this panel's Settings are for this browser, on every
+  deck.
+- Every connected deck's own pages are off-limits to agents — from any deck.
+- **Disconnect** (in the list, or Settings) disconnects the browser from that
+  one deck; it stays connected to the others. A deck that disconnected the
+  browser from its side (Connections → Browser) says so in the list — **Remove**
+  it, or connect it again; the deck in use is dropped as soon as it says no.
+
+An agent's own headless browser stays connected to just its own deck.
 
 ### Updating
 

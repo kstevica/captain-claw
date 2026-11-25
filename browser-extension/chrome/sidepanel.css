@@ -74,6 +74,21 @@ a { color: var(--accent-text); }
 .brand { flex: 1; min-width: 0; }
 .brand-name { font-weight: 600; font-size: calc(13px * var(--fs)); }
 .brand-sub { font-size: calc(11px * var(--fs)); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The deck in use: opens the list of Flight Decks (switch, add another). */
+.deck-pick { display: block; max-width: 100%; padding: 0 14px 0 0; margin: 0; border: 0; background: none; font: inherit; font-size: calc(11px * var(--fs));
+  text-align: left; cursor: pointer; position: relative; border-radius: 4px; }
+.deck-pick::after { content: ''; position: absolute; right: 3px; top: 50%; width: 5px; height: 5px; margin-top: -4px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); opacity: .7; }
+.deck-pick:hover:not(:disabled), .deck-pick.on { color: var(--accent-text); }
+.deck-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.deck-pick:disabled { cursor: default; padding-right: 0; }
+.deck-pick:disabled::after { display: none; }
+.deck-row.in-use { border-color: var(--accent); }
+.deck-state { display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: calc(11px * var(--fs)); }
+.deck-state.done { color: var(--ok); }
+.deck-state.working { color: var(--accent-text); }
+.deck-state.error { color: var(--err); }
+.deck-state .dim { color: var(--muted); }
 
 .icon-btn {
   display: inline-flex; align-items: center; justify-content: center;

@@ -12,6 +12,11 @@
 // own pages and anything that isn't a web page are off-limits, and the
 // person can stop any agent from the panel.
 //
+// A browser connected to several Flight Decks keeps a socket to each, and
+// agents on every one of them can use it. An agent is known by its deck and
+// slug together (two decks may each have a "researcher"): its tab group, a
+// Stop in the panel and the tab to go back to are kept that way.
+//
 // The same socket carries the agents' web searches (search.js) and the pages
 // read here for their web_fetch (pages.js) when the person turned those on —
 // then it's open even with "Agents can use this browser" off, and Flight Deck
@@ -23,7 +28,7 @@
 // needs "Work on every site"), navigation through chrome.tabs, screenshots of
 // the tab in front — and the rest say what's in the way (lib/hands-errors.js).
 
-import { browserLabel, loadConn } from './lib/api.js'
+import { browserLabel, loadDecks, onDeck } from './lib/api.js'
 import { saveSearchPick, servedEngines } from './lib/engines.js'
 import { cleanError, LOST_DEBUGGER, needsDebugger, noScripting, OTHER_EXTENSION, plainNote } from './lib/hands-errors.js'
 import { scrollThrough, settleInPage } from './lib/settle.js'
@@ -49,15 +54,15 @@ class Refusal extends Error {}
 
 // ── state ──
 
-let ws = null
-let wsConn = null       // the deck connection the socket belongs to
-let lent = { hands: false, search: [], fetch: false }   // what the socket told Flight Deck this browser lends
-let retry = 0
-let retryTimer = 0
-let pingTimer = 0
+// One link per Flight Deck this browser is connected to: { conn, ws, lent,
+// retry, retryTimer, waiting, pingTimer } — lent is what the socket told that
+// deck this browser lends ({ hands, search: [engine ids], fetch }).
+const links = new Map()  // deck address → link
+let decks = []          // every deck this browser is connected to (lib/api.js)
+let statuses = {}       // deck address → { state, error, at }, for the panel
 let prefs = { on: false, front: false }
-let stopped = new Set()
-let groups = {}         // agent slug → { groupId, windowId, name, current }
+let stopped = new Set() // agents the person stopped: "<deck>|<slug>" (a bare slug, kept from before: on every deck)
+let groups = {}         // agent key ("<deck>|<slug>") → { groupId, windowId, name, title, current }
 let log = []
 let loaded = null
 const attached = new Map()   // tabId → { lastUse, world, console: [], net: Map, shotScale, since }
@@ -66,7 +71,7 @@ const attached = new Map()   // tabId → { lastUse, world, console: [], net: Ma
 const plainTabs = new Map()
 const cancelled = new Set()
 // Where to go back when an agent's run is over: window id → the tab the person
-// was on when one of that agent's tabs took the front ({ tabId, slug }).
+// was on when one of that agent's tabs took the front ({ tabId, key }).
 let returnTo = new Map()
 let actsRunning = 0
 const openedFrom = new Map() // tabId → [new tab ids opened from it]
@@ -99,11 +104,55 @@ function saveLog() {
   chrome.storage.session.set({ handsLog: log.slice(-LOG_MAX) }).catch(() => {})
 }
 
-function setStatus(state, error = '') {
-  chrome.storage.session.set({ handsStatus: { state, error, at: Date.now() } }).catch(() => {})
+function setStatus(deck, state, error = '') {
+  statuses[deck] = { state, error, at: Date.now() }
+  saveStatuses()
 }
 
-// ── the socket ──
+function saveStatuses() {
+  chrome.storage.session.set({ handsStatus: statuses }).catch(() => {})
+}
+
+// ── agents, by deck ──
+
+const agentKey = (deck, slug) => `${deck}|${slug}`
+
+/** "glasses" for glasses.example.com; a deck on this computer or an address keeps its host. */
+function deckShort(deck) {
+  try {
+    const u = new URL(deck)
+    return u.hostname === 'localhost' || /^[\d.]+$/.test(u.hostname) || !u.hostname.includes('.') ? u.host : u.hostname.split('.')[0]
+  } catch { return deck }
+}
+
+// With more than one deck connected, an agent's tab group says which deck it's from.
+const groupTitle = (name, deck) => (decks.length > 1 ? `${name} · ${deckShort(deck)}` : name)
+
+function agentOf(msg, link) {
+  const deck = link.conn.url
+  const slug = String(msg.agent?.slug || '')
+  const name = oneLine(msg.agent?.name || slug || 'Agent').slice(0, 40)
+  return { slug, name, deck, key: agentKey(deck, slug), title: groupTitle(name, deck) }
+}
+
+const isStopped = (agent) => stopped.has(agent.key) || stopped.has(agent.slug)
+
+/** The slugs of *deck*'s agents the person stopped, as that deck knows them. */
+function stoppedOn(deck) {
+  const out = new Set()
+  for (const s of stopped) {
+    const bar = s.lastIndexOf('|')
+    if (bar < 0) out.add(s)
+    else if (s.slice(0, bar) === deck) out.add(s.slice(bar + 1))
+  }
+  return [...out]
+}
+
+// Flight Deck's own pages are off-limits — every connected deck's, and the
+// one an act came from (an agent's own headless browser has just that one).
+const offLimits = (url, conn) => onDeck(url, conn ? [...decks, conn] : decks)
+
+// ── the sockets, one per deck ──
 
 export async function startHands() {
   await loadState()
@@ -117,118 +166,141 @@ function permitted() {
   return !!(chrome.debugger?.attach && chrome.tabGroups?.update)
 }
 
+const live = (ws) => !!ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)
+const sameLent = (a, b) => a.hands === b.hands && a.search.join() === b.search.join() && a.fetch === b.fetch
+
 async function ensureConnected() {
   await loadState()
   // Read fresh: a change can land while the first read is still on its way.
   const got = await chrome.storage.local.get(['hands', 'handsStopped']).catch(() => ({}))
   prefs = { on: false, front: false, ...(got.hands || {}) }
   stopped = new Set(Array.isArray(got.handsStopped) ? got.handsStopped : [])
-  const want = { hands: prefs.on && permitted(), search: await servedEngines(), fetch: await readsPages() }
-  if (!want.hands && attached.size) detachAll()
-  if (!want.hands && !want.search.length && !want.fetch) { disconnect(prefs.on ? 'permission' : 'off'); return }
-  const conn = await loadConn()
-  if (!conn) { disconnect('off'); return }
-  if (ws && wsConn && wsConn.url === conn.url && wsConn.token === conn.token &&
-      (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-    if (want.hands !== lent.hands || want.search.join() !== lent.search.join() || want.fetch !== lent.fetch) {
-      lent = want
-      send({ type: 'prefs', ...lent })
-      setStatus(ws.readyState === WebSocket.OPEN ? (lent.hands ? 'on' : 'search') : 'connecting')
-    }
-    return
+  decks = (await loadDecks().catch(() => null))?.decks || []
+  const hands = prefs.on && permitted()
+  if ((!hands || !decks.length) && attached.size) detachAll()
+  // A deck disconnected, or connected again with a new token: its socket goes.
+  for (const [url, link] of links) {
+    if (!decks.some((d) => d.url === url && d.token === link.conn.token)) dropLink(url)
   }
-  disconnect(null)
-  lent = want
-  connect(conn)
+  const before = Object.keys(statuses).length
+  statuses = Object.fromEntries(Object.entries(statuses).filter(([url]) => decks.some((d) => d.url === url)))
+  if (Object.keys(statuses).length !== before) saveStatuses()
+  for (const conn of decks) {
+    const want = { hands, search: await servedEngines(conn.url), fetch: await readsPages(conn.url) }
+    const link = links.get(conn.url)
+    if (!want.hands && !want.search.length && !want.fetch) {
+      if (link) dropLink(conn.url)
+      if (statuses[conn.url]?.state !== (prefs.on ? 'permission' : 'off')) setStatus(conn.url, prefs.on ? 'permission' : 'off')
+      continue
+    }
+    if (link && live(link.ws)) {
+      if (!sameLent(want, link.lent)) {
+        link.lent = want
+        send(link, { type: 'prefs', ...want })
+        setStatus(conn.url, link.ws.readyState === WebSocket.OPEN ? (want.hands ? 'on' : 'search') : 'connecting')
+      }
+      continue
+    }
+    // Waiting to try again after the deck went away: its own timer does that.
+    if (link?.waiting) { link.lent = want; continue }
+    connect(conn, want)
+  }
 }
 
-function disconnect(state) {
-  clearTimeout(retryTimer)
-  clearInterval(pingTimer)
-  if (ws) {
-    const old = ws
-    ws = null
+function dropLink(url) {
+  const link = links.get(url)
+  if (!link) return
+  links.delete(url)
+  clearTimeout(link.retryTimer)
+  clearInterval(link.pingTimer)
+  if (link.ws) {
+    const old = link.ws
+    link.ws = null
     old.onclose = null
     try { old.close(1000) } catch { /* already gone */ }
   }
-  wsConn = null
-  if (state) {
-    setStatus(state)
-    if (state === 'off' || state === 'permission') detachAll()
-  }
 }
 
-function connect(conn) {
+function connect(conn, lent) {
+  const retry = links.get(conn.url)?.retry || 0
+  dropLink(conn.url)
+  const link = { conn, ws: null, lent, retry, retryTimer: 0, waiting: false, pingTimer: 0 }
+  links.set(conn.url, link)
   let sock
   try {
     sock = new WebSocket(conn.url.replace(/^http/i, 'ws') + '/fd/clip/hands/ws')
   } catch (e) {
-    setStatus('error', String(e.message || e))
+    setStatus(conn.url, 'error', String(e.message || e))
     return
   }
-  ws = sock
-  wsConn = conn
-  setStatus('connecting')
+  link.ws = sock
+  setStatus(conn.url, 'connecting')
   sock.onopen = () => {
     // An agent's own (headless) browser is named after the agent by Flight Deck.
     sock.send(JSON.stringify({ type: 'hello', token: conn.token, browser: conn.agent ? `Headless · ${conn.agent}` : browserLabel(),
-                               version: VERSION, stopped: [...stopped], hands: lent.hands, search: lent.search,
-                               fetch: lent.fetch }))
-    clearInterval(pingTimer)
-    pingTimer = setInterval(() => send({ type: 'ping' }), PING_MS)
+                               version: VERSION, stopped: stoppedOn(conn.url), hands: link.lent.hands, search: link.lent.search,
+                               fetch: link.lent.fetch }))
+    clearInterval(link.pingTimer)
+    link.pingTimer = setInterval(() => send(link, { type: 'ping' }), PING_MS)
   }
   sock.onmessage = (ev) => {
     let msg
     try { msg = JSON.parse(ev.data) } catch { return }
     if (msg.type === 'welcome') {
-      retry = 0
-      setStatus(lent.hands ? 'on' : 'search')
-      if ('search_pick' in msg) saveSearchPick(String(msg.search_pick || ''))
-      if ('fetch_mode' in msg) saveFetchMode(String(msg.fetch_mode || ''))
+      link.retry = 0
+      setStatus(conn.url, link.lent.hands ? 'on' : 'search')
+      if ('search_pick' in msg) saveSearchPick(conn.url, String(msg.search_pick || ''))
+      if ('fetch_mode' in msg) saveFetchMode(conn.url, String(msg.fetch_mode || ''))
     }
-    else if (msg.type === 'search_pick') saveSearchPick(String(msg.engine || ''))
-    else if (msg.type === 'fetch_mode') saveFetchMode(String(msg.mode || ''))
-    else if (msg.type === 'fetch') fetchFor(msg)
-    else if (msg.type === 'denied') setStatus('denied', msg.error || '')
-    else if (msg.type === 'act') runAct(msg)
-    else if (msg.type === 'search') searchFor(msg)
+    else if (msg.type === 'search_pick') saveSearchPick(conn.url, String(msg.engine || ''))
+    else if (msg.type === 'fetch_mode') saveFetchMode(conn.url, String(msg.mode || ''))
+    else if (msg.type === 'fetch') fetchFor(msg, link)
+    else if (msg.type === 'denied') setStatus(conn.url, 'denied', msg.error || '')
+    else if (msg.type === 'act') runAct(msg, link)
+    else if (msg.type === 'search') searchFor(msg, link)
     else if (msg.type === 'cancel') cancelled.add(String(msg.id || ''))
-    else if (msg.type === 'turn_over') turnOver(String(msg.agent?.slug || ''))
+    else if (msg.type === 'turn_over') turnOver(agentKey(conn.url, String(msg.agent?.slug || '')))
   }
   sock.onclose = (ev) => {
-    if (ws !== sock) return
-    ws = null
-    clearInterval(pingTimer)
-    if (ev.code === 4401) { setStatus('denied', 'This browser was disconnected from Flight Deck.'); return }
-    setStatus('connecting', "Can't reach Flight Deck — trying again.")
-    const wait = [1000, 2000, 5000, 10000, 20000, 30000][Math.min(retry++, 5)]
-    clearTimeout(retryTimer)
-    retryTimer = setTimeout(ensureConnected, wait)
+    if (link.ws !== sock) return
+    link.ws = null
+    clearInterval(link.pingTimer)
+    if (links.get(conn.url) !== link) return
+    if (ev.code === 4401) { setStatus(conn.url, 'denied', 'This browser was disconnected from Flight Deck.'); return }
+    setStatus(conn.url, 'connecting', "Can't reach Flight Deck — trying again.")
+    const wait = [1000, 2000, 5000, 10000, 20000, 30000][Math.min(link.retry++, 5)]
+    clearTimeout(link.retryTimer)
+    link.waiting = true
+    link.retryTimer = setTimeout(() => { link.waiting = false; ensureConnected() }, wait)
   }
 }
 
-function send(msg) {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    try { ws.send(JSON.stringify(msg)) } catch { /* closing */ }
+function send(link, msg) {
+  if (link?.ws && link.ws.readyState === WebSocket.OPEN) {
+    try { link.ws.send(JSON.stringify(msg)) } catch { /* closing */ }
   }
 }
 
 chrome.alarms?.onAlarm.addListener((a) => { if (a.name === 'captain-hands') ensureConnected() })
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && (changes.search || changes.searchPick || changes.fetchMode || changes.fetchPrefs)) ensureConnected()
-  if (area === 'local' && changes.hands) {
+  if (area !== 'local') return
+  if (changes.search || changes.searchPicks || changes.fetchModes || changes.fetchPrefs) ensureConnected()
+  if (changes.hands) {
     prefs = { on: false, front: false, ...(changes.hands.newValue || {}) }
     ensureConnected()
   }
-  if (area === 'local' && changes.handsStopped) {
+  if (changes.handsStopped) {
     stopped = new Set(changes.handsStopped.newValue || [])
-    send({ type: 'stopped', agents: [...stopped] })
+    for (const link of links.values()) send(link, { type: 'stopped', agents: stoppedOn(link.conn.url) })
   }
-  if (area === 'local' && changes.conn) ensureConnected()
+  // A deck connected or disconnected (decks), or seeded the old way (conn).
+  if (changes.decks || changes.conn) ensureConnected()
 })
 chrome.permissions?.onAdded.addListener(() => ensureConnected())
 chrome.permissions?.onRemoved.addListener(() => ensureConnected())
-chrome.windows.onFocusChanged.addListener((id) => { if (id !== chrome.windows.WINDOW_ID_NONE) send({ type: 'focus' }) })
+chrome.windows.onFocusChanged.addListener((id) => {
+  if (id !== chrome.windows.WINDOW_ID_NONE) for (const link of links.values()) send(link, { type: 'focus' })
+})
 
 // ── one act ──
 
@@ -269,13 +341,17 @@ function hostOf(url) {
   try { return new URL(String(url).includes('://') ? url : 'https://' + url).host.replace(/^www\./, '') } catch { return '' }
 }
 
-async function runAct(msg) {
+// What the panel's log keeps of an act: by deck and agent.
+const logEntry = (id, agent, action, text) => ({ id, at: Date.now(), deck: agent.deck, key: agent.key, slug: agent.slug, name: agent.name,
+                                                 action, text, state: 'working' })
+
+async function runAct(msg, link) {
   await loadState()
   const id = String(msg.id || '')
-  const agent = { slug: String(msg.agent?.slug || ''), name: oneLine(msg.agent?.name || msg.agent?.slug || 'Agent').slice(0, 40) }
+  const agent = agentOf(msg, link)
   const action = String(msg.action || '')
   const args = msg.args && typeof msg.args === 'object' ? msg.args : {}
-  const entry = { id, at: Date.now(), slug: agent.slug, name: agent.name, action, text: describeAct(action, args), state: 'working' }
+  const entry = logEntry(id, agent, action, describeAct(action, args))
   const quiet = action === 'status' || action === 'release'
   if (!quiet) { log.push(entry); if (log.length > LOG_MAX) log = log.slice(-LOG_MAX); saveLog() }
   let result
@@ -283,11 +359,10 @@ async function runAct(msg) {
   actsRunning++
   try {
     if (!prefs.on) throw new Refusal("This browser isn't lent to agents (“Agents can use this browser” is off in Captain's settings).")
-    if (stopped.has(agent.slug)) throw new Refusal("The person stopped you using their browser (Stop in the Captain panel). They let you go on with “Let it again” there — ask them to, and don't try again until they say so.")
+    if (isStopped(agent)) throw new Refusal("The person stopped you using their browser (Stop in the Captain panel). They let you go on with “Let it again” there — ask them to, and don't try again until they say so.")
     const fn = ACTIONS[action]
     if (!fn) throw new Refusal(`“${action}” isn't something this browser does (Captain for Chrome ${VERSION}).`)
-    const conn = wsConn || (await loadConn())
-    const ctx = { id, agent, args, conn, action }
+    const ctx = { id, agent, args, conn: link.conn, action }
     try {
       result = await fn(ctx)
     } catch (e) {
@@ -307,21 +382,20 @@ async function runAct(msg) {
   try { await noteFront(agent, before) } catch { /* a tab went away meanwhile */ }
   actsRunning--
   if (!quiet) saveLog()
-  send({ type: 'result', id, ...result })
+  send(link, { type: 'result', id, ...result })
 }
 
 // ── a robot check handed to the person (lib/robot-check.js) ──
 
 // Flight Deck hears it (the agent waits longer, its chat says why), and the
 // panel's log shows it while it lasts.
-function tellerFor(id, agent) {
+function tellerFor(id, agent, link) {
   let entry = null
   return (m) => {
-    send({ ...m, id })
+    send(link, { ...m, id })
     if (m.joined) return
     if (!('over' in m)) {
-      entry = { id: `${id}:check`, at: Date.now(), slug: agent.slug, name: agent.name, action: 'robot_check', state: 'working',
-                text: `Waiting for you: answer ${m.site || 'the site'}'s robot check in the tab in front` }
+      entry = logEntry(`${id}:check`, agent, 'robot_check', `Waiting for you: answer ${m.site || 'the site'}'s robot check in the tab in front`)
       log.push(entry); if (log.length > LOG_MAX) log = log.slice(-LOG_MAX); saveLog()
     } else if (entry) {
       const solved = m.over === 'solved'
@@ -333,33 +407,28 @@ function tellerFor(id, agent) {
   }
 }
 
-function agentOf(msg) {
-  return { slug: String(msg.agent?.slug || ''), name: oneLine(msg.agent?.name || msg.agent?.slug || 'Agent').slice(0, 40) }
-}
-
 // ── a web search (search.js) ──
 
-async function searchFor(msg) {
+async function searchFor(msg, link) {
   const id = String(msg.id || '')
-  const result = await runSearch(msg, (x) => cancelled.has(x), tellerFor(id, agentOf(msg)))
+  const result = await runSearch(msg, (x) => cancelled.has(x), tellerFor(id, agentOf(msg, link), link), link.conn.url)
   cancelled.delete(id)
-  send({ type: 'result', id, ...result })
+  send(link, { type: 'result', id, ...result })
 }
 
 // ── a page read for an agent's web_fetch (pages.js) ──
 
-async function fetchFor(msg) {
+async function fetchFor(msg, link) {
   const id = String(msg.id || '')
-  const agent = agentOf(msg)
-  const entry = { id, at: Date.now(), slug: agent.slug, name: agent.name, action: 'fetch',
-                  text: `Read ${hostOf(String(msg.url || '')) || 'a page'} in the background`, state: 'working' }
+  const agent = agentOf(msg, link)
+  const entry = logEntry(id, agent, 'fetch', `Read ${hostOf(String(msg.url || '')) || 'a page'} in the background`)
   log.push(entry); if (log.length > LOG_MAX) log = log.slice(-LOG_MAX); saveLog()
-  const result = await runFetch(msg, (x) => cancelled.has(x), tellerFor(id, agent))
+  const result = await runFetch(msg, (x) => cancelled.has(x), tellerFor(id, agent, link), link.conn.url)
   cancelled.delete(id)
   entry.state = result.ok ? 'done' : 'failed'
   if (!result.ok) entry.error = clip(String(result.error || ''), 160)
   saveLog()
-  send({ type: 'result', id, ...result })
+  send(link, { type: 'result', id, ...result })
 }
 
 // ── going back to the person's tab ──
@@ -378,25 +447,25 @@ function saveReturn() {
 // After an act: one of the agent's tabs took the front where the person was on
 // a tab of their own → remember that tab (once per run).
 async function noteFront(agent, before) {
-  const g = groups[agent.slug]
+  const g = groups[agent.key]
   if (!g) return
   const after = await activeTabs()
   for (const [windowId, tab] of after) {
     const was = before.get(windowId)
     if (tab.groupId !== g.groupId || !was || was.id === tab.id || was.groupId === g.groupId) continue
     if (returnTo.has(windowId)) continue
-    returnTo.set(windowId, { tabId: was.id, slug: agent.slug })
+    returnTo.set(windowId, { tabId: was.id, key: agent.key })
     saveReturn()
   }
 }
 
 // The agent's run is over: where its tab is still in front, the person's comes back.
-async function turnOver(slug) {
+async function turnOver(key) {
   await loadState()
-  const g = await agentGroup({ slug, name: groups[slug]?.name || slug })
+  const g = await agentGroup({ key })
   let changed = false
   for (const [windowId, r] of [...returnTo]) {
-    if (r.slug !== slug) continue
+    if (r.key !== key) continue
     returnTo.delete(windowId)
     changed = true
     const [cur] = await chrome.tabs.query({ active: true, windowId }).catch(() => [])
@@ -431,15 +500,18 @@ function colorFor(slug) {
 }
 
 async function agentGroup(agent) {
-  const g = groups[agent.slug]
+  const g = groups[agent.key]
   if (!g || g.groupId == null) return null
   try {
     const tg = await chrome.tabGroups.get(g.groupId)
     g.windowId = tg.windowId
-    if (tg.title !== agent.name) chrome.tabGroups.update(g.groupId, { title: agent.name }).catch(() => {})
+    if (agent.title && tg.title !== agent.title) {
+      chrome.tabGroups.update(g.groupId, { title: agent.title }).catch(() => {})
+      g.title = agent.title
+    }
     return g
   } catch {
-    delete groups[agent.slug]
+    delete groups[agent.key]
     saveGroups()
     return null
   }
@@ -468,9 +540,9 @@ async function newTab(agent, { front = prefs.front } = {}) {
     await chrome.tabs.group({ groupId: g.groupId, tabIds: [tab.id] })
   } else {
     const groupId = await chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId } })
-    await chrome.tabGroups.update(groupId, { title: agent.name, color: colorFor(agent.slug) }).catch(() => {})
-    g = { groupId, windowId, name: agent.name }
-    groups[agent.slug] = g
+    await chrome.tabGroups.update(groupId, { title: agent.title, color: colorFor(agent.key) }).catch(() => {})
+    g = { groupId, windowId, name: agent.name, title: agent.title }
+    groups[agent.key] = g
   }
   g.current = tab.id
   saveGroups()
@@ -484,7 +556,7 @@ async function tabFor(agent, args, { create = false } = {}) {
     const tab = await chrome.tabs.get(id).catch(() => null)
     if (!tab) throw new Refusal(`There's no tab ${id} (it was closed?). Call tabs to see yours.`)
     if (!g || tab.groupId !== g.groupId) {
-      throw new Refusal(`Tab ${id} isn't one of yours. You can only use the tabs in your own tab group “${agent.name}” — the person can drag a tab into it to share it with you.`)
+      throw new Refusal(`Tab ${id} isn't one of yours. You can only use the tabs in your own tab group “${agent.title}” — the person can drag a tab into it to share it with you.`)
     }
     g.current = id
     saveGroups()
@@ -505,7 +577,7 @@ async function tabFor(agent, args, { create = false } = {}) {
 function guardTab(tab, conn) {
   const url = tab.pendingUrl || tab.url || ''
   if (!url || url === 'about:blank' || /^https?:/i.test(url)) {
-    if (conn && url && sameOrigin(url, conn.url)) throw new Refusal("Flight Deck's own pages are off-limits in the person's browser.")
+    if (url && offLimits(url, conn)) throw new Refusal("Flight Deck's own pages are off-limits in the person's browser.")
     return
   }
   throw new Refusal(`That tab shows ${clip(url, 80)} — agents work on web pages only. Navigate it to a web address.`)
@@ -523,7 +595,7 @@ function checkUrl(raw, conn) {
     throw new Refusal(`“${clip(text, 80)}” isn't a web address.`)
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Refusal(`Only web pages (http/https) — not ${u.protocol} addresses.`)
-  if (conn && sameOrigin(u.href, conn.url)) throw new Refusal("Flight Deck's own pages are off-limits in the person's browser.")
+  if (offLimits(u.href, conn)) throw new Refusal("Flight Deck's own pages are off-limits in the person's browser.")
   return u.href
 }
 
@@ -1461,7 +1533,7 @@ async function listTabs(ctx) {
   const g = await agentGroup(ctx.agent)
   const tabs = await groupTabs(g)
   if (!tabs.length) return 'You have no tabs open yet. navigate opens a page in a tab of your own (your tab group in the person\'s Chrome).'
-  return [`Your tabs (group “${ctx.agent.name}”):`, ...tabs.map((t) => tabLine(t, g.current))].join('\n')
+  return [`Your tabs (group “${ctx.agent.title}”):`, ...tabs.map((t) => tabLine(t, g.current))].join('\n')
 }
 
 const ACTIONS = {
@@ -1604,7 +1676,7 @@ const ACTIONS = {
       let url
       try { url = new URL(raw, tab.url).href } catch { failed.push(`${raw}: not an address`); continue }
       if (!/^https?:/i.test(url)) { failed.push(`${url}: not a web address`); continue }
-      if (sameOrigin(url, ctx.conn.url)) { failed.push(`${url}: Flight Deck's own address`); continue }
+      if (offLimits(url, ctx.conn)) { failed.push(`${url}: Flight Deck's own address`); continue }
       let res = sameOrigin(url, tab.url) ? await fetchInPage(tab.id, url) : { ok: false }
       if (!res.ok) {
         const here = await fetchHere(url)
@@ -1833,16 +1905,16 @@ const ACTIONS = {
     const tabs = await groupTabs(g)
     for (const t of tabs) { await detach(t.id); plainTabs.delete(t.id) }
     if (g) { g.current = null; saveGroups() }
-    return { content: `Let go of the person's Chrome.${tabs.length ? ` Your ${tabs.length} tab${tabs.length === 1 ? ' stays' : 's stay'} open in the “${ctx.agent.name}” group for them.` : ''}` }
+    return { content: `Let go of the person's Chrome.${tabs.length ? ` Your ${tabs.length} tab${tabs.length === 1 ? ' stays' : 's stay'} open in the “${ctx.agent.title}” group for them.` : ''}` }
   },
 }
 
 // Mark the agent as recently at work (a Cancel on Chrome's debugging bar stops it).
 for (const [name, fn] of Object.entries(ACTIONS)) {
   ACTIONS[name] = async (ctx) => {
-    const g = groups[ctx.agent.slug]
+    const g = groups[ctx.agent.key]
     const out = await fn(ctx)
-    const after = groups[ctx.agent.slug] || g
+    const after = groups[ctx.agent.key] || g
     if (after) after.recentAt = Date.now()
     return out
   }

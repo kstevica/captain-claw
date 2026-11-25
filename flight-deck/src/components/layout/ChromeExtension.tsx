@@ -209,6 +209,7 @@ function GetIt({ data }: { data: ChromeActivity }) {
           <p>Click the Captain icon, type this Flight Deck's address and press <b>Connect this browser</b>:</p>
           <CopyText text={deck} label="this Flight Deck's address" />
           <p className="text-xs text-zinc-500">A tab opens here with a code — check it matches the panel and approve it.</p>
+          <p className="text-xs text-zinc-500">Already connected to another Flight Deck? Click the deck's name at the top of the panel, then <b>Connect another Flight Deck</b> — the browser stays connected to both (Captain for Chrome 0.10 or newer).</p>
         </div>
       </li>
       <li className={step}>
