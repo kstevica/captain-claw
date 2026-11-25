@@ -418,6 +418,34 @@ async def test_the_close_adds_the_reply_and_queues_triage_again(api):
         [("reply", "error", "The turn ended in an error")]
 
 
+async def test_the_agents_checks_on_a_turn_are_kept_and_go_with_its_reply(api):
+    tid = _tid()
+    checks = [{"check": "fabrication", "kind": "false_mail_send", "outcome": "fixed", "count": 2},
+              {"check": "duplicate_call", "kind": "read", "outcome": "blocked", "count": 1}]
+    await _send(api, _open(api, tid), _close(api, tid, checks=checks))
+    assert api.board.get_turn(tid)["checks"] == checks
+    ev = api.board.events(api.alice, _task(api, api.alice, tid)["id"])[-1]
+    assert ev["kind"] == "reply" and ev["refs"]["checks"] == checks
+    # None fired: the reply carries no checks; an old agent's close has none at all.
+    for extra in ({"checks": []}, {}):
+        tid = _tid()
+        await _send(api, _open(api, tid), _close(api, tid, **extra))
+        assert api.board.get_turn(tid)["checks"] == []
+        assert "checks" not in api.board.events(api.alice, _task(api, api.alice, tid)["id"])[-1]["refs"]
+
+
+@pytest.mark.parametrize("bad", [
+    {"check": "fabrication", "kind": "x", "outcome": "fine", "count": 1},          # not an outcome
+    {"check": "Fabrication!", "kind": "", "outcome": "fixed", "count": 1},         # not a check's name
+    {"check": "stall", "kind": "<b>", "outcome": "flagged", "count": 1},           # not a kind
+    {"check": "stall", "kind": "", "outcome": "flagged", "count": 0},              # never fired
+])
+async def test_a_check_that_isnt_one_is_refused(api, bad):
+    tid = _tid()
+    r = await _post(api, _open(api, tid), _close(api, tid, checks=[bad]))
+    assert r.status_code == 422
+
+
 async def test_secrets_in_the_texts_are_masked_again(api):
     tid = _tid()
     await _send(api, _open(api, tid, text="use key sk-proj-abcdefghijklmnopqrstuv please"),

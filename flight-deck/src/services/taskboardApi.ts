@@ -197,6 +197,16 @@ export interface TaskItem {
 }
 
 /** One thing that happened to a task, on any channel. */
+/** One of the agent's own checks on a turn (turn_register.note_check), on its reply's refs. */
+export interface TurnCheck {
+  check: string
+  kind: string
+  /** sent_back: told to fix it · fixed: the reply that ended the turn passed ·
+   *  flagged: it went out anyway · blocked: the check stopped it. */
+  outcome: 'sent_back' | 'fixed' | 'flagged' | 'blocked'
+  count: number
+}
+
 export interface TaskEvent {
   id: number
   task_id: string

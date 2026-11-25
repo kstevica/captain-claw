@@ -2,11 +2,11 @@ import { Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent, typ
 import {
   AlertTriangle, Bot, Check, ChevronDown, CircleDot, CircleSlash, Clock, FileDown, Hand, HelpCircle, History, ListTodo, Loader2, ShieldAlert, Sparkles, Users, X,
 } from 'lucide-react'
-import type { ExportFormat, TaskAction, TaskFacet, TaskItem, TaskLinePlace, TaskProof, TaskboardStatus } from '../../services/taskboardApi'
+import type { ExportFormat, TaskAction, TaskFacet, TaskItem, TaskLinePlace, TaskProof, TaskboardStatus, TurnCheck } from '../../services/taskboardApi'
 import { resolveProposal } from '../../services/notifications'
 import {
-  JUDGE_LABEL, KEY_SHEET, OWES_LABEL, PROOF_LABEL, RESULT_LABEL, STATUS_LABEL, TASK_KEYS, agoRelative, channelInfo, foldChar, keyLabel,
-  markdownPieces, placeInLine, proofRow, type DatePreset, type DateRange, type TaskNote,
+  CHECK_OUTCOME_LABEL, JUDGE_LABEL, KEY_SHEET, OWES_LABEL, PROOF_LABEL, RESULT_LABEL, STATUS_LABEL, TASK_KEYS, agoRelative, channelInfo,
+  checkWords, foldChar, keyLabel, markdownPieces, placeInLine, proofRow, type DatePreset, type DateRange, type TaskNote,
 } from './taskboardText'
 
 // Pieces of the Taskboard: search highlighting (the server's folding, so
@@ -217,6 +217,46 @@ export function ProofSection({ proof, focused }: { proof: TaskProof; focused: bo
       )}
       {!!proof.more && <p className="mt-1 text-[11px] text-zinc-500">And {proof.more} more, in What happened.</p>}
     </section>
+  )
+}
+
+const CHECK_TONE: Record<string, string> = {
+  fixed: 'text-emerald-700 dark:text-emerald-400',
+  sent_back: 'text-zinc-400',
+  blocked: 'text-amber-700 dark:text-amber-400',
+  flagged: 'text-red-600 dark:text-red-400',
+}
+
+/** The checks on a turn's refs, as the server keeps them; [] for anything else. */
+export function turnChecks(refs: Record<string, unknown> | undefined): TurnCheck[] {
+  const raw = refs?.checks
+  if (!Array.isArray(raw)) return []
+  return raw.filter((c): c is TurnCheck => !!c && typeof c === 'object'
+    && typeof (c as TurnCheck).check === 'string' && typeof (c as TurnCheck).outcome === 'string')
+}
+
+/** What the agent's own checks said about the turn that wrote this reply:
+ *  what each found and what came of it. */
+export function TurnChecks({ checks }: { checks: TurnCheck[] }) {
+  if (!checks.length) return null
+  return (
+    <ul className="mt-1 space-y-0.5" aria-label="Captain's checks on this answer">
+      {checks.map((c, i) => {
+        const bad = c.outcome === 'flagged'
+        return (
+          <li key={i} className="flex items-start gap-1.5 text-[11px]">
+            {bad ? <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0 text-red-600 dark:text-red-400" />
+              : c.outcome === 'fixed' ? <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                : <ShieldAlert className="mt-0.5 h-3 w-3 shrink-0 text-amber-700 dark:text-amber-400" />}
+            <span className="min-w-0 break-words text-zinc-300">
+              {checkWords(c.check, c.kind)}
+              {c.count > 1 && <span className="text-zinc-500"> ×{c.count}</span>}
+              <span className={CHECK_TONE[c.outcome] || 'text-zinc-500'}> · {CHECK_OUTCOME_LABEL[c.outcome] || c.outcome}</span>
+            </span>
+          </li>
+        )
+      })}
+    </ul>
   )
 }
 

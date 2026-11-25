@@ -974,3 +974,42 @@ def test_a_move_only_reaches_what_is_ticked_and_on_the_list():
 def test_no_next_step_is_approved_from_the_bar():
     batch = _source(_TASK_BATCH)
     assert "ProposalButtons" not in batch and "resolveProposal" not in batch and "autonomy" not in batch
+
+
+# ── The agent's own checks under its reply (turn_register) ──
+
+def _turn_checks(refs) -> list:
+    return _run([(_TEXT, ["CHECK_WORDS", "checkWords", "CHECK_OUTCOME_LABEL"]),
+                 (_PARTS, ["CHECK_TONE", "turnChecks", "TurnChecks"])], f"""
+      const AlertTriangle = 'AlertTriangle', Check = 'Check', ShieldAlert = 'ShieldAlert';
+      const tree = TurnChecks({{ checks: turnChecks({json.dumps(refs)}) }});
+      const rows = [];
+      walk(tree, (n) => {{ if (n.type === 'li') rows.push([n.props.children[0].type, text(n)]) }});
+      out = rows;
+    """, prelude=_REACT)
+
+
+def test_a_replys_checks_say_what_was_found_and_what_came_of_it():
+    rows = _turn_checks({"checks": [
+        {"check": "fabrication", "kind": "false_mail_send", "outcome": "fixed", "count": 2},
+        {"check": "completion_gate", "kind": "script_execution_enforcement", "outcome": "sent_back", "count": 1},
+        {"check": "fabrication", "kind": "fabricated_id", "outcome": "flagged", "count": 1},
+        {"check": "duplicate_call", "kind": "read", "outcome": "blocked", "count": 1},
+        {"check": "something_new", "kind": "", "outcome": "blocked", "count": 1},
+    ]})
+    assert rows == [
+        ["Check", "Said an email went out that wasn’t sent ×2 · fixed before it answered"],
+        ["ShieldAlert", "Wrote a script and never ran it · sent back to fix it"],
+        ["AlertTriangle", "Quoted an ID nothing had shown · went out anyway"],
+        ["ShieldAlert", "Repeated the same call (read) · stopped"],
+        ["ShieldAlert", "something new · stopped"],
+    ]
+
+
+@pytest.mark.parametrize("refs", [{}, {"checks": []}, {"checks": "nope"}, {"checks": [{"kind": "x"}]}])
+def test_a_reply_without_checks_shows_none(refs):
+    assert _run([(_TEXT, ["CHECK_WORDS", "checkWords", "CHECK_OUTCOME_LABEL"]),
+                 (_PARTS, ["CHECK_TONE", "turnChecks", "TurnChecks"])], f"""
+      const AlertTriangle = 'AlertTriangle', Check = 'Check', ShieldAlert = 'ShieldAlert';
+      out = TurnChecks({{ checks: turnChecks({json.dumps(refs)}) }});
+    """, prelude=_REACT) is None

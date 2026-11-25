@@ -238,6 +238,9 @@ _TABLES: dict[str, list[tuple[str, str]]] = {
         ("cognitive_mode", "TEXT NOT NULL DEFAULT ''"),
         # v1.3: the Drive level the turn ran at ('' = not reported).
         ("drive", "TEXT NOT NULL DEFAULT ''"),
+        # v1.4: what the agent's own checks said about the turn (turn_register.note_check):
+        # [{check, kind, outcome, count}] — the start of what a person reviews of it.
+        ("checks", "TEXT NOT NULL DEFAULT '[]'"),
     ],
     "source_cursors": [
         ("source", "TEXT PRIMARY KEY"),
@@ -333,7 +336,7 @@ _WRITABLE = _TASK_COLUMNS - {"id", "user_id", "search_text", "fingerprint", "use
 # the store's own); JSON and yes/no columns are read back as such.
 _TURN_FIELDS = {name for name, _ in _TABLES["turns"]} - {
     "turn_id", "gate", "task_id", "task_key", "open_ref", "close_ref", "received_at"}
-_TURN_JSON = {"origin_detail": {}, "ext_refs": {}, "deliverables": [], "automation": {}}
+_TURN_JSON = {"origin_detail": {}, "ext_refs": {}, "deliverables": [], "automation": {}, "checks": []}
 _TURN_FLAGS = ("member", "opener", "human", "private", "own_chat")
 TURN_DROPPED = "skipped:dropped"
 
