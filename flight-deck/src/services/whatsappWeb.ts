@@ -240,6 +240,11 @@ export interface WhatsAppWebAutoreplyEntry {
   called?: string[]
   messages?: { id: string; sender: string; from_owner: boolean; reply_to_agent: boolean; text: string }[]
   steps?: WhatsAppWebAutoreplyStep[]
+  // The chat's photos that went to the model ("sent", else why not) …
+  pictures?: { sender: string; label?: string; status: string }[]
+  // … and how the agent showed them to its model: inline (it saw them), described
+  // (its vision model described them), unseen, or dropped (an agent from before pictures).
+  pictures_seen?: 'inline' | 'described' | 'unseen' | 'dropped' | string
   seconds?: number
   error?: string
   // The answer that went out: what its receipts said.
