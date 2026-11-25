@@ -311,6 +311,11 @@ def _build_replay_batch(session) -> list[dict]:
             payload["origin"] = msg_origin.origin_of(msg)
             if msg.get("channel"):
                 payload["channel"] = msg["channel"]
+            if role == "user" and isinstance(msg.get("words"), str):
+                # What the person typed, when the stored turn holds more (a
+                # picture's lines and the agent's guidance for it): the chat
+                # matches its log on these, and shows them if it heals the turn.
+                payload["words"] = msg["words"]
             batch.append(payload)
         elif role == "tool" and tool_name == "task_rephrase":
             batch.append({

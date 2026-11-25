@@ -71,3 +71,43 @@ async def test_another_role_or_session_does_not_count(chat):
     await db.add_chat_messages("proc-ana", uid, [{"role": "assistant", "content": LONG, "metadata": HEALED}], known=known)
     assert known == []
     assert await _rows(db, uid) == [("user", LONG), ("assistant", LONG)]
+
+
+def _healed_from(agent_session: str) -> str:
+    return json.dumps({"healed": True, "agent_session": agent_session})
+
+
+def _divider(agent_session: str) -> dict:
+    return {"role": "system", "content": "New topic",
+            "metadata": json.dumps({"topic": {"action": "new", "agentSessionId": agent_session, "source": "agent"}})}
+
+
+async def test_a_short_healed_line_counts_under_its_sessions_divider(chat):
+    """Glasses, 2026-11-23: a tab that was away took the session's short lines
+    another tab had saved for missing; "E-ink?" and "no" went in twice."""
+    db, uid = chat
+    await db.add_chat_messages("proc-ana", uid, [
+        {"role": "user", "content": "no"},                                  # an older session's "no"
+        _divider("s-2c41"), {"role": "user", "content": "E-ink?"}, {"role": "user", "content": "no"},
+    ])
+    known: list[int] = []
+    ids = await db.add_chat_messages("proc-ana", uid, [
+        {"role": "user", "content": "E-ink?", "metadata": _healed_from("s-2c41")},
+        {"role": "user", "content": "no", "metadata": _healed_from("s-2c41")},
+    ], known=known)
+    assert known == [0, 1] and len(set(ids)) == 2
+    assert len(await _rows(db, uid)) == 4
+
+
+async def test_a_short_healed_line_of_another_session_is_written(chat):
+    db, uid = chat
+    await db.add_chat_messages("proc-ana", uid, [
+        _divider("s-old1"), {"role": "user", "content": "no"}, _divider("s-new2")])
+    known: list[int] = []
+    await db.add_chat_messages("proc-ana", uid, [
+        {"role": "user", "content": "no", "metadata": _healed_from("s-new2")},     # said again in the new one
+        {"role": "user", "content": "no", "metadata": _healed_from("s-nolog")},    # a session the log doesn't name
+        {"role": "user", "content": "no", "metadata": _healed_from("%")},          # not a session id
+    ], known=known)
+    assert known == []
+    assert [c for _r, c in await _rows(db, uid)].count("no") == 4

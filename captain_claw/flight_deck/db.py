@@ -2451,12 +2451,20 @@ class FlightDeckDB:
         return ids
 
     _HEALED_MIN_CHARS = 40
+    _AGENT_SESSION_ID = re.compile(r"[A-Za-z0-9_.:-]{6,80}")
 
     async def _logged_healed_turn(self, session_id: str, msg: dict) -> int | None:
-        """The row id of a healed turn the log already has (add_chat_messages)."""
+        """The row id of a healed turn the log already has (add_chat_messages).
+
+        A line of 40+ characters counts anywhere in the log. A shorter one
+        ("E-ink?", "no") repeats for real, so it counts only when the chat says
+        which of the agent's sessions it healed from (``agent_session``) and
+        the log holds it under that session's first divider: a second tab whose
+        window missed rows another tab wrote then can't save them again
+        (glasses, 2026-11-23: four short lines a second time)."""
         role = str(msg.get("role") or "")
         content = str(msg.get("content") or "")
-        if role not in ("user", "assistant") or len(content) < self._HEALED_MIN_CHARS:
+        if role not in ("user", "assistant") or not content.strip():
             return None
         meta = msg.get("metadata")
         if isinstance(meta, str):
@@ -2466,10 +2474,25 @@ class FlightDeckDB:
                 return None
         if not isinstance(meta, dict) or meta.get("healed") is not True:
             return None
+        since = 0
+        if len(content) < self._HEALED_MIN_CHARS:
+            agent_session = str(meta.get("agent_session") or "")
+            if not self._AGENT_SESSION_ID.fullmatch(agent_session):
+                return None
+            # That session's first divider (a topic row naming it).
+            async with self._db.execute(
+                "SELECT MIN(id) FROM chat_messages WHERE session_id = ? AND role = 'system'"
+                " AND metadata LIKE '%agentSessionId%' AND instr(metadata, ?) > 0",
+                (session_id, agent_session),
+            ) as cur:
+                first = await cur.fetchone()
+            if not first or first[0] is None:
+                return None
+            since = int(first[0])
         async with self._db.execute(
-            "SELECT id FROM chat_messages WHERE session_id = ? AND role = ? AND content = ?"
+            "SELECT id FROM chat_messages WHERE session_id = ? AND role = ? AND content = ? AND id > ?"
             " ORDER BY id DESC LIMIT 1",
-            (session_id, role, content),
+            (session_id, role, content, since),
         ) as cur:
             row = await cur.fetchone()
         return int(row[0]) if row else None

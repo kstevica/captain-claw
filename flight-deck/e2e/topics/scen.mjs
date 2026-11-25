@@ -285,6 +285,79 @@ S.healedRowsFlagged = async () => {
   done()
 }
 
+// ── A turn with a picture (the agent's copy holds more than was typed) ──
+//
+// Glasses, 2026-11-25: the agent keeps a turn with a picture as the picture's
+// line, its guidance for the picture, then the words; the log has the words,
+// then the picture's line. The chat took the agent's copy for missing and
+// saved it again, guidance and all.
+
+const PIC = '[Attached image: /w/saved/downloads/s1/image-1.png]'
+const GUIDE = '(The image(s) above are attached and you can SEE them directly — describe/analyze them from what you see.)'
+const ASKED = 'I accepted the invitation, how do I get back to that channel?'
+const agentCopy = `${PIC}\n${GUIDE}\n${ASKED}`
+const logCopy = `${ASKED}\n\n${PIC}`
+
+// A turn kept before the replay carried the words: still matched.
+S.pictureTurnKeptBeforeWords = async () => {
+  const log = makeLog([divider('new', 's1'), turn('user', logCopy), turn('assistant', 'a1')])
+  const h = await setup({ auth: true, log, holdHistory: false })
+  await h.release()
+  h.ev.connected(); h.ev.welcome('s1'); h.ev.replay([['user', agentCopy], ['assistant', 'a1']]); h.ev.replayDone()
+  await h.flush()
+  check('nothing written', log.rows.length === 3, log.view())
+  check('shown once', count(h.view(), `user:${logCopy}`) === 1 && h.view().length === 3, h.view())
+  done()
+}
+
+// The replay says what was typed: matched on that.
+S.pictureTurnWithWords = async () => {
+  const log = makeLog([divider('new', 's1'), turn('user', logCopy), turn('assistant', 'a1')])
+  const h = await setup({ auth: true, log, holdHistory: false })
+  await h.release()
+  h.ev.connected(); h.ev.welcome('s1'); h.ev.replay([['user', agentCopy, { words: ASKED }], ['assistant', 'a1']]); h.ev.replayDone()
+  await h.flush()
+  check('nothing written', log.rows.length === 3, log.view())
+  check('shown once', h.view().length === 3, h.view())
+  done()
+}
+
+// A picture turn the log really is missing (sent from the phone): saved as
+// it was typed, with the picture — never the agent's guidance.
+S.missingPictureTurnSavedAsTyped = async () => {
+  const log = makeLog([divider('new', 's1'), turn('user', 'u1'), turn('assistant', 'a1')])
+  const h = await setup({ auth: true, log, holdHistory: false })
+  await h.release()
+  h.ev.connected(); h.ev.welcome('s1')
+  h.ev.replay([['user', 'u1'], ['assistant', 'a1'], ['user', agentCopy, { words: ASKED }], ['assistant', 'a2']]); h.ev.replayDone()
+  await h.flush()
+  const saved = log.rows.slice(3)
+  check('the turn and its reply written', saved.length === 2, log.view())
+  check('as typed, with the picture', saved[0]?.content === logCopy, saved[0]?.content)
+  check('no guidance shown', !h.view().some((v) => v.includes('SEE them')), h.view())
+  check('healed from s1', JSON.parse(saved[0]?.metadata || '{}').agent_session === 's1', saved[0]?.metadata)
+  done()
+}
+
+// A tab that was away while another tab wrote the session's short lines
+// (glasses, 2026-11-23): its replay takes them for missing; the log keeps one.
+S.staleTabShortLines = async () => {
+  const log = makeLog([divider('new', 's0'), turn('user', 'u0'), turn('assistant', 'a0')])
+  const h = await setup({ auth: true, log, holdHistory: false })
+  await h.release()
+  h.ev.connected(); h.ev.welcome('s0'); h.ev.replay([['user', 'u0'], ['assistant', 'a0']]); h.ev.replayDone()
+  await h.flush()
+  // Another tab: the agent moved to s1, and the turns went in there.
+  log.add([divider('new', 's1'), turn('user', 'E-ink?'), turn('assistant', 'a1'), turn('user', 'no')])
+  const before = log.rows.length
+  h.ev.disconnected(); h.ev.connected(); h.ev.welcome('s1')
+  h.ev.replay([['user', 'E-ink?'], ['assistant', 'a1'], ['user', 'no']]); h.ev.replayDone()
+  await h.flush(); await h.flush()
+  const again = log.rows.slice(before).filter((r) => r.role === 'user')
+  check('the short lines not written again', again.length === 0, log.view().slice(before))
+  done()
+}
+
 // ── A message sent as the socket dies (held again, sent once) ──
 //
 // Not dividers, but the same store and fake socket: a frame the agent never

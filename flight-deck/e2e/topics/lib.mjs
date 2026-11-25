@@ -72,15 +72,24 @@ export async function setup({ auth = true, log = makeLog(), holdHistory = true }
       return json(out)
     }
     if (/\/fd\/chat\/sessions\/[^/]+\/messages$/.test(u) && method === 'POST') {
-      // As db.add_chat_messages: a healed turn (40+ chars) the log has word for
-      // word is not written again; its row id comes back and its index in `known`.
+      // As db.add_chat_messages: a healed turn the log has word for word is not
+      // written again — a line of 40+ chars anywhere, a shorter one under the
+      // first divider of the agent session it was healed from — its row id
+      // comes back and its index in `known`.
       const body = JSON.parse(init.body)
       const ids = []
       const known = []
       body.messages.forEach((m, i) => {
-        const healed = JSON.parse(m.metadata || '{}').healed === true
-        const had = healed && (m.role === 'user' || m.role === 'assistant') && m.content.length >= 40
-          ? [...log.rows].reverse().find((r) => r.role === m.role && r.content === m.content) : undefined
+        const meta = JSON.parse(m.metadata || '{}')
+        const same = (r) => r.role === m.role && r.content === m.content
+        let had
+        if (meta.healed === true && (m.role === 'user' || m.role === 'assistant')) {
+          if (m.content.length >= 40) had = [...log.rows].reverse().find(same)
+          else if (meta.agent_session) {
+            const first = log.rows.find((r) => JSON.parse(r.metadata || '{}').topic?.agentSessionId === meta.agent_session)
+            if (first) had = [...log.rows].reverse().find((r) => r.id > first.id && same(r))
+          }
+        }
         if (had) { ids.push(had.id); known.push(i) } else ids.push(log.add([m])[0])
       })
       return json({ ok: true, ids, ...(known.length ? { known } : {}) })
@@ -104,7 +113,7 @@ export async function setup({ auth = true, log = makeLog(), holdHistory = true }
     connected: () => emit('_connected'),
     disconnected: () => emit('_disconnected'),
     welcome: (sid) => emit('welcome', { session: { id: sid, name: 'default' }, models: [], personalities: [] }),
-    replay: (turns) => emit('replay_batch', { messages: turns.map(([role, content]) => ({ type: 'chat_message', role, content, replay: true })) }),
+    replay: (turns) => emit('replay_batch', { messages: turns.map(([role, content, extra]) => ({ type: 'chat_message', role, content, replay: true, ...(extra || {}) })) }),
     replayDone: () => emit('replay_done'),
     sessionInfo: (sid, count = 2) => emit('session_info', { id: sid, name: 'default', message_count: count }),
     reply: (text) => emit('chat_message', { role: 'assistant', content: text }),

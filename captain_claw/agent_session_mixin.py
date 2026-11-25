@@ -1477,6 +1477,7 @@ class AgentSessionMixin:
         _reasoning_tokens = self._count_tokens(reasoning_content) if reasoning_content else 0
         _channel: str | None = None
         _source, _source_label = "", ""
+        _words: str | None = None
         if origin is None:
             from captain_claw import member_privacy, msg_origin
 
@@ -1487,6 +1488,9 @@ class AgentSessionMixin:
                     _src = getattr(self, "_turn_source", None)
                     if isinstance(_src, tuple) and len(_src) == 2:
                         _source, _source_label = _src
+                    # The person's own words, for the turn's opening message only.
+                    _words = getattr(self, "_turn_words", None)
+                    self._turn_words = None
                 else:
                     origin, origin_detail = msg_origin.resolve_turn_origin(content)
             elif role == "user":
@@ -1514,6 +1518,10 @@ class AgentSessionMixin:
             source_label=_source_label or None,
         )
         _added = self.session.messages[-1]
+        if isinstance(_words, str) and _words.strip() != str(content or "").strip():
+            # The turn's text holds more than the person typed (a picture's
+            # lines and guidance): their words, as their chat shows them.
+            _added["words"] = _words
         if _server_blocks:
             _added["server_blocks"] = _server_blocks
         if tool_calls:
