@@ -963,6 +963,35 @@ async def list_browsers(user: dict = Depends(get_current_user)):
             "extension_version": served}
 
 
+@owner_router.get("/activity")
+async def browser_activity(user: dict = Depends(get_current_user)):
+    """Captain for Chrome in Flight Deck's sidebar: whether the person's Chrome
+    is connected, what it does for their agents now, and what it did last.
+
+    ``state``: ``connected`` (a browser of theirs has its socket open),
+    ``offline`` (paired, but none is open now — Chrome closed, or nothing in
+    it lent to the agents) or ``not_set_up`` (never paired, or disconnected).
+    ``lent``: one that's connected lets the agents' browser tool use it."""
+    from captain_claw.flight_deck.browser_hands import activity, live_connections
+
+    uid = str(user["id"])
+    rows = [r for r in await get_db().list_pats(uid) if token_kind(r.get("name")) == "browser"]
+    live = [c for c in live_connections(uid) if not c.agent_slug]
+    served, seen = extension_version(), seen_versions()
+    browsers = []
+    for c in live:
+        version = c.version or str((seen.get(c.token_id) or {}).get("version") or "")
+        browsers.append({"name": c.browser, "version": version, "version_state": version_state(version, served),
+                         "agents_can_use": c.hands, "searches": list(c.search_engines),
+                         "reads_pages": c.reads_pages, "connected_s": int(time.monotonic() - c.connected_at)})
+    prefix = TOKEN_PREFIXES["browser"]
+    paired = [{"name": str(r.get("name") or "")[len(prefix):] or "Browser",
+               "last_used_at": r.get("last_used_at")} for r in rows]
+    state = "connected" if live else "offline" if rows else "not_set_up"
+    return {"state": state, "lent": any(c.hands for c in live), "browsers": browsers, "paired": paired,
+            **activity(uid), "extension_version": served, "download": extension_dir() is not None}
+
+
 @owner_router.delete("/{token_id}")
 async def remove_browser(token_id: str, user: dict = Depends(get_current_user)):
     from captain_claw.flight_deck.browser_hands import drop_agent_browser

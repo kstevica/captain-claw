@@ -12,7 +12,10 @@ Pinned here:
   and are listed in the act's answer; nobody else can post to that act;
 * Connections → Browser shows which browsers agents can use now;
 * a page holding another extension's frame (Chrome keeps the debugger off it)
-  is named as that — never "a chrome:// page" — with what still works there.
+  is named as that — never "a chrome:// page" — with what still works there;
+* Flight Deck's sidebar reads what the person's Chrome does for their agents
+  (``/fd/browsers/activity``): set up or not, connected, the act running now
+  and the ones before, in plain words — never what was typed.
 """
 
 from __future__ import annotations
@@ -62,6 +65,8 @@ async def deck(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
     monkeypatch.setattr(bh, "_CONNS", {})
     monkeypatch.setattr(bh, "_ACTS", {})
+    monkeypatch.setattr(bh, "_RECENT", {})
+    monkeypatch.setattr(bh, "_LAST_SITE", {})
     from captain_claw.flight_deck import browser_waits
     monkeypatch.setattr(browser_waits, "_JOBS", {})
     monkeypatch.setattr(bh, "_MINTED", {})
@@ -555,3 +560,62 @@ async def test_the_end_of_a_run_reaches_the_browsers_that_agent_uses(deck):
         assert r == {"ok": True, "browsers": 1}
         await asyncio.sleep(0.1)
     assert heard == {"person": ["scout", "ledger"], "own": ["scout"]}
+
+
+# ── what the person's Chrome is doing (Flight Deck's sidebar) ─────────
+
+
+async def test_the_sidebar_hears_what_the_persons_chrome_is_doing(deck):
+    c, jwt = deck["client"], deck["jwt"]
+    seen = (await c.get("/fd/browsers/activity", headers=jwt)).json()
+    assert seen["state"] == "not_set_up" and seen["now"] == [] and seen["recent"] == [] and not seen["lent"]
+    pat = await deck["pat"]()
+    seen = (await c.get("/fd/browsers/activity", headers=jwt)).json()
+    assert seen["state"] == "offline" and seen["paired"][0]["name"] == "Chrome on macOS"
+
+    hold = asyncio.Event()
+
+    async def answer(act):
+        if act["action"] == "click":
+            await hold.wait()
+        return {"ok": True, "data": {"url": "https://www.booking.com/hotel/x"}} if act["action"] == "navigate" \
+            else {"ok": True, "content": "done"}
+
+    async with FakeBrowser(deck["ws"], pat, answer=answer):
+        seen = (await c.get("/fd/browsers/activity", headers=jwt)).json()
+        assert seen["state"] == "connected" and seen["lent"]
+        assert seen["browsers"][0]["name"] == "Chrome on macOS" and seen["browsers"][0]["agents_can_use"]
+        await _act(c, "navigate", {"url": "https://www.booking.com/"})
+        await _act(c, "type", {"ref": "ref_3", "text": "my secret words"})
+        await _act(c, "status")   # bookkeeping: not shown
+        clicking = asyncio.create_task(_act(c, "click", {"ref": "ref_4"}))
+        for _ in range(100):
+            seen = (await c.get("/fd/browsers/activity", headers=jwt)).json()
+            if seen["now"]:
+                break
+            await asyncio.sleep(0.02)
+        now = seen["now"][0]
+        assert (now["agent"], now["doing"], now["site"], now["needs_you"]) == ("Scout", "Clicking", "booking.com", False)
+        # Another person sees none of it.
+        bobs = (await c.get("/fd/browsers/activity",
+                            headers={"Authorization": f"Bearer {create_access_token('bob')}"})).json()
+        assert bobs["state"] == "not_set_up" and bobs["now"] == [] and bobs["recent"] == []
+        hold.set()
+        assert (await clicking)["ok"]
+        seen = (await c.get("/fd/browsers/activity", headers=jwt)).json()
+    assert seen["now"] == []
+    assert [(r["did"], r["site"], r["ok"]) for r in seen["recent"]] == [
+        ("Clicked", "booking.com", True), ("Typed", "booking.com", True), ("Opened booking.com", "booking.com", True)]
+    assert "secret" not in json.dumps(seen)
+    seen = (await c.get("/fd/browsers/activity", headers=jwt)).json()
+    assert seen["state"] == "offline" and seen["recent"]   # what it did stays after Chrome closed
+
+
+def test_acts_are_said_in_plain_words_and_typed_text_is_never_repeated():
+    assert bh.act_words("navigate", {"url": "https://www.example.org/a?b=1"}) == \
+        ("Opening example.org", "Opened example.org", "example.org")
+    assert bh.act_words("navigate", {"url": "back"})[:2] == ("Going back", "Went back")
+    assert bh.act_words("type", {"text": "hunter2"}) == ("Typing", "Typed", "")
+    assert bh.act_words("press_key", {"key": "Enter"})[0] == "Pressing a key"
+    assert bh.act_words("something_new", {})[0] == "Doing something new"
+    assert bh.host_of("nope") == "nope" and bh.host_of("") == "" and bh.host_of("back") == ""

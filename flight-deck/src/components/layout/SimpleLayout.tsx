@@ -154,6 +154,9 @@ import { SimpleNav } from './SimpleNav'
 import { navEntries, type NavEntry, type NavTarget } from './navDestinations'
 import { PeoplePanel } from './PeoplePanel'
 import { PlaybookStorePanel, type PlaybookAgent } from '../playbooks/PlaybookStorePanel'
+import { ChromeExtensionDialog, ChromeNavRow, ChromeRailButton } from './ChromeExtension'
+import { useChromeActivity } from './useChromeActivity'
+import type { ChromeActivity } from '../../services/browserClip'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import { NetworkBadge, networkShareAction } from '../agents/NetworkShare'
 import { dockerShareKey, processShareKey, useNetworkShareStore } from '../../stores/networkShareStore'
@@ -515,6 +518,10 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [peopleOpen, setPeopleOpen] = useState(false)
   // Playbooks: ready-made ways to get things done on the web (the store).
   const [playbooksOpen, setPlaybooksOpen] = useState(false)
+  // Captain for Chrome (the Browser group's row): connected or not, and what
+  // it's doing for the agents. Not asked on a phone — it has no row there.
+  const [chromeOpen, setChromeOpen] = useState(false)
+  const chrome = useChromeActivity(chromeOpen, !isMobile)
   // With no chat open, the centre shows Today or the Agents cards (the nav picks).
   const [homeView, setHomeView] = useState<'today' | 'agents'>('today')
   // The Line's counts, for the nav's Inbox.
@@ -1196,12 +1203,15 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     }
     setTimeout(attempt, 150)
   }
-  const playbookConnections = () => {
-    setPlaybooksOpen(false)
+  // Connections → Browser (every browser and Mac, recordings): from the
+  // Playbooks store and from Captain for Chrome's dialog.
+  const browserConnections = () => {
     if (locked) { openConnections('browser'); return }
     try { localStorage.setItem('fd:connections-tab', 'browser') } catch { /* storage blocked: its last tab */ }
     useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('connections')
   }
+  const playbookConnections = () => { setPlaybooksOpen(false); browserConnections() }
+  const chromeConnections = () => { setChromeOpen(false); browserConnections() }
   const peopleToTask = (taskId: string) => showTaskboardTask(taskId)
   // Drive and OneDrive folders want the user's Google or Microsoft account:
   // Connections, on that tab.
@@ -1636,6 +1646,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
             covered={taskboardOpen} />
         </KioskWideDialog>
       )}
+      {chromeOpen && chrome && (
+        <ChromeExtensionDialog data={chrome} onClose={() => setChromeOpen(false)} onConnections={chromeConnections} />
+      )}
       {playbooksOpen && (
         <KioskWideDialog label="Playbooks" phone={isMobile} widest onClose={() => setPlaybooksOpen(false)}>
           <PlaybookStorePanel onClose={() => setPlaybooksOpen(false)} agents={playbookAgents} preferAgentId={activeAgentId}
@@ -1734,6 +1747,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         onInfo={locked ? () => setInfoOpen(true) : undefined}
         nav={nav}
         navCurrent={navCurrent}
+        chrome={chrome}
+        chromeOpen={chromeOpen}
+        onChrome={() => setChromeOpen(true)}
         onLibrary={() => openLibrary()}
         onData={() => openData()}
         onFolders={openFolders}
@@ -2169,7 +2185,7 @@ function workerLineRows(a: SimpleAgent, depth: number, family: FamilyHooks, phon
 
 function AgentsColumn({
   agents: allAgents, family, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onLeave, onRefresh, onSpawn, onGroup, onOptions, onSettings, onInfo,
-  nav, navCurrent, onLibrary, onData, onFolders, menuFor, locked = false, adminSwitch = false,
+  nav, navCurrent, chrome, chromeOpen = false, onChrome, onLibrary, onData, onFolders, menuFor, locked = false, adminSwitch = false,
 }: {
   agents: SimpleAgent[]
   /** The agent family: who sits under whom, moves, run workers (AgentFamily.tsx). */
@@ -2196,6 +2212,10 @@ function AgentsColumn({
   /** The outcome nav (Today, Inbox, Tasks…) and the one in front. */
   nav: NavEntry[]
   navCurrent: NavTarget | null
+  /** Captain for Chrome's state (null: not heard yet — no row), its dialog open, and opening it. */
+  chrome?: ChromeActivity | null
+  chromeOpen?: boolean
+  onChrome?: () => void
   /** Opens the File library. */
   onLibrary?: () => void
   /** Opens the Data library. */
@@ -2300,7 +2320,8 @@ function AgentsColumn({
           <NotificationBell align="left" />
         </div>
         <div className="py-1">
-          <SimpleNav entries={nav} current={navCurrent} rail />
+          <SimpleNav entries={nav} current={navCurrent} rail
+            extra={chrome && onChrome ? { browser: <ChromeRailButton data={chrome} onOpen={onChrome} open={chromeOpen} /> } : undefined} />
         </div>
         <div className="mx-4 my-2 border-t fd-divider" />
         <div className="flex flex-1 flex-col items-center gap-1.5 overflow-y-auto py-2">
@@ -2401,7 +2422,8 @@ function AgentsColumn({
 
       {/* What people come for, in plain words (the Line is the Inbox). */}
       <div className="px-3">
-        <SimpleNav entries={nav} current={navCurrent} />
+        <SimpleNav entries={nav} current={navCurrent}
+          extra={chrome && onChrome ? { browser: <ChromeNavRow data={chrome} onOpen={onChrome} open={chromeOpen} /> } : undefined} />
       </div>
       <div className="mx-4 mt-2 border-t fd-divider" />
 

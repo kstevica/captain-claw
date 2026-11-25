@@ -554,7 +554,9 @@ async def _load_page(conn: Any, owner: str, slug: str, name: str, engine: Engine
     act = hands._Act(id="hs_" + secrets.token_hex(10), user_id=owner, slug=slug, agent_name=name,
                      action="search", conn=conn, future=asyncio.get_running_loop().create_future(),
                      job=waits.current(), page_wait_s=PAGE_WAIT_S)
+    hands.describe(act, f"Searching {engine.name}", f"Searched {engine.name}", hands.host_of(engine.host))
     hands._ACTS[act.id] = act
+    msg: dict | None = None
 
     async def cancel() -> None:
         try:
@@ -577,6 +579,7 @@ async def _load_page(conn: Any, owner: str, slug: str, name: str, engine: Engine
             return {"ok": False, "error": f"{engine.name} didn't show results in {int(PAGE_WAIT_S)} s."}
     finally:
         hands._ACTS.pop(act.id, None)
+        hands.finish(act, msg)
     if act.robot and isinstance(msg, dict):
         data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
         if not isinstance(data.get("robot"), dict):

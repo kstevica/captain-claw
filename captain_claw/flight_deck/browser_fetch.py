@@ -259,7 +259,10 @@ async def fetch_in_browser(owner: str, slug: str, body: FetchBody) -> dict:
     act = hands._Act(id="hf_" + secrets.token_hex(10), user_id=owner, slug=slug, agent_name=name,
                      action="fetch", conn=conn, future=asyncio.get_running_loop().create_future(),
                      content_limit=MAX_HTML_CHARS, job=waits.current(), page_wait_s=PAGE_WAIT_S)
+    site = hands.host_of(url)
+    hands.describe(act, f"Reading {site or 'a page'}", f"Read {site or 'a page'}", site)
     hands._ACTS[act.id] = act
+    msg: dict | None = None
 
     async def cancel() -> None:
         try:
@@ -285,6 +288,7 @@ async def fetch_in_browser(owner: str, slug: str, body: FetchBody) -> dict:
                         "error": f"The page didn't settle in the person's Chrome in {int(PAGE_WAIT_S)} s."}
     finally:
         hands._ACTS.pop(act.id, None)
+        hands.finish(act, msg)
     data = msg.get("data") if isinstance(msg.get("data"), dict) else {}
     robot = data.get("robot") if isinstance(data.get("robot"), dict) else act.robot
     robot = {k: str(robot.get(k) or "")[:120] for k in ("site", "vendor", "outcome")} if isinstance(robot, dict) else None

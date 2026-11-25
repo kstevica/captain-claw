@@ -209,3 +209,62 @@ export interface ChromeFetchStatus {
 export const getChromeFetch = () => fdFetch<ChromeFetchStatus>('/fd/web-fetch/chrome')
 export const setChromeFetch = (mode: ChromeFetchMode, sites: string[]) =>
   fdFetch<ChromeFetchStatus>('/fd/web-fetch/chrome', { method: 'PUT', body: JSON.stringify({ mode, sites }) })
+
+// ── Captain for Chrome in the sidebar (browser_clip.browser_activity) ──
+//
+// Whether the person's Chrome is connected, what it does for their agents
+// now, and what it did last — in plain words, never what was typed.
+
+export type ChromeState = 'connected' | 'offline' | 'not_set_up'
+
+export interface ChromeBrowserLive {
+  name: string
+  version: string
+  version_state: '' | 'same' | 'update' | 'ahead'
+  /** “Agents can use this browser” is on in its panel. */
+  agents_can_use: boolean
+  /** Engines it runs the agents' web searches on. */
+  searches: string[]
+  /** It reads pages for the agents' web_fetch. */
+  reads_pages: boolean
+  connected_s: number
+}
+
+export interface ChromeActNow {
+  agent: string
+  slug: string
+  doing: string
+  site: string
+  for_s: number
+  browser: string
+  /** A robot check is open in their Chrome, waiting for them. */
+  needs_you: boolean
+}
+
+export interface ChromeActDone {
+  agent: string
+  slug: string
+  did: string
+  site: string
+  at: string
+  took_s: number
+  ok: boolean
+  browser: string
+  robot?: { site: string; outcome: string }
+}
+
+export interface ChromeActivity {
+  /** connected: a browser of theirs is open to Flight Deck now; offline: paired, none open; not_set_up: never paired. */
+  state: ChromeState
+  /** One that's connected lets the agents' browser tool use it. */
+  lent: boolean
+  browsers: ChromeBrowserLive[]
+  paired: { name: string; last_used_at: string | null }[]
+  now: ChromeActNow[]
+  recent: ChromeActDone[]
+  extension_version: string
+  /** This Flight Deck has the extension to hand out. */
+  download: boolean
+}
+
+export const getChromeActivity = () => fdFetch<ChromeActivity>('/fd/browsers/activity')
