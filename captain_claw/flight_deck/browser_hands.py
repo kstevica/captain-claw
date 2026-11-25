@@ -55,6 +55,7 @@ import json
 import logging
 import secrets
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -170,10 +171,139 @@ class _Act:
     wait_until: float = 0.0     # loop time it may run till while the person answers a check
     page_wait_s: float = 0.0    # a page's own wait (after the person answered)
     robot: dict | None = None   # the check handed over, and how it ended
+    # In plain words for Flight Deck's sidebar (``activity``): what it's doing
+    # now, what it did once it's over, and the site — never what is typed.
+    doing: str = ""
+    did: str = ""
+    site: str = ""
 
 
 _CONNS: dict[str, list[_Conn]] = {}
 _ACTS: dict[str, _Act] = {}
+
+
+# ── What the person's Chrome is doing, for Flight Deck's sidebar ──────
+#
+# The acts running now are ``_ACTS``; the ones that ended are kept here, a
+# few per person, in memory only (a restart forgets them). An agent's own
+# headless browser isn't the person's Chrome: its acts stay out.
+
+RECENT_KEEP = 12
+QUIET_ACTS = {"status", "release"}   # bookkeeping, not something done on a page
+_RECENT: dict[str, deque] = {}
+_LAST_SITE: dict[tuple[str, str], str] = {}   # (person, agent) → the site its tab is on
+
+
+def host_of(url: Any) -> str:
+    """``booking.com`` for ``https://www.booking.com/…`` ('' when it isn't an address)."""
+    from urllib.parse import urlsplit
+
+    raw = str(url or "").strip()
+    if not raw or raw in ("back", "forward"):
+        return ""
+    try:
+        host = urlsplit(raw if "://" in raw else "https://" + raw).hostname or ""
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+# action → (doing, did). Typed text, keys and scripts are never repeated.
+_ACT_WORDS: dict[str, tuple[str, str]] = {
+    "tab_new": ("Opening a new tab", "Opened a new tab"),
+    "tab_close": ("Closing a tab", "Closed a tab"),
+    "click": ("Clicking", "Clicked"),
+    "double_click": ("Clicking", "Clicked"),
+    "right_click": ("Clicking", "Clicked"),
+    "triple_click": ("Clicking", "Clicked"),
+    "hover": ("Pointing at something", "Pointed at something"),
+    "drag": ("Dragging", "Dragged"),
+    "type": ("Typing", "Typed"),
+    "press_key": ("Pressing a key", "Pressed a key"),
+    "form_input": ("Filling in a form", "Filled in a form"),
+    "scroll": ("Scrolling", "Scrolled"),
+    "scroll_to": ("Scrolling", "Scrolled"),
+    "screenshot": ("Taking a screenshot", "Took a screenshot"),
+    "zoom": ("Looking closer", "Looked closer"),
+    "read_page": ("Reading the page", "Read the page"),
+    "page_text": ("Reading the page", "Read the page"),
+    "find": ("Looking for something on the page", "Looked for something on the page"),
+    "page_files": ("Listing the page's files", "Listed the page's files"),
+    "download": ("Downloading files", "Downloaded files"),
+    "save_page": ("Saving the page", "Saved the page"),
+    "javascript": ("Running a script", "Ran a script"),
+    "console": ("Reading the page's console", "Read the page's console"),
+    "network_requests": ("Reading the page's network log", "Read the page's network log"),
+    "upload_file": ("Attaching a file", "Attached a file"),
+}
+
+
+def act_words(action: str, args: dict | None = None) -> tuple[str, str, str]:
+    """``(doing, did, site)`` for one act of an agent's ``browser`` tool."""
+    args = args if isinstance(args, dict) else {}
+    if action in ("navigate", "tab_new"):
+        url = str(args.get("url") or "")
+        if url == "back":
+            return "Going back", "Went back", ""
+        if url == "forward":
+            return "Going forward", "Went forward", ""
+        site = host_of(url)
+        if site:
+            return f"Opening {site}", f"Opened {site}", site
+    if action in _ACT_WORDS:
+        doing, did = _ACT_WORDS[action]
+        return doing, did, ""
+    plain = action.replace("_", " ").strip() or "something"
+    return f"Doing {plain}", f"Did {plain}", ""
+
+
+BACKGROUND_ACTS = {"search", "fetch"}   # in a tab of their own: the agent's tab stays where it was
+
+
+def describe(act: _Act, doing: str, did: str, site: str = "") -> None:
+    """Put the words on *act*; an act without a site of its own is on the
+    site that agent's tab was on last."""
+    key = (act.user_id, act.slug)
+    if site and act.action not in BACKGROUND_ACTS:
+        _LAST_SITE[key] = site
+    act.doing, act.did, act.site = doing, did, site or _LAST_SITE.get(key, "")
+
+
+def finish(act: _Act, result: dict | None) -> None:
+    """Note an act that ended (``result`` None: it never got an answer)."""
+    if act.conn.agent_slug or act.action in QUIET_ACTS or not act.did:
+        return
+    result = result if isinstance(result, dict) else {}
+    data = result.get("data") if isinstance(result.get("data"), dict) else {}
+    landed = host_of(data.get("url")) if data.get("url") and act.action not in BACKGROUND_ACTS else ""
+    if landed:
+        _LAST_SITE[(act.user_id, act.slug)] = landed
+    robot = act.robot or {}
+    row = {"agent": act.agent_name, "slug": act.slug, "did": act.did, "site": landed or act.site,
+           "at": datetime.now(UTC).isoformat(), "took_s": round(_now() - act.started, 1),
+           "ok": bool(result.get("ok")), "browser": act.conn.browser}
+    if robot.get("outcome"):
+        row["robot"] = {"site": str(robot.get("site") or ""), "outcome": str(robot.get("outcome") or "")}
+    kept = _RECENT.get(act.user_id)
+    if kept is None:
+        kept = _RECENT[act.user_id] = deque(maxlen=RECENT_KEEP)
+    kept.append(row)
+
+
+def activity(user_id: str) -> dict:
+    """What the person's Chrome does for their agents now, and did last
+    (newest first): ``{"now": [...], "recent": [...]}``."""
+    now = _now()
+    acts = sorted((a for a in _ACTS.values() if a.user_id == str(user_id) and not a.conn.agent_slug
+                   and a.action not in QUIET_ACTS and a.doing), key=lambda a: a.started)
+    return {
+        "now": [{"agent": a.agent_name, "slug": a.slug, "doing": a.doing, "site": a.site,
+                 "for_s": int(now - a.started), "browser": a.conn.browser,
+                 # A robot check handed to the person: it waits for them.
+                 "needs_you": bool(a.robot and a.robot.get("outcome") == "waiting")}
+                for a in acts],
+        "recent": list(reversed(_RECENT.get(str(user_id)) or ())),
+    }
 
 
 def live_connections(user_id: str) -> list[_Conn]:
@@ -602,7 +732,9 @@ async def agent_act(body: ActBody, request: Request) -> dict:
     name = await display_name(slug, owner) or slug or "Agent"
     act = _Act(id="ha_" + secrets.token_hex(10), user_id=owner, slug=slug, agent_name=name,
                action=body.action, conn=conn, future=asyncio.get_running_loop().create_future())
+    describe(act, *act_words(body.action, body.args))
     _ACTS[act.id] = act
+    result: dict | None = None
     try:
         try:
             await conn.send({"type": "act", "id": act.id, "agent": {"slug": slug, "name": name},
@@ -628,6 +760,7 @@ async def agent_act(body: ActBody, request: Request) -> dict:
         return result
     finally:
         _ACTS.pop(act.id, None)
+        finish(act, result)
 
 
 # ── An agent pairs its own browser (the person approves) ─────────────
