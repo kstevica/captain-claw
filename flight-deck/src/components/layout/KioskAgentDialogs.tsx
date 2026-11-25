@@ -88,7 +88,7 @@ export type AgentMenuItem = MenuItem & { group?: AgentMenuGroup }
 const AGENT_MENU_GROUPS: { key: AgentMenuGroup; title: string; caption: string }[] = [
   { key: 'work', title: 'At work', caption: 'What it’s doing, and what it did' },
   { key: 'knows', title: 'What it knows', caption: 'What it was taught, and what it learned' },
-  { key: 'who', title: 'Who it is', caption: 'Its role, its model, its reach' },
+  { key: 'who', title: 'Who it is', caption: 'Its name, role, model and reach' },
   { key: 'place', title: 'Its place', caption: 'Where it sits, and a copy of it' },
 ]
 

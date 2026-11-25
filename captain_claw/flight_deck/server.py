@@ -10762,6 +10762,11 @@ class ProcessActionResult(BaseModel):
     # A spawn's standing instructions as stored for the owner (the archetype's):
     # what the browser mirrors, not its own copy.
     fleet_instructions: str = ""
+    # A rename the agent goes by (identity with `introduce`): "now" (it runs and
+    # took it), "next_start" (it's off: its personality file has it), "restart"
+    # (it runs but couldn't be told: the file has it, a restart applies it),
+    # "failed" (neither). "" for anything else.
+    introduced: str = ""
 
 
 @app.get("/fd/processes", response_model=list[ProcessInfo])
@@ -11469,8 +11474,54 @@ async def set_process_parent(
 
 
 class ProcessIdentityUpdate(BaseModel):
-    name: str | None = None
+    name: str | None = Field(None, max_length=200)
     description: str | None = None
+    # A rename the agent goes by too: its own personality ("You are …") takes
+    # the new name, not only the label Flight Deck shows.
+    introduce: bool = False
+
+
+def _personality_file(slug: str) -> Path:
+    """Where a process agent keeps its personality: ~/.captain-claw in its own HOME."""
+    return DATA_DIR / slug / "data" / "home-config-parent" / ".captain-claw" / "personality.md"
+
+
+async def _introduce_as(slug: str, entry: dict, name: str) -> tuple[str, str]:
+    """The agent's own name follows a rename. A running agent is told through
+    its PUT /api/personality (it clears its prompt caches); one that is off or
+    asleep gets its personality file written, read at its next start.
+    Returns (how it went — see ProcessActionResult.introduced — and why not)."""
+    from captain_claw.personality import Personality, parse_personality_markdown, personality_to_markdown
+
+    port = int(entry.get("web_port") or 0)
+    running = bool(port) and _process_is_alive(slug)
+    why = ""
+    if running:
+        import httpx
+
+        auth = str(entry.get("web_auth") or "")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0), trust_env=False) as client:
+                r = await client.put(f"http://127.0.0.1:{port}/api/personality",
+                                     params={"token": auth} if auth else {}, json={"name": name})
+            if r.status_code == 200:
+                return "now", ""
+            why = f"it answered {r.status_code}"
+        except Exception as exc:  # noqa: BLE001 — the rename stands; the agent hears it next start
+            why = str(exc)[:200] or type(exc).__name__
+        log.warning("Couldn't tell a running agent its new name", agent=slug, error=why)
+    path = _personality_file(slug)
+    try:
+        current = parse_personality_markdown(path.read_text("utf-8")) if path.is_file() else Personality()
+        current.name = name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".md.tmp")
+        tmp.write_text(personality_to_markdown(current), "utf-8")
+        os.replace(tmp, path)
+        return ("restart", why) if running else ("next_start", "")
+    except OSError as exc:
+        log.warning("Couldn't write an agent's new name", agent=slug, error=str(exc))
+        return "failed", str(exc)[:200]
 
 
 @app.post("/fd/processes/{slug}/identity", response_model=ProcessActionResult)
@@ -11488,13 +11539,16 @@ async def update_process_identity(
     if entry is None:
         raise HTTPException(404, f"Process '{slug}' not found")
     if body.name is not None:
-        entry["name"] = body.name.strip() or entry.get("name", slug)
+        entry["name"] = " ".join(body.name.split()) or entry.get("name", slug)
     if body.description is not None:
         entry["description"] = body.description
     registry[slug] = entry
     _save_process_registry(registry)
     if body.name is not None:  # its name is in its family's blocks
         family_carrier.refresh_quietly(entry.get("owner"))
+    told, why = ("", "")
+    if body.name is not None and body.introduce:
+        told, why = await _introduce_as(slug, entry, str(entry.get("name") or slug))
     # The owner's Flight Deck lays its own saved labels over the registry's, so
     # an admin's rename would stay hidden behind them: drop those for this agent.
     if getattr(request.state, "acting_admin_id", ""):
@@ -11506,7 +11560,14 @@ async def update_process_identity(
                 await _update_owner_map(owner_id, key, slug, None)
             except Exception as exc:
                 log.warning("Could not clear the owner's label override", agent=slug, error=str(exc))
-    return ProcessActionResult(ok=True, slug=slug, message="Saved.")
+    name = str(entry.get("name") or slug)
+    message = {
+        "now": f"Renamed — it calls itself {name} now.",
+        "next_start": f"Renamed — it calls itself {name} from its next start.",
+        "restart": f"Renamed — it's running and didn't take the new name yet ({why}); it calls itself {name} after a restart.",
+        "failed": f"Renamed — but it couldn't be told its new name ({why}).",
+    }.get(told, "Saved.")
+    return ProcessActionResult(ok=True, slug=slug, message=message, introduced=told)
 
 
 @app.get("/fd/processes/{slug}/logs")

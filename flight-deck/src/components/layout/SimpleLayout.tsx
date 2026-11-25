@@ -55,6 +55,7 @@ import {
   MonitorPlay,
   CornerDownRight,
   Workflow,
+  PencilLine,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -136,6 +137,7 @@ import { KioskInfoDialog, type InfoAgent } from './KioskInfoDialog'
 import { KioskOnboardingDialog, type OnboardingAction } from './KioskOnboardingDialog'
 import { KioskAgentIdentityDialog } from './KioskAgentIdentityDialog'
 import { KioskAgentPictureDialog } from './KioskAgentPicture'
+import { KioskAgentRename } from './KioskAgentRename'
 import { AgentHome } from './AgentHome'
 import { AgentCards } from './AgentCards'
 import { AgentStoreDialog } from '../store/AgentStorePanel'
@@ -195,6 +197,8 @@ interface SimpleAgent {
   asleep?: boolean
   /** Shared with you: its agent_ref, and whose it is. */
   sharedRef?: string
+  /** …and its slug: the person's own name for it is kept under it. */
+  sharedSlug?: string
   ownerId?: string
   ownerName?: string
   /** Its family (agent_family): the id of the agent it sits under, whether it
@@ -312,6 +316,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   } = useContainerStore()
   const {
     processes, fetchProcesses, startProcess, stopProcess, restartProcess, removeProcess, descriptionOverrides: procDesc,
+    nameOverrides: procNames,
   } = useProcessStore()
   const { agents: localAgents, probeAll, probeAgent } = useLocalAgentStore()
   // Do NOT subscribe to the whole `sessions` Map — its identity churns on every
@@ -423,6 +428,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [filesDataId, setFilesDataId] = useState<string | null>(null)
   // …and the picture its square shows instead of its initials.
   const [agentPictureId, setAgentPictureId] = useState<string | null>(null)
+  // …and what it's called (KioskAgentRename).
+  const [renameId, setRenameId] = useState<string | null>(null)
   const avatars = useAgentAvatarStore((s) => s.avatars)
   const forgetAvatar = useAgentAvatarStore((s) => s.forgetAgent)
   // Agent groups: a group being made or edited, and the agent whose "⋯" → Group is open.
@@ -622,7 +629,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         const running = sa.status === 'running'
         list.push({
           id: sharedContainerId(sa.agent_ref), kind: 'shared',
-          name: sa.name || sa.slug, description: sa.description || '',
+          // The person's own name for it first, as the deck says it to them (agent_names.py).
+          name: procNames[sa.slug] || sa.name || sa.slug, description: sa.description || '',
+          sharedSlug: sa.slug,
           state: running ? 'running' : 'stopped', reachable: running,
           host: '', port: 0, auth: '', startKey: '', managed: false,
           sharedRef: sa.agent_ref, ownerId: sa.owner_id, ownerName: sa.owner_name,
@@ -633,7 +642,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     const rank = (a: SimpleAgent) => (a.asleep ? STATE_RANK.running : STATE_RANK[a.state])
     list.sort((x, y) => rank(x) - rank(y) || x.name.localeCompare(y.name))
     return list
-  }, [containers, processes, localAgents, dockerDesc, procDesc, sharingEnabled, sharedAgents])
+  }, [containers, processes, localAgents, dockerDesc, procDesc, procNames, sharingEnabled, sharedAgents])
 
   // ── The agent family (agent_family; AgentFamily.tsx) ──
   // An agent under another shows under it; one of yours goes under another by
@@ -967,6 +976,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       onSelect: () => setAgentPictureId(a.id),
     }
   }
+  // What it's called: any agent the person sees, except one Flight Deck runs itself.
+  const renameMenuItems = (a: SimpleAgent): AgentMenuItem[] => (a.managed || (a.kind === 'shared' && !a.sharedSlug) ? [] : [{
+    icon: PencilLine, label: 'Rename', tone: 'violet', group: 'who',
+    hint: a.kind === 'process' ? 'A new name — it goes by it too'
+      : a.kind === 'shared' ? 'Your own name for it' : 'A new name in your list',
+    onSelect: () => setRenameId(a.id),
+  }])
   // A process agent of yours as a colleague: who it is to the team and its email.
   const identityMenuItems = (a: SimpleAgent): AgentMenuItem[] => (a.kind === 'process' && !a.managed ? [{
     icon: IdCard, label: 'Identity & email', tone: 'cyan', group: 'who',
@@ -996,6 +1012,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     if (a.kind === 'shared') {
       return [
         ...filesDataMenuItems(a),
+        ...renameMenuItems(a),
         pictureMenuItem(a),
         groupMenuItem(a),
         ...pinMenuItems(a),
@@ -1046,6 +1063,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onSelect: () => showLessons(a.startKey, { name: a.name }) })
       }
       items.push(
+        ...renameMenuItems(a),
         ...identityMenuItems(a),
         { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', tone: 'zinc', group: 'who', onSelect: () => setAgentSettingsId(a.id) },
         pictureMenuItem(a),
@@ -1058,7 +1076,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       if (net.show) items.push({ icon: Globe, label: net.label, hint: net.hint, tone: 'cyan', group: 'who', onSelect: net.onClick, disabled: net.disabled })
     }
     // A local agent, or one Flight Deck runs: its picture is all of "who it is" here.
-    if (!((a.kind === 'docker' || a.kind === 'process') && !a.managed)) items.push(pictureMenuItem(a))
+    if (!((a.kind === 'docker' || a.kind === 'process') && !a.managed)) items.push(...renameMenuItems(a), pictureMenuItem(a))
     items.push(groupMenuItem(a), ...familyMenuItems(a), ...pinMenuItems(a))
     // The whole agent in one file — Flight Deck writes it from the agent's folder (process agents).
     if (a.kind === 'process' && !a.managed) {
@@ -1075,7 +1093,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   }
   // Off the kiosk its "⋯" holds only the agent's group and pin (the gear has the rest).
   const menuFor = locked ? agentMenuItems
-    : (a: SimpleAgent) => [...filesDataMenuItems(a, true), groupMenuItem(a), ...familyMenuItems(a), ...identityMenuItems(a), pictureMenuItem(a), ...pinMenuItems(a)]
+    : (a: SimpleAgent) => [...filesDataMenuItems(a, true), groupMenuItem(a), ...familyMenuItems(a), ...renameMenuItems(a), ...identityMenuItems(a), pictureMenuItem(a), ...pinMenuItems(a)]
   const groupPickerAgent = groupPickerId ? agents.find((a) => a.id === groupPickerId) : undefined
   const agentInfo = agentInfoId ? agents.find((a) => a.id === agentInfoId) : undefined
   const agentInstructions = agentInstructionsId ? agents.find((a) => a.id === agentInstructionsId) : undefined
@@ -1084,6 +1102,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const agentIdentity = agentIdentityId ? agents.find((a) => a.id === agentIdentityId) : undefined
   const filesData = filesDataId ? agents.find((a) => a.id === filesDataId) : undefined
   const agentPicture = agentPictureId ? agents.find((a) => a.id === agentPictureId) : undefined
+  const renaming = renameId ? agents.find((a) => a.id === renameId) : undefined
 
   const refresh = () => { fetchContainers(); fetchProcesses(); fetchShared(); probeAll() }
 
@@ -1602,6 +1621,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           agents={agents}
           phone={isMobile}
           onClose={() => setGroupDialog(null)}
+        />
+      )}
+      {renaming && (
+        <KioskAgentRename
+          agent={{ kind: renaming.kind, name: renaming.name, ownerName: renaming.ownerName,
+                   key: renaming.kind === 'shared' ? renaming.sharedSlug ?? '' : renaming.startKey }}
+          onClose={() => setRenameId(null)}
         />
       )}
       {agentPicture && (
