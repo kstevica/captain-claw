@@ -20,6 +20,11 @@ back, so the agent's replay can land before or after the log. It covers:
   a frame the agent never took goes back on hold and is sent again once the
   chat reconnects; one the agent took (the replay shows it) is not sent twice;
   a send on a socket that wasn't open is held, not lost.
+- **Several written while the agent is busy** (`heldGoAsOne`,
+  `heldNewTopicOwnTurn`, `heldSendAllInTurn`): they go together as one
+  message once the turn ends; a "new topic:" one waits for the turn after,
+  taking what follows it along; "Send all at next step" hands them over as one
+  note, and if the turn had just ended they go as that one message.
 
 ```bash
 flight-deck/e2e/topics/run.sh

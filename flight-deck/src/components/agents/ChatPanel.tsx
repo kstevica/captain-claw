@@ -72,7 +72,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { useShallow } from 'zustand/react/shallow'
-import { useChatStore, PLAN_LEVELS, LANE_MAIN, LANE_AUTO, LANES, laneKey, type PlanLevel, type NextStepOption, type HeldMessage } from '../../stores/chatStore'
+import { useChatStore, PLAN_LEVELS, LANE_MAIN, LANE_AUTO, LANES, laneKey, heldPlaces, type PlanLevel, type NextStepOption, type HeldMessage, type HeldPlace } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
@@ -1087,6 +1087,8 @@ function ChatContent({
   // While the agent is busy, what you send waits and goes once it is free.
   const sendTitle = pendingUploads > 0 ? 'Waiting for uploads...'
     : session.busy ? `Send when ${session.containerName} is free` : null
+  // How the held messages go: together, as one message (heldPlaces).
+  const heldAt = heldPlaces(session.held ?? [])
   // A ready box starts "Ask anything" (the e2e screenshot scripts find it by that).
   const placeholder = closed ? 'This chat has ended'
     : sleeping ? (session.waking ? 'Waking up…' : 'Asleep — write to wake it…')
@@ -1226,18 +1228,19 @@ function ChatContent({
           </div>
         )}
 
-        {/* Written while the agent was busy: each goes by itself once it is free. */}
+        {/* Written while the agent was busy: they go by themselves once it is
+            free, all together as one message. */}
         {session.held?.map((h, i) => (
           <HeldBubble
             key={h.id}
             held={h}
-            next={i === 0}
+            place={heldAt[i]}
             agentName={session.containerName}
             large={simple}
             conn={conn}
             sharedRef={sharedRef ?? ''}
             canInsert={session.busy && !session.stopping && session.connected}
-            onInsert={() => sendHeldInTurn(sessionKey, h.id)}
+            onInsert={() => sendHeldInTurn(sessionKey)}
             onCancel={() => cancelHeld(sessionKey, h.id)}
           />
         ))}
@@ -2474,13 +2477,14 @@ function replyBefore(messageId: string): string {
 }
 
 /** A message written while the agent was busy (or away): it waits under the
- *  transcript, dashed, and goes by itself once the agent is free — the first
- *  one next, the rest one turn each after it. "Send at next step" hands it to
- *  the running turn instead (the agent reads it at its next step); "Don't
- *  send" withdraws it. */
-function HeldBubble({ held, next, agentName, large, conn, sharedRef, canInsert, onInsert, onCancel }: {
+ *  transcript, dashed, and goes by itself once the agent is free — with the
+ *  others waiting, as one message (a new-topic one waits for the turn after:
+ *  heldPlaces). The last bubble of the ones going together says when they go,
+ *  and its "Send at next step" hands them all to the running turn instead (the
+ *  agent reads them at its next step); "Don't send" withdraws just this one. */
+function HeldBubble({ held, place, agentName, large, conn, sharedRef, canInsert, onInsert, onCancel }: {
   held: HeldMessage
-  next: boolean
+  place: HeldPlace
   agentName: string
   large: boolean
   conn: AgentConn | null
@@ -2492,8 +2496,12 @@ function HeldBubble({ held, next, agentName, large, conn, sharedRef, canInsert, 
 }) {
   const action = 'rounded px-1.5 py-0.5 text-[11px] transition-colors pointer-coarse:px-2.5 pointer-coarse:py-1.5'
   const sent = splitSentFiles(held.content)
+  const several = place.size > 1
+  const when = place.batch === 0
+    ? (several ? `These ${place.size} send as one message when ${agentName} is free` : `Sends when ${agentName} is free`)
+    : (several ? `These ${place.size} wait their turn, as one message` : 'Waiting its turn')
   return (
-    <div className="mb-3 flex flex-col items-end gap-0.5" data-fd-held>
+    <div className={`${place.last ? 'mb-3' : 'mb-1.5'} flex flex-col items-end gap-0.5`} data-fd-held>
       <div className={`max-w-[85%] rounded-br-sm border border-dashed border-violet-500/40 bg-violet-600/10 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'}`}>
         {sent.text && (
           <div className={`fd-markdown ${large ? 'text-base leading-relaxed' : 'text-sm'} text-zinc-300`}>
@@ -2504,20 +2512,24 @@ function HeldBubble({ held, next, agentName, large, conn, sharedRef, canInsert, 
           <FileChips files={sent.files} conn={conn} pictures="tile" viewUrl={(f) => sentPictureUrl(f, conn, sharedRef)}
             className={sent.text ? 'mt-2' : ''} />
         )}
-        <span className="mt-1 flex items-center justify-end gap-1 text-[10px] text-zinc-500">
-          <Clock className="h-3 w-3" />
-          {next ? `Sends when ${agentName} is free` : 'Waiting its turn'}
-        </span>
+        {place.last && (
+          <span className="mt-1 flex items-center justify-end gap-1 text-[10px] text-zinc-500">
+            <Clock className="h-3 w-3" />
+            {when}
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-1">
-        {canInsert && (
+        {canInsert && place.batch === 0 && place.last && (
           <button
             type="button"
             onClick={onInsert}
-            title={`Hand it to ${agentName}'s running turn now — read at its next step, without waiting for the turn to end`}
+            title={several
+              ? `Hand all ${place.size} to ${agentName}'s running turn now, as one note — read at its next step, without waiting for the turn to end`
+              : `Hand it to ${agentName}'s running turn now — read at its next step, without waiting for the turn to end`}
             className={`${action} text-violet-700 hover:bg-violet-500/10 dark:text-violet-300`}
           >
-            Send at next step
+            {several ? 'Send all at next step' : 'Send at next step'}
           </button>
         )}
         <button

@@ -18,7 +18,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { useChatStore, type HeldMessage } from '../../stores/chatStore'
+import { useChatStore, heldPlaces, type HeldMessage } from '../../stores/chatStore'
 import { uploadFileToAgent } from '../../services/fileTransfer'
 import { imageRef, type ChatMessage } from '../../services/agentChat'
 import { injectedAs, noteSummary, tidyServerPaths } from '../../utils/chatOrigin'
@@ -259,6 +259,7 @@ function EmbeddedChatBody({
   })()
 
   const pendingUploads = attachments.filter((a) => a.status === 'uploading').length
+  const heldAt = heldPlaces(session?.held ?? [])
 
   return (
     <div
@@ -287,19 +288,26 @@ function EmbeddedChatBody({
           </div>
         )}
 
-        {/* Written while the agent was busy: each goes once it is free. */}
-        {session?.held?.map((h) => (
-          <div key={h.id} className="mb-2 flex flex-col items-end gap-0.5">
+        {/* Written while the agent was busy: they go once it is free, all
+            together as one message (heldPlaces). */}
+        {session?.held?.map((h, i) => {
+          const place = heldAt[i]
+          const several = place.size > 1
+          return (
+          <div key={h.id} className={`${place.last ? 'mb-2' : 'mb-1'} flex flex-col items-end gap-0.5`}>
             <div className="max-w-[85%] rounded-lg border border-dashed border-violet-500/40 bg-violet-600/10 px-2.5 py-1.5 text-xs text-zinc-300">
               <SentBody content={h.content} conn={{ host, port, auth }} plain />
             </div>
             <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
-              Sends when free
-              {busy && connected && (
-                <button type="button" onClick={() => sendHeldInTurn(containerId, h.id)}
-                  title="Hand it to the running turn now — read at its next step"
+              {place.last && (place.batch === 0
+                ? (several ? `These ${place.size} send as one when free` : 'Sends when free')
+                : (several ? `These ${place.size} wait their turn` : 'Waiting its turn'))}
+              {busy && connected && place.batch === 0 && place.last && (
+                <button type="button" onClick={() => sendHeldInTurn(containerId)}
+                  title={several ? `Hand all ${place.size} to the running turn now, as one note — read at its next step`
+                    : 'Hand it to the running turn now — read at its next step'}
                   className="text-violet-300 underline-offset-2 hover:underline">
-                  Send at next step
+                  {several ? 'Send all at next step' : 'Send at next step'}
                 </button>
               )}
               <button type="button" onClick={() => cancelHeld(containerId, h.id)} className="text-zinc-500 underline-offset-2 hover:text-zinc-300 hover:underline">
@@ -307,7 +315,8 @@ function EmbeddedChatBody({
               </button>
             </span>
           </div>
-        ))}
+          )
+        })}
 
         <div ref={messagesEndRef} />
       </div>

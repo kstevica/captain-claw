@@ -420,5 +420,71 @@ S.heldWhenSocketNotOpen = async () => {
   done()
 }
 
+// ── Several written while the agent is busy (they go as one) ──
+
+/** A live lane on a turn of its own ("first" sent, the agent on it). */
+async function busyLane() {
+  const { h, sent } = await liveLane()
+  h.st().sendMessage(h.key, 'first')
+  await settle()
+  h.emit('status', { status: 'thinking' })
+  await settle()
+  return { h, sent }
+}
+
+// Two written during a turn: once it ends they go together, one turn.
+S.heldGoAsOne = async () => {
+  const { h, sent } = await busyLane()
+  h.st().sendMessage(h.key, 'also this')
+  h.st().sendMessage(h.key, 'and this')
+  await settle()
+  check('both held while busy', h.ses().held.length === 2 && same(sent, ['first']), { held: h.ses().held, sent })
+  h.ev.reply('done'); h.ev.ready()
+  await h.flush()
+  check('sent once, as one message', same(sent, ['first', 'also this\n\nand this']), sent)
+  check('nothing left on hold', h.ses().held.length === 0, h.ses().held)
+  check('one bubble for both', count(h.view(), 'user:also this\n\nand this') === 1, h.view())
+  done()
+}
+
+// A new-topic one waits for the turn after (the agent acts on a cue only at
+// the start of a message), and takes what was written after it along.
+S.heldNewTopicOwnTurn = async () => {
+  const { h, sent } = await busyLane()
+  h.st().sendMessage(h.key, 'a')
+  h.st().sendMessage(h.key, 'new topic: b')
+  h.st().sendMessage(h.key, 'c')
+  await settle()
+  h.ev.reply('done'); h.ev.ready()
+  await h.flush()
+  check('the first batch goes alone', same(sent, ['first', 'a']), sent)
+  check('the new-topic batch still waits', h.ses().held.length === 2, h.ses().held)
+  h.emit('status', { status: 'thinking' }); h.ev.reply('ok'); h.ev.ready()
+  await h.flush()
+  check('then the new topic, with what came after it', same(sent, ['first', 'a', 'new topic: b\n\nc']), sent)
+  check('nothing left on hold', h.ses().held.length === 0, h.ses().held)
+  done()
+}
+
+// "Send all at next step": one note to the running turn; refused (the turn
+// had just ended), it waits again as that one message and goes by itself.
+S.heldSendAllInTurn = async () => {
+  const { h, sent } = await busyLane()
+  const btw = []
+  h.ws.sendBtw = (content) => { btw.push(content) }
+  h.st().sendMessage(h.key, 'x')
+  h.st().sendMessage(h.key, 'y')
+  await settle()
+  check('handed over', h.st().sendHeldInTurn(h.key) === true, null)
+  check('one note for both', same(btw, ['x\n\ny']), btw)
+  check('nothing left on hold', h.ses().held.length === 0, h.ses().held)
+  h.ev.reply('done'); h.ev.ready()
+  h.emit('command_result', { command: '/btw', busy: false, content: '' })
+  await h.flush()
+  check('refused: sent as one message once free', same(sent, ['first', 'x\n\ny']), sent)
+  check('nothing left on hold after', h.ses().held.length === 0, h.ses().held)
+  done()
+}
+
 if (!S[name]) { console.log('scenarios:', Object.keys(S).join(' ')); process.exit(name ? 1 : 0) }
 await S[name]()
