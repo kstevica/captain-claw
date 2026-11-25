@@ -240,6 +240,11 @@ def _task_text(kind: str, payload: dict) -> str:
     return str(payload.get("text") or payload.get("workflow") or payload.get("path") or kind)
 
 
+def _limit_plan(payload: dict) -> str:
+    mark = payload.get("plan_limit") if payload.get("author") == "plan_limit" else None
+    return str(mark.get("plan") or "") if isinstance(mark, dict) else ""
+
+
 def _public_job(slug: str, name: str, row: sqlite3.Row, state: str, now: float) -> dict[str, Any]:
     payload = _loads(row["payload"], {})
     schedule = _loads(row["schedule"], {})
@@ -262,8 +267,11 @@ def _public_job(slug: str, name: str, row: sqlite3.Row, state: str, now: float) 
         "agent_state": state,
         "kind": kind,
         "task": _task_text(kind, payload),
-        # Who wrote it: "agent" for the cron tool, else a person (/cron, the panel).
+        # Who wrote it: "agent" for the cron tool, "plan_limit" for a carry-on
+        # after the plan's usage limit (limit_carry_on), else a person.
         "author": str(payload.get("author") or ""),
+        # A carry-on's plan ("ChatGPT", "Claude" or ""), for its label.
+        "limit_plan": _limit_plan(payload),
         "schedule": sched_text,
         "schedule_type": str(schedule.get("type") or ""),
         "session_id": str(row["session_id"] or ""),
