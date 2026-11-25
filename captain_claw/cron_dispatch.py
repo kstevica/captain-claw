@@ -980,11 +980,17 @@ async def execute_cron_job(ctx: RuntimeContext, job: Any, trigger: str = "schedu
             if not prompt_text:
                 raise ValueError(f"Cron job {job_id} has empty prompt payload")
             # The run happens in the job's own session; its result goes to
-            # the chat the job was set up from (session_id).
-            run_session = await job_run_session(ctx, job)
+            # the chat the job was set up from (session_id). A carry-on after
+            # the plan's usage limit runs back where the limit stopped the
+            # work, which it needs in front of it.
+            from captain_claw import limit_carry_on
+
+            run_session_id = limit_carry_on.run_session(payload)
+            if not run_session_id:
+                run_session_id = (await job_run_session(ctx, job)).id
             dispatch_status = await dispatch_prompt_in_session(
                 ctx,
-                session_id=run_session.id,
+                session_id=run_session_id,
                 prompt_text=prompt_text,
                 source=f"cron:{trigger}:{job_id}",
                 cron_job_id=job_id,

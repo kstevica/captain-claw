@@ -3033,6 +3033,22 @@ class AgentOrchestrationMixin:
                 except Exception as e:
                     error_str = str(e)
 
+                    # The plan's usage limit (the person's ChatGPT subscription
+                    # used up): waiting seconds won't cure it — often hours.
+                    # End the turn plainly and carry on after the reset.
+                    if isinstance(e, (LLMAPIError, LLMError)):
+                        from captain_claw import limit_carry_on
+
+                        _paused = await limit_carry_on.pause_turn(self, e)
+                        if _paused is not None:
+                            self._update_clarification_state(
+                                user_input=user_input,
+                                effective_user_input=effective_user_input,
+                                assistant_response=_paused,
+                            )
+                            await self._persist_assistant_response(_paused)
+                            return finish(_paused, success=False)
+
                     # Check if transient and retriable
                     _is_transient = False
                     if isinstance(e, LLMAPIError) and e.status_code in (408, 429, 502, 503, 529):

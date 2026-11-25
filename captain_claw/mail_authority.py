@@ -2030,6 +2030,11 @@ def cron_job_text(payload: dict | None) -> str:
     text = str(payload.get("text") or "")
     if payload.get("author") == "agent":
         return narrower_intent(text, str(payload.get("mail_intent_text") or ""))
+    if payload.get("author") == "plan_limit":
+        # A carry-on after the plan's usage limit (limit_carry_on) goes on
+        # with the interrupted request: judged on what was stored of it —
+        # what the person wrote, or the interrupted run's own judged text.
+        return str(payload.get("mail_intent_text") or "")
     return text
 
 

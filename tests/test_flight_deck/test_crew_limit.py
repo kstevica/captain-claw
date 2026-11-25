@@ -46,8 +46,16 @@ def test_what_counts_as_the_plans_limit():
                  '{"error": {"type": "usage_limit_reached", "resets_in_seconds": 7200}}'):
         assert h.plan_limit(text), text
     for text in ("Credit balance is too low", "Failed to authenticate. API Error: 401 invalid x-api-key",
-                 "API Error: 529 Overloaded", "Billing hard limit reached", ""):
+                 "API Error: 529 Overloaded", "Billing hard limit reached", "",
+                 # an API key's per-minute limit: trying again soon cures it
+                 "Rate limit reached for gpt-4o on tokens per min (TPM). Please try again in 1.2s."):
         assert not h.plan_limit(text), text
+
+
+def test_crew_reads_the_limit_as_the_agents_do():
+    from captain_claw import plan_limit as shared
+
+    assert h.plan_limit is shared.plan_limit and h.LIMIT_LONGEST_S == shared.LIMIT_LONGEST_S
 
 
 def test_when_it_resets():
@@ -101,7 +109,7 @@ for m in limitfirst limitwin limitmid limitzero limitguess limitalways nocredit;
 done
 mode=$(cat "$gd/mode" 2>/dev/null)
 k=$(( n - $(cat "$gd/since" 2>/dev/null || echo 0) ))
-soon=$(( $(date +%s) + 1 ))
+soon=$(( $(date +%s) + 3 ))   # whole seconds: +1 was often past by the time the runner read it
 say() { printf '%s\n' "$1"; }
 fails() { say "{\"type\":\"result\",\"is_error\":true,\"result\":\"$1\",\"session_id\":\"sess-1\"}"; exit 1; }
 done_now() {
