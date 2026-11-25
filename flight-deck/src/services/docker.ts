@@ -274,6 +274,8 @@ export interface ProcessActionResult {
   message: string
   /** A spawn's standing instructions as Flight Deck stored them for the owner. */
   fleet_instructions?: string
+  /** A rename the agent goes by: 'now' | 'next_start' | 'restart' | 'failed' ('' otherwise). */
+  introduced?: string
 }
 
 // ── Old Man quick-spawn ──
@@ -329,6 +331,16 @@ export const setProcessParent = (slug: string, parent: string, madeFor?: string)
       method: 'PUT',
       body: JSON.stringify(madeFor === undefined ? { parent } : { parent, made_for: madeFor }),
     })
+
+/** A new name for one of the owner's agents, kept in the registry (every
+ *  client sees it). `introduce`: the agent goes by it too — its personality
+ *  takes the name, at once when it runs, else from its next start. The
+ *  answer's message says which. */
+export const renameProcess = (slug: string, name: string, introduce: boolean) =>
+  fdFetch<ProcessActionResult>(`/processes/${encodeURIComponent(slug)}/identity`, {
+    method: 'POST',
+    body: JSON.stringify({ name, introduce }),
+  })
 
 export const spawnProcess = (config: SpawnConfig) =>
   fdFetch<ProcessActionResult>('/spawn-process', {
