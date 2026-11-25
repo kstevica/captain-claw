@@ -303,6 +303,7 @@ async def test_what_it_says_while_its_being_stopped_isnt_shown(deck):
     "Request timed out",
     "fetch failed",
     "Rate limit exceeded, please retry",
+    "Rate limit reached for gpt-4o on tokens per min (TPM). Please try again in 1.2s.",
 ])
 def test_what_trying_again_could_get_past(text):
     assert crew_harness.passing(text)

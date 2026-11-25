@@ -60,9 +60,10 @@ _PASSING = re.compile(
     r"|connection (?:was )?(?:reset|closed|refused|aborted|error|lost)|stream (?:ended|disconnected|closed)|fetch failed|network error"
     r"|timed? ?out|overloaded|temporarily unavailable|service unavailable|bad gateway|gateway time-?out|internal server error"
     r"|too many requests|rate.?limit|upstream|\b(?:408|429|500|502|503|504|520|522|524|529)\b", re.IGNORECASE)
-# ...and what trying again won't change, even when it's said in the same breath.
+# ...and what trying again won't change, even when it's said in the same breath
+# (an API key's "Rate limit reached … try again in 1.2s" isn't one).
 _LASTING = re.compile(
-    r"usage limit|limit reached|hit your .*limit|today's .*tokens|quota|billing|credit|payment|api.?key|invalid.*key|unauthori[sz]ed"
+    r"usage limit|(?<!rate )limit reached|hit your .*limit|today's .*tokens|quota|billing|credit|payment|api.?key|invalid.*key|unauthori[sz]ed"
     r"|authenticat|forbidden|permission|context.*(?:length|too long|exceed)|\b(?:400|401|402|403|404)\b", re.IGNORECASE)
 
 

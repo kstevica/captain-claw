@@ -109,7 +109,7 @@ for m in limitfirst limitwin limitmid limitzero limitguess limitalways nocredit;
 done
 mode=$(cat "$gd/mode" 2>/dev/null)
 k=$(( n - $(cat "$gd/since" 2>/dev/null || echo 0) ))
-soon=$(( $(date +%s) + 1 ))
+soon=$(( $(date +%s) + 3 ))   # whole seconds: +1 was often past by the time the runner read it
 say() { printf '%s\n' "$1"; }
 fails() { say "{\"type\":\"result\",\"is_error\":true,\"result\":\"$1\",\"session_id\":\"sess-1\"}"; exit 1; }
 done_now() {
