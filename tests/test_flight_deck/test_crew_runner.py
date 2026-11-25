@@ -88,8 +88,8 @@ async def deck(monkeypatch, tmp_path):
     monkeypatch.setattr("captain_claw.flight_deck.server.DATA_DIR", tmp_path / "fd-data")
     told: list[dict] = []
 
-    async def notify(task, *, stalled=False):
-        told.append({**task, "stalled": stalled})
+    async def notify(task, *, stalled=False, paused=False):
+        told.append({**task, "stalled": stalled, "paused": paused})
 
     monkeypatch.setattr(crew_runner, "_notify", notify)
     monkeypatch.setattr(crew_runner, "_sync_board", lambda task: None)
