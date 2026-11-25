@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Captain for Chrome",
   "short_name": "Captain",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Send the page you're on to one of your Captain agents \u2014 let your agents use this browser, signed in as you, in tabs of their own, and run their web searches and read pages here \u2014 and record what you do on a site once, so an agent does it for you after that.",
   "icons": {
     "16": "icons/icon-16.png",
