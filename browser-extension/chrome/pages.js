@@ -20,13 +20,13 @@
 // turned off here (Settings → Web pages). Never Flight Deck's own pages,
 // addresses on a private network or this computer, or anything but http(s).
 
-import { loadConn } from './lib/api.js'
+import { loadDecks } from './lib/api.js'
 import { handOver, passesByItself, robotCheck, siteOf } from './lib/robot-check.js'
 import { scrollThrough, settleInPage } from './lib/settle.js'
 import { inBackgroundTab } from './search.js'
 
 const GROUP_TITLE = 'Captain · reading'
-const PICK_KEY = 'fetchMode'       // Flight Deck's mode ('' = off), as it last said
+const PICK_KEY = 'fetchModes'      // each Flight Deck's mode ('' = off), as it last said: { deck address: mode }
 const PREFS_KEY = 'fetchPrefs'     // { declined: true } = turned off in this browser
 const ALL = ['<all_urls>']
 const WAIT_MAX_MS = 36000
@@ -38,23 +38,28 @@ const HTML_MAX = 2900000
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 class Refusal extends Error {}
 
-export async function loadFetchMode() {
+export async function loadFetchMode(deck) {
   const got = await chrome.storage.local.get([PICK_KEY, PREFS_KEY]).catch(() => ({}))
-  const mode = ['blocked', 'always'].includes(got[PICK_KEY]) ? got[PICK_KEY] : ''
-  return { mode, declined: !!got[PREFS_KEY]?.declined }
+  const said = got[PICK_KEY]?.[deck]
+  return { mode: ['blocked', 'always'].includes(said) ? said : '', declined: !!got[PREFS_KEY]?.declined }
 }
 
-export async function saveFetchMode(mode) {
+export async function saveFetchMode(deck, mode) {
+  if (!deck) return
   const m = ['blocked', 'always'].includes(mode) ? mode : ''
-  if (m !== (await loadFetchMode()).mode) await chrome.storage.local.set({ [PICK_KEY]: m })
+  const got = await chrome.storage.local.get(PICK_KEY).catch(() => ({}))
+  const modes = got[PICK_KEY] && typeof got[PICK_KEY] === 'object' ? got[PICK_KEY] : {}
+  if ((modes[deck] || '') === m) return
+  await chrome.storage.local.set({ [PICK_KEY]: { ...modes, [deck]: m } })
 }
 
 export async function setFetchDeclined(declined) {
   await chrome.storage.local.set({ [PREFS_KEY]: { declined: !!declined } })
 }
 
-export async function readsPages() {
-  const { mode, declined } = await loadFetchMode()
+/** Does this browser read pages for *deck*'s agents now? */
+export async function readsPages(deck) {
+  const { mode, declined } = await loadFetchMode(deck)
   if (!mode || declined) return false
   try { return await chrome.permissions.contains({ origins: ALL }) } catch { return false }
 }
@@ -80,17 +85,17 @@ export async function refusal(href) {
   try { u = new URL(href) } catch { return 'That address is broken.' }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return 'Only web pages (http or https) are read here.'
   if (privateHost(u.hostname)) return 'Addresses on a private network or this computer are never opened for an agent.'
-  const conn = await loadConn().catch(() => null)
-  try {
-    if (conn && new URL(conn.url).host === u.host) return "Flight Deck's own pages are never opened for an agent."
-  } catch { /* no deck address */ }
+  const { decks } = await loadDecks().catch(() => ({ decks: [] }))
+  if (decks.some((d) => { try { return new URL(d.url).host === u.host } catch { return false } })) {
+    return "Flight Deck's own pages are never opened for an agent."
+  }
   return ''
 }
 
 /** One page for Flight Deck: what to send back as the act's result. */
-export async function runFetch(msg, isCancelled, tell = () => {}) {
+export async function runFetch(msg, isCancelled, tell = () => {}, deck = '') {
   try {
-    if (!(await readsPages())) {
+    if (!(await readsPages(deck))) {
       throw new Refusal("This browser doesn't read pages for agents now (Flight Deck → Profile → Web pages, and “Work on every site” in Captain's settings).")
     }
     const href = String(msg.url || '')

@@ -15,7 +15,9 @@ export const SEARCH_ENGINES = {
 }
 
 const KEY = 'search'
-const PICK_KEY = 'searchPick'   // the engine picked in Flight Deck ('' = off), as it last said
+// The engine picked in each Flight Deck ('' = off), as it last said: { deck address: id }.
+// Each deck has its own pick; a browser connected to two serves each its own.
+const PICK_KEY = 'searchPicks'
 
 /** { on, engines: [ids the person allowed here], declined: id } */
 export async function loadSearchPrefs() {
@@ -28,23 +30,27 @@ export async function saveSearchPrefs(prefs) {
   await chrome.storage.local.set({ [KEY]: prefs })
 }
 
-export async function loadSearchPick() {
+export async function loadSearchPick(deck) {
   const got = await chrome.storage.local.get(PICK_KEY).catch(() => ({}))
-  const id = String(got[PICK_KEY] || '')
+  const id = String(got[PICK_KEY]?.[deck] || '')
   return SEARCH_ENGINES[id] ? id : ''
 }
 
-export async function saveSearchPick(id) {
+export async function saveSearchPick(deck, id) {
+  if (!deck) return
   const pick = SEARCH_ENGINES[id] ? id : ''
-  if (pick !== (await loadSearchPick())) await chrome.storage.local.set({ [PICK_KEY]: pick })
+  const got = await chrome.storage.local.get(PICK_KEY).catch(() => ({}))
+  const picks = got[PICK_KEY] && typeof got[PICK_KEY] === 'object' ? got[PICK_KEY] : {}
+  if ((picks[deck] || '') === pick) return
+  await chrome.storage.local.set({ [PICK_KEY]: { ...picks, [deck]: pick } })
 }
 
-/** Engines this browser serves now: allowed here (the panel's Allow), or the
- * one picked in Flight Deck unless it was turned off here — and Chrome still
- * lets Captain read the engine's result pages. */
-export async function servedEngines() {
+/** Engines this browser serves *deck* now: allowed here (the panel's Allow),
+ * or the one picked in that Flight Deck unless it was turned off here — and
+ * Chrome still lets Captain read the engine's result pages. */
+export async function servedEngines(deck) {
   const prefs = await loadSearchPrefs()
-  const pick = await loadSearchPick()
+  const pick = await loadSearchPick(deck)
   if (!chrome.permissions?.contains) return []
   const wanted = new Set(prefs.on ? prefs.engines : [])
   if (pick && prefs.declined !== pick) wanted.add(pick)

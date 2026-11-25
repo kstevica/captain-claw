@@ -7,10 +7,14 @@
 // "Anonymize" sends the page or the selection to Flight Deck instead
 // (/fd/clip/anonymize): names, numbers and addresses come back as tokens,
 // the real values stay in a vault named after the site.
+//
+// The browser can be connected to several Flight Decks (lib/api.js). The panel
+// works with the one in use, picked from the menu at its top; agents on every
+// one of them can use the browser all the same (hands.js).
 
 import { icon } from './lib/icons.js'
 import { renderMarkdown, escapeHtml as esc } from './lib/md.js'
-import { AuthError, api, browserLabel, clearConn, loadConn, normalizeDeckUrl, publicCall, saveConn, upload } from './lib/api.js'
+import { AuthError, api, browserLabel, forgetDeck, loadDecks, normalizeDeckUrl, publicCall, saveDeck, upload, useDeck } from './lib/api.js'
 import { SEARCH_ENGINES, loadSearchPick, loadSearchPrefs, saveSearchPick, saveSearchPrefs, servedEngines } from './lib/engines.js'
 import { loadFetchMode, readsPages, saveFetchMode, setFetchDeclined } from './pages.js'
 
@@ -32,7 +36,10 @@ $btnSettings.innerHTML = icon('settings')
 
 const S = {
   view: 'loading',
-  conn: null,
+  conn: null,          // the deck in use
+  decks: [],           // every deck this browser is connected to
+  kept: {},            // deck address → what the panel keeps for it: { agent, lenses, me }
+  adding: false,       // connecting another deck (the connect view has a way back)
   me: null,
   meError: '',
   windowId: null,
@@ -167,11 +174,15 @@ function restoreScroll(before) {
 
 function render() {
   const connected = !!S.conn
-  $btnHistory.hidden = !connected || S.view === 'connect' || S.view === 'agent'
+  $btnHistory.hidden = !connected || S.view === 'connect' || S.view === 'agent' || S.view === 'decks'
   $btnPlaybooks.hidden = $btnHistory.hidden
   $btnPlaybooks.classList.toggle('on', S.view === 'pbs' || S.view === 'pb')
   $btnSettings.hidden = !connected || S.view === 'connect' || S.view === 'agent'
-  $deckName.textContent = connected ? (S.me?.deck?.name ? `${S.me.deck.name} · ${hostOf(S.conn.url)}` : hostOf(S.conn.url)) : 'Not connected'
+  $deckName.textContent = connected ? deckTitle(S.conn) : 'Not connected'
+  // The deck menu: with a deck in use (not an agent's own browser).
+  $deckName.disabled = !connected || !!S.conn.agent
+  $deckName.classList.toggle('on', S.view === 'decks')
+  $deckName.title = connected && !S.conn.agent ? (S.decks.length > 1 ? 'Switch Flight Deck' : 'Your Flight Decks') : ''
   const before = listScroll()
   renderView()
   restoreScroll(before)
@@ -246,6 +257,7 @@ function renderView() {
     else if (S.view === 'anon') $view.innerHTML = viewAnon()
     else if (S.view === 'history') $view.innerHTML = viewHistory()
     else if (S.view === 'settings') $view.innerHTML = viewSettings()
+    else if (S.view === 'decks') $view.innerHTML = viewDecks()
     else $view.innerHTML = '<div class="row dim"><div class="spinner"></div> Loading…</div>'
   })
 }
@@ -267,15 +279,30 @@ function viewConnect() {
         <button class="btn" data-act="cancel-pair">Cancel</button>
       </div>`
   }
+  if (S.adding && S.decks.length) {
+    return `
+    <div class="row"><button class="icon-btn" data-act="decks">${icon('back')}</button><div class="grow" style="font-weight:600">Connect another Flight Deck</div></div>
+    <div class="card">
+      <p class="muted" style="margin:0">This browser stays connected to ${S.decks.length === 1 ? esc(hostOf(S.decks[0].url)) : `your ${S.decks.length} Flight Decks`} too. Agents on each of them can use it; the panel works with the one you pick at the top.</p>
+    </div>
+    ${viewDeckInput()}`
+  }
   return `
     <div class="card">
       <div style="font-weight:600;font-size:calc(14px * var(--fs));margin-bottom:4px">Send any page to your agents</div>
       <p class="muted" style="margin:0">Summarize it, keep it with its files, pull out its data or ask about it — your agent works on it in Flight Deck, and the page lands in your <b>Web clips</b> shared folder.</p>
     </div>
+    ${viewDeckInput()}`
+}
+
+function viewDeckInput() {
+  const again = S.decks.find((d) => d.url === normalizeDeckUrl(S.deckInput))
+  return `
     <div class="card">
       <label class="label" for="deckUrl">Your Flight Deck address</label>
       <input type="url" id="deckUrl" placeholder="captain.example.com" value="${esc(S.deckInput)}" autocomplete="url">
       ${S.connectError ? `<div class="notice err" style="margin-top:8px">${esc(S.connectError)}</div>` : ''}
+      ${again && S.adding ? `<div class="dim" style="margin-top:6px">This browser is already connected to ${esc(hostOf(again.url))} — connecting again gives it a new token.</div>` : ''}
       <button class="btn primary block" data-act="connect" style="margin-top:10px">Connect this browser</button>
       <p class="dim" style="margin:8px 0 0">You approve it once in Flight Deck; no password is stored here. Disconnect any time in Connections → Browser.</p>
     </div>`
@@ -318,10 +345,13 @@ async function pollPairing(p) {
       const r = await publicCall(p.deck, `/fd/clip/pair/${encodeURIComponent(p.id)}`)
       if (r.status === 'approved' && r.token) {
         S.pairing = null
-        S.conn = { url: p.deck, token: r.token, user: r.user || {} }
-        await saveConn(S.conn)
-        toast('Connected')
-        await afterConnect()
+        const conn = { url: p.deck, token: r.token, user: r.user || {} }
+        await saveDeck(conn)
+        S.decks = (await loadDecks()).decks
+        S.adding = false
+        S.deckInput = ''
+        toast(S.decks.length > 1 ? `Connected — ${hostOf(conn.url)} is in use` : 'Connected')
+        await enterDeck(conn)
         return
       }
       if (r.status === 'denied' || r.status === 'expired') {
@@ -337,17 +367,21 @@ async function pollPairing(p) {
 // ── me, agents ──
 
 async function loadMe() {
+  const conn = S.conn
+  if (!conn) return
   try {
-    S.me = await api(S.conn, `/fd/clip/me?v=${encodeURIComponent(VERSION)}`)
+    const me = await api(conn, `/fd/clip/me?v=${encodeURIComponent(VERSION)}`)
+    if (S.conn !== conn) return   // another deck was picked meanwhile
+    S.me = me
     S.meAt = Date.now()
     S.meError = ''
-    await setStore({ me: S.me })
+    keep({ me: S.me })
     if ('search' in S.me) {   // a deck from before web searches says nothing
-      await saveSearchPick(S.me.search?.engine || '')
+      await saveSearchPick(conn.url, S.me.search?.engine || '')
       await refreshSearch()
     }
     if ('fetch' in S.me) {
-      await saveFetchMode(S.me.fetch?.mode || '')
+      await saveFetchMode(conn.url, S.me.fetch?.mode || '')
       await refreshFetch()
     }
     if (!agentDef(S.agent)) {
@@ -355,30 +389,147 @@ async function loadMe() {
       S.agent = firstUp ? firstUp.slug : ''
     }
   } catch (e) {
-    if (e instanceof AuthError) return disconnected(e.message)
+    if (S.conn !== conn) return
+    if (e instanceof AuthError) return disconnected(e.message, conn.url)
     S.meError = e.message
   }
 }
 
-async function disconnected(why) {
-  await clearConn()
+// ── decks: several Flight Decks, one in use ──
+
+/** "Glasses · glasses.example.com" once the deck said its name, else its host. */
+function deckTitle(conn) {
+  const name = S.kept[conn.url]?.me?.deck?.name
+  return name ? `${name} · ${hostOf(conn.url)}` : hostOf(conn.url)
+}
+
+/** A deck in a few letters, beside an agent's name: its own name once it said
+ * it ("Home") — unless another connected deck has the same one (most keep
+ * the default "Captain") — else its host's first part. */
+function deckShort(url) {
+  const name = S.kept[url]?.me?.deck?.name
+  if (name && !S.decks.some((d) => d.url !== url && S.kept[d.url]?.me?.deck?.name === name)) return name
+  try {
+    const u = new URL(url)
+    return u.hostname === 'localhost' || /^[\d.]+$/.test(u.hostname) || !u.hostname.includes('.') ? u.host : u.hostname.split('.')[0]
+  } catch { return hostOf(url) }
+}
+
+/** What the panel keeps for the deck in use: the agent picked, its lenses, the last /fd/clip/me. */
+function keep(patch, url = S.conn?.url) {
+  if (!url) return
+  S.kept = { ...S.kept, [url]: { ...(S.kept[url] || {}), ...patch } }
+  setStore({ decksKept: S.kept })
+}
+
+// The panel switches to a deck: what it kept for that one comes back, the
+// rest is asked anew.
+async function enterDeck(conn) {
+  const kept = S.kept[conn.url] || {}
+  S.conn = conn
+  S.me = kept.me || null
+  S.meError = ''
+  S.meAt = 0
+  S.agent = kept.agent || ''
+  S.lenses = kept.lenses && typeof kept.lenses === 'object' ? kept.lenses : {}
+  S.lensMore = false
+  S.recs = null
+  S.recsError = ''
+  S.recRun = null
+  PB.site = ''; PB.url = ''; PB.chips = []; PB.recsHere = []; PB.more = 0; PB.at = 0; PB.asked = ''
+  PB.store = null; PB.storeError = ''; PB.items = null; PB.open = null
+  S.view = S.rec ? 'rec' : 'main'
+  if (conn.agent) S.view = 'agent'
+  await refreshSearch()
+  await refreshFetch()
+  render()
+  if (conn.agent) return
+  await loadMe()
+  if (S.conn !== conn) return
+  applyDefaults()
+  render()
+  loadLenses()
+  loadRecs()
+  await scan()
+}
+
+async function switchDeck(url) {
+  const d = S.decks.find((x) => x.url === url)
+  if (!d || d === S.conn) { S.view = 'main'; render(); return }
+  await useDeck(url)
+  toast(`Now on ${deckTitle(d)}`)
+  await enterDeck(d)
+}
+
+// A deck turned this browser away (its token was revoked), or the person
+// disconnected it: off the list. The panel goes on with another deck, if any.
+async function disconnected(why, url = S.conn?.url) {
+  if (!url) return
+  const next = await forgetDeck(url)
+  S.decks = (await loadDecks()).decks
+  const { [url]: _gone, ...rest } = S.kept
+  S.kept = rest
+  setStore({ decksKept: S.kept })
+  if (S.conn?.url !== url) {
+    if (why) toast(`${hostOf(url)}: ${why}`)
+    render()
+    return
+  }
+  if (next) {
+    toast(why ? `${hostOf(url)}: ${why}` : `Disconnected from ${hostOf(url)}`)
+    await enterDeck(next)
+    return
+  }
   S.conn = null
   S.me = null
   S.lenses = {}
-  setStore({ lenses: {} })
   S.view = 'connect'
+  S.adding = false
   S.connectError = why || ''
   render()
 }
 
-async function afterConnect() {
-  S.view = 'main'
-  render()
-  await loadMe()
-  applyDefaults()
-  render()
-  scan()
-  loadLenses()
+function deckState(url) {
+  const st = S.handsStatus?.[url]
+  if (!st || st.state === 'off') return null
+  if (st.state === 'on') return { tone: 'done', text: 'Agents can use this browser' }
+  if (st.state === 'search') return { tone: 'done', text: 'Runs agents\' searches and page reads' }
+  if (st.state === 'connecting') return { tone: 'working', text: st.error || 'Connecting…' }
+  if (st.state === 'permission') return { tone: 'error', text: 'Needs a reload of Captain for Chrome' }
+  if (st.state === 'denied') return { tone: 'error', text: 'It disconnected this browser' }
+  return { tone: 'error', text: st.error || 'Not connected' }
+}
+
+function viewDecks() {
+  const rows = S.decks.map((d) => {
+    const inUse = d.url === S.conn?.url
+    const u = d.user || {}
+    const st = deckState(d.url)
+    const denied = S.handsStatus?.[d.url]?.state === 'denied'
+    const pick = inUse ? '<span class="status-pill done"><span class="dot"></span>In use</span>'
+      : denied ? `<button class="btn" data-act="deck-again" data-deck="${esc(d.url)}" style="padding:3px 10px">Connect again</button>`
+      : `<button class="btn" data-act="deck-use" data-deck="${esc(d.url)}" style="padding:3px 10px">Use</button>`
+    return `
+    <div class="card deck-row ${inUse ? 'in-use' : ''}">
+      <div class="row">
+        <div class="grow" style="min-width:0">
+          <div class="ellipsis" style="font-weight:600">${esc(S.kept[d.url]?.me?.deck?.name || hostOf(d.url))}</div>
+          <div class="dim ellipsis">${esc(hostOf(d.url))}${u.name || u.email ? ` · ${esc(u.name || u.email)}` : ''}</div>
+        </div>
+        ${pick}
+      </div>
+      ${st ? `<div class="deck-state ${st.tone}"><span class="dot"></span><span class="dim ellipsis" title="${esc(st.text)}">${esc(st.text)}</span></div>` : ''}
+      <div class="row" style="margin-top:6px;gap:10px">
+        <button class="link-btn" data-act="deck-open" data-deck="${esc(d.url)}">Open Flight Deck</button>
+        <button class="link-btn danger" data-act="deck-disconnect" data-deck="${esc(d.url)}">${denied ? 'Remove' : 'Disconnect'}</button>
+      </div>
+    </div>`
+  }).join('')
+  return `
+    <div class="row"><button class="icon-btn" data-act="back">${icon('back')}</button><div class="grow" style="font-weight:600">Your Flight Decks</div></div>
+    ${rows}
+    <button class="btn block" data-act="deck-add">${icon('plus', 'sm')} Connect another Flight Deck</button>
+    <p class="dim" style="margin:8px 2px 0">Agents on every deck here can use this browser, run their searches and read pages in it — each in tabs of its own. Pages you send go to the deck in use.</p>`
 }
 
 // ── reading the page ──
@@ -543,17 +694,20 @@ let lensTimer = 0
 // Asks the deck for this agent's lenses; while the agent is still thinking
 // them up the general ones show, and the deck is asked again shortly.
 async function loadLenses(slug = S.agent, { fresh = false } = {}) {
-  if (!slug || !S.conn) return
+  const conn = S.conn
+  if (!slug || !conn) return
   clearTimeout(lensTimer)
   let tries = 0
   const ask = async () => {
-    if (S.agent !== slug || !S.conn) return
+    if (S.agent !== slug || S.conn !== conn) return
     try {
-      const r = await api(S.conn, `/fd/clip/agents/${encodeURIComponent(slug)}/lenses${fresh && tries === 0 ? '?fresh=1' : ''}`)
+      const r = await api(conn, `/fd/clip/agents/${encodeURIComponent(slug)}/lenses${fresh && tries === 0 ? '?fresh=1' : ''}`)
+      if (S.conn !== conn) return
       S.lenses[slug] = { ...r, at: Date.now() }
-      setStore({ lenses: S.lenses })
+      keep({ lenses: S.lenses })
     } catch (e) {
-      if (e instanceof AuthError) return disconnected(e.message)
+      if (S.conn !== conn) return
+      if (e instanceof AuthError) return disconnected(e.message, conn.url)
       // A deck without the route (older) or a hiccup: the general ones, no remark.
       S.lenses[slug] = { ...(S.lenses[slug] || {}), state: 'unavailable', at: Date.now() }
     }
@@ -964,55 +1118,78 @@ function agoText(at) {
   return s < 10 ? 'now' : s < 60 ? `${s}s ago` : `${Math.round(s / 60)} min ago`
 }
 
-function handsName(slug) {
-  return agentDef(slug)?.name || [...S.handsLog].reverse().find((e) => e.slug === slug)?.name || slug
+// An agent at work here is known by its deck and slug ("<deck>|<slug>", as
+// hands.js keeps it); a stop kept from before decks is a bare slug.
+const handsKey = (e) => e.key || e.slug
+const keyDeck = (key) => (key.includes('|') ? key.slice(0, key.lastIndexOf('|')) : '')
+const keySlug = (key) => key.slice(key.lastIndexOf('|') + 1)
+
+/** "Researcher", or "Researcher · Home" while more than one deck is connected. */
+function handsName(key, name = '') {
+  const deck = keyDeck(key)
+  const slug = keySlug(key)
+  const own = !deck || deck === S.conn?.url
+  name = name || (own && agentDef(slug)?.name) || [...S.handsLog].reverse().find((e) => handsKey(e) === key)?.name || slug
+  return S.decks.length > 1 && deck ? `${name} · ${deckShort(deck)}` : name
 }
 
-function handsStatusText() {
-  const st = S.handsStatus?.state
-  if (st === 'on') return ''
-  if (st === 'permission') return 'Reload Captain for Chrome in chrome://extensions to finish its update (it needs the debugger permission).'
-  if (st === 'denied') return S.handsStatus.error || 'Flight Deck refused this browser — connect it again.'
-  if (st === 'connecting') return S.handsStatus.error || 'Connecting to Flight Deck…'
-  if (st === 'error') return S.handsStatus.error || 'Not connected.'
+const isHandsStopped = (e) => S.handsStopped.includes(handsKey(e)) || S.handsStopped.includes(e.slug)
+
+/** What's in the way of the agents' socket to a deck ('' = nothing). */
+function handsStatusFor(st) {
+  const state = st?.state
+  if (state === 'on' || state === 'search' || state === 'off') return ''
+  if (state === 'permission') return 'Reload Captain for Chrome in chrome://extensions to finish its update (it needs the debugger permission).'
+  if (state === 'denied') return st.error || 'Flight Deck refused this browser — connect it again.'
+  if (state === 'connecting') return st.error || 'Connecting to Flight Deck…'
+  if (state === 'error') return st.error || 'Not connected.'
   return 'Starting…'
+}
+
+/** The same for every connected deck, each named once there's more than one. */
+function handsStatusText() {
+  const lines = S.decks.map((d) => {
+    const text = handsStatusFor(S.handsStatus?.[d.url])
+    return text && (S.decks.length > 1 ? `${deckShort(d.url)}: ${text}` : text)
+  }).filter(Boolean)
+  return lines.join(' · ')
 }
 
 function viewHands() {
   if (!S.hands.on) return ''
   const now = Date.now()
   const latest = new Map()
-  for (const e of S.handsLog) if (now - e.at < HANDS_RECENT_MS) latest.set(e.slug, e)
-  const working = [...latest.values()].filter((e) => !S.handsStopped.includes(e.slug)).reverse()
+  for (const e of S.handsLog) if (now - e.at < HANDS_RECENT_MS) latest.set(handsKey(e), e)
+  const working = [...latest.values()].filter((e) => !isHandsStopped(e)).reverse()
   const status = handsStatusText()
   const rows = working.map((e) => `
     <div class="hands-agent">
-      <span class="status-pill ${e.state === 'working' ? 'working' : e.state === 'failed' ? 'error' : 'done'}"><span class="dot"></span>${esc(e.name)}</span>
+      <span class="status-pill ${e.state === 'working' ? 'working' : e.state === 'failed' ? 'error' : 'done'}"><span class="dot"></span>${esc(handsName(handsKey(e), e.name))}</span>
       <div class="grow ellipsis" title="${esc(e.error || e.text)}">${esc(e.text)}${e.state === 'failed' ? ' — didn\'t work' : ''} <span class="dim">· ${esc(agoText(e.at))}</span></div>
-      <button class="link-btn" data-act="hands-show" data-slug="${esc(e.slug)}">Show</button>
-      <button class="link-btn danger" data-act="hands-stop" data-slug="${esc(e.slug)}">Stop</button>
+      <button class="link-btn" data-act="hands-show" data-slug="${esc(handsKey(e))}">Show</button>
+      <button class="link-btn danger" data-act="hands-stop" data-slug="${esc(handsKey(e))}">Stop</button>
     </div>`).join('')
-  const stoppedRows = S.handsStopped.map((slug) => `
-    <div class="hands-agent"><div class="grow dim">${esc(handsName(slug))} is stopped — it can't use this browser.</div>
-      <button class="link-btn" data-act="hands-let" data-slug="${esc(slug)}">Let it again</button></div>`).join('')
+  const stoppedRows = S.handsStopped.map((key) => `
+    <div class="hands-agent"><div class="grow dim">${esc(handsName(key))} is stopped — it can't use this browser.</div>
+      <button class="link-btn" data-act="hands-let" data-slug="${esc(key)}">Let it again</button></div>`).join('')
   const past = S.handsLog.slice(-15).reverse()
   const history = past.length ? `
     <details class="hands-log">
       <summary class="dim">What agents did here</summary>
-      ${past.map((e) => `<div class="step ${e.state === 'failed' ? 'err' : ''}"><b>${esc(e.name)}</b>&nbsp;${esc(e.text)}${e.state === 'failed' ? ` — ${esc(e.error || 'failed')}` : ''} <span class="dim">· ${esc(agoText(e.at))}</span></div>`).join('')}
+      ${past.map((e) => `<div class="step ${e.state === 'failed' ? 'err' : ''}"><b>${esc(handsName(handsKey(e), e.name))}</b>&nbsp;${esc(e.text)}${e.state === 'failed' ? ` — ${esc(e.error || 'failed')}` : ''} <span class="dim">· ${esc(agoText(e.at))}</span></div>`).join('')}
     </details>` : ''
   return `
     <div class="card hands ${working.length ? 'active' : ''}">
       <div class="row">${icon('globe', 'sm')}<div class="grow"><b>${working.length ? 'An agent is using this browser' : 'Agents can use this browser'}</b>
         ${status ? `<div class="dim">${esc(status)}</div>` : ''}</div>
-        ${S.handsStatus?.state === 'permission' ? '<button class="btn" data-act="hands-extensions" style="padding:3px 9px">Open extensions</button>' : ''}</div>
+        ${Object.values(S.handsStatus || {}).some((st) => st?.state === 'permission') ? '<button class="btn" data-act="hands-extensions" style="padding:3px 9px">Open extensions</button>' : ''}</div>
       ${rows}${stoppedRows}${history}
     </div>`
 }
 
-async function handsShow(slug) {
+async function handsShow(key) {
   const got = await chrome.storage.session.get('handsGroups').catch(() => ({}))
-  const g = got.handsGroups?.[slug]
+  const g = got.handsGroups?.[key]
   if (!g) { toast('Its tabs are gone.'); return }
   let tabId = g.current
   if (!tabId) {
@@ -1053,8 +1230,8 @@ function searchPick() {
 
 async function refreshSearch() {
   S.search = await loadSearchPrefs()
-  S.searchPickId = await loadSearchPick()
-  S.searchServed = await servedEngines()
+  S.searchPickId = await loadSearchPick(S.conn?.url)
+  S.searchServed = await servedEngines(S.conn?.url)
 }
 
 function searchWhat(eng) {
@@ -1086,7 +1263,7 @@ function viewSearchSettings() {
   const on = S.searchServed.includes(eng.id)
   return `<div class="card"><div class="label">Web searches</div>
     <label class="switch"><input type="checkbox" id="searchOn" data-engine="${esc(eng.id)}" ${on ? 'checked' : ''}><div>Run my agents' web searches here, on ${esc(eng.name)}<div class="dim">${searchWhat(eng)}</div></div></label>
-    ${on && S.handsStatus?.state && !['on', 'search'].includes(S.handsStatus.state) ? `<div class="dim" style="margin-top:4px">${esc(handsStatusText())}</div>` : ''}
+    ${on && handsStatusFor(S.handsStatus?.[S.conn?.url]) ? `<div class="dim" style="margin-top:4px">${esc(handsStatusFor(S.handsStatus[S.conn.url]))}</div>` : ''}
   </div>`
 }
 
@@ -1124,8 +1301,8 @@ async function stopSearch(id) {
 // browser reads pages while Chrome lets Captain read every site.
 
 async function refreshFetch() {
-  S.fetch = await loadFetchMode()
-  S.fetchServed = await readsPages()
+  S.fetch = await loadFetchMode(S.conn?.url)
+  S.fetchServed = await readsPages(S.conn?.url)
 }
 
 const FETCH_WHAT = "Your agents' web_fetch opens pages here, signed in as you, in a background tab that closes once the page is read — " +
@@ -1183,12 +1360,14 @@ function followHands() {
   // A page read in the background for web_fetch isn't an agent at work here.
   if (last.action === 'fetch') { S.handsSeen = last.at; return }
   // Only the first step of a stretch of work: picking another agent meanwhile sticks.
-  const fresh = !S.handsLog.some((e) => e !== last && e.slug === last.slug && last.at - e.at < HANDS_RECENT_MS)
+  const fresh = !S.handsLog.some((e) => e !== last && handsKey(e) === handsKey(last) && last.at - e.at < HANDS_RECENT_MS)
   S.handsSeen = last.at
+  // An agent of another deck works here all the same: the panel stays on the deck in use.
+  if (last.deck && last.deck !== S.conn?.url) return
   if (!fresh || last.slug === S.agent || S.sending || S.view === 'run' || !agentDef(last.slug)) return
   S.agent = last.slug
   S.lensMore = false
-  setStore({ agent: S.agent })
+  keep({ agent: S.agent })
   keepLensChoice()
   loadLenses(S.agent)
   toast(`${last.name} is using your browser`)
@@ -1478,8 +1657,14 @@ async function send(asked) {
 
 // ── a run ──
 
+// A run belongs to the deck it was sent to: it's followed there even after
+// the panel switched to another deck.
+function runConn(run) {
+  return S.decks.find((d) => d.url === run?.deck) || (run?.deck ? null : S.conn)
+}
+
 function startRun(run) {
-  S.run = { ...run, status: 'starting', events: [], next: 0, result: '', live: '', error: '', files: [], done: false, at: Date.now() }
+  S.run = { deck: S.conn?.url, ...run, status: 'starting', events: [], next: 0, result: '', live: '', error: '', files: [], done: false, at: Date.now() }
   watchAsks()
   S.followUp = ''
   S.follow = true
@@ -1495,8 +1680,15 @@ async function pollRun(run) {
   let misses = 0
   let drawn = ''
   while (S.run === run && !run.done) {
+    const conn = runConn(run)
+    if (!conn) {   // its deck was disconnected
+      run.done = true
+      run.lost = true
+      run.status = run.status === 'done' ? 'done' : 'lost'
+      break
+    }
     try {
-      const r = await api(S.conn, `/fd/clip/runs/${encodeURIComponent(run.clip_id)}?since=${run.next}`)
+      const r = await api(conn, `/fd/clip/runs/${encodeURIComponent(run.clip_id)}?since=${run.next}`)
       misses = 0
       run.status = r.status
       run.events.push(...(r.events || []))
@@ -1513,7 +1705,7 @@ async function pollRun(run) {
         remember(run)
       }
     } catch (e) {
-      if (e instanceof AuthError) { run.polling = false; return disconnected(e.message) }
+      if (e instanceof AuthError) { run.polling = false; return disconnected(e.message, conn.url) }
       if (/over or unknown/i.test(e.message)) {
         run.done = true
         run.lost = true
@@ -1651,12 +1843,14 @@ async function sendFollowUp() {
     page: { url: run.url, title: run.title },
   }
   form.append('meta', new Blob([JSON.stringify(meta)], { type: 'application/json' }), 'meta.json')
+  const conn = runConn(run)
+  if (!conn) { toast('That Flight Deck isn\'t connected any more.'); return }
   try {
-    const res = await upload(S.conn, '/fd/clip/send', form, () => {})
-    startRun({ clip_id: res.clip_id, folder: res.folder, vfs: res.vfs, agent: res.agent || run.agent, agentSlug: run.agentSlug,
+    const res = await upload(conn, '/fd/clip/send', form, () => {})
+    startRun({ deck: conn.url, clip_id: res.clip_id, folder: res.folder, vfs: res.vfs, agent: res.agent || run.agent, agentSlug: run.agentSlug,
                title: run.title, url: run.url, action: run.action === 'recording' || run.action === 'playbook' ? run.action : 'ask', actionLabel: 'Follow-up' })
   } catch (e) {
-    if (e instanceof AuthError) return disconnected(e.message)
+    if (e instanceof AuthError) return disconnected(e.message, conn.url)
     toast(e.message)
   }
 }
@@ -1664,7 +1858,9 @@ async function sendFollowUp() {
 async function saveRunFile(path) {
   const run = S.run
   try {
-    const r = await api(S.conn, `/fd/clip/runs/${encodeURIComponent(run.clip_id)}/file?path=${encodeURIComponent(path)}`, { raw: true })
+    const conn = runConn(run)
+    if (!conn) throw new Error('That Flight Deck isn\'t connected any more.')
+    const r = await api(conn, `/fd/clip/runs/${encodeURIComponent(run.clip_id)}/file?path=${encodeURIComponent(path)}`, { raw: true })
     const blob = await r.blob()
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
@@ -2046,7 +2242,7 @@ function openPastRun(id) {
   const r = (S.recRun?.runs || []).find((x) => x.id === id)
   if (!r) return
   const live = r.status === 'thinking' || r.status === 'starting'
-  S.run = { clip_id: r.id, folder: r.folder, vfs: r.vfs, agent: r.agent, agentSlug: r.agent_slug, title: r.name, url: S.recRun.rec.start_url || '',
+  S.run = { deck: S.conn?.url, clip_id: r.id, folder: r.folder, vfs: r.vfs, agent: r.agent, agentSlug: r.agent_slug, title: r.name, url: S.recRun.rec.start_url || '',
             action: 'recording', actionLabel: 'Recording', status: r.status, events: (r.steps_done || []).map((text) => ({ text })), next: 0,
             result: r.result || '', live: '', error: r.error || '', files: [], done: !live, at: Date.parse(r.started_at) || Date.now(), followedEnd: true }
   S.follow = true
@@ -2097,7 +2293,7 @@ function viewRecRun() {
       <span class="ellipsis"><b>${esc(RUN_STATUS[r.status] || r.status)}</b> <span class="dim">· ${esc(r.agent || '')} · ${esc(new Date(r.started_at).toLocaleString())}</span></span>
       ${r.inputs?.length || r.note ? `<span class="dim ellipsis">${esc([...(r.inputs || []).map((i) => `${i.label}: ${i.value}`), r.note].filter(Boolean).join(' · '))}</span>` : ''}
     </button>`).join('')
-  const handsOk = S.hands.on && S.handsStatus?.state !== 'denied'
+  const handsOk = S.hands.on && S.handsStatus?.[S.conn?.url]?.state !== 'denied'
   return `
     <div class="row"><button class="icon-btn" data-act="recs" title="Back">${icon('back')}</button>
       <div class="grow"><div style="font-weight:600" class="ellipsis">${esc(rec.name)}</div>
@@ -2256,10 +2452,10 @@ async function watchAsks() {
   if (asksWatching) return
   asksWatching = true
   let misses = 0
-  while (S.conn && S.run && !S.run.done) {
+  while (S.run && !S.run.done && runConn(S.run)) {
     try {
       const known = (S.asks || []).map((a) => a.id).join(',')
-      const r = await api(S.conn, `/fd/clip/asks?wait=20&known=${encodeURIComponent(known)}`)
+      const r = await api(runConn(S.run), `/fd/clip/asks?wait=20&known=${encodeURIComponent(known)}`)
       misses = 0
       showAsks(r.asks || [])
     } catch (e) {
@@ -2355,13 +2551,15 @@ async function sendAnswer(form, declined) {
   const a = (S.asks || []).find((x) => x.id === form.dataset.ask)
   if (!a || form.dataset.busy) return
   form.dataset.busy = '1'
+  // The questions come from the deck of the run being followed.
+  const conn = runConn(S.run) || S.conn
   try {
-    await api(S.conn, `/fd/clip/asks/${encodeURIComponent(a.id)}`, {
+    await api(conn, `/fd/clip/asks/${encodeURIComponent(a.id)}`, {
       method: 'POST', body: JSON.stringify(declined ? { declined: true } : { answers: askAnswers(form, a) }) })
     showAsks(S.asks.filter((x) => x.id !== a.id))
   } catch (e) {
     delete form.dataset.busy
-    if (e instanceof AuthError) return disconnected(e.message)
+    if (e instanceof AuthError) return disconnected(e.message, conn.url)
     if (/isn't open any more/.test(e.message)) return showAsks(S.asks.filter((x) => x.id !== a.id))
     const box = form.querySelector('#askError')
     box.textContent = e.message
@@ -2714,7 +2912,7 @@ function viewPb() {
     return `<option value="${esc(a.slug)}" ${a.slug === S.agent ? 'selected' : ''} ${up ? '' : 'disabled'}>${a.status === 'running' ? '●' : a.status === 'asleep' ? '◐' : '○'} ${esc(a.name)}${up ? '' : ` (${esc(a.status)})`}</option>`
   }).join('')
   const needsChrome = b.where === 'chrome' || b.where === 'prefer_chrome'
-  const handsOk = S.hands.on && S.handsStatus?.state !== 'denied'
+  const handsOk = S.hands.on && S.handsStatus?.[S.conn?.url]?.state !== 'denied'
   const cat = (PB.store?.categories || []).find((c) => c.id === b.category)
   const wrong = missing.find((i) => pbRange(i, o.values[i.name]))
   const runLabel = o.sending ? 'Starting…' : !ag ? 'Pick an agent' : wrong ? `${wrong.label} is ${pbRange(wrong, o.values[wrong.name])}`
@@ -2885,6 +3083,7 @@ $btnPlaybooks.addEventListener('click', () => {
 
 async function remember(run) {
   const item = {
+    deck: run.deck || S.conn?.url || '',
     clip_id: run.clip_id, title: run.title, url: run.url, agent: run.agent, agentSlug: run.agentSlug, action: run.action,
     actionLabel: run.actionLabel, folder: run.folder, vfs: run.vfs, status: run.status, at: run.at || Date.now(), watch: run.watch || null,
     result: String(run.result || '').slice(0, 8000), error: run.error || '', files: run.files || [],
@@ -2897,7 +3096,7 @@ function viewHistory() {
   const items = S.history.map((h, i) => `
     <button class="history-item" data-history="${i}">
       <span class="ellipsis" style="font-weight:600">${esc(h.actionLabel || h.action)}: ${esc(h.title)}</span>
-      <span class="dim ellipsis">${esc(h.agent)} · ${esc(hostOf(h.url))} · ${esc(new Date(h.at).toLocaleString())}</span>
+      <span class="dim ellipsis">${esc(h.agent)}${S.decks.length > 1 && h.deck ? ` on ${esc(deckShort(h.deck))}` : ''} · ${esc(hostOf(h.url))} · ${esc(new Date(h.at).toLocaleString())}</span>
     </button>`).join('')
   return `
     <div class="row"><button class="icon-btn" data-act="back">${icon('back')}</button><div class="grow" style="font-weight:600">Recent</div>
@@ -2908,7 +3107,8 @@ function viewHistory() {
 function openHistory(i) {
   const h = S.history[i]
   if (!h) return
-  S.run = { ...h, events: [], next: 0, live: '', done: !['starting', 'thinking'].includes(h.status), followedEnd: true }
+  // Kept from before decks were remembered: the deck in use then was the only one.
+  S.run = { deck: S.decks[0]?.url, ...h, events: [], next: 0, live: '', done: !['starting', 'thinking'].includes(h.status), followedEnd: true }
   S.follow = true
   S.view = 'run'
   render()
@@ -2924,9 +3124,10 @@ function viewSettings() {
     <div class="row"><button class="icon-btn" data-act="back">${icon('back')}</button><div class="grow" style="font-weight:600">Settings</div></div>
     ${viewVersion(true)}
     <div class="card">
-      <div class="label">Connected</div>
-      <div>${esc(hostOf(S.conn?.url || ''))}</div>
+      <div class="label">${S.decks.length > 1 ? 'In use' : 'Connected'}</div>
+      <div>${esc(deckTitle(S.conn))}</div>
       <div class="dim">${esc(u.name || '')}${u.email && u.email !== u.name ? ` · ${esc(u.email)}` : ''}</div>
+      <button class="link-btn" data-act="decks" style="margin-top:6px">${S.decks.length > 1 ? `Your ${S.decks.length} Flight Decks` : 'Connect another Flight Deck'}</button>
     </div>
     ${agents ? `<div class="card"><label class="label" for="setAgent">Agent</label><select class="select" id="setAgent">${agents}</select></div>` : ''}
     <div class="card">
@@ -2938,7 +3139,7 @@ function viewSettings() {
     </div>
     <div class="card">
       <div class="label">Agents</div>
-      <label class="switch"><input type="checkbox" id="handsOn" ${S.hands.on ? 'checked' : ''}><div>Agents can use this browser<div class="dim">Your agents' browser tool works here, signed in as you — in tabs of their own, grouped under the agent's name. Chrome shows that Captain is debugging the browser while one works. Flight Deck's own pages stay off-limits.</div></div></label>
+      <label class="switch"><input type="checkbox" id="handsOn" ${S.hands.on ? 'checked' : ''}><div>Agents can use this browser<div class="dim">Your agents' browser tool works here, signed in as you — in tabs of their own, grouped under the agent's name. Chrome shows that Captain is debugging the browser while one works. Flight Deck's own pages stay off-limits.${S.decks.length > 1 ? ` Agents on each of your ${S.decks.length} Flight Decks can.` : ''}</div></div></label>
       <label class="switch"><input type="checkbox" id="handsFront" ${S.hands.front ? 'checked' : ''} ${S.hands.on ? '' : 'disabled'}><div>Bring an agent's tab to the front while it works</div></label>
       ${S.hands.on && handsStatusText() ? `<div class="dim" style="margin-top:4px">${esc(handsStatusText())}</div>` : ''}
     </div>
@@ -2951,7 +3152,7 @@ function viewSettings() {
       <label class="switch"><input type="checkbox" id="prefShot" ${S.prefs.screenshot ? 'checked' : ''}><div>Always send a screenshot</div></label>
     </div>
     <button class="btn block" data-act="open-deck">${icon('external', 'sm')} Open Flight Deck</button>
-    <button class="btn block danger" data-act="disconnect">Disconnect this browser</button>
+    <button class="btn block danger" data-act="disconnect">${S.decks.length > 1 ? `Disconnect from ${esc(hostOf(S.conn?.url || ''))}` : 'Disconnect this browser'}</button>
     <div class="foot">Captain for Chrome ${esc(VERSION)}${S.me?.extension?.version && S.me.extension.version !== VERSION ? ` · Flight Deck has ${esc(S.me.extension.version)}` : ''}</div>`
 }
 
@@ -3051,10 +3252,10 @@ $view.addEventListener('click', (ev) => {
   else if (act === 'clear-focus') { S.focus = null; render() }
   else if (act === 'follow') { S.follow = true; render() }
   else if (act === 'new-topic') newTopic(el.dataset.slug || S.agent)
-  else if (act === 'open-task' && S.conn && S.run?.watch?.id) chrome.tabs.create({ url: `${S.conn.url}/#task=${encodeURIComponent(S.run.watch.id)}` })
+  else if (act === 'open-task' && runConn(S.run) && S.run?.watch?.id) chrome.tabs.create({ url: `${runConn(S.run).url}/#task=${encodeURIComponent(S.run.watch.id)}` })
   else if (act === 'back') { S.view = 'main'; render(); scheduleScan(0) }
-  else if (act === 'stop' && S.run) {
-    api(S.conn, `/fd/clip/runs/${encodeURIComponent(S.run.clip_id)}/stop`, { method: 'POST' }).catch((e) => toast(e.message))
+  else if (act === 'stop' && S.run && runConn(S.run)) {
+    api(runConn(S.run), `/fd/clip/runs/${encodeURIComponent(S.run.clip_id)}/stop`, { method: 'POST' }).catch((e) => toast(e.message))
   } else if (act === 'copy' && S.run?.result) {
     navigator.clipboard.writeText(S.run.result).then(() => toast('Copied'), () => toast("Couldn't copy"))
   } else if (act === 'open-deck' && S.conn) chrome.tabs.create({ url: `${S.conn.url}/` })
@@ -3076,10 +3277,30 @@ $view.addEventListener('click', (ev) => {
   else if (act === 'fetch-allow') allowFetch()
   else if (act === 'fetch-decline') stopFetch()
   else if (act === 'clear-history') { S.history = []; setStore({ history: [] }); render() }
-  else if (act === 'disconnect') {
-    if (!confirm('Disconnect this browser from Flight Deck?')) return
-    api(S.conn, '/fd/clip/disconnect', { method: 'POST' }).catch(() => {}).finally(() => disconnected(''))
-  }
+  else if (act === 'disconnect' && S.conn) disconnectDeck(S.conn.url)
+  else if (act === 'decks') { S.adding = false; S.connectError = ''; S.pairing = null; S.view = 'decks'; render() }
+  else if (act === 'deck-use') switchDeck(el.dataset.deck)
+  else if (act === 'deck-open') chrome.tabs.create({ url: `${el.dataset.deck}/` })
+  else if (act === 'deck-disconnect') disconnectDeck(el.dataset.deck)
+  else if (act === 'deck-add') { S.adding = true; S.deckInput = ''; S.connectError = ''; S.pairing = null; S.view = 'connect'; render() }
+  else if (act === 'deck-again') { S.adding = true; S.deckInput = el.dataset.deck; S.connectError = ''; S.pairing = null; S.view = 'connect'; render() }
+})
+
+function disconnectDeck(url) {
+  const d = S.decks.find((x) => x.url === url)
+  if (!d) return
+  if (S.handsStatus?.[url]?.state === 'denied') { disconnected('', url); return }   // it said no already: just off the list
+  if (!confirm(S.decks.length > 1 ? `Disconnect this browser from ${hostOf(url)}? It stays connected to your other Flight Decks.` : 'Disconnect this browser from Flight Deck?')) return
+  api(d, '/fd/clip/disconnect', { method: 'POST' }).catch(() => {}).finally(() => disconnected('', url))
+}
+
+// The deck name in the header opens the list of decks.
+$deckName.addEventListener('click', () => {
+  if (!S.conn || S.conn.agent) return
+  if (S.view === 'decks') { S.view = 'main'; render(); scheduleScan(0); return }
+  S.adding = false
+  S.view = 'decks'
+  render()
 })
 
 $view.addEventListener('change', (ev) => {
@@ -3087,7 +3308,7 @@ $view.addEventListener('change', (ev) => {
   if (el.id === 'agent' || el.id === 'setAgent') {
     S.agent = el.value
     S.lensMore = false
-    setStore({ agent: S.agent })
+    keep({ agent: S.agent })
     keepLensChoice()
     if (el.id === 'agent') render()
     loadLenses(S.agent)
@@ -3229,14 +3450,16 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (changes.handsLog) S.handsLog = changes.handsLog.newValue || []
     if (changes.handsStatus) S.handsStatus = changes.handsStatus.newValue || null
     followHands()
-    if (S.view === 'main' || S.view === 'settings') render()
+    if (S.view === 'main' || S.view === 'settings' || S.view === 'decks') render()
   }
-  if (area === 'local' && (changes.fetchMode || changes.fetchPrefs)) {
+  if (area === 'local' && (changes.fetchModes || changes.fetchPrefs)) {
     refreshFetch().then(() => { if (S.view === 'main' || S.view === 'settings') render() })
   }
-  if (area === 'local' && (changes.search || changes.searchPick)) {
+  if (area === 'local' && (changes.search || changes.searchPicks)) {
     refreshSearch().then(() => { if (S.view === 'main' || S.view === 'settings') render() })
   }
+  // A deck connected or disconnected in another window's panel.
+  if (area === 'local' && changes.decks) decksChanged()
   if (area === 'local' && (changes.hands || changes.handsStopped)) {
     if (changes.hands) S.hands = { on: false, front: false, ...(changes.hands.newValue || {}) }
     if (changes.handsStopped) S.handsStopped = changes.handsStopped.newValue || []
@@ -3249,6 +3472,20 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (S.view === 'settings') render()
   }
 })
+
+async function decksChanged() {
+  const { decks } = await loadDecks().catch(() => ({ decks: S.decks }))
+  S.decks = decks
+  if (!S.conn) {
+    // Connected in another window while this one showed the connect form.
+    if (decks.length && S.view === 'connect' && !S.pairing) await enterDeck(decks[decks.length - 1])
+    return
+  }
+  const same = decks.find((d) => d.url === S.conn.url)
+  if (!same) return disconnected('', S.conn.url)
+  if (same.token !== S.conn.token) S.conn = same   // connected again: the new token
+  if (['main', 'settings', 'decks', 'history'].includes(S.view)) render()
+}
 
 // A panel left open: when it's looked at again (and a couple of minutes went
 // by), ask Flight Deck anew — a newer version, or a choice made there (the
@@ -3265,15 +3502,13 @@ document.addEventListener('visibilitychange', () => {
 
 async function start() {
   try { S.windowId = (await chrome.windows.getCurrent()).id } catch { S.windowId = null }
-  const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me', 'lenses', 'hands', 'handsStopped', 'recDraft', 'verSkip'])
+  const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me', 'lenses', 'decksKept', 'hands', 'handsStopped', 'recDraft', 'verSkip'])
   S.draft = stored.recDraft && Array.isArray(stored.recDraft.steps) ? stored.recDraft : null
-  S.agent = stored.agent || ''
   S.verSkip = stored.verSkip || ''
   S.prefs = { snapshot: false, screenshot: false, textSize: 'small', watchEvery: 'daily', ...(stored.prefs || {}) }
   applyTextSize()
   S.history = Array.isArray(stored.history) ? stored.history : []
   S.deckInput = stored.lastDeck || ''
-  S.lenses = stored.lenses && typeof stored.lenses === 'object' ? stored.lenses : {}
   S.hands = { on: false, front: false, ...(stored.hands || {}) }
   S.handsStopped = Array.isArray(stored.handsStopped) ? stored.handsStopped : []
   try {
@@ -3285,29 +3520,24 @@ async function start() {
     S.handsSeen = S.handsLog.length ? S.handsLog[S.handsLog.length - 1].at : 0
   } catch { /* no session storage */ }
   await refreshAllSites()
-  await refreshSearch()
-  await refreshFetch()
-  S.conn = await loadConn()
-  if (!S.conn) {
+  const { decks, use } = await loadDecks().catch(() => ({ decks: [], use: null }))
+  S.decks = decks
+  S.kept = stored.decksKept && typeof stored.decksKept === 'object' ? stored.decksKept : {}
+  if (use && !stored.decksKept && (stored.agent || stored.me || stored.lenses)) {
+    // Kept from before decks: it was all about the one deck there was.
+    keep({ agent: stored.agent || '', me: stored.me || null, lenses: stored.lenses || {} }, use.url)
+    chrome.storage.local.remove(['agent', 'me', 'lenses']).catch(() => {})
+  }
+  if (!use) {
+    await refreshSearch()
+    await refreshFetch()
     S.view = 'connect'
     render()
     return
   }
-  if (S.conn.agent) {
-    // An agent's own browser: its token is for the agent's browser tool only.
-    S.view = 'agent'
-    render()
-    return
-  }
-  if (stored.me) S.me = stored.me   // drawn at once; refreshed below
-  S.view = S.rec ? 'rec' : 'main'   // a recording going on is what the panel is for right now
-  render()
-  await loadMe()
-  applyDefaults()
-  render()
-  loadLenses()
-  loadRecs()
-  await scan()
+  // An agent's own browser (its token is for the agent's browser tool only)
+  // shows just that; a recording going on is what the panel is for right now.
+  await enterDeck(use)
   takeFocus()
 }
 
