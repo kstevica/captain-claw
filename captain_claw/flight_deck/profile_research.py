@@ -32,6 +32,7 @@ from urllib.parse import unquote, urlsplit
 
 from captain_claw.flight_deck import agent_preset_docs as pdocs
 from captain_claw.flight_deck import profile_sources as ps
+from captain_claw.flight_deck import side_call_health
 from captain_claw.flight_deck import tenant_profile as tp
 from captain_claw.logging import get_logger
 
@@ -593,7 +594,8 @@ async def _run(job: Job, tier: dict, env: list[dict], sources: dict, name: str, 
     effort = reasoning.normalize_level(os.environ.get("FD_PROFILE_REASONING", "").strip() or "low")
     with reasoning.call_effort(effort):
         reply = await model_reply(tier, system, user, job.owner_id,
-                                  max_tokens=_MAX_TOKENS, request_timeout=180.0)
+                                  max_tokens=_MAX_TOKENS, request_timeout=180.0,
+                                  feature=side_call_health.PROFILE_RESEARCH)
     job.tokens += int(reply.tokens or 0)
     try:
         drafts, notes = _parse(reply.text)

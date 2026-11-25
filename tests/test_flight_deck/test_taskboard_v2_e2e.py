@@ -134,7 +134,8 @@ async def deck(env, tmp_path, monkeypatch):  # noqa: F811
     async def resolve_tier(user_id, prefer=("fast", "balanced")):
         return {"provider": "fake", "model": "tier-model"}
 
-    async def model_reply(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+    async def model_reply(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None,
+                          feature=""):
         drafting = "approve before it goes out" in system
         model.calls.append(SimpleNamespace(drafting=drafting, prompt=user, owner=owner_id))
         title = next((line.removeprefix("Task: ").strip() for line in user.splitlines()

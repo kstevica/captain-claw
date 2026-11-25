@@ -14,12 +14,14 @@ Only paths the catalogue lists are written, below the agent's own folder.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import sqlite3
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -245,6 +247,52 @@ def restore_columns(agent_dir: Path, columns: dict[str, Any]) -> int:
     return n
 
 
+def pause_agent_jobs(agent_dir: Path, *, same_person: bool, ids: Iterable[str] | None = None) -> int:
+    """The agent's own cron jobs (set up with its cron tool) that came with a
+    bundle, paused like its scheduled tasks in Flight Deck: its owner resumes
+    them in Scheduled tasks, which picks the next run from then — so none
+    fires the moment the agent starts, and a copy doesn't run beside the
+    agent it was made of. For someone else, none may write or organize email:
+    the words that allowed it were the other person's. *ids*: only those
+    rows (an import into an existing agent); None: all of them (a new agent).
+    How many were paused."""
+    db = agent_dir / catalog.BY_KEY["sessions"].path
+    if not db.is_file():
+        return 0
+    wanted = None if ids is None else {str(i) for i in ids}
+    if wanted is not None and not wanted:
+        return 0
+    now = datetime.now(UTC).isoformat()
+    n = 0
+    with closing(sqlite3.connect(str(db), timeout=30)) as c:
+        if not c.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'cron_jobs'").fetchone():
+            return 0
+        for job_id, payload in c.execute("SELECT id, payload FROM cron_jobs").fetchall():
+            if wanted is not None and str(job_id) not in wanted:
+                continue
+            sets, params = ["enabled = 0", "last_status = 'paused'", "updated_at = ?"], [now]
+            if not same_person:
+                sets.append("payload = ?")
+                params.append(_without_mail_authority(payload))
+            c.execute(f"UPDATE cron_jobs SET {', '.join(sets)} WHERE id = ?", (*params, job_id))
+            n += 1
+        c.commit()
+    return n
+
+
+def _without_mail_authority(payload: Any) -> str:
+    """A cron prompt job's payload judged as the agent's own words with no
+    request of the person behind it (mail_authority.cron_job_text): it can't
+    write or organize email until its new owner sets it up again."""
+    try:
+        data = json.loads(payload) if isinstance(payload, str) else payload
+    except ValueError:
+        return str(payload or "")
+    if isinstance(data, dict) and "text" in data:
+        data = {**data, "author": "agent", "mail_intent_text": ""}
+    return json.dumps(data, ensure_ascii=False)
+
+
 def write_eco(agent_dir: Path, value: str) -> None:
     if value not in ("on", "off"):
         return
@@ -257,6 +305,7 @@ def write_eco(agent_dir: Path, value: str) -> None:
 async def unpack_on_spawn(ref: dict[str, Any], slug: str, agent_dir: Path, owner_id: str) -> None:
     """The spawn's hook: the bundle in *ref* into the new agent's folder, before it starts."""
     notes = await asyncio.to_thread(unpack, Path(ref["path"]), agent_dir)
+    ref["agent_jobs"] = await asyncio.to_thread(pause_agent_jobs, agent_dir, same_person=bool(ref.get("same_person")))
     write_eco(agent_dir, str(ref.get("eco_mode") or ""))
     if ref.get("columns"):
         await asyncio.to_thread(restore_columns, agent_dir, ref["columns"])
@@ -366,6 +415,7 @@ def apply_to_existing(path: Path, agent_dir: Path, mode: str, columns: dict[str,
     parts = bundle.manifest.get("parts") if isinstance(bundle.manifest.get("parts"), dict) else {}
     stored: dict[str, dict[str, dict[str, int]]] = {}
     notes: list[str] = []
+    agent_jobs = 0
     for name in bundle.names("stores/"):
         key = name[len("stores/"):].removesuffix(".db")
         part = catalog.BY_KEY.get(key)
@@ -380,18 +430,22 @@ def apply_to_existing(path: Path, agent_dir: Path, mode: str, columns: dict[str,
             try:
                 if dest.is_file():
                     stored[key] = merge.merge_store(tmp, dest, tables, mode)
+                    added_jobs = (stored[key].get("cron_jobs") or {}).get("ids") or {}
                 else:                               # a store it hasn't got yet: the bundle's, as a new agent's
                     stores.check(tmp)
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(tmp, dest)
                     stored[key] = {t: {"added": n, "skipped": 0} for t, n in stores.counts(dest).items()}
+                    added_jobs = None
+                if key == "sessions":                # its own cron jobs the import added: paused
+                    agent_jobs = pause_agent_jobs(agent_dir, same_person=same_person, ids=added_jobs)
             except (stores.StoreError, sqlite3.Error) as exc:
                 notes.append(f"{part.label} left as it was: {exc}")
     files = merge.merge_files(bundle, agent_dir, categories, mode, _inside, base=bool(package) and not same_person)
     if columns:
         restore_columns(agent_dir, columns)
     done = {"stores": stored, "files": files, "notes": notes, "categories": sorted(categories),
-            "package": package, "taken_out": taken_out}
+            "package": package, "taken_out": taken_out, "agent_jobs": agent_jobs}
     note_package(path, agent_dir, mode, done, base=False)
     return done
 

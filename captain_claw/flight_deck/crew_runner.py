@@ -141,6 +141,18 @@ _RETRYING = ("Your last turn was cut off because the connection to the model fai
 _RETRIES = 3
 _SAID_WORKING: dict[str, float] = {}  # per task: when it was last said to be still working
 
+# A turn the account's usage limit stopped (Claude's 5-hour or weekly limit, Codex's): it waits for the
+# reset and goes on by itself. Nobody has to keep an eye on it and send it on again.
+_LIMIT_CARRY_ON = ("Your last turn was stopped by the account's usage limit before it finished. Carry on where you left off. "
+                   "Whatever you were running then may not have finished, so check it before relying on it. Your files are "
+                   "as you left them.\n\n")
+_LIMIT_AGAIN = ("Your last turn was stopped by the account's usage limit before you could start on it, so here it is "
+                "again.\n\n")
+_LIMIT_GUESS_S = 30 * 60  # it didn't say when the limit resets: look again this often…
+_LIMIT_GUESSES = 6        # …this many times, then leave it failed for a person
+_LIMIT_GUESSED: dict[str, int] = {}  # per task: looks taken without a reset time, since its last good turn
+_PLAN_WORDS = {"claude": "The Claude plan", "codex": "The ChatGPT plan"}
+
 _MODELS: dict[str, tuple[float, list[str]]] = {}  # per user: what OpenCode said it can use, and when
 _PROCS: dict[str, subprocess.Popen] = {}
 _PREPARING: dict[str, asyncio.Task] = {}  # tasks still getting their repository
@@ -189,6 +201,14 @@ def _retry_wait_seconds(done: int) -> float:
     except ValueError:
         first = 20.0
     return first * 3 ** done
+
+
+def _limit_margin_seconds() -> float:
+    """How long after the limit resets the turn goes: its clock and the CLI's needn't agree to the second."""
+    try:
+        return max(0.0, float(os.environ.get("FD_CREW_LIMIT_MARGIN_SECONDS", 90)))
+    except ValueError:
+        return 90.0
 
 
 def _hung_seconds(task: dict) -> float:
@@ -831,9 +851,11 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
     env.update(crew_env.variables(task["user_id"], task["repo"], task["worktree"], state, env.get("PATH", "")))
     env[TASK_MARK] = task["id"]
     interrupted = bool(state.get("interrupted"))
-    retrying = bool(state.get("retrying"))
+    limit = str(state.get("limit_wait") or "")
+    resent = int(state.get("limit_resent") or 0)  # what the limit kept from its turn, at the front of pending
+    retrying = bool(state.get("retrying")) or bool(limit)
     if interrupted or retrying:
-        state = {k: v for k, v in state.items() if k not in ("interrupted", "retrying")}
+        state = {k: v for k, v in state.items() if k not in ("interrupted", "retrying", "limit_wait", "limit_resent")}
         _store().update(task["id"], env=state)
         task = {**task, "env": state}
     await crew_attach.place(task)
@@ -853,7 +875,9 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
         prompt = f"{_first_prompt(task)}{folders.told}\n\n{said}".rstrip()
     else:
         news = f"{(folders.told or crew_vfs.NONE_LEFT).strip()}\n\n" if folders_changed else ""
-        prompt = (_INTERRUPTED if interrupted else _RETRYING if retrying else "") + news + _next_prompt(pending, setup=task["kind"] == "setup")
+        why = (_INTERRUPTED if interrupted else _LIMIT_AGAIN if limit == "again" else _LIMIT_CARRY_ON if limit
+               else _RETRYING if retrying else "")
+        prompt = why + news + _next_prompt(pending, setup=task["kind"] == "setup")
     turn = int(task.get("turn") or 0) + 1
     out_dir = crew_store.turn_dir(task["user_id"], task["id"], turn)
     spec = RunSpec(binary=binary, prompt=prompt, cwd=task["worktree"], git_common_dir=task.get("git_common_dir") or "",
@@ -878,7 +902,12 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
     if task.get("model") and not route:
         _store().note_seen(task["user_id"], harness, model=task["model"])
     fresh = _store().get(task["user_id"], task["id"]) or task
-    if said or not retrying:  # going again on its own, nobody has said anything new
+    if limit:
+        # What the usage limit kept from its turn goes again, but it's on the log already.
+        new = "\n\n".join(pending[resent:])
+        if new:
+            _say(fresh, "turn", new)
+    elif said or not retrying:  # going again on its own, nobody has said anything new
         _say(fresh, "turn", f"{task['brief']}\n\n{said}".rstrip() if first else said)
     _sync_board(fresh)
 
@@ -1083,6 +1112,59 @@ def _another_try(task: dict, why: str) -> dict[str, Any] | None:
             "env": {**(task.get("env") or {}), "retrying": True}}
 
 
+def _clock(ts: float, now: float) -> str:
+    """A time of day on this computer's clock; the day too when it isn't today."""
+    at, today = time.localtime(ts), time.localtime(now)
+    same = at.tm_yday == today.tm_yday and at.tm_year == today.tm_year
+    return time.strftime("%H:%M" if same else "%a %d %b, %H:%M", at)
+
+
+def _turn_said(task: dict) -> str:
+    """What the person or the agent said that started this turn ("" when it started by itself)."""
+    turn = int(task.get("turn") or 0)
+    events = crew_store.read_events(task["user_id"], task["id"], after=max(0, int(task.get("events") or 0) - 400))
+    for e in reversed(events):
+        if e.get("kind") == "turn" and int(e.get("turn") or 0) == turn:
+            return str(e.get("text") or "")
+    return ""
+
+
+def _wait_for_limit(task: dict, current: dict, state: TurnState, why: str) -> dict[str, Any] | None:
+    """The account's usage limit stopped this turn: what keeps it waiting until the limit resets, then
+    sends it on — or None to leave it failed (no reset time after so many looks, or one too far off).
+
+    A turn that had done nothing yet gets its message again; one that had, a word to carry on."""
+    now = time.time()
+    at = crew_harness.limit_reset(state, why, now)
+    guessed = at is None
+    if guessed:
+        looks = _LIMIT_GUESSED.get(task["id"], 0)
+        if looks >= _LIMIT_GUESSES:
+            return None
+        _LIMIT_GUESSED[task["id"]] = looks + 1
+        start = now + _LIMIT_GUESS_S
+    else:
+        start = at + _limit_margin_seconds()
+    pending = list(current.get("pending") or [])
+    out: dict[str, Any] = {}
+    did_something = bool((state.final or "").strip()) or state.tokens_out > 0
+    said = "" if did_something else _turn_said(task)
+    again = bool(said)
+    if said.startswith(task["brief"]):
+        # Its very first turn, and it never got going: that turn starts over, as the first.
+        out["session"] = ""
+        said = said[len(task["brief"]):].strip()
+    if said:
+        pending = [said, *pending]
+    plan = _PLAN_WORDS.get(task["harness"], "The account")
+    when = f"in {_how_long(max(start - now, 0))} (at {_clock(start, now)})"
+    note = (f"{plan}'s usage limit is used up"
+            + (" and it didn't say when it resets, so it looks again then" if guessed else "")
+            + f". It goes on by itself {when}: a message sends it sooner, Stop cancels.")
+    env = {**(current.get("env") or {}), "limit_wait": "again" if again else "carry_on", "limit_resent": int(bool(said))}
+    return {**out, "status": "queued", "note": note[:2000], "retry_at": start, "env": env, "pending": pending}
+
+
 def _out_of_tries(why: str) -> str:
     return f"{why} Tried again {_RETRIES} times. Its work is still here: send it a message to try once more."
 
@@ -1148,6 +1230,16 @@ async def _finish_turn(task: dict, state: TurnState, code: int | None) -> None:
     else:
         status = "ready"
         note = note or _head(body) or "Finished."
+    if status == "failed" and not task.get("model_source") and crew_harness.plan_limit(f"{note} {state.error}"):
+        paused = _wait_for_limit(task, current, state, f"{note} {state.error}")
+        if paused is not None:
+            store.update(task["id"], **{**fields, **paused})
+            fresh = store.get(task["user_id"], task["id"]) or task
+            _say(fresh, "note", paused["note"])
+            _sync_board(fresh)
+            if _LIMIT_GUESSED.get(task["id"], 0) <= 1:  # told once: not again at every look
+                _spawn_notify(fresh, paused=True)
+            return
     if status == "failed" and code is not None and crew_harness.passing(note):
         again = _another_try(task, note)
         if again is not None:
@@ -1157,6 +1249,7 @@ async def _finish_turn(task: dict, state: TurnState, code: int | None) -> None:
         note = _out_of_tries(note)
     if status != "failed":
         fields.update(retries=0, retry_at=0)
+        _LIMIT_GUESSED.pop(task["id"], None)
     if pending and status != "failed":
         status = "queued"
     if task["kind"] in ("scout", "setup") and body and status != "queued":
@@ -2461,19 +2554,23 @@ def _agent_address(task: dict) -> tuple[str, int]:
     return (task.get("source_host") or "localhost", port) if port else ("", 0)
 
 
-def _spawn_notify(task: dict, *, stalled: bool = False) -> None:
+def _spawn_notify(task: dict, *, stalled: bool = False, paused: bool = False) -> None:
     try:
-        job = asyncio.create_task(_notify(task, stalled=stalled))
+        job = asyncio.create_task(_notify(task, stalled=stalled, paused=paused) if paused
+                                  else _notify(task, stalled=stalled))
     except RuntimeError:
         return
     _TASKS.add(job)
     job.add_done_callback(_TASKS.discard)
 
 
-async def _notify(task: dict, *, stalled: bool = False) -> None:
+async def _notify(task: dict, *, stalled: bool = False, paused: bool = False) -> None:
+    """Tell whoever asked how the task stands: done, failed, waiting on a decision,
+    stuck — or *paused* until its account's usage limit resets."""
     from captain_claw.flight_deck import agent_notify, owner_notify
 
-    state = "seems stuck" if stalled else _NOTICE.get(task["status"], task["status"])
+    state = ("seems stuck" if stalled else "is paused until its plan's usage limit resets" if paused
+             else _NOTICE.get(task["status"], task["status"]))
     title = f"Crew: {task['title'][:120]} {state}"
     text = notice_text(task, stalled=stalled)
     host, port = _agent_address(task)

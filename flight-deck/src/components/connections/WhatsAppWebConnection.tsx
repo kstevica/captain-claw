@@ -289,7 +289,8 @@ function Sending() {
                 mentions it by name or a trigger word, or replies to one of its messages (you can call it in the same
                 way). For 15 minutes after that it
                 joins in when it has something useful to add, and steps back as soon as you write there yourself. It sees
-                only that chat and can search the web — never your mail, files, calendar, memory or other chats. Its
+                only that chat (with its latest photos) and can search the web — never your mail, files, calendar, memory
+                or other chats. Its
                 messages count toward the daily limit and carry your signature.
               </p>
               {autoView.kill_switch && (
@@ -387,6 +388,29 @@ function DeliveryNote({ delivery, sentAt, dot = true }: { delivery: WhatsAppWebD
   return <span className={color} title={d.hint}>{dot ? ' · ' : ''}{d.text}</span>
 }
 
+// Whether the chat's photos reached the agent's model, for one decision.
+function PicturesNote({ e }: { e: WhatsAppWebAutoreplyEntry }) {
+  const pics = e.pictures ?? []
+  if (pics.length === 0) return null
+  const sent = pics.filter((p) => p.status === 'sent').length
+  const failed = pics.filter((p) => p.status !== 'sent')
+  const n = (k: number) => (k === 1 ? 'a picture' : `${k} pictures`)
+  const seen = !sent ? '' : e.pictures_seen === 'inline' ? `Looked at ${n(sent)} from the chat.`
+    : e.pictures_seen === 'described' ? `Its vision model described ${n(sent)} from the chat (its own model can’t see pictures).`
+    : e.pictures_seen === 'unseen' ? `Couldn’t see ${n(sent)} from the chat: neither its model nor a vision model can look at pictures.`
+    : e.pictures_seen === 'dropped' ? `Didn’t get ${n(sent)} from the chat: restart the agent so it can take pictures.`
+    : `Sent ${n(sent)} from the chat.`
+  const warn = !sent || e.pictures_seen === 'unseen' || e.pictures_seen === 'dropped'
+  return (
+    <div className={warn ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-400'}>
+      {seen}
+      {failed.map((p, i) => (
+        <span key={i}>{seen || i > 0 ? ' ' : ''}A picture from {p.sender} didn’t come through: {p.status.replace(/\.+$/, '')}.</span>
+      ))}
+    </div>
+  )
+}
+
 function ActivityEntry({ e }: { e: WhatsAppWebAutoreplyEntry }) {
   const [open, setOpen] = useState(false)
   const label = outcomeLabel(e.outcome)
@@ -415,6 +439,7 @@ function ActivityEntry({ e }: { e: WhatsAppWebAutoreplyEntry }) {
           <span className="text-zinc-500">{m.from_owner ? 'You' : m.sender || 'someone'}: </span>{m.text || <span className="italic text-zinc-500">no text</span>}
         </div>
       ))}
+      <PicturesNote e={e} />
       {why && <div className="italic text-zinc-400">Why: {why}</div>}
       {final?.kind === 'reply' && (
         <div className="border-l-2 border-emerald-500/50 pl-2 text-zinc-200 whitespace-pre-wrap break-words">{final.text}</div>

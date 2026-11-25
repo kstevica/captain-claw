@@ -333,7 +333,10 @@ async def _agent_complete(rec: agent_sharing.AgentRecord, messages: Sequence[dic
         if not port or not token:
             return None
         payload = {
-            "messages": [{"role": str(m["role"]), "content": str(m["content"])} for m in messages],
+            # A message's pictures (``images``: data, mime, label) go along:
+            # the agent shows them to its model or has them described.
+            "messages": [{"role": str(m["role"]), "content": str(m["content"]),
+                          **({"images": list(m["images"])} if m.get("images") else {})} for m in messages],
             "max_tokens": int(max_tokens),
         }
         # Always the local agent, never through an env proxy.
@@ -364,6 +367,11 @@ async def _agent_complete(rec: agent_sharing.AgentRecord, messages: Sequence[dic
     if meta_out is not None:
         meta_out["model"] = str(data.get("model") or "")[:120]
         meta_out["tokens"] = _tokens_used(data.get("usage"))
+        if isinstance(pictures := data.get("pictures"), dict):
+            # How a call's pictures reached the model (an agent from before
+            # pictures says nothing: it dropped them).
+            meta_out["pictures"] = {"count": int(pictures.get("count") or 0),
+                                    "seen": str(pictures.get("seen") or "")[:20]}
         if reasoning:
             thought = data.get("reasoning")
             meta_out["reasoning"] = thought if isinstance(thought, str) else ""

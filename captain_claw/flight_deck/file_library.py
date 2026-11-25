@@ -55,6 +55,7 @@ from typing import Any, NamedTuple
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, Response
 
+from captain_claw.flight_deck import side_call_health
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.logging import get_logger
 
@@ -986,26 +987,30 @@ def cut_off(reply: ModelReply) -> bool:
 async def call_model(tier: dict, system: str, user: str, owner_id: str,
                      max_tokens: int = _MAX_TOKENS,
                      request_timeout: float | None = None,
-                     images: list | None = None) -> tuple[str, int]:
+                     images: list | None = None, feature: str = "") -> tuple[str, int]:
     """One call to *tier*'s model: (reply text, tokens spent). The tokens
     count toward the owner's daily allowance. ``request_timeout`` overrides
     the provider's own (Ollama's is 120s) for a long background call.
     ``images`` go with the user message (``EncodedImage``); raises
-    :class:`PictureRefusedError` when the server would not take them."""
+    :class:`PictureRefusedError` when the server would not take them.
+    *feature*: the background work it's for (side_call_health)."""
     reply = await model_reply(tier, system, user, owner_id, max_tokens=max_tokens,
-                              request_timeout=request_timeout, images=images)
+                              request_timeout=request_timeout, images=images, feature=feature)
     return reply.text, reply.tokens
 
 
 async def model_reply(tier: dict, system: str, user: str, owner_id: str,
                       max_tokens: int = _MAX_TOKENS,
                       request_timeout: float | None = None,
-                      images: list | None = None) -> ModelReply:
+                      images: list | None = None, feature: str = "") -> ModelReply:
     """:func:`call_model`, with what the server said about the call. A
     reasoning level set around it (``reasoning.call_effort``) reaches the
-    request."""
+    request. A call for a background *feature* says how it went, so the
+    person hears when their model stops working (side_call_health)."""
     from captain_claw.flight_deck.basna_routes import tier_api_key
     from captain_claw.llm import Message, create_provider, is_reasoning_backfill_placeholder
+    who = (owner_id, feature, str(tier.get("provider") or ""), str(tier.get("model") or ""),
+           str(tier.get("base_url") or ""))
     provider = create_provider(
         provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
         base_url=tier.get("base_url") or None, api_key=tier_api_key(tier),
@@ -1016,10 +1021,18 @@ async def model_reply(tier: dict, system: str, user: str, owner_id: str,
         # A server that refuses pictures is retried without them, and the
         # provider turns this off — which is how the refusal shows here.
         provider.sees_images = True
-    resp = await provider.complete(
-        messages=[Message(role="system", content=system),
-                  Message(role="user", content=user, images=images or None)],
-        temperature=0.2, max_tokens=max_tokens)
+    try:
+        resp = await provider.complete(
+            messages=[Message(role="system", content=system),
+                      Message(role="user", content=user, images=images or None)],
+            temperature=0.2, max_tokens=max_tokens)
+    except Exception as exc:
+        await side_call_health.failed(*who, error=exc)
+        raise
+    if (resp.content or "").strip():
+        await side_call_health.ok(*who)
+    else:
+        await side_call_health.failed(*who, error=None)
     usage = dict(getattr(resp, "usage", None) or {})
     tokens = int(usage.get("total_tokens") or 0) or (
         int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0))
@@ -1300,7 +1313,8 @@ async def _summarize_picture(row: dict, path: Path, owner_id: str, reach: MediaR
                     with _quiet():
                         content, tokens = await call_model(
                             model, _PICTURE_SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id,
-                            max_tokens=_PICTURE_MAX_TOKENS, images=[picture])
+                            max_tokens=_PICTURE_MAX_TOKENS, images=[picture],
+                            feature=side_call_health.FILE_DESCRIPTIONS)
                 finally:
                     reach.probed.add(model_id)
             parsed = _parse_reply(content)
@@ -1471,7 +1485,8 @@ async def _summarize_transcript(row: dict, text: str, seconds: float, tier: dict
     try:
         with _quiet():
             content, tokens = await call_model(
-                tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id)
+                tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id,
+                feature=side_call_health.FILE_DESCRIPTIONS)
         parsed = _parse_reply(content)
     except Exception:
         # Keep the transcript (search finds it meanwhile): the retry only
@@ -1526,7 +1541,8 @@ async def summarize_row(row: dict, tier: dict, owner_id: str,
                 f"Size: {row['size']} bytes\n\n---\n{body}")
     with _quiet():
         content, tokens = await call_model(
-            tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id)
+            tier, _SYSTEM % ", ".join(c for c, _ in CATEGORIES), user_msg, owner_id,
+            feature=side_call_health.FILE_DESCRIPTIONS)
     parsed = _parse_reply(content)
     return {
         "status": "done",

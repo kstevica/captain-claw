@@ -59,6 +59,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from captain_claw.flight_deck import jev_routes, taskboard_proof, taskboard_sources, taskboard_store
+from captain_claw.flight_deck import side_call_health
 from captain_claw.flight_deck.gmail_autoreply_judges import neutralise_markers, new_nonce
 from captain_claw.flight_deck.taskboard_store import (
     _LOCK_GROUP,
@@ -997,7 +998,8 @@ async def complete(reader: dict, system: str, prompt: str, user_id: str,
     with reasoning.call_effort(agent_preset.read_effort()):
         reply = await asyncio.wait_for(
             file_library.model_reply(reader, system, prompt, user_id, max_tokens=_EXTRACT_MAX_TOKENS,
-                                     request_timeout=_CALL_TIMEOUT_S), _CALL_TIMEOUT_S + 10)
+                                     request_timeout=_CALL_TIMEOUT_S, feature=side_call_health.TASK_TRIAGE),
+            _CALL_TIMEOUT_S + 10)
     return reply.text, str(reader.get("model") or "")
 
 

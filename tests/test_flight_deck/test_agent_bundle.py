@@ -990,3 +990,140 @@ async def test_scheduled_backups_are_kept_copied_and_restored(deck, tmp_path, mo
         assert await insights.count() == 2 and not await insights.search("after the backup")
     finally:
         await insights.close()
+
+
+# ── its own cron jobs (set up with its cron tool) ───────────────────────────
+
+_PAST = "2026-01-01T08:00:00+00:00"
+
+
+def _add_cron_jobs(agent_dir: Path) -> None:
+    """Two of the agent's own cron jobs, on, due long ago, with what their runs said."""
+    db = agent_dir / "data" / "sessions" / "sessions.db"
+    human = {"text": "Every Friday email ana@client.example the VAT summary"}
+    by_agent = {"text": "Check the bank feed", "author": "agent",
+                "mail_intent_text": "yes, and email me what you find"}
+    runs = json.dumps([{"role": "assistant", "content": "Balance is 12,345 EUR (run output)"}])
+    with sqlite3.connect(db) as c:
+        c.executescript("""
+            CREATE TABLE cron_jobs (
+                id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, schedule TEXT NOT NULL,
+                session_id TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, last_run_at TEXT, next_run_at TEXT NOT NULL,
+                last_status TEXT NOT NULL DEFAULT 'pending', last_error TEXT,
+                chat_history TEXT NOT NULL DEFAULT '[]', monitor_history TEXT NOT NULL DEFAULT '[]',
+                bad_streak INTEGER NOT NULL DEFAULT 0, run_session_id TEXT NOT NULL DEFAULT '');
+        """)
+        for job_id, payload in (("j-vat", human), ("j-bank", by_agent)):
+            c.execute("INSERT INTO cron_jobs (id, kind, payload, schedule, session_id, enabled, created_at, updated_at,"
+                      " next_run_at, last_status, last_error, chat_history, monitor_history, run_session_id)"
+                      " VALUES (?, 'prompt', ?, '{\"type\": \"daily\", \"hour\": 8, \"minute\": 0}', 's1', 1, ?, ?,"
+                      " ?, 'ok', 'timeout once', ?, ?, 'run-s9')",
+                      (job_id, json.dumps(payload), _PAST, _PAST, _PAST, runs, runs))
+
+
+def _jobs(agent_dir: Path) -> dict[str, dict]:
+    with sqlite3.connect(agent_dir / "data" / "sessions" / "sessions.db") as c:
+        c.row_factory = sqlite3.Row
+        return {r["id"]: dict(r) for r in c.execute("SELECT * FROM cron_jobs")}
+
+
+@pytest.mark.asyncio
+async def test_its_own_cron_jobs_travel_without_what_their_runs_said_unless_conversations_do(deck, tmp_path):
+    _add_cron_jobs(server.DATA_DIR / "bob-agent")
+    async with _client() as c:
+        data = await _export(c, {"preset": "trained"})
+        rows = _store_rows(data, "sessions", "SELECT id, enabled, chat_history, monitor_history, last_error,"
+                           " run_session_id FROM cron_jobs ORDER BY id", tmp_path)
+        assert rows == [("j-bank", 1, "[]", "[]", None, ""), ("j-vat", 1, "[]", "[]", None, "")]
+        assert b"run output" not in data and b"timeout once" not in data
+        up = await _upload(c, data)
+        assert up["counts"]["schedules"] == 3          # Flight Deck's one and its own two
+        full = await _export(c, {"preset": "full"})
+        assert _store_rows(full, "sessions", "SELECT chat_history FROM cron_jobs WHERE id = 'j-vat'",
+                           tmp_path)[0][0].count("run output") == 1
+        # a template carries no schedules at all
+        template = await _export(c, {"preset": "template"})
+        assert "stores/sessions.db" not in _names(template)
+
+
+@pytest.mark.asyncio
+async def test_its_own_cron_jobs_arrive_paused_and_someone_elses_cant_send_email(deck, tmp_path):
+    _add_cron_jobs(server.DATA_DIR / "bob-agent")
+    async with _client() as c:
+        data = await _export(c, {"preset": "trained"})
+        up = await _upload(c, data, CAROL)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import", json={"name": "Books"},
+                         headers=_hdr(CAROL))
+        assert r.status_code == 200, r.text
+        assert r.json()["schedules"] == 3
+        assert any(n.startswith("3 scheduled task(s) came with it, switched off") for n in r.json()["notes"])
+        jobs = _jobs(server.DATA_DIR / "books")
+        assert {j["enabled"] for j in jobs.values()} == {0}
+        assert {j["last_status"] for j in jobs.values()} == {"paused"}
+        for job in jobs.values():                    # the words that allowed email were Bob's
+            payload = json.loads(job["payload"])
+            assert payload["author"] == "agent" and payload["mail_intent_text"] == ""
+        assert json.loads(jobs["j-vat"]["payload"])["text"].startswith("Every Friday email")
+        from captain_claw import mail_authority
+        bobs = {"text": "Every Friday email ana@client.example the VAT summary"}
+        assert mail_authority.explicit_mail_intent(mail_authority.cron_job_text(bobs))
+        assert not mail_authority.explicit_mail_intent(
+            mail_authority.cron_job_text(json.loads(jobs["j-vat"]["payload"])))
+
+        # Bob's own backup as a new agent: paused too (the agent it was made of still runs them), words kept
+        up = await _upload(c, await _export(c, {"preset": "full"}))
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import", json={"name": "Copy"},
+                         headers=_hdr(BOB))
+        assert r.status_code == 200, r.text
+    jobs = _jobs(server.DATA_DIR / "copy")
+    assert {j["enabled"] for j in jobs.values()} == {0}
+    assert json.loads(jobs["j-vat"]["payload"]) == {"text": "Every Friday email ana@client.example the VAT summary"}
+    assert json.loads(jobs["j-bank"]["payload"])["mail_intent_text"] == "yes, and email me what you find"
+    assert "run output" in jobs["j-vat"]["chat_history"]       # a full backup keeps its runs
+
+
+@pytest.mark.asyncio
+async def test_into_an_agent_only_the_cron_jobs_the_import_added_are_paused(deck):
+    bob = server.DATA_DIR / "bob-agent"
+    _add_cron_jobs(bob)
+    async with _client() as c:
+        backup = await _export(c, {"preset": "full"})
+        # append its own backup: the jobs are already there, so they stay as they are (on)
+        up = await _upload(c, backup)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "bob-agent", "mode": "append"}},
+                         headers=_hdr(BOB))
+        assert r.status_code == 200, r.text
+        assert {j["enabled"] for j in _jobs(bob).values()} == {1}
+        # reset from it: every job is the bundle's now, so all come in paused
+        up = await _upload(c, backup)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "bob-agent", "mode": "reset"}},
+                         headers=_hdr(BOB))
+        assert r.status_code == 200, r.text
+        assert r.json()["schedules"] == 3
+        assert {j["enabled"] for j in _jobs(bob).values()} == {0}
+        assert json.loads(_jobs(bob)["j-vat"]["payload"])["text"].startswith("Every Friday")
+        assert "author" not in json.loads(_jobs(bob)["j-vat"]["payload"])
+        # into Carol's agent, which has no sessions store yet: the bundle's, paused, no email
+        up = await _upload(c, backup, CAROL)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "carol-agent", "mode": "append"}},
+                         headers=_hdr(CAROL))
+        assert r.status_code == 200, r.text
+    jobs = _jobs(server.DATA_DIR / "carol-agent")
+    assert set(jobs) == {"j-vat", "j-bank"} and {j["enabled"] for j in jobs.values()} == {0}
+    assert {json.loads(j["payload"])["mail_intent_text"] for j in jobs.values()} == {""}
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_task_that_runs_a_flow_stays_out_and_says_so(deck):
+    sched.get_store().create(owner_id=BOB, name="Weekly flow", schedule="weekly mon 09:00", agent_slug="bob-agent",
+                             flow_id="flow-1", delivery_kind="agent", delivery={"chat": True})
+    async with _client() as c:
+        made = await c.post("/fd/agent-bundle/export/bob-agent", json={"preset": "trained"}, headers=_hdr(BOB))
+    assert made.status_code == 200, made.text
+    summary = made.json()["manifest"]
+    assert summary["counts"]["schedules"] == 1
+    assert any("run a flow stayed out" in n for n in summary["notes"])

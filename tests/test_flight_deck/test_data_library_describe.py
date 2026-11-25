@@ -39,7 +39,8 @@ class _Model:
 def model(monkeypatch: pytest.MonkeyPatch) -> _Model:
     state = _Model()
 
-    async def model_reply(tier, system, user, owner_id, max_tokens=700, request_timeout=None, images=None):
+    async def model_reply(tier, system, user, owner_id, max_tokens=700, request_timeout=None, images=None,
+                          feature=""):
         state.calls.append({"effort": reasoning.requested_effort(), "max_tokens": max_tokens, "user": user})
         return state.replies.pop(0)
 
