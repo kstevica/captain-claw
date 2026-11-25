@@ -10,6 +10,12 @@ them available to everyone on the deck, read-only for all but admins.
 It all lives in one system setting (``archetypes.TEAM_SETTING``), so a publish lands
 as one write. An agent copies its instructions when it's created, so changing or
 removing a team archetype never touches agents already made from it.
+
+An admin's own archetype made from an onboarded agent (agent_package) carries its
+onboarding: its documents, lessons, skills and exam. Publishing it ("Make it a
+company archetype") brings a copy the deck keeps, which every agent made from it
+starts with as its base. An edit keeps it, and removing the team archetype forgets
+it (agents made from it keep what they unpacked).
 """
 
 from __future__ import annotations
@@ -23,12 +29,14 @@ from pydantic import BaseModel, Field
 
 from captain_claw.config import without_retired_tools
 from captain_claw.flight_deck import agent_forge as af
+from captain_claw.flight_deck import agent_package
 from captain_claw.flight_deck import vatra_routes as vr
 from captain_claw.flight_deck.admin_routes import require_admin
 from captain_claw.flight_deck.archetype_routes import (
     _VALID_MODES,
     _VALID_TIERS,
     ArchetypeBody,
+    _onboarding,
     _slugify,
     _validate,
     read_documents,
@@ -247,6 +255,9 @@ class PublishBody(BaseModel):
     group: PackGroup
     family: PackFamily
     archetypes: list[ArchetypeBody] = Field(max_length=MAX_PACK)
+    # The admin's own archetypes, made company ones ("Make it a company archetype"):
+    # each brings the onboarding its own row carries. A generated set never does.
+    own: bool = False
 
 
 def _resolve_group(catalog: dict, group: PackGroup) -> str:
@@ -295,6 +306,26 @@ async def _store(catalog: dict) -> None:
     await get_db().set_system_setting(TEAM_SETTING, json.dumps(catalog))
 
 
+async def _team_onboarding(admin_id: str, archetype_id: str) -> dict | None:
+    """The onboarding of the admin's own archetype *archetype_id*, with a copy
+    of its package the deck keeps; None when it has none (or it's gone)."""
+    own = _onboarding(await get_db().get_user_archetype(admin_id, archetype_id)) if archetype_id else {}
+    if not own.get("package"):
+        return None
+    copied = await asyncio.to_thread(agent_package.copy_for_team, str(own["package"]), admin_id)
+    if copied is None:
+        log.warning("Team archetype: its onboarding package is gone", archetype=archetype_id)
+        return None
+    return {**own, "package": copied["id"]}
+
+
+def _forget_onboarding(archetypes: list[dict]) -> None:
+    for a in archetypes:
+        package = (a.get("onboarding") or {}).get("package") if isinstance(a.get("onboarding"), dict) else ""
+        if package:
+            agent_package.forget_team(str(package))
+
+
 @router.post("", status_code=201)
 async def publish(body: PublishBody, user: dict = Depends(require_admin)) -> dict[str, Any]:
     """Make a reviewed set available to everyone on the deck, as one write."""
@@ -327,11 +358,21 @@ async def publish(body: PublishBody, user: dict = Depends(require_admin)) -> dic
         }), company=True)
         data["id"] = aid
         data["icon"] = _clean_icon(item.icon)
+        # One of the admin's own, made from an onboarded agent: its onboarding comes along.
+        # Only what the server finds on their own archetype: the body can't name a package.
+        onboarding = await _team_onboarding(str(user.get("id") or ""), item.archetype_id.strip()) if body.own else None
+        if onboarding:
+            data["onboarding"] = onboarding
         made.append(data)
     catalog["archetypes"].extend(made)
-    await _store(catalog)
+    try:
+        await _store(catalog)
+    except Exception:
+        _forget_onboarding(made)
+        raise
     log.info("Team archetypes published", admin=user["id"], group=group_id, family=family, count=len(made))
-    return {"published": len(made), "group": group_id, "family": family, "ids": [a["id"] for a in made]}
+    return {"published": len(made), "group": group_id, "family": family, "ids": [a["id"] for a in made],
+            "with_onboarding": sum(1 for a in made if a.get("onboarding"))}
 
 
 @router.put("/{archetype_id}")
@@ -350,6 +391,9 @@ async def update_one(archetype_id: str, body: ArchetypeBody, user: dict = Depend
     }), company=True)
     data["id"] = archetype_id
     data["icon"] = _clean_icon(body.icon, str(catalog["archetypes"][at].get("icon") or ""))
+    # The body can't name an onboarding package: the stored one's is kept.
+    if isinstance(catalog["archetypes"][at].get("onboarding"), dict):
+        data["onboarding"] = catalog["archetypes"][at]["onboarding"]
     catalog["archetypes"][at] = data
     _prune(catalog)
     await _store(catalog)
@@ -363,9 +407,11 @@ async def delete_group(group_id: str, user: dict = Depends(require_admin)) -> di
     if not any(g["id"] == group_id for g in catalog["groups"]):
         raise HTTPException(404, "There's no team group by that name.")
     before = len(catalog["archetypes"])
+    gone = [a for a in catalog["archetypes"] if a.get("category") == group_id]
     catalog["archetypes"] = [a for a in catalog["archetypes"] if a.get("category") != group_id]
     _prune(catalog)
     await _store(catalog)
+    _forget_onboarding(gone)
     return {"removed": before - len(catalog["archetypes"])}
 
 
@@ -375,7 +421,9 @@ async def delete_one(archetype_id: str, user: dict = Depends(require_admin)) -> 
     kept = [a for a in catalog["archetypes"] if a.get("id") != archetype_id]
     if len(kept) == len(catalog["archetypes"]):
         raise HTTPException(404, "There's no team archetype by that name.")
+    gone = [a for a in catalog["archetypes"] if a.get("id") == archetype_id]
     catalog["archetypes"] = kept
     _prune(catalog)
     await _store(catalog)
+    _forget_onboarding(gone)   # agents made from it keep what they unpacked
     return {"ok": True}

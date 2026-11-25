@@ -97,6 +97,8 @@ export interface Archetype {
   shared_owner_email?: string
   shared_owner_name?: string
   shared_permission?: string
+  // Made from an onboarded agent ("Save as an archetype"): what it passes on.
+  onboarding?: { package: string; from?: string; counts?: Record<string, number> }
 }
 
 /** A person looking for an archetype by role, family, what it does or a keyword. */

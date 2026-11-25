@@ -3188,3 +3188,69 @@ async def test_an_onboarded_agent_is_passed_on_with_an_archetype(deck, monkeypat
     async with _client() as c:
         assert (await c.delete("/fd/archetypes/refund-desk", headers=_auth(BOB))).status_code == 200
     assert not (pkg.packages_dir() / package_id).exists()
+
+
+async def test_an_onboarded_archetype_made_a_company_one_keeps_its_onboarding(deck, monkeypatch):
+    """"Make it a company archetype": the deck keeps a copy of its package, which every agent made
+    from it starts with as its base — and the admin's own archetype going takes only the original."""
+    from captain_claw.flight_deck import agent_package as pkg
+
+    async def merged(db, uid):
+        rows, shared = await arch_mod._owned_and_shared(db, uid) if uid else ([], [])
+        return arch_mod.merge_archetypes([dict(_ARCH)], rows, shared, (await arch_mod.team_catalog(db))["archetypes"])
+
+    monkeypatch.setattr(arch_mod, "merged_archetypes", merged)
+    monkeypatch.setattr(server, "_process_is_alive", lambda s: False)
+    await deck._db.execute("UPDATE users SET role = 'admin' WHERE id = ?", (BOB,))
+    await deck._db.commit()
+    slug = await _spawn(BOB, "Helpdesk", 24411)
+    preset = _setup(BOB, [{"name": "policy.md", "text": "# Refunds\nRefunds within 14 days."}],
+                    rules=[{"text": "Answer in Croatian.", "always": True}])
+    assert (await _apply(BOB, slug, preset)).status_code == 200
+    async with _client() as c:
+        r = await c.post(f"/fd/agent-package/{slug}", headers=_auth(BOB), json={"role": "Refund desk"})
+        assert r.status_code == 200, r.text
+        mine = r.json()["archetype"]
+        original = mine["onboarding"]["package"]
+        body = {k: mine[k] for k in ("role", "description", "tier", "cognitive_mode", "tools")}
+        body["fleet_instructions"] = "You answer customers kindly and check the refund policy first. " * 15
+        pack = {"group": {"label": "Front desk"}, "family": {"name": "Support", "icon": "", "color": ""},
+                "archetypes": [{**body, "archetype_id": "refund-desk", "family": "Support",
+                                "onboarding": {"package": "0" * 16}}]}       # a body can't name a package
+        # Generated (not one of the admin's own): nothing comes along, even with the same id.
+        r = await c.post("/fd/archetypes/team", headers=_auth(BOB), json=pack)
+        assert r.status_code == 201 and r.json()["with_onboarding"] == 0
+        assert (await c.delete(f"/fd/archetypes/team/{r.json()['ids'][0]}", headers=_auth(BOB))).status_code == 200
+        r = await c.post("/fd/archetypes/team", headers=_auth(BOB), json={**pack, "own": True})
+        assert r.status_code == 201, r.text
+        assert r.json()["with_onboarding"] == 1 and r.json()["ids"] == ["refund-desk"]
+        # As the Archetypes page does next: the admin's own archetype goes, with its own package.
+        assert (await c.delete("/fd/archetypes/refund-desk", headers=_auth(BOB))).status_code == 200
+    [team] = (await arch_mod.team_catalog(deck))["archetypes"]
+    kept = team["onboarding"]["package"]
+    assert kept != original and not (pkg.packages_dir() / original).exists()
+    assert pkg.load(kept)["owner"] == pkg.TEAM_OWNER
+    assert (pkg.packages_dir() / kept / "knowledge" / "policy.md").is_file()
+
+    # Carol, who never saw the agent, starts from it with all of it as her base.
+    async with _client() as c:
+        r = await c.post("/fd/spawn-process", headers=_auth(CAROL), json={
+            "name": "Carols desk", "archetype": "refund-desk", "botport_enabled": False,
+            "web_enabled": True, "web_port": 24412})
+    assert r.status_code == 200, r.text
+    carols = server.DATA_DIR / r.json()["slug"]
+    record = ap.read_record(carols)
+    assert {e["doc"] for e in record["knowledge"]} == {"policy.md"}
+    assert all(e["layer"] == "base" for e in record["knowledge"] + record["rules"])
+    assert "14 days" in (carols / "data" / "workspace" / "knowledge" / "policy.md").read_text()
+
+    # An admin's edit keeps it; removing the company archetype forgets the deck's copy only.
+    async with _client() as c:
+        r = await c.put("/fd/archetypes/team/refund-desk", headers=_auth(BOB),
+                        json={**body, "role": "Refund desk (EU)", "family": "Support", "category": team["category"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["onboarding"]["package"] == kept
+        assert (await c.delete("/fd/archetypes/team/refund-desk", headers=_auth(BOB))).status_code == 200
+    assert not (pkg.packages_dir() / kept).exists()
+    assert (carols / "data" / "workspace" / "knowledge" / "policy.md").is_file()       # hers stays hers
+    pkg.forget_team(slug)                                   # never anything but the deck's own (not a package id)
