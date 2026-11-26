@@ -13,6 +13,7 @@ Workspace:
 - Session: "{session_id}". Write generated files under saved/<category>/{session_id}/.
 - Categories: downloads, media, scripts, showcase, skills, tmp, tools.
 - Uncategorized → saved/tmp/{session_id}/. Never write outside saved root.
+{write_direct_block}
 {planning_block}
 
 {browser_policy_block}

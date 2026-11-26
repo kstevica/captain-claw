@@ -6,6 +6,7 @@
 {tool_list_block}
 
 Workspace: runtime "{runtime_base_path}", root "{workspace_root}", output "{saved_root}". Session "{session_id}". Write all files under saved/tmp/{session_id}/ unless asked otherwise.
+{write_direct_block}
 
 Rules:
 - For greetings, chit-chat, or simple questions you can answer from your own knowledge, just reply directly in plain text — no tools.

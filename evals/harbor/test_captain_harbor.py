@@ -42,3 +42,20 @@ def test_context_from_result():
     assert ctx["n_input_tokens"] == 100 and ctx["n_output_tokens"] == 9 and ctx["n_cache_tokens"] == 80
     assert ctx["cost_usd"] == 0.01
     assert ctx["metadata"]["mode"] == "deck" and "messages" not in ctx["metadata"]
+
+
+def test_a_harbor_trial_runs_at_full_stretch_and_locked_by_default():
+    flags = ch.runner_flags("anthropic", "m", ch.CaptainOptions(), "/logs/agent")
+    assert ["--effort", "max"] == flags[flags.index("--effort"):][:2]
+    assert ["--drive", "ambitious"] == flags[flags.index("--drive"):][:2]
+    assert "--lock" in flags
+
+
+def test_auto_leaves_a_level_to_captain_and_lock_can_be_turned_off():
+    flags = ch.runner_flags("anthropic", "m", ch.CaptainOptions(reasoning_effort="auto", drive="persistent"), "/l")
+    assert "--effort" not in flags and ["--drive", "persistent"] == flags[flags.index("--drive"):][:2]
+    assert "--lock" in flags
+    nothing = ch.runner_flags("anthropic", "m", ch.CaptainOptions(reasoning_effort="auto", drive="auto"), "/l")
+    assert not {"--effort", "--drive", "--lock"} & set(nothing)
+    loose = ch.runner_flags("anthropic", "m", ch.CaptainOptions(lock=False), "/l")
+    assert "--effort" in loose and "--lock" not in loose

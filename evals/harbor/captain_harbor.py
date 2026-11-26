@@ -1,7 +1,10 @@
 """Harbor adapter: run Captain on Harbor tasks (ShellBench, Terminal-Bench …).
 
     harbor run -p <tasks dir> --agent captain_harbor:Captain \
-        -m anthropic/claude-haiku-5-5 --ak reasoning_effort=high
+        -m anthropic/claude-haiku-5-5
+
+A Harbor trial runs Captain at full stretch by default: reasoning effort max
+and Drive ambitious, locked for the whole run.
 
 (with ``evals/harbor`` on PYTHONPATH). Each trial installs Captain in the task
 container and runs ``captain-claw-once`` in the task's working directory. That
@@ -26,9 +29,13 @@ Options (``--ak name=value``):
                    newest that day
   workspace        folder the agent works in (default: the container's
                    working directory)
-  reasoning_effort off · minimal · low · medium · high · xhigh · max
-  drive            relaxed · diligent · persistent · ambitious (how far the
-                   harness pushes the turn; default: Captain's)
+  reasoning_effort off · minimal · low · medium · high · xhigh · max · auto
+                   (default max: the highest the model offers; auto leaves
+                   it to Captain)
+  drive            relaxed · diligent · persistent · ambitious · auto (how far
+                   the harness pushes the turn; default ambitious)
+  lock             force the effort and Drive above for the whole run, so the
+                   agent can't change them (default true)
   max_iterations   tool-call budget for the turn
   timeout_seconds  stop the task after this long (30 minutes at most)
   archetype        spawn the agent from the deck's agent store, by id
@@ -71,6 +78,13 @@ PROVIDER_KEY_ENVS: dict[str, tuple[str, ...]] = {
     "xai": ("XAI_API_KEY",),
 }
 TOOL_KEY_ENVS = ("BRAVE_API_KEY", "TAVILY_API_KEY", "YDC_API_KEY", "KEENABLE_API_KEY")
+# A Harbor trial is a benchmark: Captain at full stretch unless told otherwise,
+# held there for the whole run (``lock``). A model without "max" runs at its
+# highest level; Ambitious's unasked extra step never runs on these tasks
+# (automated turns), so it adds Persistent's limits and check plus "go deeper".
+HARBOR_EFFORT = "max"
+HARBOR_DRIVE = "ambitious"
+_LEAVE_TO_CAPTAIN = ("auto", "default")
 
 
 class CaptainOptions(InstalledAgentOptions):
@@ -85,9 +99,10 @@ class CaptainOptions(InstalledAgentOptions):
     workspace: str | None = Field(
         default=None, description="Folder the agent works in (default: the working directory)."
     )
-    drive: Literal["relaxed", "diligent", "persistent", "ambitious"] | None = Field(
-        default=None, description="Drive: how far the harness pushes the turn.",
+    drive: Literal["relaxed", "diligent", "persistent", "ambitious", "auto"] | None = Field(
+        default=None, description=f"Drive: how far the harness pushes the turn (default {HARBOR_DRIVE}).",
     )
+    lock: bool = Field(default=True, description="Force effort and Drive for the whole run.")
     max_iterations: int | None = Field(default=None, description="Tool-call budget for the turn.")
     timeout_seconds: float | None = Field(default=None, description="Stop the task after this long.")
     archetype: str | None = Field(default=None, description="Spawn this agent from the deck's agent store, by id.")
@@ -103,13 +118,28 @@ def split_model(model_name: str) -> tuple[str, str]:
     return provider, model
 
 
+def benchmark_levels(options: CaptainOptions) -> tuple[str, str]:
+    """(effort, drive) for the run: what was asked, else the Harbor defaults;
+    "" where ``auto`` leaves the choice to Captain."""
+    def pick(asked: str | None, default: str) -> str:
+        text = str(asked or "").strip().lower()
+        if text in _LEAVE_TO_CAPTAIN:
+            return ""
+        return text or default
+
+    return pick(options.reasoning_effort, HARBOR_EFFORT), pick(options.drive, HARBOR_DRIVE)
+
+
 def runner_flags(provider: str, model: str, options: CaptainOptions, logs_dir: str) -> list[str]:
     flags = ["-p", provider, "-m", model, "--run-dir", RUN_DIR,
              "--result-json", f"{logs_dir}/{RESULT_NAME}"]
-    if options.reasoning_effort:
-        flags += ["--effort", options.reasoning_effort]
-    if options.drive:
-        flags += ["--drive", options.drive]
+    effort, drive = benchmark_levels(options)
+    if effort:
+        flags += ["--effort", effort]
+    if drive:
+        flags += ["--drive", drive]
+    if options.lock and (effort or drive):
+        flags += ["--lock"]
     if options.max_iterations:
         flags += ["--max-iterations", str(options.max_iterations)]
     if options.timeout_seconds:
@@ -133,7 +163,7 @@ def context_from_result(data: dict[str, Any]) -> dict[str, Any]:
         "cost_usd": data.get("cost_usd_estimate"),
         "metadata": {
             key: data.get(key)
-            for key in ("ok", "error", "mode", "captain_version", "effort", "drive", "store_agent",
+            for key in ("ok", "error", "mode", "captain_version", "effort", "drive", "locked", "store_agent",
                         "models_used", "duration_seconds", "tool_calls", "tools_used", "files", "deck")
         },
     }

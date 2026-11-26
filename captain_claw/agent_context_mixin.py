@@ -3866,6 +3866,14 @@ class AgentContextMixin:
         workspace_root: object = self.workspace_base_path
         if getattr(self, "_speaker_scoped", False) is True:
             runtime_base_path = workspace_root = saved_root = _SPEAKER_PATH_PLACEHOLDER
+        # Direct writes (Code agents, benchmark runs): the write tool puts a
+        # file where it is asked for, so the saved/ rules cover scratch only —
+        # said outright, or the agent "fixes" a named file by moving it there.
+        write_direct_block = (
+            self.instructions.render("section_write_direct.md", workspace_root=workspace_root)
+            if os.environ.get("CLAW_WRITE_DIRECT") and getattr(self, "_speaker_scoped", False) is not True
+            else ""
+        )
 
         base_prompt = self.instructions.render(
             "system_prompt.md",
@@ -3891,6 +3899,7 @@ class AgentContextMixin:
             browser_policy_block=browser_policy_block,
             direct_api_block=direct_api_block,
             termux_policy_block=termux_policy_block,
+            write_direct_block=write_direct_block,
             google_block=google_block,
             jev_block=jev_block,
             datastore_block=datastore_block,

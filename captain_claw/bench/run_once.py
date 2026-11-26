@@ -68,6 +68,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--effort", default="", help="Reasoning effort: off, minimal, low, medium, high, xhigh, max.")
     p.add_argument("--drive", default="", choices=["", *DRIVE_LEVELS],
                    help="Drive, how far the harness pushes the turn: " + ", ".join(DRIVE_LEVELS) + ".")
+    p.add_argument("--lock", action="store_true",
+                   help="Force --effort and --drive for the whole run: the agent can't change them.")
     p.add_argument("--workspace", default="", help="Folder the agent works in (default: the current folder).")
     p.add_argument("--run-dir", default="", help="Where the deck, logs and result.json go (default: a new temp folder).")
     p.add_argument("--result-json", default="", help="Result file (default: <run dir>/result.json).")
@@ -333,6 +335,9 @@ async def run_standalone(args: argparse.Namespace, instruction: str, run_dir: Pa
         os.environ["CLAW_WRITE_DIRECT"] = "1"
     if args.max_iterations > 0:
         os.environ["CLAW_MAX_ITERATIONS"] = str(args.max_iterations)
+    from captain_claw.bench.deck_run import lock_env
+
+    os.environ.update(lock_env(args))
 
     from captain_claw.logging import configure_logging, set_system_log_sink
 
@@ -398,7 +403,7 @@ async def run_standalone(args: argparse.Namespace, instruction: str, run_dir: Pa
         usage=dict(getattr(agent, "total_usage", None) or {}), messages=messages,
         counts=tool_counts(messages), files=diff_snapshots(before, snapshot(workspace)),
         session_id=getattr(session, "id", None),
-        extra={"mode": "standalone", "drive": args.drive or None},
+        extra={"mode": "standalone", "drive": args.drive or None, "locked": bool(lock_env(args))},
     )
     write_outputs(args, result, result_path)
     report(args, result, result_path)

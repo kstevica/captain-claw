@@ -164,6 +164,13 @@ class DriveLevelTool(Tool):
             return ToolResult(success=False, error=(
                 "Drive is your owner's setting — it can't be read or changed from this conversation."))
         act = str(action or "get").strip().lower()
+        forced = drive.locked()
+        if forced and act in ("get", "set"):
+            note = (f"Drive is locked at {drive.LEVELS[forced].label} for this run "
+                    "(set from outside, e.g. by a benchmark harness); it can't be changed.")
+            if act == "set":
+                return ToolResult(success=False, error=note)
+            return ToolResult(content=f"{note}\n\n{_report(agent, here)}")
         if act == "get":
             return ToolResult(content=_report(agent, here))
         if act != "set":
