@@ -159,6 +159,7 @@ captain-claw-orchestrate = "captain_claw.orchestrator_cli:cli_orchestrate"
 captain-claw-fd = "captain_claw.flight_deck.server:main"
 flight-deck = "captain_claw.flight_deck.server:main"
 captain-claw-mcp = "captain_claw.mcp_serve:main"
+captain-claw-once = "captain_claw.bench.run_once:main"
 botport = "botport.server:main"
 
 [build-system]
