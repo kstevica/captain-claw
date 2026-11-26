@@ -32,6 +32,7 @@ Workspace folder policy:
   - tmp: disposable scratch intermediates -> saved/tmp/{session_id}/
 - Any uncategorized file write path is remapped to: saved/tmp/{session_id}/...
 - Never write outside saved root; if user asks another path, mirror it as a subpath under saved/.
+{write_direct_block}
 
 PDF processing policy:
 - Use `pdf_extract` to extract text from PDFs. This is the only tool needed for PDF content.

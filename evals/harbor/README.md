@@ -33,9 +33,21 @@ would answer.
 pip install harbor
 export ANTHROPIC_API_KEY=...        # or OPENAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY
 PYTHONPATH=evals/harbor harbor run -p path/to/tasks \
-  --agent captain_harbor:Captain -m anthropic/claude-haiku-5-5 \
-  --ak reasoning_effort=high --ak drive=persistent -k 3 -n 4
+  --agent captain_harbor:Captain -m anthropic/claude-haiku-5-5 -k 3 -n 4
 ```
+
+**By default, a Harbor trial runs Captain at full stretch.** Reasoning effort is
+`max` (the highest level the model offers, so `high` on a model without `max`)
+and Drive is `ambitious`. Both are **locked** for the whole run:
+- every main model call uses them;
+- the agent's `reasoning_effort` and `drive_level` tools refuse to change them;
+- housekeeping calls keep their quiet defaults.
+
+To change this, pass `--ak reasoning_effort=high`, `--ak drive=persistent`, or
+`auto` to leave a setting to Captain. `--ak lock=false` sets the levels as the
+agent's defaults without forcing them. `captain-claw-once` reads the lock as
+`--lock` and passes it to the agent as `CLAW_LOCK_REASONING_EFFORT` and
+`CLAW_LOCK_DRIVE`.
 
 By default the agent is a plain new agent, like **New agent → Advanced** with
 nothing chosen. `--ak archetype=<id>` spawns an agent from the deck's **agent
@@ -80,8 +92,9 @@ PYTHONPATH=evals/harbor harbor run ... \
 |---|---|
 | `source` | pip spec: `captain-claw==0.9.4`, a git URL, or a local wheel path (default: the latest release) |
 | `constraints` | pip constraints file pinning dependencies (see above) |
-| `reasoning_effort` | `off` · `minimal` · `low` · `medium` · `high` · `xhigh` · `max` |
-| `drive` | `relaxed` · `diligent` · `persistent` · `ambitious` |
+| `reasoning_effort` | `off` · `minimal` · `low` · `medium` · `high` · `xhigh` · `max` · `auto` (default `max`) |
+| `drive` | `relaxed` · `diligent` · `persistent` · `ambitious` · `auto` (default `ambitious`) |
+| `lock` | force effort and Drive for the whole run (default `true`) |
 | `max_iterations` | tool-call budget for the turn |
 | `timeout_seconds` | stop the task after this long (30 min at most) |
 | `workspace` | folder the agent works in (default: the container's working directory) |

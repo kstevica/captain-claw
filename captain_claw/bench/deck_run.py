@@ -77,6 +77,24 @@ def provider_key(provider: str, env: dict[str, str] | None = None) -> str:
     return ""
 
 
+# What the agent reads to force a level for its whole run (llm/reasoning.py
+# LOCK_ENV, drive.py LOCK_ENV; named here so this module stays light).
+EFFORT_LOCK_ENV = "CLAW_LOCK_REASONING_EFFORT"
+DRIVE_LOCK_ENV = "CLAW_LOCK_DRIVE"
+
+
+def lock_env(args: argparse.Namespace) -> dict[str, str]:
+    """With ``--lock``: the effort and Drive the agent must keep all run."""
+    if not getattr(args, "lock", False):
+        return {}
+    out = {}
+    if args.effort:
+        out[EFFORT_LOCK_ENV] = args.effort
+    if args.drive:
+        out[DRIVE_LOCK_ENV] = args.drive
+    return out
+
+
 def agent_env_vars(args: argparse.Namespace, env: dict[str, str] | None = None) -> list[dict[str, str]]:
     """The spawned agent's extra environment: direct writes, the step budget,
     and the caller's web-search keys."""
@@ -86,6 +104,7 @@ def agent_env_vars(args: argparse.Namespace, env: dict[str, str] | None = None) 
         out.append({"key": "CLAW_WRITE_DIRECT", "value": "1"})
     if args.max_iterations > 0:
         out.append({"key": "CLAW_MAX_ITERATIONS", "value": str(args.max_iterations)})
+    out.extend({"key": k, "value": v} for k, v in lock_env(args).items())
     for name in TOOL_KEY_ENVS:
         if env.get(name):
             out.append({"key": name, "value": env[name]})
@@ -353,6 +372,8 @@ def recorded_usage(
     cost, priced, models = 0.0, False, set()
     for rec in data.get("records") or []:
         rec_provider, rec_model = str(rec.get("provider") or provider), str(rec.get("model") or model)
+        # Some calls record the model already as "provider/model".
+        rec_model = rec_model.removeprefix(f"{rec_provider}/")
         models.add(f"{rec_provider}/{rec_model}")
         part = estimate_cost(rec_provider, rec_model, {k: int(rec.get(k) or 0) for k in _USAGE_KEYS})
         if part is not None:
@@ -474,6 +495,8 @@ async def run_on_deck(args: argparse.Namespace, instruction: str, run_dir: Path)
         if not args.quiet:
             store = f"store agent {args.archetype} · " if args.archetype else ""
             knobs = " · ".join(f"{k} {v}" for k, v in (("effort", args.effort), ("drive", args.drive)) if v)
+            if knobs and lock_env(args):
+                knobs += " (locked)"
             _say(f"agent {slug} · {store}{args.provider}/{args.model}{' · ' + knobs if knobs else ''} · "
                  f"port {info['web_port']} · in {workspace}")
 
@@ -535,6 +558,7 @@ async def run_on_deck(args: argparse.Namespace, instruction: str, run_dir: Path)
         extra={
             "mode": "deck",
             "drive": args.drive or None,
+            "locked": bool(lock_env(args)),
             "store_agent": args.archetype or None,
             "models_used": models_used,
             "deck": {"url": args.deck_url or (deck.url if deck else ""), "private": deck is not None,

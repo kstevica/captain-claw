@@ -214,6 +214,12 @@ def test_recorded_usage_prices_each_call_at_its_model(monkeypatch):
     assert cost == 0.5
     assert models == ["anthropic/big", "anthropic/small"]
     assert dr.recorded_usage({"totals": {}, "records": []}, "p", "m")[1] is None
+    # A call that recorded "provider/model" is the same model, priced once.
+    seen.clear()
+    _, _, models = dr.recorded_usage({"totals": {}, "records": [
+        {"provider": "anthropic", "model": "anthropic/big", "prompt_tokens": 5},
+        {"provider": "anthropic", "model": "big", "prompt_tokens": 5}]}, "anthropic", "big")
+    assert models == ["anthropic/big"] and seen == [("anthropic", "big", 5), ("anthropic", "big", 5)]
 
 
 def test_store_lines_put_featured_first():
@@ -283,3 +289,28 @@ def test_private_deck_env_is_its_own(monkeypatch, tmp_path):
     assert env["FD_DATA_DIR"] == str(tmp_path / "deck" / "data")
     assert env["HOME"] == str(tmp_path / "deck" / "home")
     assert "CLAW_WRITE_DIRECT" not in env
+
+
+def test_lock_passes_the_forced_levels_to_the_agent():
+    from captain_claw import drive
+    from captain_claw.llm import reasoning
+
+    # The names the agent reads (kept as literals in deck_run to stay light).
+    assert dr.EFFORT_LOCK_ENV == reasoning.LOCK_ENV and dr.DRIVE_LOCK_ENV == drive.LOCK_ENV
+    locked = dr.agent_env_vars(_args(effort="max", drive="ambitious", lock=True), {})
+    assert {"key": "CLAW_LOCK_REASONING_EFFORT", "value": "max"} in locked
+    assert {"key": "CLAW_LOCK_DRIVE", "value": "ambitious"} in locked
+    # Without --lock the levels are only defaults the agent may change.
+    loose = dr.agent_env_vars(_args(effort="max", drive="ambitious"), {})
+    assert not any(e["key"].startswith("CLAW_LOCK_") for e in loose)
+    assert dr.lock_env(_args(lock=True)) == {}       # nothing given, nothing forced
+
+
+async def test_a_locked_run_says_so_in_the_result(monkeypatch, tmp_path, no_poll_wait):
+    deck = FakeDeck(tmp_path)
+    monkeypatch.setattr(dr, "DeckClient", deck.client)
+    args = _args(deck_url="http://x", workspace=str(tmp_path), effort="max", drive="ambitious",
+                 lock=True, quiet=True)
+    assert await dr.run_on_deck(args, "q", tmp_path) == 0
+    result = json.loads((tmp_path / "result.json").read_text())
+    assert result["locked"] is True and result["effort"] == "max" and result["drive"] == "ambitious"

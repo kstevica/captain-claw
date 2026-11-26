@@ -121,6 +121,18 @@ def current_turn_effort() -> str | None:
     return _TURN.get()
 
 
+# A level forced from outside for the agent's whole run — a benchmark harness
+# (captain-claw-once --lock). It beats every other pick for the main
+# conversation calls, and the reasoning_effort tool refuses to change it.
+# Housekeeping calls keep the model's default, as always.
+LOCK_ENV = "CLAW_LOCK_REASONING_EFFORT"
+
+
+def locked_effort() -> str | None:
+    """The level forced for this run (:data:`LOCK_ENV`), or ``None``."""
+    return normalize_level(os.environ.get(LOCK_ENV, ""))
+
+
 def requested_effort() -> str | None:
     """The level the provider should apply to the request it is building."""
     return _CALL.get()

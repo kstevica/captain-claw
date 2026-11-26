@@ -155,3 +155,28 @@ def test_talk_about_drive_is_noticed_but_not_talk_about_files():
         assert _DRIVE_TALK_RE.search(text), text
     for text in ("save it to my drive", "upload the file to Google Drive", "drive folder for the team"):
         assert not _DRIVE_TALK_RE.search(text), text
+
+
+# ── a level forced for the whole run (benchmark harness) ─────────────
+
+
+async def test_a_locked_drive_beats_every_pick_and_the_tool_cant_change_it(monkeypatch, _settings):
+    monkeypatch.setenv(drive.LOCK_ENV, "ambitious")
+    agent = _agent(channel="api")
+    with drive.turn_drive("relaxed"):
+        assert drive.current_name(agent) == "ambitious"
+    agent._turn_drive_override = "relaxed"
+    assert drive.current_name(agent) == "ambitious"
+
+    refused = await _run(agent, action="set", level="relaxed")
+    assert not refused.success and "locked at Ambitious" in refused.error
+    assert not (_settings / "drive.txt").exists()
+    shown = await _run(agent, action="get")
+    assert shown.success and shown.content.startswith("Drive is locked at Ambitious")
+
+
+def test_an_unknown_or_empty_lock_forces_nothing(monkeypatch):
+    for value in ("", "auto", "frantic"):
+        monkeypatch.setenv(drive.LOCK_ENV, value)
+        assert drive.locked() is None
+        assert drive.current_name(None) == drive.DEFAULT
