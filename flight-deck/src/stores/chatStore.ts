@@ -103,6 +103,7 @@ function logRowToMessage(r: LogRow): ChatMessage {
     ...(taskMark(meta.task) ? { task: taskMark(meta.task) } : {}),
     ...(meta.automation ? { automation: String(meta.automation) } : {}),
     ...(meta.narration ? { narration: true } : {}),
+    ...(meta.jev ? { jev: true } : {}),
     ...(meta.note ? { note: String(meta.note) } : {}),
     ...(typeof meta.file_size === 'number' ? { fileSize: meta.file_size } : {}),
     // A system row stored before its kind was recorded: narration or not is
@@ -217,6 +218,9 @@ interface PersistedPlanSlice {
 
 // Valid plan-mode enrichment levels (cumulative: each adds context on top of
 // the previous). Mirrors PLAN_LEVELS in captain_claw/plan_mode.py.
+/** completion_gate steps Jev's narration already says in words (jev_narration.py). */
+const JEV_NARRATED_STEPS = new Set(['jev_course', 'jev_course_relation', 'jev_block_review', 'course_turn'])
+
 export const PLAN_LEVELS = ['plain', 'enriched', 'insightful', 'complete'] as const
 export type PlanLevel = (typeof PLAN_LEVELS)[number]
 
@@ -506,6 +510,7 @@ async function _flushMessages() {
               ...(m.task ? { task: m.task } : {}),
               ...(m.automation ? { automation: m.automation } : {}),
               ...(m.narration ? { narration: true } : {}),
+              ...(m.jev ? { jev: true } : {}),
               ...(m.healed ? { healed: true, ...(m.healedFrom ? { agent_session: m.healedFrom } : {}) } : {}),
               ...(m.note ? { note: m.note } : {}),
               ...(m.fileSize !== undefined ? { file_size: m.fileSize } : {}),
@@ -2611,12 +2616,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         content: text,
         timestamp: (data.timestamp as string) || new Date().toISOString(),
         narration: true,
+        // Jev's decision, said in words (jev_narration.py).
+        ...(data.source === 'jev' ? { jev: true } : {}),
       })
     })
 
     ws.on('monitor', (data) => {
       const toolName = data.tool_name as string || ''
       const output = data.output as string || ''
+      // Jev's course check / step-budget call arrives as narration in words;
+      // its raw completion_gate row would only add "Working on it".
+      const gateStep = toolName === 'completion_gate'
+        ? String((data.arguments as Record<string, unknown> | undefined)?.step || '') : ''
+      if (JEV_NARRATED_STEPS.has(gateStep)) {
+        heardFrom(key)
+        updateSession(key, { busy: true })
+        return
+      }
       if (toolName && !data.replay) {
         heardFrom(key)
         // Attribute the call to the queued task that is running it.

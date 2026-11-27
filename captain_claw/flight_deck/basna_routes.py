@@ -2764,7 +2764,8 @@ async def _send_chat_and_collect(
                 _args = {**(_args or {}), "course": _course}
             _record(str(msg.get("tool_name") or msg.get("tool") or "tool"),
                     _summarize_tool_args(msg.get("arguments")), _args)
-        elif mtype == "narration" and str(msg.get("text") or "").strip():
+        elif (mtype == "narration" and str(msg.get("text") or "").strip()
+              and msg.get("source") != "jev"):  # Jev's lines aren't the worker's words
             _record("narration", str(msg["text"]).strip()[:280])
         elif mtype == "turn_usage" and not msg.get("replay"):
             # Live, running cumulative token counts emitted after each internal

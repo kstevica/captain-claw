@@ -271,6 +271,9 @@ class Check:
     latency_ms: int = 0
     trigger: str = ""
     at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    # Jev's spread over the options (its "thinking", narrated in the chat).
+    stage_probs: dict[str, float] = field(default_factory=dict)
+    next_probs: dict[str, float] = field(default_factory=dict)
 
     def record(self, line: str = "") -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -289,7 +292,7 @@ class Check:
 def parse_check(resp: Any, *, step: int, latency_ms: int = 0, trigger: str = "") -> Check | None:
     stage_choice, _conf, stage_probs = _choice(resp, Q_STAGE)
     on_track = _num(_answer(resp, Q_ON_TRACK).get("noul"))
-    nxt, nxt_conf, _ = _choice(resp, Q_NEXT)
+    nxt, nxt_conf, nxt_probs = _choice(resp, Q_NEXT)
     stage = _expected_stage(stage_choice, stage_probs)
     if stage is None and on_track is None and nxt is None:
         return None
@@ -297,6 +300,7 @@ def parse_check(resp: Any, *, step: int, latency_ms: int = 0, trigger: str = "")
     return Check(
         step=step, stage=stage, stage_name=name, on_track=on_track, next=nxt,
         next_confidence=nxt_conf, latency_ms=latency_ms, trigger=trigger,
+        stage_probs=stage_probs, next_probs=nxt_probs,
     )
 
 
@@ -384,19 +388,20 @@ def relation_state(course_before: dict[str, Any], message: str, last_reply: str 
     return state
 
 
-async def ask_relation(state: dict[str, Any]) -> tuple[str | None, float | None]:
-    """Jev's relation and its confidence, or (None, None). Never raises."""
+async def ask_relation(state: dict[str, Any]) -> tuple[str | None, float | None, dict[str, float]]:
+    """Jev's relation, its confidence and its spread over the options, or
+    (None, None, {}). Never raises."""
     if not await ready():
-        return None, None
+        return None, None, {}
     try:
         resp = await asyncio.wait_for(_ask(state, RELATION_QUESTIONS), TIMEOUT_SECONDS + 3)
     except Exception as exc:
         log.debug("Jev course relation skipped", error=str(exc) or type(exc).__name__)
-        return None, None
-    choice, conf, _ = _choice(resp, Q_RELATION)
+        return None, None, {}
+    choice, conf, probs = _choice(resp, Q_RELATION)
     if choice not in task_course.RELATIONS:
-        return None, None
-    return choice, conf
+        return None, None, {}
+    return choice, conf, probs
 
 
 async def ask_check(state: dict[str, Any], *, step: int, trigger: str) -> Check | None:

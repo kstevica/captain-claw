@@ -41,6 +41,9 @@ export interface ChatMessage {
   /** Live between-step narration blurb: part of the turn's activity, folded
    *  away with it once the turn ends. */
   narration?: boolean
+  /** A narration line that is Jev's decision (the course check, a step-budget
+   *  call, a refused call's next step), not the agent's own words. */
+  jev?: boolean
   /** A message the runtime wrote into the agent's session as "user" (a
    *  relayed result, an automated turn's opener): its origin. Shown as a
    *  muted note, never as the user's bubble (role is `system`). */
