@@ -26,6 +26,8 @@ docs/jev-course-plan.md §1. Off only through ``context.task_anchor: false``
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import copy
 import re
 from dataclasses import dataclass, field
@@ -404,6 +406,70 @@ def record_check(metadata: dict[str, Any], check: dict[str, Any]) -> None:
     checks = [c for c in course.get("checks") or [] if isinstance(c, dict)]
     checks.append(check)
     course["checks"] = checks[-MAX_CHECKS:]
+
+
+# ── a worker's frame (Basna / Vatra) ─────────────────────────────────
+#
+# Flight Deck sends a worker's chat frame a ``course`` field: the run's goal
+# (the person's words), the worker's own part, and whether the run checks its
+# course with Jev and how often. The anchor then reads "Run goal / Your part"
+# instead of the worker's long prompt (docs/jev-course-plan.md §3).
+
+GOAL_CHARS = 600
+PART_CHARS = 600
+_FRAME: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "task_course_frame", default=None)
+
+
+def normalize_frame(raw: Any) -> dict[str, Any] | None:
+    """A frame's ``course`` field, checked and cut; None when it says nothing."""
+    if not isinstance(raw, dict):
+        return None
+    goal = re.sub(r"\s+", " ", str(raw.get("goal") or "")).strip()
+    part = re.sub(r"\s+", " ", str(raw.get("part") or "")).strip()
+    if not goal and not part:
+        return None
+    out: dict[str, Any] = {"goal": _cut(goal, GOAL_CHARS), "part": _cut(part, PART_CHARS)}
+    reqs = raw.get("requirements")
+    if isinstance(reqs, list):
+        out["requirements"] = [_cut(str(r).strip(), REQUIREMENT_CHARS) for r in reqs if str(r).strip()][
+            :MAX_REQUIREMENTS]
+    if isinstance(raw.get("check"), bool):
+        out["check"] = raw["check"]
+    max_checks = raw.get("max_checks")
+    if isinstance(max_checks, int) and not isinstance(max_checks, bool) and max_checks >= 0:
+        out["max_checks"] = max_checks
+    return out
+
+
+@contextlib.contextmanager
+def turn_frame(raw: Any):
+    """Bind a frame's ``course`` for the turn it starts (the turn's task
+    inherits it, like the frame's reasoning effort)."""
+    token = _FRAME.set(normalize_frame(raw))
+    try:
+        yield
+    finally:
+        _FRAME.reset(token)
+
+
+def current_frame() -> dict[str, Any] | None:
+    return _FRAME.get()
+
+
+def apply_frame(metadata: dict[str, Any], frame: dict[str, Any] | None) -> None:
+    """Put a worker's frame on the anchor this turn just opened: the run's
+    goal, the worker's part (else the anchor stays the turn's own words) and
+    the run's requirements."""
+    course = current(metadata)
+    if course is None or not frame:
+        return
+    if frame.get("goal"):
+        course["goal"] = frame["goal"]
+    if frame.get("part"):
+        course["anchor"] = frame["part"]
+    if frame.get("requirements"):
+        course["requirements"] = list(frame["requirements"])
 
 
 def note(course: Any, live: dict[str, Any] | None = None) -> str:

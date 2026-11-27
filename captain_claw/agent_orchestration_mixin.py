@@ -1333,6 +1333,10 @@ class AgentOrchestrationMixin:
         to the open task replaces the rule-based guess (in the background)."""
         self._task_course_start = None
         self._task_course_live = None
+        # A Basna/Vatra worker's frame: the run's goal, this worker's part,
+        # and the run's switch and check budget.
+        frame = task_course.current_frame()
+        self._course_frame = frame
         self._course_watch = jev_course.TurnWatch(max_checks=self._course_max_checks())
         if not self.session or not isinstance(self.session.metadata, dict):
             return
@@ -1344,14 +1348,16 @@ class AgentOrchestrationMixin:
                 user_input,
                 prev=prev,
                 topic_switch=self._looks_like_topic_switch,
-                automated=automated,
+                automated=automated or frame is not None,
                 turn_msg=len(messages) - 1,
             )
             self._task_course_start = start
+            if frame is not None:
+                task_course.apply_frame(self.session.metadata, frame)
         except Exception:  # noqa: BLE001 — the anchor is a help, never a blocker
             log.debug("Task anchor update failed", exc_info=True)
             return
-        if automated or not jev_course.enabled():
+        if automated or frame is not None or not self._course_switch():
             return
         before = start.before.get(task_course.KEY)
         if not task_course.is_open(before) or task_course.is_continue(start.message):
@@ -1383,6 +1389,14 @@ class AgentOrchestrationMixin:
             watch.relation_task = asyncio.get_running_loop().create_task(_relation())
         except RuntimeError:
             pass
+
+    def _course_switch(self) -> bool:
+        """Whether this turn checks its course with Jev: a worker's frame
+        decides for its run, else the agent's own switch."""
+        frame = getattr(self, "_course_frame", None)
+        if isinstance(frame, dict) and isinstance(frame.get("check"), bool):
+            return frame["check"]
+        return jev_course.enabled()
 
     def _course_max_checks(self) -> int:
         """Checks a turn may make: the default, or a worker's share of its
@@ -1486,14 +1500,15 @@ class AgentOrchestrationMixin:
 
             trigger = watch.due()
             course = task_course.current(self.session.metadata)
-            if trigger and course is not None and jev_course.enabled():
+            switch = self._course_switch() if trigger else False
+            if trigger and course is not None and switch:
                 state = jev_course.check_state(
                     course, messages[turn_start_idx:], steps_used=iteration,
                 )
                 step = watch.tool_steps
 
                 async def _check() -> jev_course.Check | None:
-                    if not await jev_course.ready():
+                    if not await jev_course.ready(switch):
                         watch.disabled = True
                         return None
                     return await jev_course.ask_check(state, step=step, trigger=trigger)

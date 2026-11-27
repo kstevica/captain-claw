@@ -242,6 +242,11 @@ export interface ProgressEvent {
   tool?: string   // tool name on action/narration events
   detail?: string // tool-arg summary on action/narration events
   group?: string  // Vatra grouped mode: this owner's execution-phase letter (A..D)
+  // Keep on course: a worker's Jev course check on `course` events.
+  course_stage?: number
+  stage_name?: string
+  p_on_track?: number
+  next_move?: string
   // Live cumulative token counts on `usage` events.
   prompt_tokens?: number
   completion_tokens?: number

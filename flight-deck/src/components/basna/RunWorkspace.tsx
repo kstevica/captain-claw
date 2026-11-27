@@ -24,6 +24,15 @@ function LiveAgentCard({ a, onSkip }: { a: LiveAgent; onSkip?: (role: string) =>
                 : <Check className="h-4 w-4 shrink-0 text-emerald-500" />)
             : <Loader2 className="h-4 w-4 shrink-0 animate-spin text-violet-500" />}
           <span className="truncate text-sm font-semibold text-zinc-100">{a.role}</span>
+          {a.course && typeof a.course.course_stage === 'number' && (
+            <span
+              title={a.offTrack ? `Looks off track — ${a.course.detail || ''}` : a.course.detail}
+              className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${
+                a.offTrack ? 'bg-red-500/10 text-red-500' : 'bg-zinc-800 text-zinc-400'}`}
+            >
+              {a.offTrack ? 'Off track · ' : ''}Stage {Math.min(5, Math.max(1, Math.round(a.course.course_stage)))}/5
+            </span>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {a.usage && (
