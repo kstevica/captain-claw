@@ -1629,8 +1629,10 @@ class AgentOrchestrationMixin:
         # so a genuinely-stuck turn still terminates.
         self._stall_retry_count: int = 0
         # The check before delivering (Drive, agent_completion_mixin) runs at
-        # most once per turn.
+        # most once per turn; so do the caveat and snippet checks next to it.
         self._delivery_check_done: bool = False
+        self._caveat_check_done: bool = False
+        self._snippet_check_done: bool = False
         # Drive's extra-work step: None until the asked work is delivered at
         # Ambitious, then its state for the rest of the turn.
         self._extra_work: dict[str, Any] | None = None

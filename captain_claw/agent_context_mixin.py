@@ -5650,6 +5650,11 @@ class AgentContextMixin:
             _line_text = self._line_news_note()
             if _line_text:
                 env_note = [("line_news", _line_text)] + env_note
+            # A request to publish (commit, push, PR) gets the credentials the
+            # files going out still hold, before the first step (safety_guard).
+            _safety_text = self._safety_preflight_note() if hasattr(self, "_safety_preflight_note") else ""
+            if _safety_text:
+                env_note = [("safety_preflight", _safety_text)] + env_note
             self._turn_env_tokens = self._count_tokens(_env_text) if _env_text else 0
             reserved_tokens = 0
             if turn_anchor_pos is not None:

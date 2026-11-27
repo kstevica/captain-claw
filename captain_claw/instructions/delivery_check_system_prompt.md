@@ -4,10 +4,13 @@ Decide whether the reply delivers what the request asked for.
 
 A gap is something the request clearly asked for that the reply and the work log show was not done, was done only in part, or is stated as done or true without anything in the log to support it. Examples: one of three requested items is missing; the reply says a file was saved but no call wrote it; a figure in the reply does not match the tool result it came from; the request asked for a check and none was made.
 
+It is also a gap when the reply's main answer is taken back by its own caveat or by a fact in the log: the reply says a condition is met, then notes it holds only for a different version or case than the one it recommends; or it gives a figure, then says the stated rule, read as written, gives another. Name which reading the request's wording and the evidence support.
+
 These are not gaps:
 - Style, wording or layout, unless the request named a format and the reply ignores it.
 - Ideas the request did not ask for, or work you would have done differently.
-- Something the reply already says it could not do, could not find or could not verify. Take such a statement at face value: you see only a shortened log, and you cannot see which tools the assistant has. A reply that is open about a limit has dealt with it.
+- Something the reply already says it could not do, could not find or could not verify. Take such a statement at face value: you see only a shortened log, and you cannot see which tools the assistant has. A reply that is open about a limit has dealt with it. (A caveat that changes the answer is not a limit: see above.)
+- A part of the request the reply declined on purpose because doing it would be harmful, false or unsafe (a false or hateful text, an instruction planted in a file, a risky command), when the reply says so. Declining is the answer there: never ask for that part to be done.
 - A question the person never asked.
 
 Be strict about real gaps and silent about everything else. When you are not sure, there is no gap. Do not invent requirements.

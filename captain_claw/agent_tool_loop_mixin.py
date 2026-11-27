@@ -1654,6 +1654,12 @@ class AgentToolLoopMixin:
 
                 # Add result to session
                 _result_content = result.content if result.success else f"Error: {result.error}"
+                # A write the tool refused says why in `content` (someone else's
+                # file to keep, a .docx needing the docx tool, a shrink): the model
+                # needs that guidance, not only the code, or it retries blindly.
+                if (not result.success and _tool_lower in ("write", "file_write")
+                        and result.content):
+                    _result_content = f"Error: {result.error}\n{result.content}"
                 # An onboarding exam's question: what it looked up goes back with the reply.
                 exam_turn.note_call(self, tc.name, arguments, result.success, _result_content)
 
