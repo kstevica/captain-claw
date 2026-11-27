@@ -69,6 +69,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-context", type=int, default=0,
                    help="The model's context window to plan for, in tokens (default: Captain's 160K).")
     p.add_argument("--max-output", type=int, default=0, help="Output tokens per model call (default: Captain's).")
+    p.add_argument("--vision", default="", choices=["", "auto", "on", "off"],
+                   help="Whether the model sees pictures itself: on, off, or auto (Captain decides; the default). "
+                        "Off, a picture goes to a separate vision call instead.")
     p.add_argument("--effort", default="", help="Reasoning effort: off, minimal, low, medium, high, xhigh, max.")
     p.add_argument("--drive", default="", choices=["", *DRIVE_LEVELS],
                    help="Drive, how far the harness pushes the turn: " + ", ".join(DRIVE_LEVELS) + ".")
@@ -335,6 +338,8 @@ def build_config(args: argparse.Namespace, run_dir: Path, workspace: Path) -> An
         cfg.context.max_tokens = args.max_context
     if args.max_output > 0:
         cfg.model.max_tokens = args.max_output
+    if args.vision in ("on", "off"):
+        cfg.model.vision = args.vision
     cfg.workspace.path = str(workspace)
     if args.skills_dir:
         cfg.skills.load.extra_dirs = [*cfg.skills.load.extra_dirs, str(user_path(args.skills_dir))]

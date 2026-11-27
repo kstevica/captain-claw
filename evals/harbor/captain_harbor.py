@@ -45,6 +45,9 @@ Options (``--ak name=value``):
                    OPENAI_API_KEY
   max_context      the model's context window, in tokens (default 160K)
   max_output       output tokens per model call
+  vision           on · off · auto: whether the model sees pictures itself
+                   (default on: a local multimodal model is off under auto,
+                   and then only sees a picture through a separate call)
   max_iterations   tool-call budget for the turn
   timeout_seconds  stop the task after this long (default: the task's own
                    limit, which ``--timeout-multiplier`` scales)
@@ -98,6 +101,11 @@ TOOL_KEY_ENVS = ("BRAVE_API_KEY", "TAVILY_API_KEY", "YDC_API_KEY", "KEENABLE_API
 # "go deeper".
 HARBOR_EFFORT = "medium"
 HARBOR_DRIVE = "ambitious"
+# Pictures go to the agent's own model, for every model: under "auto" Captain
+# keeps a local build it doesn't know (a Qwen quant) off, and the agent then sees
+# a picture only through a separate vision call. A model that can't take
+# pictures refuses once and Captain turns it off for the rest of the run.
+HARBOR_VISION = "on"
 _LEAVE_TO_CAPTAIN = ("auto", "default")
 # Captain's optional extras a trial installs unless told otherwise: without
 # ``pdf`` (PyMuPDF) a PDF is read page by page, and a small model falls back to
@@ -132,6 +140,9 @@ class CaptainOptions(InstalledAgentOptions):
     )
     max_context: int | None = Field(default=None, description="The model's context window, in tokens.")
     max_output: int | None = Field(default=None, description="Output tokens per model call.")
+    vision: Literal["auto", "on", "off"] | None = Field(
+        default=None, description=f"Whether the model sees pictures itself (default {HARBOR_VISION}).",
+    )
     drive: Literal["relaxed", "diligent", "persistent", "ambitious", "auto"] | None = Field(
         default=None, description=f"Drive: how far the harness pushes the turn (default {HARBOR_DRIVE}).",
     )
@@ -222,6 +233,9 @@ def runner_flags(provider: str, model: str, options: CaptainOptions, logs_dir: s
         flags += ["--max-context", str(options.max_context)]
     if options.max_output:
         flags += ["--max-output", str(options.max_output)]
+    vision = options.vision or HARBOR_VISION
+    if vision in ("on", "off"):
+        flags += ["--vision", vision]
     if skills_dir:
         flags += ["--skills-dir", skills_dir]
     if options.workspace:

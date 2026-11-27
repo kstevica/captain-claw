@@ -69,6 +69,12 @@ controls. A server with a single slot handles one request at a time, so run
 one task at a time (`-n 1`). Otherwise concurrent tasks queue behind each other
 and run out each other's time.
 
+Pictures go to the agent's own model by default (`--ak vision=on`). Outside
+Harbor, Captain keeps a local build it doesn't know off, since quantized
+builds ship with and without vision, and the agent then sees a picture only
+through a separate call. `--ak vision=off` or `--ak vision=auto` changes that;
+a model that refuses pictures has vision turned off for the rest of the run.
+
 **Give a local model ×4–×5 the time limits.** A quantized model on one GPU took
 about 3× Haiku 5.5's time per task on WildClawBench (up to 7× on some), and at
 ×3 the long research and PDF tasks ran out of time.

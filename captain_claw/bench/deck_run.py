@@ -138,6 +138,8 @@ def agent_config(args: argparse.Namespace, workspace: Path, name: str) -> dict[s
         body["max_context"] = args.max_context
     if getattr(args, "max_output", 0) > 0:
         body["max_tokens"] = args.max_output
+    if getattr(args, "vision", "") in ("on", "off"):
+        body["vision"] = args.vision
     if args.archetype:
         body["archetype"] = args.archetype
     return body
