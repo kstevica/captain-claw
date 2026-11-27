@@ -327,3 +327,55 @@ def test_apply_frame_makes_the_anchor_read_goal_and_part():
     tc.begin_turn(meta2, "Collect the fares", automated=True, now=NOW)
     tc.apply_frame(meta2, {"goal": "Plan the trip"})
     assert meta2[tc.KEY]["anchor"] == "Collect the fares"
+
+
+# ── per-turn records ─────────────────────────────────────────────────
+
+
+def _tool(name: str, **args) -> dict:
+    return {"role": "tool", "content": "ok", "tool_name": name, "tool_arguments": args}
+
+
+def test_tool_targets_name_what_a_call_worked_on():
+    assert tc.tool_target(_tool("read", path="a.md")) == "read:a.md"
+    assert tc.tool_target(_tool("web_fetch_batch", urls=["https://x.co/1", "https://x.co/2"])) == \
+        "web_fetch_batch:https://x.co/1"
+    assert tc.tool_target(_tool("shell")) == "shell"
+    msgs = [{"role": "user", "content": "go"}, _tool("read", path="a"),
+            {"role": "tool", "content": "x", "tool_name": "completion_gate"}, _tool("read", path="b")]
+    assert tc.turn_targets(msgs) == ["read:a", "read:b"]
+
+
+def test_followed_compares_the_calls_after_a_line_with_those_before():
+    targets = ["read:a", "read:a", "read:a", "read:b", "write:c"]
+    assert tc.followed(targets, 3) is True        # new targets after the line
+    assert tc.followed(["read:a"] * 6, 3) is False  # the same call again
+    assert tc.followed(["read:a"] * 3, 3) is None   # nothing ran after it
+
+
+@pytest.mark.parametrize("text,success,expected", [
+    ("Here it is.", True, "finished"),
+    ("Request cancelled by user.", False, "cancelled"),
+    ("I reached this message's step limit (iteration budget exhausted)", False, "budget"),
+    ("I got stuck and couldn't make further progress.", False, "stuck"),
+    ("Something broke", False, "failed"),
+])
+def test_outcome(text, success, expected):
+    assert tc.outcome(text, success) == expected
+
+
+def test_record_turn_keeps_ten_and_tallies_lines_into_the_closed_summary():
+    meta: dict = {}
+    _open(meta)
+    for i in range(12):
+        tc.record_turn(meta, {"outcome": "finished", "tool_steps": i,
+                              "lines": [{"line": "refocus", "at": 3, "followed": i % 2 == 0}]
+                              if i < 3 else []})
+    course = meta[tc.KEY]
+    assert len(course["turn_stats"]) == tc.TURN_STATS_KEEP
+    assert course["followed"] == {"shown": 3, "followed": 2, "unknown": 0}
+    other = "Write a haiku about autumn rain falling softly over the old harbour walls tonight please."
+    tc.begin_turn(meta, other, prev=_prev(), now=NOW)
+    closed = meta[tc.CLOSED_KEY][-1]
+    assert closed["followed"] == {"shown": 3, "followed": 2, "unknown": 0}
+    assert len(closed["turn_stats"]) == tc.TURN_STATS_KEEP

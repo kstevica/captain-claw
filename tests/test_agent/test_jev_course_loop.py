@@ -297,3 +297,45 @@ async def test_a_runs_switch_off_beats_the_workers_own(jev_on):
     await _steps(agent, 8, 0, 0)
     await _settle()
     assert calls == []
+
+
+# ── per-turn records (phase 4) ───────────────────────────────────────
+
+
+def _tool_msg(agent: Agent, path: str, n: int) -> None:
+    agent.session.add_message("tool", "ok", tool_call_id=f"t{n}", tool_name="read",
+                              tool_arguments={"path": path})
+
+
+def test_a_tool_turn_leaves_a_record_with_the_follow_rate():
+    agent = _agent()
+    agent.session.add_message("user", TASK)
+    agent._task_course_begin(TASK)
+    agent.last_turn_start_idx = 0
+    for i in range(3):
+        _tool_msg(agent, "a.md", i)
+    watch = agent._course_watch
+    watch.tool_steps = 5
+    watch.checks_done = 1
+    watch.latest = jev_course.Check(step=3, stage=2.0, stage_name="gathering", on_track=0.1,
+                                    next="refocus", next_confidence=0.9)
+    watch.line_marks.append(("refocus", 3))
+    for i in range(3, 5):
+        _tool_msg(agent, "b.md", i)
+    agent._course_finish("Here is the table.", True, {"total_tokens": 1234})
+    (stats,) = agent.session.metadata[task_course.KEY]["turn_stats"]
+    assert stats["outcome"] == "finished" and stats["tool_calls"] == 5 and stats["tokens"] == 1234
+    assert stats["checks"] == 1 and stats["jev"] is True and stats["final_stage"] == 2.0
+    assert stats["relation"] == task_course.NEW_TASK and stats["worker"] is False
+    assert stats["lines"] == [{"line": "refocus", "at": 3, "followed": True}]
+    assert agent.session.metadata[task_course.KEY]["followed"] == {"shown": 1, "followed": 1, "unknown": 0}
+    assert any("step=course_turn" in g and "followed=1" in g for g in _gates(agent))
+
+
+def test_a_plain_reply_leaves_no_record():
+    agent = _agent()
+    agent.session.add_message("user", TASK)
+    agent._task_course_begin(TASK)
+    agent.last_turn_start_idx = 0
+    agent._course_finish("Sure.", True, {})
+    assert "turn_stats" not in agent.session.metadata[task_course.KEY]

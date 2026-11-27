@@ -472,6 +472,83 @@ def apply_frame(metadata: dict[str, Any], frame: dict[str, Any] | None) -> None:
         course["requirements"] = list(frame["requirements"])
 
 
+# ── per-turn records (tracking whether it helps) ─────────────────────
+
+TURN_STATS_KEEP = 10
+FOLLOW_WINDOW = 3
+_TARGET_KEYS = ("path", "file_path", "url", "query", "command", "action", "name", "id")
+
+
+def tool_target(msg: dict[str, Any]) -> str:
+    """What a tool call worked on: ``tool:path/url/query/…``, else the tool."""
+    name = str(msg.get("tool_name", "") or "tool").strip()
+    args = msg.get("tool_arguments")
+    if isinstance(args, dict):
+        for key in _TARGET_KEYS:
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"{name}:{value.strip()[:200]}"
+        urls = args.get("urls")
+        if isinstance(urls, list) and urls:
+            return f"{name}:{str(urls[0])[:200]}"
+    return name
+
+
+def turn_targets(turn_messages: list[dict[str, Any]]) -> list[str]:
+    from captain_claw.msg_origin import is_monitor_only
+
+    return [
+        tool_target(m) for m in turn_messages or []
+        if isinstance(m, dict) and str(m.get("role", "")).lower() == "tool" and not is_monitor_only(m)
+    ]
+
+
+def followed(targets: list[str], at: int, window: int = FOLLOW_WINDOW) -> bool | None:
+    """Did the calls after a corrective line (shown when ``at`` calls had
+    run) work on something other than the calls just before it? None when
+    nothing ran after it."""
+    after = targets[at:at + window]
+    if not after:
+        return None
+    before = set(targets[max(0, at - window):at])
+    return not set(after) <= before
+
+
+def outcome(text: Any, success: bool) -> str:
+    """finished / budget / stuck / cancelled / failed, from how the turn ended."""
+    low = str(text or "").lower()
+    if "cancelled by user" in low:
+        return "cancelled"
+    if "iteration budget exhausted" in low or "step limit" in low:
+        return "budget"
+    if "got stuck" in low:
+        return "stuck"
+    return "finished" if success else "failed"
+
+
+def record_turn(metadata: dict[str, Any], stats: dict[str, Any]) -> None:
+    """Keep a turn's record on the open anchor (newest 10) and add up how
+    often corrective lines were followed (carried into the closed summary)."""
+    course = current(metadata)
+    if course is None or not isinstance(stats, dict):
+        return
+    turns = [t for t in course.get("turn_stats") or [] if isinstance(t, dict)]
+    turns.append(stats)
+    course["turn_stats"] = turns[-TURN_STATS_KEEP:]
+    lines = [ln for ln in stats.get("lines") or [] if isinstance(ln, dict)]
+    if lines:
+        tally = course.get("followed") if isinstance(course.get("followed"), dict) else {}
+        tally = {"shown": int(tally.get("shown", 0)), "followed": int(tally.get("followed", 0)),
+                 "unknown": int(tally.get("unknown", 0))}
+        for ln in lines:
+            tally["shown"] += 1
+            if ln.get("followed") is True:
+                tally["followed"] += 1
+            elif ln.get("followed") is None:
+                tally["unknown"] += 1
+        course["followed"] = tally
+
+
 def note(course: Any, live: dict[str, Any] | None = None) -> str:
     """The note the model reads. ``live`` adds the course check's lines
     (``stage`` and ``line``)."""

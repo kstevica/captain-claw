@@ -439,6 +439,9 @@ class TurnWatch:
     relation_result: tuple[Any, ...] | None = None
     scan_idx: int | None = None   # session index already counted for failures
     tools_seen: int = 0           # the loop's tool-call count at the last tick
+    # (line, tool calls that had run when it was shown) — for the follow rate.
+    line_marks: list[tuple[str, int]] = field(default_factory=list)
+    checks_done: int = 0
 
     def note_tool_step(self, failures: int, successes: int) -> None:
         self.tool_steps += 1
@@ -485,6 +488,7 @@ class TurnWatch:
         if self.tool_steps - check.step > STALE_STEPS:
             return None
         self.latest = check
+        self.checks_done += 1
         return check
 
     def fresh(self) -> Check | None:
