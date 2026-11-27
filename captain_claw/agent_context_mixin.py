@@ -68,7 +68,9 @@ _FLEET_NOTICE_RE = re.compile(
     r"(?:[^\n]*?Current fleet: (?P<roster>[^\n]*))?"
 )
 # Order of the live task-state notes inside their block.
-_LIVE_NOTE_ORDER = ("planning_context", "list_task_memory", "scale_progress", "context_pressure")
+_LIVE_NOTE_ORDER = (
+    "task_course", "planning_context", "list_task_memory", "scale_progress", "context_pressure",
+)
 # Block markers quoted inside a note body (e.g. a snippet of an earlier prompt).
 _NESTED_BLOCK_MARKER_RE = re.compile(r"\[((?:END )?INTERNAL CONTEXT)", re.IGNORECASE)
 # The header an automation lane's result carries in the main chat
@@ -3866,6 +3868,14 @@ class AgentContextMixin:
         workspace_root: object = self.workspace_base_path
         if getattr(self, "_speaker_scoped", False) is True:
             runtime_base_path = workspace_root = saved_root = _SPEAKER_PATH_PLACEHOLDER
+        # Direct writes (Code agents, benchmark runs): the write tool puts a
+        # file where it is asked for, so the saved/ rules cover scratch only —
+        # said outright, or the agent "fixes" a named file by moving it there.
+        write_direct_block = (
+            self.instructions.render("section_write_direct.md", workspace_root=workspace_root)
+            if os.environ.get("CLAW_WRITE_DIRECT") and getattr(self, "_speaker_scoped", False) is not True
+            else ""
+        )
 
         base_prompt = self.instructions.render(
             "system_prompt.md",
@@ -3891,6 +3901,7 @@ class AgentContextMixin:
             browser_policy_block=browser_policy_block,
             direct_api_block=direct_api_block,
             termux_policy_block=termux_policy_block,
+            write_direct_block=write_direct_block,
             google_block=google_block,
             jev_block=jev_block,
             datastore_block=datastore_block,
@@ -5574,6 +5585,20 @@ class AgentContextMixin:
         planning_note = self._build_pipeline_note(planning_pipeline or {})
         list_note = self._build_list_task_note(list_task_plan or {})
         scale_note = self._build_scale_progress_note()
+        # The task anchor (task_course): the person's request, from the
+        # turn's second call on, so a long chain or a fold can't lose it.
+        course_note = ""
+        if tool_messages_from_index is not None and self.session is not None:
+            try:
+                from captain_claw import task_course
+
+                course_note = task_course.note_for_turn(
+                    self.session.metadata,
+                    self.session.messages[tool_messages_from_index:],
+                    getattr(self, "_task_course_live", None),
+                )
+            except Exception:  # noqa: BLE001 — a help, never a blocker
+                course_note = ""
         # "BTW" live instructions — injected by the user while a task is
         # running.  Each one becomes a user message so the model treats
         # them as direct instructions.
@@ -5641,6 +5666,11 @@ class AgentContextMixin:
             _line_text = self._line_news_note()
             if _line_text:
                 env_note = [("line_news", _line_text)] + env_note
+            # A request to publish (commit, push, PR) gets the credentials the
+            # files going out still hold, before the first step (safety_guard).
+            _safety_text = self._safety_preflight_note() if hasattr(self, "_safety_preflight_note") else ""
+            if _safety_text:
+                env_note = [("safety_preflight", _safety_text)] + env_note
             self._turn_env_tokens = self._count_tokens(_env_text) if _env_text else 0
             reserved_tokens = 0
             if turn_anchor_pos is not None:
@@ -5720,6 +5750,15 @@ class AgentContextMixin:
                 "role": "user",
                 "content": scale_note,
                 "_live_notes": [("scale_progress", scale_note)],
+            })
+            candidate_sidx.append(None)
+        if course_note:
+            # Small and the point of the turn: always kept.
+            must_include.add(len(candidate_messages))
+            candidate_messages.append({
+                "role": "user",
+                "content": course_note,
+                "_live_notes": [("task_course", course_note)],
             })
             candidate_sidx.append(None)
         btw_pos: int | None = None
@@ -6022,6 +6061,7 @@ class AgentContextMixin:
             "sections": sections,
             "memory_note_used": 1 if "memory_context" in _note_kinds else 0,
             "planning_note_used": 1 if "planning_context" in _live_kinds else 0,
+            "task_course_note_used": 1 if "task_course" in _live_kinds else 0,
             "scale_progress_note_used": 1 if "scale_progress" in _live_kinds else 0,
             "todo_note_used": 1 if "todo_context" in _note_kinds else 0,
             "workspace_manifest_used": 1 if "workspace_manifest" in _note_kinds else 0,

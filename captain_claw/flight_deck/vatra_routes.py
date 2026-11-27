@@ -73,6 +73,7 @@ from captain_claw.flight_deck.basna_routes import (
     _round_filename_rule,
     _RUN_USAGE,
     _run_extend_unbounded,
+    _progress_course,
     _run_gate,
     _run_sid,
     _run_workers,
@@ -1684,6 +1685,13 @@ async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dic
     _body_role_tiers = getattr(body, "role_tiers", None)
     if _body_role_tiers is not None and cfg.get("role_tiers") != _body_role_tiers:
         _knob_updates["role_tiers"] = _body_role_tiers
+    # Keep on course (run_course): the starting agent's switch, else what the
+    # session kept (a continuation round), else on.
+    from captain_claw.flight_deck import run_course as _run_course
+
+    _course_check = _run_course.resolve_switch(request, cfg)
+    if cfg.get("course_check") != _course_check:
+        _knob_updates["course_check"] = _course_check
     if _knob_updates:
         cfg.update(_knob_updates)
         try:
@@ -1880,6 +1888,7 @@ async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dic
     # from exhausting the serving box's memory). 0 = unlimited. Propagates into every
     # gathered round via the contextvar; every _dispatch_one obeys it.
     _run_gate.set(_make_gate(getattr(body, "max_parallel", 0), len(subtasks)))
+    _run_course.start_run(intent, check=_course_check, team_size=len(subtasks))
     if getattr(body, "max_parallel", 0) and body.max_parallel < len(subtasks):
         _progress(sid, "route", f"Max {body.max_parallel} agent(s) in parallel")
     # Execution groups (opt-in): run owners in ordered phases A→B→C→D (barrier
@@ -2111,6 +2120,10 @@ async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dic
             def _on_action(act: dict) -> None:
                 _owner_stamp(sid, subtask)  # liveness heartbeat (Increment 5)
                 vatra_ledger.record_action(sid, owner, subtask, label, act)  # `vatra map`
+                _course = (act.get("args") or {}).get("course")
+                if _course:
+                    _progress_course(sid, label, subtask or owner, _course, **gx)
+                    return
                 detail = act.get("detail", "")
                 if act["tool"] == "narration":
                     _progress(sid, "narration", f"{label}: {detail}", agent=label,
@@ -2165,6 +2178,14 @@ async def _execute_vatra_inner(body: ExecuteRequest, request: Request, user: dic
         results_by_id: dict[str, dict] = {}
 
         async def _dispatch_owner(sp: dict) -> dict:
+            # Keep on course: this owner's subtask is its part.
+            _token = _run_course.set_part(_run_course.subtask_part(sp["subtask"]))
+            try:
+                return await _dispatch_owner_inner(sp)
+            finally:
+                _run_course.reset_part(_token)
+
+        async def _dispatch_owner_inner(sp: dict) -> dict:
             arch, st = sp["arch"], sp["subtask"]
             role = arch.get("role") or arch["id"]
             label = _owner_label(sp)

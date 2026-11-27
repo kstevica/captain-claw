@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 from typing import Any
 
@@ -53,6 +54,9 @@ _REASONING_EXEMPT_LABELS = _BACKGROUND_MAINTENANCE_LABELS | {
     "script_rephrase",
     "orchestrator_rephrase",
     "task_contract_critic",
+    # The check before delivering, asked again after it ran out of tokens
+    # thinking (agent_completion_mixin._delivery_check).
+    "delivery_check_quiet",
     "list_task_extractor",
     "research_keyword_extraction",
     "session_description",
@@ -439,12 +443,41 @@ class AgentGuardMixin:
         )
         return False, f"Blocked by {guard_type} guard: {reason}"
 
+    def _step_down_effort_after_overflow(self) -> tuple[str, str] | None:
+        """After a main call thought through its whole output budget and gave
+        nothing back: run the rest of the turn one effort level lower.
+
+        Returns ``(from, to)``, or None when there is no lower level (or the
+        model has no effort controls) — then the caller treats it as an
+        ordinary empty reply. The only thing that moves a level forced for the
+        run: the harness, not the agent, and only to get an answer at all.
+        """
+        current = self._turn_reasoning_effort()
+        profile = reasoning.profile_for_provider(getattr(self, "provider", None))
+        if profile is None:
+            return None
+        current = reasoning.clamp(current, profile) or profile.default
+        lower = reasoning.step_down(current, profile)
+        if lower is None:
+            return None
+        self._turn_effort_overflow = lower
+        return current, lower
+
     def _turn_reasoning_effort(self) -> str | None:
-        """The reasoning effort for this turn's main calls: what the agent set
-        for the rest of the turn (its ``reasoning_effort`` tool), else the
-        chat box's pick (a web chat turn), else the agent's setting for where
-        the turn came from (``reasoning_effort.json``: its source, its
-        channel, the default), else None — the model's own."""
+        """The reasoning effort for this turn's main calls: a level stepped
+        down to after a call thought through its whole output budget
+        (:meth:`_step_down_effort_after_overflow`), else one forced for the
+        whole run (``reasoning.locked_effort``), else what the agent set for
+        the rest of the turn (its ``reasoning_effort`` tool), else the chat
+        box's pick (a web chat turn), else the agent's setting for where the
+        turn came from (``reasoning_effort.json``: its source, its channel,
+        the default), else None — the model's own."""
+        stepped = getattr(self, "_turn_effort_overflow", None)
+        if stepped is not None:
+            return stepped
+        forced = reasoning.locked_effort()
+        if forced is not None:
+            return forced
         override = getattr(self, "_turn_effort_override", None)
         if override is not None:
             return None if override == reasoning.AUTO else override
@@ -851,6 +884,14 @@ class AgentGuardMixin:
         if not br_ok:
             self._audit_refused_tool(name, arguments, f"Blast radius: {br_error}", session_id_override)
             raise GuardBlockedError("blast_radius", br_error)
+        # Deterministic safety (safety_guard): credential stores stay closed,
+        # and nothing is committed or pushed while it carries credentials.
+        _safety_refusal = self._safety_precheck(name, arguments)
+        if _safety_refusal:
+            from captain_claw.tools.registry import ToolResult as _SafetyRefused
+
+            self._audit_refused_tool(name, arguments, f"Safety: {_safety_refusal[:200]}", session_id_override)
+            return _SafetyRefused(success=False, error=_safety_refusal)
         # Inject session object and peer-consult approval callback into
         # arguments for tools that need them (e.g. consult_peer).
         _session = getattr(self, "session", None)
@@ -928,7 +969,126 @@ class AgentGuardMixin:
             if (result.content or "").strip() or (result.error or "").strip():
                 self._gate_status(_gate.working(gate, f"what {name} returned"))
             result = await _gate.gate_result(gate, name, result)
+        return self._safety_postcheck(name, arguments, result)
+
+    # ── Deterministic safety (safety_guard.py) ──────────────────────
+
+    @staticmethod
+    def _safety_settings() -> Any:
+        guards = getattr(get_config(), "guards", None)
+        return getattr(guards, "safety", None)
+
+    def _safety_workdir(self) -> str:
+        base = getattr(self, "workspace_base_path", None)
+        return str(base) if base else os.getcwd()
+
+    def _safety_precheck(self, name: str, arguments: dict[str, Any]) -> str:
+        """A refusal for a call the deterministic safety checks stop, else ""."""
+        settings = self._safety_settings()
+        if settings is None:
+            return ""
+        from captain_claw import safety_guard
+
+        try:
+            if getattr(settings, "credential_files", False):
+                refusal = safety_guard.credential_read(name, arguments)
+                if refusal:
+                    return refusal
+            if name in ("shell", "terminal", "termux") and getattr(settings, "trust_workspace_repos", False):
+                command = safety_guard.shell_command_text(arguments)
+                if re.search(r"\bgit\b", command):
+                    added = safety_guard.trust_repos_in_env(
+                        safety_guard.workspace_repos(self._safety_workdir()), os.environ)
+                    if added:
+                        log.info("Safety: workspace repositories trusted for git", repos=added)
+            if getattr(settings, "publish_check", False) and name in ("shell", "terminal", "termux"):
+                command = safety_guard.shell_command_text(arguments)
+                if safety_guard.publish_command(command):
+                    found = safety_guard.scan_repo_for_secrets(
+                        safety_guard.command_dir(command, self._safety_workdir()))
+                    if found:
+                        log.warning("Safety: publish refused, credentials in the repo", findings=len(found))
+                        return safety_guard.publish_refusal(found)
+        except Exception:  # noqa: BLE001 — a check that fails never blocks the work
+            log.warning("Safety precheck failed", tool=name, exc_info=True)
+        return ""
+
+    def _safety_postcheck(self, name: str, arguments: dict[str, Any], result: Any) -> Any:
+        """Mask credentials in a tool's result and flag instructions in content
+        it read, before the model sees either."""
+        settings = self._safety_settings()
+        if settings is None or result is None:
+            return result
+        from captain_claw import safety_guard
+
+        try:
+            source = str(arguments.get("path") or arguments.get("url") or arguments.get("file_path") or "")
+            notes: list[str] = []
+            if getattr(settings, "mask_secrets", False) and "secret" not in name.lower():
+                found: list[tuple[str, int]] = []
+                for field in ("content", "error"):
+                    text = getattr(result, field, None)
+                    if isinstance(text, str) and text:
+                        masked, hits = safety_guard.mask_secrets(text)
+                        if hits:
+                            setattr(result, field, masked)
+                            found.extend(hits)
+                if found:
+                    notes.append(safety_guard.masked_note(found, source))
+            if getattr(settings, "untrusted_instructions", False) and name in safety_guard.CONTENT_TOOLS:
+                labels = safety_guard.untrusted_instructions(getattr(result, "content", "") or "")
+                if labels:
+                    seen: set[tuple[str, tuple[str, ...]]] = getattr(self, "_safety_warned", set())
+                    self._safety_warned = seen
+                    key = (source or name, tuple(labels))
+                    if key not in seen:
+                        seen.add(key)
+                        notes.append(safety_guard.instructions_note(labels, source))
+            if notes:
+                hint = "\n\n".join(notes)
+                result.system_hint = f"{result.system_hint}\n\n{hint}" if result.system_hint else hint
+        except Exception:  # noqa: BLE001 — never lose a tool result to a check
+            log.warning("Safety postcheck failed", tool=name, exc_info=True)
         return result
+
+    def _safety_preflight_note(self) -> str:
+        """Before the first step of a turn (once per turn): the credentials in
+        the files a commit or push would carry, when the request asks to
+        publish; a note when the request puts down a group of people."""
+        settings = self._safety_settings()
+        if settings is None:
+            return ""
+        text = str(getattr(self, "_turn_user_text", "") or "")
+        cached = getattr(self, "_safety_preflight_cache", None)
+        if isinstance(cached, tuple) and cached[0] == text:
+            return cached[1]
+        notes: list[str] = []
+        from captain_claw import safety_guard
+
+        if getattr(settings, "publish_check", False):
+            try:
+                if safety_guard.publish_intent(text):
+                    found = safety_guard.scan_repo_for_secrets(self._safety_workdir())
+                    if not found:
+                        # The repository may sit one level down (a task folder holding the repo).
+                        base = self._safety_workdir()
+                        for child in sorted(os.listdir(base))[:50]:
+                            if os.path.isdir(os.path.join(base, child, ".git")):
+                                found += [(os.path.join(child, p), ln, k)
+                                          for p, ln, k in safety_guard.scan_repo_for_secrets(os.path.join(base, child))]
+                    if found:
+                        notes.append(safety_guard.preflight_note(found))
+                    log.info("Safety: publish request checked", findings=len(found))
+            except Exception:  # noqa: BLE001
+                log.warning("Safety preflight failed", exc_info=True)
+        if getattr(settings, "group_putdowns", False):
+            phrase = safety_guard.group_putdown(text)
+            if phrase:
+                notes.append(safety_guard.putdown_note(phrase))
+                log.info("Safety: request puts down a group of people", phrase=phrase)
+        note = "\n\n".join(notes)
+        self._safety_preflight_cache = (text, note)
+        return note
 
     def _gate_status(self, text: str) -> None:
         """The live status line while the privacy gate works."""

@@ -19,6 +19,7 @@ import {
   MoreHorizontal,
   PackageSearch,
   PenLine,
+  Compass,
   RotateCw,
   Shuffle,
   SlidersHorizontal,
@@ -40,8 +41,8 @@ import { KioskSkillsPanel } from './KioskAgentSkills'
 import { TopicsPanel } from '../agents/TopicsPanel'
 import { SwitchTrack } from '../common/SwitchTrack'
 import {
-  getAgentConfig, getAgentDrive, getAgentEcoMode, getAgentMode, getAgentModelSwitch, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentModelSwitch,
-  setAgentDrive, setAgentDriveInitiative, setAgentEcoMode, setAgentTaskRephrase, setAgentVision,
+  getAgentConfig, getAgentCourseCheck, getAgentDrive, getAgentEcoMode, getAgentMode, getAgentModelSwitch, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentModelSwitch,
+  setAgentCourseCheck, setAgentDrive, setAgentDriveInitiative, setAgentEcoMode, setAgentTaskRephrase, setAgentVision,
 } from '../../services/docker'
 import { LLM_PROVIDERS } from '../../services/tierConfig'
 import { VISION_OPTIONS, parseModelFromYaml } from '../../services/agentModel'
@@ -348,6 +349,9 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   // Task rephrase (task_rephrase.py): null when the deck couldn't say.
   const [rephrase, setRephrase] = useState<boolean | null>(null)
   const [rephraseSaved, setRephraseSaved] = useState(false)
+  // Course check with Jev (jev_course.py): null when the deck couldn't say.
+  const [course, setCourse] = useState<{ enabled: boolean; jevConnected: boolean } | null>(null)
+  const [courseSaved, setCourseSaved] = useState(false)
   // Switching models on its own (llm/model_switch.py): null when the deck couldn't say.
   const [selfSwitch, setSelfSwitch] = useState<boolean | null>(null)
   const [selfSwitchSaved, setSelfSwitchSaved] = useState(false)
@@ -368,7 +372,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   const [modelSaved, setModelSaved] = useState(false)
   // The reasoning levels are the model's: a saved change reads them afresh.
   const [modelRev, setModelRev] = useState(0)
-  const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model' | 'rephrase' | 'switch' | 'eco' | 'drive'>('')
+  const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model' | 'rephrase' | 'course' | 'switch' | 'eco' | 'drive'>('')
   // Model and vision are read when the agent starts: changed since it last did.
   const [pendingRestart, setPendingRestart] = useState(false)
   const [restarted, setRestarted] = useState(false)
@@ -382,9 +386,11 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
       getAgentModelSwitch(kind, key).catch(() => null),
       getAgentEcoMode(kind, key).catch(() => null),
       getAgentDrive(kind, key).catch(() => null),
+      getAgentCourseCheck(kind, key).catch(() => null),
     ])
-      .then(([m, cfg, tr, ms, ec, dr]) => {
+      .then(([m, cfg, tr, ms, ec, dr, cc]) => {
         if (!live) return
+        setCourse(cc ? { enabled: cc.enabled, jevConnected: cc.jev_connected } : null)
         setDrive(dr ? parseDrive(dr.default) : null)
         setDriveExtra(dr ? dr.initiative !== false : true)
         const info = parseModelFromYaml(cfg.config_yaml || '')
@@ -526,6 +532,23 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
     } catch (e) {
       setRephrase(!next)
       setError(`Couldn't change request rewriting: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving('')
+    }
+  }
+
+  // Read on every message — no restart.
+  const toggleCourse = async () => {
+    if (course === null || !course.jevConnected || saving) return
+    const next = !course.enabled
+    setCourse({ ...course, enabled: next }); setSaving('course'); setError(''); setCourseSaved(false)
+    try {
+      await setAgentCourseCheck(kind, key, next)
+      setCourseSaved(true)
+      setTimeout(() => setCourseSaved(false), 2000)
+    } catch (e) {
+      setCourse({ ...course, enabled: !next })
+      setError(`Couldn't change the course check: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setSaving('')
     }
@@ -821,6 +844,31 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                         Older models needed it; current ones follow your words as written, so it's off unless you turn it on.
                         Applies from its next message.
                       </span>
+                    </span>
+                  </button>
+                </section>
+              )}
+              {course !== null && (
+                <section>
+                  <SectionTitle icon={Compass} title="Keep on course" saving={saving === 'course'} saved={courseSaved} />
+                  <button
+                    type="button" role="switch" aria-checked={course.jevConnected && course.enabled}
+                    onClick={toggleCourse} disabled={!!saving || !course.jevConnected}
+                    className="mt-1.5 flex w-full items-start gap-3 rounded-lg border border-zinc-800 px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-70"
+                  >
+                    <span className="mt-0.5"><SwitchTrack on={course.jevConnected && course.enabled} /></span>
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium text-zinc-200">Check progress with Jev</span>
+                      <span className="block text-[11px] leading-relaxed text-zinc-500">
+                        Every few steps of a long task Jev checks whether the work still serves your request and how far
+                        along it is, and reminds the agent when it drifts. The agent always gets a reminder of your request
+                        either way. Applies from its next message.
+                      </span>
+                      {!course.jevConnected && (
+                        <span className="mt-1 block text-[11px] leading-relaxed text-zinc-400">
+                          Needs a Jev key — Connections → Jev.
+                        </span>
+                      )}
                     </span>
                   </button>
                 </section>

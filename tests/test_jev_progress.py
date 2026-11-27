@@ -38,6 +38,11 @@ def jev(monkeypatch):
     monkeypatch.setenv("JEV_API_KEY", "jev-test")
     monkeypatch.setattr(get_config().tools.jev, "api_key", "")
     monkeypatch.setattr(get_config().tools.jev, "check_progress", True)
+    # The course check (jev_course) asks Jev too; these tests count the
+    # progress check's calls, so it is off here (its own tests below).
+    from captain_claw import jev_course
+
+    monkeypatch.setattr(jev_course, "enabled", lambda: False)
     state = types.SimpleNamespace(calls=[], answers=[_answer(0.9)])
 
     async def ask(self, st, questions, model=None):
@@ -280,6 +285,37 @@ async def test_jev_yes_gives_a_long_running_agent_more_steps(jev):
     assert [e["judge"] for e in ext] == ["progress", "jev"]
     assert ext[1]["p_progressing"] == 0.9 and ext[1]["new_limit"] == 12
     assert _asked_jev_status(outputs)
+
+
+async def test_a_fresh_course_check_decides_the_budget_without_a_second_call(jev, monkeypatch):
+    # The course check (every 6 tool steps) already answered "still on
+    # track, keep going" a step or two before the budget ran out: the
+    # extension takes that answer instead of asking the progress question.
+    from captain_claw import jev_course
+
+    monkeypatch.setattr(jev_course, "enabled", lambda: True)
+    course_answer = {"answers": {
+        jev_course.Q_STAGE: {"type": "choice", "choice": "gathering", "probabilities": {"gathering": 1.0}},
+        jev_course.Q_ON_TRACK: {"type": "noul", "noul": 0.85},
+        jev_course.Q_NEXT: {"type": "choice", "choice": "continue", "confidence": 0.9},
+    }}
+
+    async def ask(self, st, questions, model=None):
+        jev.calls.append((st, questions))
+        jc.build_request(st, questions, model)
+        return course_answer if jev_course.Q_STAGE in questions else _answer(0.1)
+
+    monkeypatch.setattr(jc.JevAPI, "ask", ask)
+    outputs: list[dict] = []
+    agent = _agent(WorkingProvider(steps=10), outputs)
+    result = await agent.complete("find the open tenders over 1M")
+    assert result.endswith("Found it: 7 open tenders over 1M across the probed sources.")
+    asked = [set(q) for _st, q in jev.calls]
+    assert {jp.QUESTION_NAME} not in asked          # no progress-check call
+    assert any(jev_course.Q_STAGE in q for q in asked)
+    ext = _gate_steps(outputs)
+    assert [e["judge"] for e in ext] == ["progress", "jev_course"]
+    assert ext[1]["p_progressing"] == 0.85
 
 
 async def test_jev_no_stops_a_long_turn_and_says_how_to_go_on(jev):

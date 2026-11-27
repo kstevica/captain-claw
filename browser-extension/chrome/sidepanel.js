@@ -117,6 +117,41 @@ function toast(text) {
   toast.t = setTimeout(() => { $toast.hidden = true }, 2600)
 }
 
+// Chrome's side panel shows no alert/confirm/prompt: window.confirm() there
+// answers false at once, without a word, so a button behind it did nothing.
+// A box over the panel asks instead. *onYes* runs in the click on its button
+// (a permission asked for there still has the person's click).
+const $sureLayer = document.getElementById('sureLayer')
+
+function askFirst(text, yes, onYes) {
+  askFirst.onYes = onYes
+  $sureLayer.innerHTML = `
+    <div class="ask-box card" role="alertdialog" aria-modal="true" aria-labelledby="sureText">
+      <div class="ask-text" id="sureText">${esc(text)}</div>
+      <div class="row">
+        <button type="button" class="btn danger grow" data-sure="yes">${esc(yes)}</button>
+        <button type="button" class="btn" data-sure="no">Cancel</button>
+      </div>
+    </div>`
+  $sureLayer.hidden = false
+  $sureLayer.querySelector('[data-sure="no"]').focus()
+}
+
+function closeSure() {
+  askFirst.onYes = null
+  $sureLayer.hidden = true
+  $sureLayer.innerHTML = ''
+}
+
+$sureLayer.addEventListener('click', (ev) => {
+  const b = ev.target.closest('[data-sure]')
+  if (!b && ev.target !== $sureLayer) return   // a click in the box, not on a button
+  const go = b?.dataset.sure === 'yes' ? askFirst.onYes : null
+  closeSure()
+  go?.()
+})
+$sureLayer.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeSure() })
+
 function actionDef(id = S.action) {
   return (S.me?.actions || []).find((a) => a.id === id) || { id, label: id, files: 'none' }
 }
@@ -529,7 +564,7 @@ function viewDecks() {
     <div class="row"><button class="icon-btn" data-act="back">${icon('back')}</button><div class="grow" style="font-weight:600">Your Flight Decks</div></div>
     ${rows}
     <button class="btn block" data-act="deck-add">${icon('plus', 'sm')} Connect another Flight Deck</button>
-    <p class="dim" style="margin:8px 2px 0">Agents on every deck here can use this browser, run their searches and read pages in it — each in tabs of its own. Pages you send go to the deck in use.</p>`
+    <p class="dim" style="margin:8px 2px 0">Agents on every deck here can use this browser, run their searches and read pages in it — each in tabs of its own. Pages you send go to the deck in use; with another browser on the same deck, its agents use the one where it's in use.</p>`
 }
 
 // ── reading the page ──
@@ -1940,7 +1975,14 @@ function recordable(tab = S.tab) {
 async function recStart() {
   const tab = (await currentTab()) || S.tab
   if (!recordable(tab)) { toast('Open the site you want to record first.'); return }
-  if (S.draft && !S.draft.id && !confirm('You have a recording you haven\'t saved. Record a new one and drop it?')) return
+  if (S.draft && !S.draft.id) {
+    askFirst('You have a recording you haven\'t saved. Record a new one and drop it?', 'Drop it and record', () => recBegin(tab))
+    return
+  }
+  recBegin(tab)
+}
+
+function recBegin(tab) {
   // Asked in the click itself: a recording keeps seeing this site, page after page.
   const asked = S.allSites ? Promise.resolve(true) : chrome.permissions.request({ origins: [`${originOf(tab.url)}/*`] }).catch(() => false)
   asked.then(async (ok) => {
@@ -1970,9 +2012,9 @@ function setDraft(draft, { now = false } = {}) {
   else draftTimer = setTimeout(write, 400)
 }
 
-async function recStop(discard) {
+async function recStop(discard, sure = false) {
   const rec = S.rec
-  if (discard && rec?.steps?.length > 1 && !confirm('Drop this recording?')) return
+  if (discard && rec?.steps?.length > 1 && !sure) { askFirst('Drop this recording?', 'Drop it', () => recStop(true, true)); return }
   if (!discard && rec) {
     const first = rec.steps.find((s) => s.url)
     const steps = rec.steps.map(({ at, tabId, ...s }) => ({ ...s, note: (S.recNotes[s.id] || '').trim() }))
@@ -2123,9 +2165,12 @@ async function recEdit(id) {
   }
 }
 
-async function recDelete(id) {
+function recDelete(id) {
   const rec = (S.recs || []).find((r) => r.id === id)
-  if (!rec || !confirm(`Delete “${rec.name}”?`)) return
+  if (rec) askFirst(`Delete “${rec.name}”?`, 'Delete', () => recDeleteNow(id))
+}
+
+async function recDeleteNow(id) {
   try {
     await api(S.conn, `/fd/clip/recordings/${encodeURIComponent(id)}/delete`, { method: 'POST' })
   } catch (e) {
@@ -2393,13 +2438,16 @@ $view.addEventListener('click', (ev) => {
     document.getElementById(`do-${id}`)?.focus()
   } else if (d.act === 'rec-save') recSave()
   else if (d.act === 'rec-drop' && S.draft) {
-    const saved = !!S.draft.id
-    if (!saved && !confirm('Drop this recording?')) return
-    setDraft(null)
-    S.draftError = ''
-    S.view = saved ? 'recs' : 'main'
-    render()
-    if (!saved) scheduleScan(0)
+    const drop = () => {
+      const saved = !!S.draft?.id
+      setDraft(null)
+      S.draftError = ''
+      S.view = saved ? 'recs' : 'main'
+      render()
+      if (!saved) scheduleScan(0)
+    }
+    if (S.draft.id) drop()
+    else askFirst('Drop this recording?', 'Drop it', drop)
   } else if (d.act === 'rec-hands-on') turnHandsOn(true)
   else if (d.act === 'rec-run-go') recRunGo()
 })
@@ -3290,8 +3338,11 @@ function disconnectDeck(url) {
   const d = S.decks.find((x) => x.url === url)
   if (!d) return
   if (S.handsStatus?.[url]?.state === 'denied') { disconnected('', url); return }   // it said no already: just off the list
-  if (!confirm(S.decks.length > 1 ? `Disconnect this browser from ${hostOf(url)}? It stays connected to your other Flight Decks.` : 'Disconnect this browser from Flight Deck?')) return
-  api(d, '/fd/clip/disconnect', { method: 'POST' }).catch(() => {}).finally(() => disconnected('', url))
+  askFirst(
+    S.decks.length > 1 ? `Disconnect this browser from ${hostOf(url)}? It stays connected to your other Flight Decks.` : 'Disconnect this browser from Flight Deck?',
+    'Disconnect',
+    () => api(d, '/fd/clip/disconnect', { method: 'POST' }).catch(() => {}).finally(() => disconnected('', url)),
+  )
 }
 
 // The deck name in the header opens the list of decks.

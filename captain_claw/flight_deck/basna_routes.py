@@ -2353,6 +2353,21 @@ _run_gate: contextvars.ContextVar["asyncio.Semaphore | None"] = contextvars.Cont
     "basna_run_gate", default=None)
 
 
+def _progress_course(sid: str, label: str, key: str, course: dict, **extra) -> None:
+    """A worker's course check in the run's feed (run_course), and a flag the
+    second time in a row it says the worker's recent steps don't serve its part."""
+    from captain_claw.flight_deck import run_course
+
+    text = run_course.describe(course)
+    _progress(sid, "course", f"{label} · {text}", agent=label, tool="course", detail=text,
+              course_stage=course.get("stage"), stage_name=course.get("stage_name"),
+              p_on_track=course.get("p_on_track"), next_move=course.get("next"), **extra)
+    if run_course.off_track(sid, key, course):
+        _progress(sid, "course_off_track",
+                  f"⚠ {label} looks off track — two course checks in a row say its recent "
+                  "steps don't serve its part", ok=False, agent=label, tool="course", **extra)
+
+
 def _make_gate(max_parallel: int, team_size: int) -> "asyncio.Semaphore | None":
     """A dispatch concurrency limiter, or None when there's nothing to gate
     (unlimited, or the cap is >= the team so every agent can run at once)."""
@@ -2740,11 +2755,15 @@ async def _send_chat_and_collect(
                         and m.get("content")):
                     answer = m["content"]
         elif mtype == "monitor" and not msg.get("replay"):
+            from captain_claw.flight_deck import run_course as _run_course
             from captain_claw.flight_deck.vatra_ledger import ledger_args
 
+            _args = ledger_args(msg.get("arguments"), msg.get("output"))
+            _course = _run_course.course_from_monitor(msg)
+            if _course:
+                _args = {**(_args or {}), "course": _course}
             _record(str(msg.get("tool_name") or msg.get("tool") or "tool"),
-                    _summarize_tool_args(msg.get("arguments")),
-                    ledger_args(msg.get("arguments"), msg.get("output")))
+                    _summarize_tool_args(msg.get("arguments")), _args)
         elif mtype == "narration" and str(msg.get("text") or "").strip():
             _record("narration", str(msg["text"]).strip()[:280])
         elif mtype == "turn_usage" and not msg.get("replay"):
@@ -2867,6 +2886,13 @@ async def _send_chat_and_collect(
                         chat_msg["image_paths"] = image_paths
                     if automation:
                         chat_msg["automation"] = automation
+                    # Keep on course: the run's goal and this worker's part
+                    # (run_course), so its task anchor reads them.
+                    from captain_claw.flight_deck import run_course as _run_course
+
+                    _course = _run_course.frame()
+                    if _course:
+                        chat_msg["course"] = _course
                     await ws.send(json.dumps(chat_msg))
                     sent = True
                     started_at = asyncio.get_event_loop().time()
@@ -3478,6 +3504,12 @@ async def execute_route(
     run_tag = format(int(time.time()), "x")[-6:]  # unique per run → no slug collisions on re-run
     plan = [(s, arch_by_id[s["archetype_id"]]) for s in selected if s["archetype_id"] in arch_by_id]
     _run_gate.set(_make_gate(body.max_parallel, len(plan)))  # cap concurrent dispatches (local models)
+    # Keep on course (run_course): every worker's frame carries the run's goal,
+    # its part and the run's switch (the starting agent's; on from the page).
+    from captain_claw.flight_deck import run_course as _run_course
+
+    _run_course.start_run(sess.get("intent") or "", check=_run_course.resolve_switch(request, None),
+                          team_size=len(plan))
     if body.max_parallel and body.max_parallel < len(plan):
         _progress(sid, "route", f"Max {body.max_parallel} agent(s) in parallel")
     _phase(sid, "Routing")
@@ -3799,6 +3831,17 @@ async def execute_route(
             # 2) Dispatch the task to each agent in parallel; log each tool call live
             # and each agent's completion as it returns.
             async def _dispatch_tracked(sp: dict) -> dict:
+                # Keep on course: this worker's part is its role on the task.
+                _sel = sp["sel"]
+                _role = _sel.get("role") or sp["arch"].get("role") or sp["arch"]["id"]
+                _extra = str(_sel.get("extra") or "").strip()
+                _token = _run_course.set_part(f"Answer as {_role}" + (f" — {_extra}" if _extra else ""))
+                try:
+                    return await _dispatch_tracked_inner(sp)
+                finally:
+                    _run_course.reset_part(_token)
+
+            async def _dispatch_tracked_inner(sp: dict) -> dict:
                 sel, arch = sp["sel"], sp["arch"]
                 role = sel.get("role") or arch.get("role") or arch["id"]
                 fleet = sel.get("fleet_instructions") or arch.get("fleet_instructions", "")
@@ -3822,6 +3865,10 @@ async def execute_route(
                 # UI can group the streaming log into live per-agent panels — not just
                 # parse the flat message string.
                 def _on_action(act: dict) -> None:
+                    _course = (act.get("args") or {}).get("course")
+                    if _course:
+                        _progress_course(sid, role, role, _course)
+                        return
                     if act["tool"] == "narration":
                         _progress(sid, "narration", f"{role}: {act['detail']}",
                                   agent=role, tool="narration", detail=act.get("detail", ""))

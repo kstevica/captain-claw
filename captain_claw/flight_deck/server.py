@@ -5951,6 +5951,97 @@ async def update_agent_task_rephrase(
     return {"ok": True, "enabled": body.enabled}
 
 
+class AgentCourseCheckUpdate(BaseModel):
+    enabled: bool
+
+
+def _read_agent_course_check(agent_dir: Path, kind: str) -> bool:
+    """As the agent decides: its switch file, else its config, else on."""
+    from captain_claw import jev_course
+
+    try:
+        switch = jev_course.parse(
+            (_agent_home_cc(agent_dir, kind) / jev_course.FILENAME).read_text(encoding="utf-8"))
+    except OSError:
+        switch = None
+    if switch is not None:
+        return switch
+    # The home config overlays the agent folder's, as at start-up.
+    for cfg in (_agent_home_cc(agent_dir, kind) / "config.yaml", agent_dir / "config.yaml"):
+        try:
+            data = yaml.safe_load(cfg.read_text()) or {}
+        except Exception:
+            continue
+        tools = data.get("tools") if isinstance(data, dict) else None
+        jev = tools.get("jev") if isinstance(tools, dict) else None
+        if isinstance(jev, dict) and isinstance(jev.get("course_check"), bool):
+            return jev["course_check"]
+    return True
+
+
+async def _owner_has_jev(request: Request) -> bool:
+    """Whether the person managing this agent has a Jev key (their own or the
+    team's) — the switch only does anything then."""
+    from captain_claw.flight_deck import jev_routes
+    from captain_claw.flight_deck.auth import _LOCAL_USER, _fd_auth_enabled
+
+    owner = getattr(request.state, "user_id", "") if _fd_auth_enabled() else _LOCAL_USER["id"]
+    try:
+        return bool(await jev_routes.get_key(owner or _LOCAL_USER["id"]))
+    except Exception:
+        return False
+
+
+@app.get("/fd/agent-course-check/{kind}/{identifier}")
+async def get_agent_course_check(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Whether the agent checks its course with Jev during long turns, and
+    whether Jev is connected at all (the task reminder runs either way)."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    return {
+        "enabled": _read_agent_course_check(agent_dir, kind),
+        "jev_connected": await _owner_has_jev(request),
+    }
+
+
+@app.put("/fd/agent-course-check/{kind}/{identifier}")
+async def update_agent_course_check(
+    kind: str, identifier: str, body: AgentCourseCheckUpdate, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Turn the Jev course check on or off. The switch file applies from the
+    agent's next message; every config copy gets it too, so it holds after a
+    restart and travels with the agent's config."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    from captain_claw import jev_course
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    for cc_dir in _agent_reasoning_dirs(agent_dir, kind):
+        if cc_dir.is_dir():
+            (cc_dir / jev_course.FILENAME).write_text(jev_course.render(body.enabled), encoding="utf-8")
+    for cfg_path in _agent_config_paths(agent_dir):
+        if not cfg_path.is_file():
+            continue
+        try:
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        tools = data.get("tools") if isinstance(data.get("tools"), dict) else {}
+        jev = tools.get("jev") if isinstance(tools.get("jev"), dict) else {}
+        data["tools"] = {**tools, "jev": {**jev, "course_check": body.enabled}}
+        cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+    return {"ok": True, "enabled": body.enabled}
+
+
 class AgentModelSwitchUpdate(BaseModel):
     enabled: bool = False
 

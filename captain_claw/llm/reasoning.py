@@ -121,6 +121,18 @@ def current_turn_effort() -> str | None:
     return _TURN.get()
 
 
+# A level forced from outside for the agent's whole run — a benchmark harness
+# (captain-claw-once --lock). It beats every other pick for the main
+# conversation calls, and the reasoning_effort tool refuses to change it.
+# Housekeeping calls keep the model's default, as always.
+LOCK_ENV = "CLAW_LOCK_REASONING_EFFORT"
+
+
+def locked_effort() -> str | None:
+    """The level forced for this run (:data:`LOCK_ENV`), or ``None``."""
+    return normalize_level(os.environ.get(LOCK_ENV, ""))
+
+
 def requested_effort() -> str | None:
     """The level the provider should apply to the request it is building."""
     return _CALL.get()
@@ -237,6 +249,18 @@ class Profile:
         if self.note:
             out["note"] = self.note
         return out
+
+
+def step_down(level: str | None, profile: Profile | None) -> str | None:
+    """The next level below *level* that *profile* offers, never "off" or the
+    "on" toggle — or None when there is none (or no profile, or no level)."""
+    if profile is None:
+        return None
+    current = level or profile.default
+    if current not in _RANK or current in ("off", ON):
+        return None
+    lower = [lvl for lvl in profile.levels if lvl not in ("off", ON) and _RANK[lvl] < _RANK[current]]
+    return max(lower, key=_RANK.__getitem__) if lower else None
 
 
 def clamp(level: str | None, profile: Profile | None) -> str | None:
@@ -390,6 +414,10 @@ class Plan:
     # a continuation of a tool call whose thinking block we can't echo.
     needs_thinking_echo: bool = False
     budget_tokens: int | None = None
+    # At least this many output tokens on a streamed call: thinking counts
+    # against the output cap, and a deep level can use all of it and end the
+    # call with nothing (adaptive Claude). None: the request's own cap.
+    min_output_tokens: int | None = None
 
 
 # ── Model families ────────────────────────────────────────────────────
@@ -457,6 +485,12 @@ _CLAUDE_OLD_RE = re.compile(r"^claude-(\d)(?:[-.](\d))?-(opus|sonnet|haiku)")
 # (at least 1024, and under max_tokens with room left for the answer).
 _CLAUDE_BUDGETS = {"minimal": 1024, "low": 2048, "medium": 8192, "high": 16384, "max": 32000}
 _CLAUDE_ANSWER_ROOM = 4096
+# Adaptive Claude counts its thinking against max_tokens. At the deep levels it
+# can think through an agent's usual 32k cap and end the call with no text and
+# no tool call (finish_reason "length") — Haiku 5.5 at max did that on every
+# step of a scheduling task. These levels get at least this much output room;
+# every adaptive Claude model takes up to 128K output on a streamed call.
+_CLAUDE_EFFORT_ROOM = {"high": 32_000, "xhigh": 64_000, "max": 128_000}
 _SAMPLING = ("temperature", "top_p", "top_k")
 
 
@@ -475,7 +509,7 @@ def _claude_effort(off_mode: str | None, adaptive_explicit: bool) -> Build:
         body: dict[str, Any] = {"output_config": {"effort": level}}
         if adaptive_explicit:
             body["thinking"] = {"type": "adaptive"}
-        return _plan(level, body=body, drop=_SAMPLING)
+        return _plan(level, body=body, drop=_SAMPLING, min_output_tokens=_CLAUDE_EFFORT_ROOM.get(level))
     return build
 
 

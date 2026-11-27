@@ -79,6 +79,20 @@ class _MCPTask:
 
 _TASKS: dict[str, _MCPTask] = {}
 _TASK_TTL_SECONDS = 3600.0  # prune terminal tasks after an hour
+_TASK_CAP_DEFAULT = 1800.0
+
+
+def _task_cap_seconds() -> float:
+    """The longest one task may run: 30 minutes, unless the deck was started
+    with ``FD_MCP_TASK_MAX_SECONDS`` (a private benchmark deck whose tasks
+    allow more)."""
+    import os
+
+    try:
+        cap = float(os.environ.get("FD_MCP_TASK_MAX_SECONDS", "") or _TASK_CAP_DEFAULT)
+    except ValueError:
+        return _TASK_CAP_DEFAULT
+    return cap if cap >= 10.0 else _TASK_CAP_DEFAULT
 _FORWARD_EVENT_TYPES = {"status", "thinking", "monitor", "tool_stream"}
 
 
@@ -196,50 +210,13 @@ async def _run_agent_task(t: _MCPTask, host: str, auth: str, timeout: float) -> 
 
             parts: list[str] = []
             deadline = loop.time() + timeout
-            busy = 0
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    if not parts:
-                        raise TimeoutError("timed out waiting for the agent")
-                    break
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 15.0))
-                except asyncio.TimeoutError:
-                    _emit("heartbeat", {"elapsed": int(timeout - remaining), "timeout": int(timeout)})
-                    continue
-                msg = json.loads(raw)
-                mt = msg.get("type", "")
-                if mt in _FORWARD_EVENT_TYPES:
-                    _emit(mt, msg)
-                if mt == "chat_message" and msg.get("role") == "assistant" and not msg.get("replay"):
-                    content = msg.get("content", "")
-                    if content:
-                        parts.append(content)
-                    # The agent emits a `usage` summary right after the reply.
-                    try:
-                        for _ in range(4):
-                            m2 = json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
-                            if m2.get("type") == "usage":
-                                t.usage = m2
-                                break
-                            if m2.get("type") in _FORWARD_EVENT_TYPES:
-                                _emit(m2.get("type"), m2)
-                    except Exception:
-                        pass
-                    break
-                if mt == "error":
-                    err = str(msg.get("message", "agent error"))
-                    if busy < 8 and ("busy processing" in err.lower() or "session is busy" in err.lower()):
-                        busy += 1
-                        _emit("status", {"status": f"peer busy, retrying ({busy})…"})
-                        await asyncio.sleep(min(2 + busy * 2, 12))
-                        try:
-                            await ws.send(json.dumps(payload))
-                        except Exception:
-                            raise RuntimeError(err)
-                        continue
-                    raise RuntimeError(err)
+            try:
+                await _collect_reply(ws, t, payload, parts, deadline, timeout, _emit)
+            except asyncio.CancelledError:
+                # cancel_task: closing this socket alone leaves the agent's turn
+                # running, unsaved. Cancel the turn itself and let it end.
+                await _cancel_agent_turn(ws, _emit)
+                raise
             t.result = "\n".join(parts) if parts else "(no response)"
             t.status = "done"
     except asyncio.CancelledError:
@@ -250,6 +227,77 @@ async def _run_agent_task(t: _MCPTask, host: str, auth: str, timeout: float) -> 
         t.error = str(exc)
     finally:
         t.updated_at = _utcnow_iso()
+
+
+# How long a cancelled task waits for the agent to end its turn. The agent
+# looks for the cancel between steps, so a model call in flight finishes first.
+_CANCEL_SETTLE_SECONDS = 60.0
+
+
+async def _cancel_agent_turn(ws: Any, emit: Any) -> None:
+    """Send the agent a cancel for its turn and wait (bounded) for the turn to
+    end: the agent saves the conversation then, so its transcript survives."""
+    loop = asyncio.get_event_loop()
+    try:
+        await ws.send(json.dumps({"type": "cancel"}))
+        emit("status", {"status": "cancelling the agent's turn"})
+        until = loop.time() + _CANCEL_SETTLE_SECONDS
+        while (left := until - loop.time()) > 0:
+            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=left))
+            if msg.get("type") == "chat_message" and msg.get("role") == "assistant" and not msg.get("replay"):
+                return
+    except Exception:  # noqa: BLE001 — best effort; the task is cancelled either way
+        return
+
+
+async def _collect_reply(ws: Any, t: _MCPTask, payload: dict, parts: list[str], deadline: float,
+                         timeout: float, _emit: Any) -> None:
+    """Read the agent's socket until its reply (into *parts*), forwarding progress."""
+    loop = asyncio.get_event_loop()
+    busy = 0
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            if not parts:
+                raise TimeoutError("timed out waiting for the agent")
+            break
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 15.0))
+        except asyncio.TimeoutError:
+            _emit("heartbeat", {"elapsed": int(timeout - remaining), "timeout": int(timeout)})
+            continue
+        msg = json.loads(raw)
+        mt = msg.get("type", "")
+        if mt in _FORWARD_EVENT_TYPES:
+            _emit(mt, msg)
+        if mt == "chat_message" and msg.get("role") == "assistant" and not msg.get("replay"):
+            content = msg.get("content", "")
+            if content:
+                parts.append(content)
+            # The agent emits a `usage` summary right after the reply.
+            try:
+                for _ in range(4):
+                    m2 = json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+                    if m2.get("type") == "usage":
+                        t.usage = m2
+                        break
+                    if m2.get("type") in _FORWARD_EVENT_TYPES:
+                        _emit(m2.get("type"), m2)
+            except Exception:
+                pass
+            break
+        if mt == "error":
+            err = str(msg.get("message", "agent error"))
+            if busy < 8 and ("busy processing" in err.lower() or "session is busy" in err.lower()):
+                busy += 1
+                _emit("status", {"status": f"peer busy, retrying ({busy})…"})
+                await asyncio.sleep(min(2 + busy * 2, 12))
+                try:
+                    await ws.send(json.dumps(payload))
+                except Exception:
+                    raise RuntimeError(err)
+                continue
+            raise RuntimeError(err)
 
 
 # ── MCP tool definitions ─────────────────────────────────────────────
@@ -346,7 +394,7 @@ async def _tool_send_task(user: dict, args: dict) -> dict:
         raise ValueError(f"Agent '{agent['name']}' is not running (status: {agent.get('status')}).")
 
     timeout = float(args.get("timeout_seconds") or 300.0)
-    timeout = max(10.0, min(timeout, 1800.0))
+    timeout = max(10.0, min(timeout, _task_cap_seconds()))
     auth = S._resolve_agent_auth(int(agent["port"]))
 
     _prune_tasks()
