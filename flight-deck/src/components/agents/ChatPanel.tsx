@@ -48,6 +48,7 @@ import {
   GraduationCap,
   Download,
   Clock,
+  Scale,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './AgentSkills'
@@ -3409,7 +3410,8 @@ const ActivityGroup = memo(function ActivityGroup({ items, live, liveTurnUsage, 
   // live or done; unfolded, it is back in the list where it happened.
   let latestNarration: ChatMessage | null = null
   for (let i = items.length - 1; i >= 0; i--) {
-    if (items[i].role !== 'tool' && (items[i].content || '').trim()) { latestNarration = items[i]; break }
+    // The agent's own words; Jev's decisions stay in the unfolded list.
+    if (items[i].role !== 'tool' && !items[i].jev && (items[i].content || '').trim()) { latestNarration = items[i]; break }
   }
   return (
     <div className="mb-3">
@@ -3493,6 +3495,19 @@ const ActivityToolRow = memo(function ActivityToolRow({ message }: { message: Ch
 })
 
 const ActivityNarration = memo(function ActivityNarration({ message }: { message: ChatMessage }) {
+  if (message.jev) {
+    // Jev's decision in words (jev_narration.py): how sure it was and what it
+    // weighed, marked as Jev's so it never reads as the agent talking.
+    return (
+      <div className="flex items-start gap-1.5 px-1.5 py-0.5 text-xs text-zinc-500" title="Jev's decision">
+        <Scale className="mt-0.5 h-3 w-3 shrink-0 text-violet-500" />
+        <div className="min-w-0 flex-1">
+          <span className="mr-1 font-medium text-violet-500">Jev</span>
+          {message.content.replace(/^Jev\s+/, '')}
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="flex items-start gap-1.5 px-1.5 py-0.5 text-xs italic text-zinc-500">
       <CircleDot className="mt-0.5 h-3 w-3 shrink-0 text-zinc-600" />
