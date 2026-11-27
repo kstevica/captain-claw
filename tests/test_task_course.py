@@ -289,3 +289,41 @@ def test_previous_turn_reads_the_end_of_the_session():
     assert prev.answered and prev.asked
     assert prev.end_at == NOW - timedelta(minutes=5)
     assert tc.previous_turn([]) == tc.PreviousTurn()
+
+
+# ── a worker's frame (Basna / Vatra) ─────────────────────────────────
+
+
+def test_normalize_frame_checks_and_cuts():
+    assert tc.normalize_frame(None) is None
+    assert tc.normalize_frame({"check": True}) is None
+    frame = tc.normalize_frame({"goal": "  Plan\n the trip ", "part": "x" * 900, "check": False,
+                                "max_checks": 3, "requirements": ["a", " ", "b"]})
+    assert frame["goal"] == "Plan the trip"
+    assert len(frame["part"]) <= tc.PART_CHARS
+    assert frame["check"] is False and frame["max_checks"] == 3
+    assert frame["requirements"] == ["a", "b"]
+    assert "check" not in tc.normalize_frame({"goal": "g", "check": "yes"})
+    assert "max_checks" not in tc.normalize_frame({"goal": "g", "max_checks": True})
+
+
+def test_turn_frame_binds_for_the_turn_only():
+    assert tc.current_frame() is None
+    with tc.turn_frame({"goal": "Plan the trip", "part": "Prices"}):
+        assert tc.current_frame() == {"goal": "Plan the trip", "part": "Prices"}
+    assert tc.current_frame() is None
+
+
+def test_apply_frame_makes_the_anchor_read_goal_and_part():
+    meta: dict = {}
+    tc.begin_turn(meta, "a very long worker prompt with instructions " * 30, automated=True, now=NOW)
+    tc.apply_frame(meta, {"goal": "Plan the trip", "part": "Prices: collect fares", "requirements": ["table"]})
+    course = meta[tc.KEY]
+    assert course["goal"] == "Plan the trip" and course["anchor"] == "Prices: collect fares"
+    assert course["requirements"] == ["table"]
+    assert tc.note(course).splitlines()[:2] == ["Run goal: Plan the trip", "Your part: Prices: collect fares"]
+    # Without a part the anchor stays the turn's own words.
+    meta2: dict = {}
+    tc.begin_turn(meta2, "Collect the fares", automated=True, now=NOW)
+    tc.apply_frame(meta2, {"goal": "Plan the trip"})
+    assert meta2[tc.KEY]["anchor"] == "Collect the fares"

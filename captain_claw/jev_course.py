@@ -201,9 +201,10 @@ def clear() -> None:
         pass
 
 
-async def ready() -> bool:
-    """On, not a shared-agent member's turn, and a usable Jev key. Never raises."""
-    if not enabled():
+async def ready(switch: bool | None = None) -> bool:
+    """On (``switch``, else the agent's own switch), not a shared-agent
+    member's turn, and a usable Jev key. Never raises."""
+    if not (enabled() if switch is None else switch):
         return False
     try:
         if jev_client._member_call():

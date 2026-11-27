@@ -50,7 +50,7 @@ def jev_on(monkeypatch):
     calls: list[dict] = []
     answers: list[jev_course.Check | None] = []
 
-    async def ready() -> bool:
+    async def ready(switch=None) -> bool:
         return True
 
     async def ask_check(state, *, step, trigger):
@@ -107,7 +107,7 @@ async def test_a_check_after_six_steps_adds_the_stage_and_one_line(jev_on):
 
 @pytest.mark.asyncio
 async def test_no_jev_means_no_check_and_the_reminder_goes_on(monkeypatch):
-    async def not_ready() -> bool:
+    async def not_ready(switch=None) -> bool:
         return False
 
     asked: list = []
@@ -266,3 +266,34 @@ def test_a_workers_share_of_the_run_cap():
     assert agent._course_max_checks() == jev_course.MAX_CHECKS_PER_TURN
     agent._course_frame = None
     assert agent._course_max_checks() == jev_course.MAX_CHECKS_PER_TURN
+
+
+@pytest.mark.asyncio
+async def test_a_workers_frame_sets_goal_part_switch_and_share(jev_on):
+    calls, _answers = jev_on
+    agent = _agent()
+    prompt = "You are the Prices owner. Long instructions follow. " * 20
+    agent.session.add_message("user", prompt)
+    with task_course.turn_frame({"goal": "Plan the trip", "part": "Prices: collect fares",
+                                 "check": True, "max_checks": 2}):
+        agent._task_course_begin(prompt)
+    course = agent.session.metadata[task_course.KEY]
+    assert course["goal"] == "Plan the trip" and course["anchor"] == "Prices: collect fares"
+    assert agent._task_course_start.relation == task_course.NEW_TASK
+    assert agent._course_watch.max_checks == 2
+    assert agent._course_watch.relation_task is None
+    count = await _steps(agent, 6, 0, 0)
+    await _settle()
+    assert len(calls) == 1 and calls[0]["state"]["run_goal"] == "Plan the trip"
+
+
+@pytest.mark.asyncio
+async def test_a_runs_switch_off_beats_the_workers_own(jev_on):
+    calls, _answers = jev_on
+    agent = _agent()
+    agent.session.add_message("user", "do your part")
+    with task_course.turn_frame({"goal": "Plan the trip", "part": "Prices", "check": False}):
+        agent._task_course_begin("do your part")
+    await _steps(agent, 8, 0, 0)
+    await _settle()
+    assert calls == []
