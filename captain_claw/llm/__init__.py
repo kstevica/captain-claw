@@ -477,6 +477,12 @@ def _apply_reasoning_plan(kwargs: dict[str, Any], plan: "reasoning.Plan", provid
     for key in plan.drop:
         kwargs.pop(key, None)
     kwargs.update(plan.kwargs)
+    # Room for the answer after deep thinking — on a streamed call only: a
+    # non-streamed one this long would run into the request timeout instead.
+    if plan.min_output_tokens and kwargs.get("stream"):
+        cap_key = "max_completion_tokens" if "max_completion_tokens" in kwargs else "max_tokens"
+        if int(kwargs.get(cap_key) or 0) < plan.min_output_tokens:
+            kwargs[cap_key] = plan.min_output_tokens
     if not plan.body:
         return
     if provider == "anthropic":

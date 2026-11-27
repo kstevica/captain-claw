@@ -64,18 +64,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--instruction-file", default="", help="Read the instruction from this file ('-' = stdin).")
     p.add_argument("-p", "--provider", default="", help="Provider: anthropic, openai, gemini, openrouter, xai, ollama …")
     p.add_argument("-m", "--model", default="", help="Model id for that provider.")
-    p.add_argument("--base-url", default="", help="Model endpoint override.")
+    p.add_argument("--base-url", default="",
+                   help="Model endpoint, e.g. a local OpenAI-compatible server (http://host:8080/v1).")
+    p.add_argument("--max-context", type=int, default=0,
+                   help="The model's context window to plan for, in tokens (default: Captain's 160K).")
+    p.add_argument("--max-output", type=int, default=0, help="Output tokens per model call (default: Captain's).")
     p.add_argument("--effort", default="", help="Reasoning effort: off, minimal, low, medium, high, xhigh, max.")
     p.add_argument("--drive", default="", choices=["", *DRIVE_LEVELS],
                    help="Drive, how far the harness pushes the turn: " + ", ".join(DRIVE_LEVELS) + ".")
     p.add_argument("--lock", action="store_true",
                    help="Force --effort and --drive for the whole run: the agent can't change them.")
     p.add_argument("--workspace", default="", help="Folder the agent works in (default: the current folder).")
+    p.add_argument("--skills-dir", default="",
+                   help="Skills for the task: a folder of skill folders, each with a SKILL.md.")
     p.add_argument("--run-dir", default="", help="Where the deck, logs and result.json go (default: a new temp folder).")
     p.add_argument("--result-json", default="", help="Result file (default: <run dir>/result.json).")
     p.add_argument("--answer-file", default="", help="Also write the final answer here.")
+    p.add_argument("--trajectory-json", default="",
+                   help="Also write the run as an ATIF trajectory here (what Harbor graders read).")
     p.add_argument("--max-iterations", type=int, default=0, help="Tool-call budget for the turn (default: Captain's).")
-    p.add_argument("--timeout", type=float, default=0.0, help="Stop the task after this many seconds (deck: 1800 at most).")
+    p.add_argument("--timeout", type=float, default=0.0,
+                   help="Stop the task after this many seconds (default: 4 h on a private deck, so the "
+                        "harness sets the limit; 30 min on a --deck-url deck).")
     p.add_argument("--sandboxed-writes", action="store_true", help="File writes go under saved/ as in the app.")
     p.add_argument("-q", "--quiet", action="store_true", help="No progress lines on stderr.")
     p.add_argument("-v", "--verbose", action="store_true", help="Status updates on stderr too (standalone).")
@@ -265,6 +275,21 @@ def write_outputs(args: argparse.Namespace, result: dict[str, Any], result_path:
         target = user_path(args.answer_file)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(result.get("answer") or "", encoding="utf-8")
+    if getattr(args, "trajectory_json", ""):
+        from captain_claw.bench.atif import to_atif
+
+        trajectory = to_atif(
+            result.get("messages") or [],
+            session_id=result.get("session_id") or (result.get("deck") or {}).get("task_id") or None,
+            model=f"{result.get('provider')}/{result.get('model')}",
+            version=str(result.get("captain_version") or ""),
+            usage=result.get("usage") or None,
+            cost_usd=result.get("cost_usd_estimate"),
+        )
+        if trajectory is not None:
+            target = user_path(args.trajectory_json)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(trajectory, indent=2, default=str, ensure_ascii=False), encoding="utf-8")
 
 
 def report(args: argparse.Namespace, result: dict[str, Any], result_path: Path) -> None:
@@ -306,7 +331,13 @@ def build_config(args: argparse.Namespace, run_dir: Path, workspace: Path) -> An
         cfg.model.model = args.model
     if args.base_url:
         cfg.model.base_url = args.base_url
+    if args.max_context > 0:
+        cfg.context.max_tokens = args.max_context
+    if args.max_output > 0:
+        cfg.model.max_tokens = args.max_output
     cfg.workspace.path = str(workspace)
+    if args.skills_dir:
+        cfg.skills.load.extra_dirs = [*cfg.skills.load.extra_dirs, str(user_path(args.skills_dir))]
     isolate_paths(cfg, run_dir)
     if args.bench:
         apply_bench_profile(cfg)

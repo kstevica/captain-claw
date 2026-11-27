@@ -36,18 +36,64 @@ PYTHONPATH=evals/harbor harbor run -p path/to/tasks \
   --agent captain_harbor:Captain -m anthropic/claude-haiku-5-5 -k 3 -n 4
 ```
 
-**By default, a Harbor trial runs Captain at full stretch.** Reasoning effort is
-`max` (the highest level the model offers, so `high` on a model without `max`)
-and Drive is `ambitious`. Both are **locked** for the whole run:
+**By default, a Harbor trial runs Captain at reasoning effort `medium` and Drive
+`ambitious`.** Both are **locked** for the whole run:
 - every main model call uses them;
 - the agent's `reasoning_effort` and `drive_level` tools refuse to change them;
 - housekeeping calls keep their quiet defaults.
 
-To change this, pass `--ak reasoning_effort=high`, `--ak drive=persistent`, or
+Higher effort is slow: at `max`, Haiku 5.5 spent 4–6 minutes per step and ran
+out a task's 15-minute limit. To change the levels, pass
+`--ak reasoning_effort=high`, `--ak drive=persistent`, or
 `auto` to leave a setting to Captain. `--ak lock=false` sets the levels as the
 agent's defaults without forcing them. `captain-claw-once` reads the lock as
 `--lock` and passes it to the agent as `CLAW_LOCK_REASONING_EFFORT` and
 `CLAW_LOCK_DRIVE`.
+
+### Local and self-hosted models
+
+Point Captain at any OpenAI-compatible server (llama.cpp, vLLM, Ollama's `/v1`)
+with `-m openai/<model id>` and `--ak endpoint=…`. Put the server's key in
+`OPENAI_API_KEY`, and tell Captain the context window. For example, a Qwen
+model served from a GPU box on the LAN:
+
+```bash
+export OPENAI_API_KEY=<server key>
+PYTHONPATH=evals/harbor harbor run -p path/to/tasks --agent captain_harbor:Captain \
+  -m openai/qwen3.8-flash-next-iq3_s --ak endpoint=http://192.168.0.10:8080/v1 \
+  --ak max_context=200000 --ak reasoning_effort=xhigh -n 1 --timeout-multiplier 5
+```
+
+Captain recognizes a local server and uses that model family's own thinking
+controls. A server with a single slot handles one request at a time, so run
+one task at a time (`-n 1`). Otherwise concurrent tasks queue behind each other
+and run out each other's time.
+
+**Give a local model ×4–×5 the time limits.** A quantized model on one GPU took
+about 3× Haiku 5.5's time per task on WildClawBench (up to 7× on some), and at
+×3 the long research and PDF tasks ran out of time.
+
+### Time limits
+
+Each task sets its own limit for the agent (WildClawBench: 5–20 minutes), and
+`--timeout-multiplier` scales all of them. Scores run with longer limits aren't
+comparable with a published leaderboard. Captain's private deck lets one task
+run as long as the run allows. A deck's own inbound MCP caps a task at 30
+minutes unless it is started with `FD_MCP_TASK_MAX_SECONDS`.
+
+When a task runs out of time, Harbor only drops its connection to the
+container. The adapter then stops `captain-claw-once` itself (SIGTERM, up to
+150 s). The runner cancels the agent's turn, which saves the conversation so far,
+and writes `captain-result.json` and `trajectory.json`. The grader then judges
+what the agent did before the limit, instead of an empty transcript, and the
+agent is no longer changing files while the grader reads them.
+
+### PDFs
+
+The adapter installs Captain with its `pdf` extra (PyMuPDF), so the agent reads
+PDFs with their headings and tables. Without it, PDFs are read page by page, and
+a small model falls back to reading pages as pictures, which takes far longer.
+`--ak extras=none` installs no extras; `--ak extras=pdf,cv` adds more.
 
 By default the agent is a plain new agent, like **New agent → Advanced** with
 nothing chosen. `--ak archetype=<id>` spawns an agent from the deck's **agent
@@ -92,11 +138,15 @@ PYTHONPATH=evals/harbor harbor run ... \
 |---|---|
 | `source` | pip spec: `captain-claw==0.9.4`, a git URL, or a local wheel path (default: the latest release) |
 | `constraints` | pip constraints file pinning dependencies (see above) |
-| `reasoning_effort` | `off` · `minimal` · `low` · `medium` · `high` · `xhigh` · `max` · `auto` (default `max`) |
+| `extras` | Captain extras to install, comma-separated (default `pdf`; `none` for none) |
+| `reasoning_effort` | `off` · `minimal` · `low` · `medium` · `high` · `xhigh` · `max` · `auto` (default `medium`) |
 | `drive` | `relaxed` · `diligent` · `persistent` · `ambitious` · `auto` (default `ambitious`) |
 | `lock` | force effort and Drive for the whole run (default `true`) |
+| `endpoint` | model server URL, for a local or self-hosted OpenAI-compatible API (with `-m openai/<model>`) |
+| `max_context` | the model's context window in tokens (default 160K) |
+| `max_output` | output tokens per model call |
 | `max_iterations` | tool-call budget for the turn |
-| `timeout_seconds` | stop the task after this long (30 min at most) |
+| `timeout_seconds` | stop the task after this long (default: the task's own limit) |
 | `workspace` | folder the agent works in (default: the container's working directory) |
 | `archetype` | spawn the agent from the deck's agent store, by id |
 | `standalone` | `true`: a bare in-process agent, no Flight Deck (for comparison) |

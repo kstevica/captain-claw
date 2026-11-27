@@ -288,3 +288,37 @@ def test_classifier_leaves_other_heals_alone():
                        "in /v1/chat/completions. set reasoning_effort to 'none'")
     assert not refused("the reasoning_content in the thinking mode must be passed back to the api")
     assert not refused("rate limit exceeded")
+
+
+# ── room for the answer after deep thinking ──────────────────────────
+
+
+@pytest.mark.parametrize("level,room", [("high", 32_000), ("xhigh", 64_000), ("max", 128_000)])
+def test_deep_adaptive_claude_levels_get_answer_room_on_streamed_calls(level, room):
+    p = LiteLLMProvider(provider="anthropic", model="claude-haiku-5-5", api_key="x", max_tokens=8192)
+    with reasoning.call_effort(level):
+        streamed = p._request_kwargs(_MSGS, stream=True)
+        plain = p._request_kwargs(_MSGS, stream=False)
+    assert streamed["max_tokens"] == room
+    # A non-streamed call that long would run into the request timeout instead.
+    assert plain["max_tokens"] == 8192
+
+
+def test_answer_room_never_lowers_a_cap_and_shallow_levels_keep_theirs():
+    big = LiteLLMProvider(provider="anthropic", model="claude-opus-5-5", api_key="x", max_tokens=128_000)
+    with reasoning.call_effort("high"):
+        assert big._request_kwargs(_MSGS, stream=True)["max_tokens"] == 128_000
+    small = LiteLLMProvider(provider="anthropic", model="claude-haiku-5-5", api_key="x", max_tokens=8192)
+    with reasoning.call_effort("medium"):
+        assert small._request_kwargs(_MSGS, stream=True)["max_tokens"] == 8192
+    # Fixed-budget Claude keeps answer room inside its own cap already.
+    assert plan_for("anthropic", "claude-haiku-4-5", None, "max", max_tokens=32_000).min_output_tokens is None
+
+
+def test_step_down_walks_to_the_lowest_thinking_level():
+    prof = profile_for("anthropic", "claude-haiku-5-5")
+    walked = [reasoning.step_down(lvl, prof) for lvl in ("max", "xhigh", "high", "medium", "low")]
+    assert walked == ["xhigh", "high", "medium", "low", None]
+    assert reasoning.step_down(None, prof) == "low"        # from the model's default, medium
+    assert reasoning.step_down("max", None) is None
+    assert reasoning.step_down(reasoning.ON, prof) is None

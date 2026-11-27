@@ -443,13 +443,38 @@ class AgentGuardMixin:
         )
         return False, f"Blocked by {guard_type} guard: {reason}"
 
+    def _step_down_effort_after_overflow(self) -> tuple[str, str] | None:
+        """After a main call thought through its whole output budget and gave
+        nothing back: run the rest of the turn one effort level lower.
+
+        Returns ``(from, to)``, or None when there is no lower level (or the
+        model has no effort controls) — then the caller treats it as an
+        ordinary empty reply. The only thing that moves a level forced for the
+        run: the harness, not the agent, and only to get an answer at all.
+        """
+        current = self._turn_reasoning_effort()
+        profile = reasoning.profile_for_provider(getattr(self, "provider", None))
+        if profile is None:
+            return None
+        current = reasoning.clamp(current, profile) or profile.default
+        lower = reasoning.step_down(current, profile)
+        if lower is None:
+            return None
+        self._turn_effort_overflow = lower
+        return current, lower
+
     def _turn_reasoning_effort(self) -> str | None:
-        """The reasoning effort for this turn's main calls: one forced for the
+        """The reasoning effort for this turn's main calls: a level stepped
+        down to after a call thought through its whole output budget
+        (:meth:`_step_down_effort_after_overflow`), else one forced for the
         whole run (``reasoning.locked_effort``), else what the agent set for
         the rest of the turn (its ``reasoning_effort`` tool), else the chat
         box's pick (a web chat turn), else the agent's setting for where the
         turn came from (``reasoning_effort.json``: its source, its channel,
         the default), else None — the model's own."""
+        stepped = getattr(self, "_turn_effort_overflow", None)
+        if stepped is not None:
+            return stepped
         forced = reasoning.locked_effort()
         if forced is not None:
             return forced
