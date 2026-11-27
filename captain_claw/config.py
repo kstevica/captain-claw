@@ -126,6 +126,10 @@ class ContextConfig(BaseModel):
     # each note to its source's share, so one large note can't crowd out the
     # rest.
     notes_allocator: str = "trim"
+    # Keep the person's request (the task anchor) in the live notes from a
+    # turn's second model call on (captain_claw/task_course.py). Always on;
+    # false only for a benchmark comparison arm.
+    task_anchor: bool = True
     inline_images: InlineImagesConfig = Field(default_factory=InlineImagesConfig)
 
 

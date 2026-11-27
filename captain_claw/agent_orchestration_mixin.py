@@ -18,7 +18,10 @@ from captain_claw.agent_stuck import (
     MSG_STUCK,
     budget_partial,
 )
-from captain_claw import drive, fabrication_guard, jev_progress, loop_guards, mail_authority, msg_origin, turn_deliverables
+from captain_claw import (
+    drive, fabrication_guard, jev_progress, loop_guards, mail_authority, msg_origin, task_course,
+    turn_deliverables,
+)
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
 from captain_claw.llm import Message, is_reasoning_backfill_placeholder
@@ -1322,6 +1325,28 @@ class AgentOrchestrationMixin:
         return (msg_origin.is_code_corrective(last)
                 and str(last.get("origin_detail") or "") != "continue_cut_off")
 
+    def _task_course_begin(self, user_input: str, *, automated: bool = False) -> None:
+        """Update the session's task anchor for this turn's message
+        (task_course). Runs right after the message joins the session; never
+        fails the turn."""
+        self._task_course_start = None
+        self._task_course_live = None
+        if not self.session or not isinstance(self.session.metadata, dict):
+            return
+        try:
+            messages = self.session.messages
+            prev = task_course.previous_turn(messages[:-1])
+            self._task_course_start = task_course.begin_turn(
+                self.session.metadata,
+                user_input,
+                prev=prev,
+                topic_switch=self._looks_like_topic_switch,
+                automated=automated,
+                turn_msg=len(messages) - 1,
+            )
+        except Exception:  # noqa: BLE001 — the anchor is a help, never a blocker
+            log.debug("Task anchor update failed", exc_info=True)
+
     def _turn_made_no_tool_call(self, turn_start_idx: int) -> bool:
         """No tool ran or was attempted in this turn: no call stored (a
         refused or failed one included), no tool result (monitor rows
@@ -2006,6 +2031,11 @@ class AgentOrchestrationMixin:
         _human_turn = not (isinstance(_turn, tuple) and _turn and _turn[0] != "human")
         if not getattr(self, "_turn_is_automated", False) and _human_turn:
             self._record_timing_event("last_user_msg_at")
+        # The task anchor (task_course): which request this turn works on,
+        # kept in the session so "continue" and folds don't lose it.
+        self._task_course_begin(
+            user_input, automated=bool(getattr(self, "_turn_is_automated", False)) or not _human_turn,
+        )
         await self._auto_compact_if_needed()
         # Compaction swaps session.messages for [summary, *recent tail], so
         # the index captured above can point past this turn: every tool
@@ -2286,6 +2316,8 @@ class AgentOrchestrationMixin:
                 list_task_plan=list_task_plan,
             )
             task_contract["requirements"] = completion_requirements
+            if self.session is not None and isinstance(self.session.metadata, dict):
+                task_course.set_requirements(self.session.metadata, completion_requirements)
             prefetch_urls = [
                 url
                 for url in list(task_contract.get("prefetch_urls", []))
