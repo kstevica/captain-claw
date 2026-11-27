@@ -1112,8 +1112,12 @@ class AgentToolLoopMixin:
             self.session.messages[start:] if isinstance(start, int)
             else self.session.messages[-30:]
         )
+        request = str(getattr(self, "_turn_user_text", "") or "")
+        course_request = getattr(self, "_course_request", None)
+        if callable(course_request):
+            request = course_request(request)
         result = await jev_block_review.review(
-            str(getattr(self, "_turn_user_text", "") or ""),
+            request,
             turn_messages,
             kind=kind,
             tool=tc.name,
