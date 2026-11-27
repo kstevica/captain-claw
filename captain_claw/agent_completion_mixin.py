@@ -19,7 +19,7 @@ orchestration loop and make the completion logic testable in isolation.
 import json
 from typing import Any
 
-from captain_claw import drive
+from captain_claw import answer_caveats, drive
 from captain_claw.agent_stuck import MSG_EMPTY_RESPONSE
 from captain_claw.logging import get_logger
 
@@ -33,6 +33,9 @@ _DELIVERY_LOG_ARGS = 200
 _DELIVERY_LOG_RESULT = 400
 _DELIVERY_REQUEST_CHARS = 6000
 _DELIVERY_REPLY_CHARS = 12000
+# The checker's answer, and the room on top for a model that thinks first.
+_DELIVERY_ANSWER_TOKENS = 1500
+_DELIVERY_THINKING_ROOM = 8000
 # How much of the extra-work step's own words is shown under the answer.
 _EXTRA_WORK_NOTE_CHARS = 1500
 
@@ -921,6 +924,31 @@ class AgentCompletionMixin:
             )
             return True, MSG_EMPTY_RESPONSE, False, completion_feedback, python_worker_attempted
 
+        # ── An answer that takes back its own result (same Drive switch) ──
+        # Once per turn, for a turn that did work with tools: when the reply
+        # or a document the turn wrote qualifies its own result ("read
+        # strictly, it would be…", "if X is a hard requirement…"), it goes
+        # back once to settle on the reading its evidence supports. Found by
+        # wording (answer_caveats), no model call.
+        if (
+            drive.current(self).delivery_check
+            and not getattr(self, "_caveat_check_done", False)
+            and iteration < (hard_turn_iterations - 1)
+            and self._turn_did_work(turn_start_idx)
+        ):
+            self._caveat_check_done = True
+            caveats = answer_caveats.find_caveats(
+                [str(final_response or ""), *self._turn_written_documents(turn_start_idx)])
+            if caveats:
+                completion_feedback = answer_caveats.feedback(caveats)
+                self._emit_tool_output(
+                    "completion_gate",
+                    {"step": "caveat_check", "passed": False, "caveats": len(caveats)},
+                    "step=caveat_check\npassed=False\n" + "\n".join(f"caveat={c}" for c in caveats),
+                )
+                log.info("Finalize BLOCKED by caveat check", iteration=iteration, caveats=len(caveats))
+                return False, "", finish_success, completion_feedback, python_worker_attempted
+
         # ── Check before delivering (Drive: Persistent and above) ────
         # Once per turn, for a turn that did work with tools and was not
         # already judged against a contract: compare the reply with what was
@@ -1121,6 +1149,31 @@ class AgentCompletionMixin:
             out.append(msg)
         return out
 
+    def _turn_written_documents(self, turn_start_idx: int) -> list[str]:
+        """The prose this turn wrote to files (a write's content, an edit's
+        new text), for the caveat check: reports and answers, not code or data."""
+        from pathlib import PurePath
+
+        session = getattr(self, "session", None)
+        messages = getattr(session, "messages", None) or []
+        texts: list[str] = []
+        for msg in messages[turn_start_idx:]:
+            if not isinstance(msg, dict) or str(msg.get("role", "")).strip().lower() != "tool":
+                continue
+            if str(msg.get("tool_name", "")).strip().lower() not in ("write", "file_write", "edit"):
+                continue
+            if str(msg.get("content", "")).lstrip().startswith(("Error", "❌", "Not written", "Refused")):
+                continue
+            args = msg.get("tool_arguments") or {}
+            if not isinstance(args, dict):
+                continue
+            if PurePath(str(args.get("path") or "")).suffix.lower() not in answer_caveats.PROSE_SUFFIXES:
+                continue
+            text = args.get("content") if args.get("content") is not None else args.get("new_string")
+            if isinstance(text, str) and text.strip():
+                texts.append(text)
+        return texts
+
     def _turn_did_work(self, turn_start_idx: int) -> bool:
         """Whether the turn called a tool: a reply made of words alone (small
         talk, a simple answer) is not checked."""
@@ -1172,14 +1225,31 @@ class AgentCompletionMixin:
             ]
             from captain_claw.config import get_config
 
+            cap = int(get_config().model.max_tokens)
+            # The check thinks at the turn's effort, and a thinking model
+            # counts its thinking against max_tokens: with 1500 alone, Qwen 3.8
+            # at xhigh ran out mid-thought on 33 of 50 checks (WildClawBench,
+            # 2026-11-26), and a cut-off check passes everything. So it gets
+            # room to think; if it still runs out before the JSON, it is asked
+            # once more with thinking off.
             response = await self._complete_with_guards(
                 messages=messages,
                 tools=None,
                 interaction_label="delivery_check",
                 turn_usage=turn_usage,
-                max_tokens=min(1500, int(get_config().model.max_tokens)),
+                max_tokens=min(_DELIVERY_ANSWER_TOKENS + _DELIVERY_THINKING_ROOM, cap),
             )
             payload = self._extract_json_object(response.content or "")
+            if not isinstance(payload, dict) and getattr(response, "finish_reason", "") == "length":
+                log.warning("Delivery check ran out of tokens — asking again with thinking off")
+                response = await self._complete_with_guards(
+                    messages=messages,
+                    tools=None,
+                    interaction_label="delivery_check_quiet",
+                    turn_usage=turn_usage,
+                    max_tokens=min(_DELIVERY_ANSWER_TOKENS, cap),
+                )
+                payload = self._extract_json_object(response.content or "")
         except Exception as exc:
             log.warning("Delivery check failed — delivering as is", error=str(exc))
             return []

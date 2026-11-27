@@ -24,6 +24,7 @@ class _Stub(AgentCompletionMixin):
         self.session = SimpleNamespace(messages=messages)
         self.verdict = verdict                      # what the checker "answers", or an exception
         self.checker_calls: list[list] = []
+        self.checker_labels: list[tuple] = []
         self.emitted: list[dict] = []
         self.persisted: list[str] = []
         self.instructions = SimpleNamespace(
@@ -32,11 +33,14 @@ class _Stub(AgentCompletionMixin):
         )
 
     async def _complete_with_guards(self, *, messages, tools, interaction_label, turn_usage, max_tokens):
-        assert tools is None and interaction_label == "delivery_check"
+        assert tools is None and interaction_label in ("delivery_check", "delivery_check_quiet")
         self.checker_calls.append(messages)
-        if isinstance(self.verdict, Exception):
-            raise self.verdict
-        return SimpleNamespace(content=self.verdict)
+        self.checker_labels.append((interaction_label, max_tokens))
+        verdict = self.verdict.pop(0) if isinstance(self.verdict, list) else self.verdict
+        if isinstance(verdict, Exception):
+            raise verdict
+        content, finish = verdict if isinstance(verdict, tuple) else (verdict, "stop")
+        return SimpleNamespace(content=content, finish_reason=finish)
 
     @staticmethod
     def _extract_json_object(raw: str):
@@ -210,6 +214,32 @@ def test_the_prompts_exist_and_take_their_fields():
     from captain_claw.instructions import InstructionLoader
 
     loader = InstructionLoader(base_dir=Path(drive.__file__).resolve().parent / "instructions", use_micro=False)
-    assert '"complete"' in loader.load("delivery_check_system_prompt.md")
+    system = loader.load("delivery_check_system_prompt.md")
+    assert '"complete"' in system
+    # A deliberate, explained refusal is not a gap: the check must never push toward it.
+    assert "declined on purpose" in system and "never ask for that part to be done" in system
     text = loader.render("delivery_check_user_prompt.md", user_input="ASK {x}", work_log="LOG", candidate_response="REPLY")
     assert "ASK {x}" in text and "LOG" in text and "REPLY" in text
+
+
+async def test_a_check_that_runs_out_thinking_is_asked_again_with_thinking_off():
+    stub = _Stub(list(WORK), [("Potential gap: nothing on C, which", "length"), (GAPS, "stop")])
+    with drive.turn_drive("persistent"):
+        finalized, _t, _ok, feedback, _pw = await _finalize(stub)
+    assert finalized is False and "Nothing on C" in feedback
+    # First with room to think (capped by the model's max_tokens), then thinking off.
+    assert stub.checker_labels == [("delivery_check", 4000), ("delivery_check_quiet", 1500)]
+
+
+async def test_a_check_cut_off_twice_still_never_blocks():
+    stub = _Stub(list(WORK), [("Potential gap", "length"), ("Still thinking", "length")])
+    with drive.turn_drive("persistent"):
+        finalized, *_ = await _finalize(stub)
+    assert finalized is True and len(stub.checker_calls) == 2
+
+
+def test_the_quiet_retry_runs_with_thinking_off():
+    from captain_claw.agent_guard_mixin import _REASONING_EXEMPT_LABELS
+
+    assert "delivery_check_quiet" in _REASONING_EXEMPT_LABELS
+    assert "delivery_check" not in _REASONING_EXEMPT_LABELS

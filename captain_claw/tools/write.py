@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from captain_claw import research_images, saved_attribution, write_guard
+from captain_claw import research_images, saved_attribution, write_guard, written_by_agent
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, project_is_readonly, resolve_vfs_path, split_scheme
@@ -37,6 +37,70 @@ _STATUS_CONFIRMATION_PATTERNS = re.compile(
 # circular imports when the module is loaded before the registry module.
 
 log = get_logger(__name__)
+
+def _keep_foreign_files() -> bool:
+    try:
+        from captain_claw.config import get_config
+
+        return bool(get_config().guards.safety.keep_foreign_files)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _foreign_overwrite_refusal(path: str, file_path: Path, prev_text: str, content: str) -> str:
+    """A refusal when a write would replace a file this agent didn't write
+    with unrelated content (the old file would be lost), else ""."""
+    import difflib
+
+    if len(prev_text.strip()) < 200:
+        return ""
+    old_lines = [ln.strip() for ln in prev_text.splitlines() if ln.strip()]
+    new_lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    if not old_lines or not new_lines:
+        return ""
+    if difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False).ratio() >= 0.2:
+        return ""   # a revision of the same document
+    # The agent's own file, as it last wrote it (remembered across restarts):
+    # replacing it is its own work.
+    if written_by_agent.is_own(file_path):
+        return ""
+    first = next((ln for ln in old_lines if ln), "")[:120]
+    return (
+        f"Not written: {path} already exists and holds different content that you didn't write "
+        f"(it starts: \"{first}\"). Writing would replace it, and that content would be lost. Keep it: "
+        "write yours under a new name in the same folder, and tell the person which file is which. "
+        "Only if the person asked for this very file to be replaced, call write again with "
+        f"overwrite=true: the old content is then kept beside it as {_aside_name(file_path, 1)}, "
+        "so don't copy it anywhere yourself."
+    )
+
+
+def _aside_name(file_path: Path, n: int) -> str:
+    """summary.md → summary.previous.md (n=1), summary.previous-2.md (n=2) …"""
+    tag = ".previous" if n == 1 else f".previous-{n}"
+    return f"{file_path.stem}{tag}{file_path.suffix}"
+
+
+def _keep_aside(file_path: Path) -> Path | None:
+    """Copy someone else's file that is about to be replaced to a
+    `.previous` name in its own folder, where the person will look for it
+    (not a scratch folder). An identical copy already there is reused.
+    None when no copy could be made: the replace must not go ahead then."""
+    import shutil
+
+    try:
+        data = file_path.read_bytes()
+        for n in range(1, 100):
+            aside = file_path.with_name(_aside_name(file_path, n))
+            if aside.exists():
+                if aside.is_file() and aside.read_bytes() == data:
+                    return aside
+                continue
+            shutil.copy2(file_path, aside)
+            return aside
+    except OSError as exc:
+        log.warning("WriteTool could not keep the old file aside", path=str(file_path), error=str(exc))
+    return None
 
 # The refusal a `_keep_existing` write gets when its file is already there.
 KEEP_EXISTING_ERROR = "exists_kept"
@@ -72,9 +136,9 @@ class WriteTool(Tool):
                 "type": "boolean",
                 "description": (
                     "Explicitly allow replacing an existing file with much "
-                    "shorter content. Without this, a write that would shrink "
-                    "an existing file by more than half is refused — use the "
-                    "edit tool for targeted changes instead."
+                    "shorter content, or a file you didn't write with "
+                    "unrelated content. Without it, both are refused — use "
+                    "the edit tool for targeted changes, or a new file name."
                 ),
             },
         },
@@ -473,6 +537,7 @@ class WriteTool(Tool):
             # call, then makes a second write_file call to "narrate" the
             # completion — destroying the actual deliverable.
             _overwrite_info: str | None = None
+            _kept_aside: Path | None = None
             if not append and file_path.exists():
                 try:
                     _prev_size = file_path.stat().st_size
@@ -484,6 +549,31 @@ class WriteTool(Tool):
                         _prev_size = len(research_images.collapse_inline_images(
                             _prev_text)[0].encode("utf-8"))
                     new_size = len(content.encode("utf-8"))
+                    # Someone else's file with unrelated content (safety_guard
+                    # setting keep_foreign_files): never replaced silently, and
+                    # never lost — overwrite=true first keeps the old content
+                    # beside it (a model left alone kept it in saved/tmp/).
+                    if _keep_foreign_files() and not any(
+                            p in {".plans", ".reports"} for p in file_path.parts):
+                        _foreign = _foreign_overwrite_refusal(path, file_path, _prev_text, content)
+                        if _foreign and not overwrite:
+                            log.warning("WriteTool refused foreign overwrite", path=str(file_path))
+                            return ToolResult(success=False, content=_foreign,
+                                              error="foreign_overwrite_refused")
+                        if _foreign:
+                            _kept_aside = _keep_aside(file_path)
+                            if _kept_aside is None:
+                                return ToolResult(
+                                    success=False, error="foreign_keep_failed",
+                                    content=(
+                                        f"Not written: {path} holds content you didn't write, and "
+                                        "no copy of it could be kept beside it, so replacing it "
+                                        "would lose it. Write yours under a new name in the same "
+                                        "folder and tell the person which file is which."
+                                    ),
+                                )
+                            log.info("WriteTool kept the old file aside", path=str(file_path),
+                                     aside=str(_kept_aside))
                     # Only fire on substantive shrinks (50%+ reduction) and
                     # only when the previous file was meaningful (>= 1 KB).
                     # The pattern check confines us to obvious confirmation
@@ -616,6 +706,11 @@ class WriteTool(Tool):
             # Who created this saved/ file before this write (PR C); a no-op
             # outside saved/ (vfs, Code-agent repo writes).
             _prior = saved_attribution.prior_creator(file_path)
+            # The file is the agent's own after this write when the agent
+            # wrote all of it: a new file or a full rewrite, or an append to a
+            # file that was already its own (written_by_agent).
+            _own_after = (not append or not file_path.exists()
+                          or written_by_agent.is_own(file_path))
             _write_once()
 
             # ── Write-then-readback verify (default-on) ──
@@ -656,6 +751,9 @@ class WriteTool(Tool):
                 if rb.get("sha8"):
                     _verify_receipt += f" sha={rb['sha8']}"
 
+            if _own_after:
+                written_by_agent.note(file_path)
+
             # Record who authored this shared file (best-effort, VFS writes only).
             if is_vfs_path(path):
                 from captain_claw.vfs import record_author
@@ -689,6 +787,11 @@ class WriteTool(Tool):
             result_msg = f"Written {len(content)} chars ({_line_count} lines) to {file_path}{redirect_note}"
             if _overwrite_info:
                 result_msg = f"{result_msg}\n{_overwrite_info}"
+            if _kept_aside is not None:
+                result_msg = (
+                    f"{result_msg}\nThe content that was there (not yours) was kept at "
+                    f"{_kept_aside}. Tell the person both names: which file is theirs and which is new."
+                )
             # Hint: prevent read-after-write waste (LLM sometimes reads
             # back a file it just wrote, wasting an iteration) and
             # second-guess rewrites (regenerating the whole file from

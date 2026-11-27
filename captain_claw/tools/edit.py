@@ -499,10 +499,15 @@ class EditTool(Tool):
             shutil.copymode(str(file_path), tmp_path)
             # The replace makes a new inode: carry the saved/ creator over
             # (PR C; a no-op outside saved/).
-            from captain_claw import saved_attribution
+            from captain_claw import saved_attribution, written_by_agent
             prior = saved_attribution.prior_creator(file_path)
+            # An edit keeps the agent's own file its own; someone else's file
+            # stays theirs (the write tool's foreign-file guard).
+            was_own = written_by_agent.is_own(file_path)
             os.replace(tmp_path, str(file_path))
             saved_attribution.note_write(file_path, prior)
+            if was_own:
+                written_by_agent.note(file_path)
             # Record authorship for shared VFS files (self-guards on non-VFS paths).
             from captain_claw.vfs import record_author
             record_author(file_path)
