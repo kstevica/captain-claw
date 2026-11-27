@@ -12,6 +12,9 @@
   writes Neutra too (an archetype's default mode would otherwise come back);
 * ``GET /fd/agent-task-rephrase`` is off by default (switch file, else config),
   and ``PUT`` writes the switch and every config copy;
+* ``GET /fd/agent-course-check`` is on by default (switch file, else config)
+  and says whether the owner has Jev; ``PUT`` writes the switch and every
+  config copy;
 * ``GET /fd/agent-tool-search`` is on at 16,000 by default (switch file, else
   config) and says whether eco mode is on; ``PUT`` writes the switch and every
   config copy;
@@ -698,3 +701,56 @@ async def test_setting_drive_writes_the_file_and_every_config_copy(deck):
         r = await c.put("/fd/agent-drive/process/bob-agent", headers=_hdr(CAROL), json={"default": "ambitious"})
         assert r.status_code in (403, 404)
         assert (cc / "drive.txt").read_text() == "auto"
+
+
+# ── course check (Jev) ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_course_check_is_on_by_default_and_says_whether_jev_is_connected(deck, monkeypatch):
+    from captain_claw.flight_deck import jev_routes
+
+    keys = {BOB: ""}
+
+    async def get_key(owner: str) -> str:
+        return keys.get(owner, "")
+
+    monkeypatch.setattr(jev_routes, "get_key", get_key)
+    cc = server.DATA_DIR / "bob-agent" / "data" / "home-config-parent" / ".captain-claw"
+    async with _client() as c:
+        get = lambda: c.get("/fd/agent-course-check/process/bob-agent", headers=_hdr(BOB))  # noqa: E731
+        assert (await get()).json() == {"enabled": True, "jev_connected": False}
+
+        keys[BOB] = "jev-key"
+        assert (await get()).json() == {"enabled": True, "jev_connected": True}
+
+        (cc / "config.yaml").write_text(yaml.dump({"tools": {"jev": {"course_check": False}}}))
+        assert (await get()).json()["enabled"] is False
+
+        (cc / "course_check.txt").write_text("on\n")
+        assert (await get()).json()["enabled"] is True
+
+        r = await c.get("/fd/agent-course-check/process/bob-agent", headers=_hdr(CAROL))
+        assert r.status_code in (403, 404)
+
+
+@pytest.mark.asyncio
+async def test_turning_the_course_check_off_writes_the_switch_and_every_config_copy(deck):
+    agent_dir = server.DATA_DIR / "bob-agent"
+    cc = agent_dir / "data" / "home-config-parent" / ".captain-claw"
+    async with _client() as c:
+        r = await c.put("/fd/agent-course-check/process/bob-agent", headers=_hdr(BOB), json={"enabled": False})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"ok": True, "enabled": False}
+        assert (cc / "course_check.txt").read_text() == "off"
+        for path in (agent_dir / "config.yaml", cc / "config.yaml"):
+            data = yaml.safe_load(path.read_text())
+            assert data["tools"] == {"jev": {"course_check": False}}
+            assert data["model"]["model"] == "bob-agent-m"  # the rest of the config stays
+
+        r = await c.put("/fd/agent-course-check/process/bob-agent", headers=_hdr(BOB), json={"enabled": True})
+        assert (cc / "course_check.txt").read_text() == "on"
+
+        r = await c.put("/fd/agent-course-check/process/bob-agent", headers=_hdr(CAROL), json={"enabled": False})
+        assert r.status_code in (403, 404)
+        assert (cc / "course_check.txt").read_text() == "on"

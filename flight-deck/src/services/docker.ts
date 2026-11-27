@@ -446,6 +446,19 @@ export const setAgentTaskRephrase = (kind: 'process' | 'docker', id: string, ena
     body: JSON.stringify({ enabled }),
   })
 
+/** Course check: every few steps of a long turn Jev checks whether the work
+ *  still serves the request and how far along it is (jev_course.py). On by
+ *  default; does anything only while Jev is connected. The task reminder
+ *  runs either way. Applies from its next message. */
+export const getAgentCourseCheck = (kind: 'process' | 'docker', id: string) =>
+  fdFetch<{ enabled: boolean; jev_connected: boolean }>(`/agent-course-check/${kind}/${id}`)
+
+export const setAgentCourseCheck = (kind: 'process' | 'docker', id: string, enabled: boolean) =>
+  fdFetch<{ ok: boolean; enabled: boolean }>(`/agent-course-check/${kind}/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  })
+
 /** Model switching on its own: whether the agent may pick another model of
  *  its provider for a task by itself (a cheaper or a smarter one), not only
  *  when asked. Off unless turned on. Applies from its next message. */

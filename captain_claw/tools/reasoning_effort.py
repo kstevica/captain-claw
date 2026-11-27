@@ -205,6 +205,14 @@ class ReasoningEffortTool(Tool):
                 "from this conversation."))
         profile = reasoning.profile_for_provider(getattr(agent, "provider", None))
         act = str(action or "get").strip().lower()
+        forced = reasoning.locked_effort()
+        if forced is not None and act in ("get", "set"):
+            shown = (reasoning.clamp(forced, profile) or forced) if profile else forced
+            note = (f"Reasoning effort is locked at {LEVEL_LABELS.get(shown, shown)} for this run "
+                    "(set from outside, e.g. by a benchmark harness); it can't be changed.")
+            if act == "set":
+                return ToolResult(success=False, error=note)
+            return ToolResult(content=f"{note}\n\n{_report(agent, here, profile)}")
         if act == "get":
             return ToolResult(content=_report(agent, here, profile))
         if act != "set":

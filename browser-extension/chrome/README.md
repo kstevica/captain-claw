@@ -8,9 +8,12 @@ carry on in Flight Deck.
 
 Works in Chrome, Edge, Brave and Arc (Chromium 116+).
 
-This is version **0.10.0**. New since 0.9: the browser can be connected to
+This is version **0.11.1**. New since 0.9: the browser can be connected to
 [several Flight Decks](#several-flight-decks) at once — agents on each of them
-can use it, and the panel works with the one you pick at its top.
+can use it, and the panel works with the one you pick at its top. 0.11.1:
+**Disconnect** (and dropping or deleting a recording) asks in the panel, where
+it did nothing before, and with two browsers on one deck its agents use the
+one where that deck is in use.
 
 Before that, 0.9.0 (shipped with Captain Claw 0.9.3) handed a
 [robot check](#a-robot-check-on-the-way-you-answer-it-the-agent-goes-on) on an
@@ -54,6 +57,9 @@ same way as the first (each deck gives the browser a token of its own).
   pages). The switches in this panel's Settings are for this browser, on every
   deck.
 - Every connected deck's own pages are off-limits to agents — from any deck.
+- **Two browsers on one deck** (a laptop and a desktop, say): that deck's
+  agents use the browser where it's the deck in use; when both have it in use,
+  or neither, the one you were at last.
 - **Disconnect** (in the list, or Settings) disconnects the browser from that
   one deck; it stays connected to the others. A deck that disconnected the
   browser from its side (Connections → Browser) says so in the list — **Remove**

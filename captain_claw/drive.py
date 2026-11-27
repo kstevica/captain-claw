@@ -33,6 +33,7 @@ without a restart. With no file, ``drive.default`` in the config decides.
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -45,6 +46,10 @@ SETTING_PATH = Path("~/.captain-claw").expanduser() / FILENAME
 # The extra-work switch, live like the default above: ``on`` or ``off``.
 INITIATIVE_FILENAME = "drive_initiative.txt"
 INITIATIVE_PATH = Path("~/.captain-claw").expanduser() / INITIATIVE_FILENAME
+# A level forced from outside for the agent's whole run — a benchmark harness
+# (captain-claw-once --lock). It beats the turn's pick, the agent's own
+# drive_level tool, its default and its mode; the tool refuses to change it.
+LOCK_ENV = "CLAW_LOCK_DRIVE"
 
 
 @dataclass(frozen=True)
@@ -165,6 +170,11 @@ def normalize(value: Any) -> str | None:
     return text if text in LEVELS else None
 
 
+def locked() -> str | None:
+    """The level forced for this run (:data:`LOCK_ENV`), or ``None``."""
+    return normalize(os.environ.get(LOCK_ENV, ""))
+
+
 # ── Turn scope ────────────────────────────────────────────────────────
 
 _TURN: ContextVar[str | None] = ContextVar("cc_drive_turn", default=None)
@@ -220,8 +230,12 @@ def mode_suggestion(agent: Any | None = None) -> str | None:
 
 
 def current_name(agent: Any | None = None) -> str:
-    """The level in effect: the turn's pick, else the agent's own default,
-    else what its cognitive mode suggests, else ``diligent``. Never raises."""
+    """The level in effect: one forced for the run, else the turn's pick, else
+    the agent's own default, else what its cognitive mode suggests, else
+    ``diligent``. Never raises."""
+    forced = locked()
+    if forced:
+        return forced
     override = getattr(agent, "_turn_drive_override", None) if agent is not None else None
     if isinstance(override, str):
         # What the agent set for the rest of the turn (its drive_level tool):

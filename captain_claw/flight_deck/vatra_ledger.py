@@ -15,6 +15,8 @@ other actor):
 * ``file``       — a file written or edited (key = its path)
 * ``finding``    — a board note or finished output (key = ``board:<id>``)
 * ``ask_answer`` — an answered ask (key = ``ask:<id>``)
+* ``course``     — an owner's latest Jev course check (key = subtask id, replaced;
+  run_course): stage, on track, next move
 """
 
 from __future__ import annotations
@@ -94,6 +96,13 @@ def record_action(sid: str, owner: str, subtask: str, label: str, act: dict) -> 
         detail = " ".join(str(act.get("detail") or "").split())[:200]
         if detail:
             _schedule(_upsert(sid, "focus", subtask or owner, detail=detail, replace=True, **who))
+        return
+    course = args.get("course")
+    if tool == "completion_gate" and isinstance(course, dict):
+        from captain_claw.flight_deck.run_course import describe
+
+        _schedule(_upsert(sid, "course", subtask or owner, detail=describe(course)[:200],
+                          replace=True, **who))
         return
     if args.get("failed"):
         return  # a refused or failed call read or wrote nothing
@@ -203,6 +212,9 @@ async def render_map(sid: str, caller_subtask: str = "", activity: dict | None =
         state = (activity.get(st) or {}).get("state") or ("active" if mine else "not started")
         focus = next((r for r in by_kind.get("focus", []) if r.get("key") == st), None)
         head = f"## {_label(st, mine)} · {state} (piece {st})"
+        course = next((r for r in by_kind.get("course", []) if r.get("key") == st), None)
+        if course and course.get("detail"):
+            head += f" · {_clip(course['detail'], 80)}"
         if focus and focus.get("detail"):
             head += f" — {_clip(focus['detail'], 120 if crowded else 200)}"
         heads[st] = head

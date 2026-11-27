@@ -12,7 +12,8 @@ Pinned here:
 * the worker keeps a socket to every deck: each says hello with its own token,
   an act's answer goes back to the deck that asked, a Stop is told only to
   that agent's deck, and a deck disconnected loses its socket while the
-  others keep theirs;
+  others keep theirs; each deck hears whether it's the one in use (another
+  browser on that deck comes second for its agents);
 * every connected deck's pages are off-limits to every deck's agents.
 """
 
@@ -162,11 +163,15 @@ const work = byUrl('wss://work.example.com/fd/clip/hands/ws')[0]
 const home = byUrl('wss://home.example.net/fd/clip/hands/ws')[0]
 out.sockets = sockets.map((s) => s.url)
 work.open(); home.open()
-out.hellos = [work.sent[0], home.sent[0]].map((h) => ({ type: h.type, token: h.token, hands: h.hands }))
+out.hellos = [work.sent[0], home.sent[0]].map((h) => ({ type: h.type, token: h.token, hands: h.hands, primary: h.primary }))
 work.say({ type: 'welcome', search_pick: '', fetch_mode: '' }); home.say({ type: 'welcome', search_pick: '', fetch_mode: '' })
 await tick()
 const status = (await chrome.storage.session.get('handsStatus')).handsStatus
 out.status = Object.fromEntries(Object.entries(status).map(([k, v]) => [k, v.state]))
+// the work deck put in use: both decks hear which one is in use now
+await api.useDeck('https://work.example.com')
+await tick()
+out.inUse = { work: work.sent.filter((m) => m.type === 'prefs').pop()?.primary, home: home.sent.filter((m) => m.type === 'prefs').pop()?.primary }
 // both decks have a "researcher"; each answer goes back to the deck that asked
 work.say({ type: 'act', id: 'ha_w1', agent: { slug: 'researcher', name: 'Researcher' }, action: 'tabs', args: {} })
 home.say({ type: 'act', id: 'ha_h1', agent: { slug: 'researcher', name: 'Researcher' }, action: 'tabs', args: {} })
@@ -201,7 +206,10 @@ console.log(JSON.stringify(out))
 process.exit(0)   // the worker's ping timers would keep node up
 """)
     assert sorted(got["sockets"]) == ["wss://home.example.net/fd/clip/hands/ws", "wss://work.example.com/fd/clip/hands/ws"]
-    assert got["hellos"] == [{"type": "hello", "token": "tw", "hands": True}, {"type": "hello", "token": "th", "hands": True}]
+    # home was connected last, so it's the deck in use
+    assert got["hellos"] == [{"type": "hello", "token": "tw", "hands": True, "primary": False},
+                             {"type": "hello", "token": "th", "hands": True, "primary": True}]
+    assert got["inUse"] == {"work": True, "home": False}
     assert got["status"] == {"https://work.example.com": "on", "https://home.example.net": "on"}
     assert got["results"] == {"work": [["ha_w1", True]], "home": [["ha_h1", True]]}
     assert ["https://work.example.com|researcher", "https://work.example.com"] in got["log"]

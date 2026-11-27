@@ -604,8 +604,10 @@ class Agent(
         words = getattr(self, "_turn_words_hint", None)
         self._turn_words_hint = None
         self._turn_words = words if isinstance(words, str) else None
-        # A level the agent set for one turn only (reasoning_effort tool) ends with it.
+        # A level the agent set for one turn only (reasoning_effort tool) ends with it,
+        # and so does a step down after a call ran out of output room.
         self._turn_effort_override = None
+        self._turn_effort_overflow = None
         # …and a Drive level it set for one turn only (drive_level tool).
         self._turn_drive_override = None
         # …and so does a model switched to for one turn only (model_switch), if

@@ -548,8 +548,13 @@ async def handle_ws_message(
         # default). Scoped to this frame: the turn's task inherits it.
         # Likewise the Drive level (absent = the agent's default). A frame an
         # automation sent never carries a person's pick.
+        # A Basna/Vatra worker's frame names the run's goal and the worker's
+        # part (task_course): the task anchor reads them instead of the prompt.
+        from captain_claw import task_course as _task_course
+
         with reasoning.turn_effort(data.get("reasoning_effort")), \
-                drive.turn_drive(data.get("drive") if automation is None else None):
+                drive.turn_drive(data.get("drive") if automation is None else None), \
+                _task_course.turn_frame(data.get("course")):
             if automation is None and not has_attachments and content.startswith("/"):
                 from captain_claw.web.slash_commands import handle_command
                 # On this socket's own agent, as a "command" frame is: a lane's

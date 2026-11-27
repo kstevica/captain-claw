@@ -262,7 +262,12 @@ export function fmtTok(n?: number): string {
   return String(n)
 }
 
-export interface LiveAgent { role: string; actions: ProgressEvent[]; usage?: ProgressEvent; done?: boolean; ok?: boolean; group?: string }
+export interface LiveAgent {
+  role: string; actions: ProgressEvent[]; usage?: ProgressEvent; done?: boolean; ok?: boolean; group?: string
+  // Keep on course: the latest Jev course check, and whether the agent is off
+  // track (two checks in a row) until a later check says otherwise.
+  course?: ProgressEvent; offTrack?: boolean
+}
 
 // Group the streaming progress into live per-agent panels (preserving the
 // order each agent first appears). `usage` events update the running token
@@ -279,6 +284,11 @@ export function buildLiveAgents(progress: ProgressEvent[]): LiveAgent[] {
     // card back to "working" so the spinner returns; the next dispatch marks done.
     if (ev.stage === 'usage') { a.usage = ev; a.done = false }
     else if (ev.stage === 'dispatch') { a.done = true; a.ok = ev.ok !== false }
+    else if (ev.stage === 'course') {
+      a.course = ev
+      if (typeof ev.p_on_track === 'number' && ev.p_on_track > 0.25) a.offTrack = false
+    }
+    else if (ev.stage === 'course_off_track') { a.offTrack = true }
     else { a.actions.push(ev); a.done = false }
   }
   return order.map((r) => byRole.get(r) as LiveAgent)

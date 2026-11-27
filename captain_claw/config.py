@@ -126,6 +126,10 @@ class ContextConfig(BaseModel):
     # each note to its source's share, so one large note can't crowd out the
     # rest.
     notes_allocator: str = "trim"
+    # Keep the person's request (the task anchor) in the live notes from a
+    # turn's second model call on (captain_claw/task_course.py). Always on;
+    # false only for a benchmark comparison arm.
+    task_anchor: bool = True
     inline_images: InlineImagesConfig = Field(default_factory=InlineImagesConfig)
 
 
@@ -467,6 +471,11 @@ class JevToolConfig(BaseModel):
     # When a guard refuses a repeated call, ask Jev what the agent should do
     # next (captain_claw/jev_block_review.py).
     review_blocks: bool = True
+    # Keep long turns on course: every few steps Jev reads the task anchor
+    # and the recent steps, and the agent gets the stage and, when Jev is
+    # confident, one refocus/finish/ask line (captain_claw/jev_course.py).
+    # The agent's Settings switch (course_check.txt) overrides it.
+    course_check: bool = True
     # When a reply names no picture file but the turn saved pictures, ask Jev
     # whether the reply hands one over, and which (captain_claw/reply_images.py).
     find_images: bool = True
@@ -944,9 +953,38 @@ class GuardTypeConfig(BaseModel):
     level: Literal["stop_suspicious", "ask_for_approval"] = "stop_suspicious"
 
 
+class SafetyGuardConfig(BaseModel):
+    """Deterministic safety checks around tool calls (safety_guard.py): no
+    model call, all on by default."""
+
+    # Credentials in what a tool returns are masked before the model sees them.
+    mask_secrets: bool = True
+    # commit / push / PR refused while the files going out hold credentials;
+    # a request to publish gets the findings before the first step.
+    publish_check: bool = True
+    # Reading credential stores (~/.ssh keys, .git-credentials, .netrc …) refused.
+    credential_files: bool = True
+    # A warning next to content whose instructions would capture the camera or
+    # screen, send data out, run a downloaded script or keep the person unaware.
+    untrusted_instructions: bool = True
+    # `write` won't replace an existing file holding unrelated content that
+    # this agent didn't write, unless overwrite=true.
+    keep_foreign_files: bool = True
+    # A request that puts down a group of people ("nothing but a burden",
+    # "vermin" …) gets a note before the first step: say plainly whether any
+    # reading targets people as a group, and won't write that part.
+    group_putdowns: bool = True
+    # The workspace's own git repositories count as safe.directory for this
+    # agent's git commands (GIT_CONFIG_* in the process environment), so a
+    # repo owned by another user (a mounted folder, a container) never leads
+    # the agent to change the person's global git config.
+    trust_workspace_repos: bool = True
+
+
 class GuardConfig(BaseModel):
     """Guarding configuration."""
 
+    safety: SafetyGuardConfig = Field(default_factory=SafetyGuardConfig)
     input: GuardTypeConfig = Field(default_factory=GuardTypeConfig)
     output: GuardTypeConfig = Field(default_factory=GuardTypeConfig)
     script_tool: GuardTypeConfig = Field(default_factory=GuardTypeConfig)

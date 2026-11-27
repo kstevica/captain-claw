@@ -11,6 +11,8 @@ Pinned here:
 * files the browser fetched for an act land in the owner's Web clips folder
   and are listed in the act's answer; nobody else can post to that act;
 * Connections → Browser shows which browsers agents can use now;
+* with two browsers on the deck, the one where it's the deck in use comes
+  first, then the one used last;
 * a page holding another extension's frame (Chrome keeps the debugger off it)
   is named as that — never "a chrome:// page" — with what still works there;
 * Flight Deck's sidebar reads what the person's Chrome does for their agents
@@ -132,8 +134,9 @@ async def deck(tmp_path: Path, monkeypatch):
 class FakeBrowser:
     """The extension's side of the socket: says hello, answers acts as told."""
 
-    def __init__(self, url: str, token: str, *, stopped=(), answer=None):
+    def __init__(self, url: str, token: str, *, stopped=(), answer=None, hello=None):
         self.url, self.token, self.stopped = url, token, list(stopped)
+        self.hello = dict(hello or {})
         self.answer = answer or (lambda act: {"ok": True, "content": f"did {act['action']}"})
         self.acts: list[dict] = []
         self.welcome: dict | None = None
@@ -143,7 +146,7 @@ class FakeBrowser:
     async def __aenter__(self):
         self.ws = await websockets.connect(self.url)
         await self.ws.send(json.dumps({"type": "hello", "token": self.token, "browser": "Chrome on macOS",
-                                       "version": "0.2.0", "stopped": self.stopped}))
+                                       "version": "0.2.0", "stopped": self.stopped, **self.hello}))
         self.welcome = json.loads(await self.ws.recv())
         self.task = asyncio.create_task(self._serve())
         return self
@@ -291,6 +294,30 @@ async def test_the_same_browser_reconnecting_replaces_its_old_socket(deck):
             assert len(bh.connections("alice")) == 1
             got = await _act(deck["client"])
             assert got["ok"] and second.acts and not first.acts
+
+
+async def test_agents_use_the_browser_where_this_deck_is_in_use(deck):
+    # Two Chromes on this deck: the laptop has it in use, the desktop has
+    # another deck in use. The laptop gets the act though the desktop had focus
+    # last; the desktop putting this deck in use wins it back; with neither
+    # saying (extensions before 0.11.1) the browser used last goes first.
+    laptop_raw, desktop_raw = await deck["pat"](), await deck["pat"]()
+    async with FakeBrowser(deck["ws"], laptop_raw, hello={"primary": True}) as laptop, \
+               FakeBrowser(deck["ws"], desktop_raw, hello={"primary": False}) as desktop:
+        await desktop.send({"type": "focus"})
+        await asyncio.sleep(0.05)
+        assert (await _act(deck["client"]))["ok"]
+        assert len(laptop.acts) == 1 and not desktop.acts
+        await laptop.send({"type": "prefs", "primary": False})
+        await desktop.send({"type": "prefs", "primary": True})
+        await asyncio.sleep(0.05)
+        assert (await _act(deck["client"]))["ok"]
+        assert len(desktop.acts) == 1 and len(laptop.acts) == 1
+        await desktop.send({"type": "prefs", "primary": False})
+        await laptop.send({"type": "focus"})
+        await asyncio.sleep(0.05)
+        assert (await _act(deck["client"]))["ok"]
+        assert len(laptop.acts) == 2 and len(desktop.acts) == 1
 
 
 # ── files ─────────────────────────────────────────────────────────────

@@ -477,6 +477,12 @@ def _apply_reasoning_plan(kwargs: dict[str, Any], plan: "reasoning.Plan", provid
     for key in plan.drop:
         kwargs.pop(key, None)
     kwargs.update(plan.kwargs)
+    # Room for the answer after deep thinking — on a streamed call only: a
+    # non-streamed one this long would run into the request timeout instead.
+    if plan.min_output_tokens and kwargs.get("stream"):
+        cap_key = "max_completion_tokens" if "max_completion_tokens" in kwargs else "max_tokens"
+        if int(kwargs.get(cap_key) or 0) < plan.min_output_tokens:
+            kwargs[cap_key] = plan.min_output_tokens
     if not plan.body:
         return
     if provider == "anthropic":
@@ -1885,6 +1891,77 @@ def _extract_usage(usage_obj: Any) -> dict[str, int]:
         "cache_creation_input_tokens": cache_creation,
         "cache_read_input_tokens": cache_read,
     }
+
+
+_STREAM_USAGE_COUNT_FIELDS = (
+    "prompt_tokens", "completion_tokens", "total_tokens",
+    "cache_creation_input_tokens", "cache_read_input_tokens",
+)
+
+
+def _usage_count(usage_obj: Any, key: str) -> int:
+    try:
+        return int(_obj_get(usage_obj, key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _usage_has_counts(usage_obj: Any) -> bool:
+    return usage_obj is not None and any(
+        _usage_count(usage_obj, k) > 0 for k in _STREAM_USAGE_COUNT_FIELDS
+    )
+
+
+def _usage_as_dict(usage_obj: Any) -> dict[str, Any]:
+    if isinstance(usage_obj, dict):
+        return dict(usage_obj)
+    dump = getattr(usage_obj, "model_dump", None)
+    if callable(dump):
+        try:
+            dumped = dump()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+    if hasattr(usage_obj, "__dict__"):
+        return {k: v for k, v in vars(usage_obj).items() if not k.startswith("_")}
+    return {}
+
+
+def _merge_stream_usage(kept: Any, new: Any) -> Any:
+    """Fold one stream chunk's ``usage`` into what was kept so far.
+
+    A usage with real counts is never replaced by an empty or all-zero one
+    (some providers and LiteLLM versions put a zeroed usage on chunks after
+    the real one). When two chunks both carry counts, each count takes its
+    larger value: that is the final figure for providers that resend running
+    totals (Gemini), and it keeps both halves when input and output counts
+    arrive on different chunks. A single usage object, the common case, is
+    returned untouched.
+    """
+    if new is None:
+        return kept
+    if kept is None or not _usage_has_counts(kept):
+        return new
+    if not _usage_has_counts(new):
+        return kept
+    merged = _usage_as_dict(new)
+    for key in _STREAM_USAGE_COUNT_FIELDS:
+        merged[key] = max(_usage_count(kept, key), _usage_count(new, key))
+    merged["total_tokens"] = max(
+        merged["total_tokens"],
+        merged["prompt_tokens"] + merged["completion_tokens"],
+    )
+    # OpenAI-style cached prompt tokens live one level down.
+    cached = max(
+        _usage_count(_obj_get(kept, "prompt_tokens_details", None) or {}, "cached_tokens"),
+        _usage_count(_obj_get(new, "prompt_tokens_details", None) or {}, "cached_tokens"),
+    )
+    if cached:
+        details = _usage_as_dict(_obj_get(new, "prompt_tokens_details", None) or {})
+        details["cached_tokens"] = cached
+        merged["prompt_tokens_details"] = details
+    return merged
 
 
 def input_tokens_total(provider: str, usage: dict | None) -> int:
@@ -3902,6 +3979,16 @@ class LiteLLMProvider(LLMProvider):
 
         try:
             async for chunk in stream:
+                # Usage first: with stream_options.include_usage the counts
+                # arrive on a chunk of their own whose ``choices`` is EMPTY
+                # (OpenAI's wire shape, and what LiteLLM 1.109+ passes on for
+                # every provider; up to 1.108 it was padded with an empty
+                # choice). Reading it after the no-choices skip below dropped
+                # every streamed call's tokens to zero.
+                usage_obj = _merge_stream_usage(
+                    usage_obj, _obj_get(chunk, "usage", None)
+                )
+
                 choices = _obj_get(chunk, "choices", [])
                 if not choices:
                     continue
@@ -3973,11 +4060,6 @@ class LiteLLMProvider(LLMProvider):
                                 on_chunk(args)
                             except Exception:
                                 pass
-
-                # Usage (typically on the final chunk)
-                u = _obj_get(chunk, "usage", None)
-                if u is not None:
-                    usage_obj = u
 
                 m = str(_obj_get(chunk, "model", "") or "")
                 if m:

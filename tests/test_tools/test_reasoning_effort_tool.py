@@ -297,3 +297,35 @@ async def test_texts_say_any_channel(_settings):
     report = (await _run(_agent(channel="whatsapp"), action="get")).content
     assert "You can change any of them from any channel, this one included" in report
     assert "Settings for every source" not in report
+
+
+# ── a level forced for the whole run (benchmark harness) ─────────────
+
+
+async def test_a_locked_level_beats_every_pick_and_the_tool_cant_change_it(monkeypatch, _settings):
+    monkeypatch.setenv(reasoning.LOCK_ENV, "max")
+    agent = _agent(channel="api")
+    assert reasoning.locked_effort() == "max"
+    with reasoning.turn_effort("low"):          # a chat box pick
+        assert _effort(agent) == "max"
+    agent._turn_effort_override = "low"         # the agent's own turn override
+    assert _effort(agent) == "max"
+
+    refused = await _run(agent, action="set", level="low", scope="setting")
+    assert not refused.success and "locked at Max" in refused.error
+    assert not _settings.exists()                # nothing written
+    shown = await _run(agent, action="get")
+    assert shown.success and shown.content.startswith("Reasoning effort is locked at Max")
+
+
+async def test_a_locked_level_the_model_lacks_shows_as_its_nearest(monkeypatch):
+    monkeypatch.setenv(reasoning.LOCK_ENV, "xhigh")   # Sonnet 4.6 has no xhigh
+    shown = await _run(_agent(channel="api"), action="get")
+    assert "locked at" in shown.content and "Extra high" not in shown.content.splitlines()[0]
+
+
+def test_no_lock_leaves_the_usual_order(monkeypatch):
+    monkeypatch.delenv(reasoning.LOCK_ENV, raising=False)
+    assert reasoning.locked_effort() is None
+    monkeypatch.setenv(reasoning.LOCK_ENV, "auto")    # "auto" forces nothing
+    assert reasoning.locked_effort() is None

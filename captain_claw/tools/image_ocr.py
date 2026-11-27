@@ -397,7 +397,10 @@ class _BaseImageLLMTool(Tool):
             )
 
             b64_data = base64.b64encode(image_bytes).decode("ascii")
-            mime = resized_mime or mimetypes.guess_type(str(file_path))[0] or "image/png"
+            from captain_claw.image_mime import sniff_image_mime
+
+            mime = (resized_mime or sniff_image_mime(image_bytes)
+                    or mimetypes.guess_type(str(file_path))[0] or "image/png")
 
             # Route: the agent's own provider when it sees images; OpenAI +
             # bearer headers → ChatGPT Responses API directly; everything else →

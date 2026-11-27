@@ -158,3 +158,32 @@ def test_length_truncation_corrective_bounded(tmp_path, monkeypatch):
     assert agent._length_truncation_corrective(resp) is not None  # 2
     assert agent._length_truncation_corrective(resp) is None      # budget spent
     assert agent._malformed_retry_count == 2
+
+
+
+class _RefusingWrite(WriteTool):
+    """A write that refuses the way the keep-foreign-files guard does (no disk)."""
+
+    async def execute(self, path, content, **kwargs):
+        from captain_claw.tools.registry import ToolResult
+
+        return ToolResult(success=False, error="foreign_overwrite_refused",
+                          content=f"Not written: {path} holds content you didn't write. Keep it: "
+                                  "write yours under a new name.")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_write_reaches_the_model_with_its_reason(tmp_path, monkeypatch):
+    # With only "Error: foreign_overwrite_refused" a model retried with
+    # overwrite=true and the other file was lost: the guidance must show.
+    monkeypatch.delenv("CLAW_MALFORMED_CALL_RETRIES", raising=False)
+    agent = _agent(tmp_path)
+    agent.tools = ToolRegistry(base_path=tmp_path)
+    agent.tools.register(_RefusingWrite())
+    tc = ToolCall(id="c1", name="write", arguments={"path": "summary.md", "content": "x" * 300})
+    await agent._handle_tool_calls([tc])
+    tool_msgs = [m for m in agent.session.messages if m.get("role") == "tool"]
+    shown = str(tool_msgs[-1].get("content") or "")
+    assert shown.startswith("Error: foreign_overwrite_refused")
+    assert "under a new name" in shown
+    assert agent._malformed_retry_count == 0   # explained, not a forced retry
