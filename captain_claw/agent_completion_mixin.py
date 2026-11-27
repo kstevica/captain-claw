@@ -20,7 +20,7 @@ import json
 import re
 from typing import Any
 
-from captain_claw import answer_caveats, drive
+from captain_claw import answer_caveats, drive, file_format_check
 from captain_claw.agent_stuck import MSG_EMPTY_RESPONSE
 from captain_claw.logging import get_logger
 
@@ -936,6 +936,39 @@ class AgentCompletionMixin:
                 iteration=iteration,
             )
             return True, MSG_EMPTY_RESPONSE, False, completion_feedback, python_worker_attempted
+
+        # ── Files the turn wrote that their own format can't read (same Drive switch) ──
+        # Once per turn: the data files changed on disk during the turn
+        # (iCalendar, JSON, XML, YAML, TOML — often written by a script, not
+        # the write tool) are parsed, and one that fails sends the turn back
+        # once with the place and the reason. No model call.
+        if (
+            drive.current(self).delivery_check
+            and not getattr(self, "_format_check_done", False)
+            and iteration < (hard_turn_iterations - 1)
+            and self._turn_did_work(turn_start_idx)
+        ):
+            self._format_check_done = True
+            import asyncio
+
+            try:
+                report = await asyncio.to_thread(
+                    file_format_check.check,
+                    getattr(getattr(self, "tools", None), "runtime_base_path", None),
+                    float(getattr(self, "_turn_started_wall", 0.0) or 0.0),
+                )
+            except Exception as exc:  # noqa: BLE001 — a check must never end the turn
+                log.warning("Format check failed", error=str(exc))
+                report = []
+            if report:
+                completion_feedback = file_format_check.feedback(report)
+                self._emit_tool_output(
+                    "completion_gate",
+                    {"step": "format_check", "passed": False, "files": len(report)},
+                    "step=format_check\npassed=False\n" + "\n".join(f"file={line}" for line in report),
+                )
+                log.info("Finalize BLOCKED by format check", iteration=iteration, files=len(report))
+                return False, "", finish_success, completion_feedback, python_worker_attempted
 
         # ── An answer built on search results nobody opened (same Drive switch) ──
         # Once per turn: the turn searched the web but opened no page, so the
