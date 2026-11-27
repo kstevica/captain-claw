@@ -961,6 +961,10 @@ class SafetyGuardConfig(BaseModel):
     # `write` won't replace an existing file holding unrelated content that
     # this agent didn't write, unless overwrite=true.
     keep_foreign_files: bool = True
+    # A request that puts down a group of people ("nothing but a burden",
+    # "vermin" …) gets a note before the first step: say plainly whether any
+    # reading targets people as a group, and won't write that part.
+    group_putdowns: bool = True
     # The workspace's own git repositories count as safe.directory for this
     # agent's git commands (GIT_CONFIG_* in the process environment), so a
     # repo owned by another user (a mounted folder, a container) never leads

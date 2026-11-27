@@ -17,6 +17,7 @@ orchestration loop and make the completion logic testable in isolation.
 """
 
 import json
+import re
 from typing import Any
 
 from captain_claw import answer_caveats, drive
@@ -36,6 +37,18 @@ _DELIVERY_REPLY_CHARS = 12000
 # The checker's answer, and the room on top for a model that thinks first.
 _DELIVERY_ANSWER_TOKENS = 1500
 _DELIVERY_THINKING_ROOM = 8000
+# Tools that open a page (the search tool only lists snippets).
+_PAGE_TOOLS = frozenset({"web_fetch", "web_fetch_batch", "web_get", "browser"})
+_DOWNLOAD_RE = re.compile(r"\b(?:curl|wget)\b[^\n]*https?://", re.IGNORECASE)
+_SNIPPET_FEEDBACK = (
+    "[Check before delivering] Your answer rests on search results you didn't open: this turn ran "
+    "web_search but opened no page. Search snippets are fragments, and a summary can paraphrase its "
+    "source loosely. Open the pages behind the facts your answer turns on (web_fetch, or "
+    "web_fetch_batch for several) and check those facts against them. Where sources disagree, read the "
+    "original they cite (the law, the standard, the paper) and follow it, and say in one line where they "
+    "differ. Then give your complete answer again. Do not ask the person a question, and do not mention "
+    "this check."
+)
 # How much of the extra-work step's own words is shown under the answer.
 _EXTRA_WORK_NOTE_CHARS = 1500
 
@@ -924,6 +937,27 @@ class AgentCompletionMixin:
             )
             return True, MSG_EMPTY_RESPONSE, False, completion_feedback, python_worker_attempted
 
+        # ── An answer built on search results nobody opened (same Drive switch) ──
+        # Once per turn: the turn searched the web but opened no page, so the
+        # answer stands on snippets (a model once took a report's loose
+        # paraphrase of a law over the law itself that way). It goes back once
+        # to open the pages its facts come from. Decided from the turn's tool
+        # calls, no model call.
+        if (
+            drive.current(self).delivery_check
+            and not getattr(self, "_snippet_check_done", False)
+            and iteration < (hard_turn_iterations - 1)
+            and self._turn_searched_without_opening(turn_start_idx)
+        ):
+            self._snippet_check_done = True
+            completion_feedback = _SNIPPET_FEEDBACK
+            self._emit_tool_output(
+                "completion_gate", {"step": "snippet_check", "passed": False},
+                "step=snippet_check\npassed=False",
+            )
+            log.info("Finalize BLOCKED by snippet check", iteration=iteration)
+            return False, "", finish_success, completion_feedback, python_worker_attempted
+
         # ── An answer that takes back its own result (same Drive switch) ──
         # Once per turn, for a turn that did work with tools: when the reply
         # or a document the turn wrote qualifies its own result ("read
@@ -1148,6 +1182,28 @@ class AgentCompletionMixin:
                 continue
             out.append(msg)
         return out
+
+    def _turn_searched_without_opening(self, turn_start_idx: int) -> bool:
+        """Whether this turn ran a web search that returned results but tried
+        to open no page, while the agent has a tool that could open one."""
+        tools = getattr(self, "tools", None)
+        try:
+            can_open = tools is not None and any(tools.has_tool(name) for name in _PAGE_TOOLS)
+        except Exception:  # noqa: BLE001
+            can_open = False
+        if not can_open:
+            return False
+        searched = False
+        for msg in self._turn_work_messages(turn_start_idx):
+            name = str(msg.get("tool_name", "")).strip().lower()
+            if name in _PAGE_TOOLS or name == "pdf_extract":
+                return False
+            # A source downloaded and read another way (curl the PDF, then read it).
+            if name == "shell" and _DOWNLOAD_RE.search(str((msg.get("tool_arguments") or {}).get("command", ""))):
+                return False
+            if name == "web_search" and not str(msg.get("content", "")).lstrip().startswith(("Error", "❌")):
+                searched = True
+        return searched
 
     def _turn_written_documents(self, turn_start_idx: int) -> list[str]:
         """The prose this turn wrote to files (a write's content, an edit's

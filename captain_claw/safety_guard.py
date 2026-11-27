@@ -478,3 +478,53 @@ def shell_command_text(arguments: dict) -> str:
     if isinstance(command, list):
         return " ".join(shlex.quote(str(c)) for c in command)
     return str(command or "")
+
+
+# ── Sweeping put-downs of a group of people ──────────────────────────
+# A request to write something that calls a group of people a burden, vermin,
+# parasites … gets a note before the first step (agent_guard_mixin): say
+# plainly whether any reading targets people as a group, and if so that you
+# won't write it; criticism of conduct or institutions instead is fine, said
+# as the reason. A model left alone took the harmless reading in silence and
+# presented the change as tactics. Wording, no model call; only a note.
+
+_PUTDOWN_NOUNS = (r"(?:a\s+)?(?:burden|drain|plague|disease|cancer|parasites?|leeches?|vermin|"
+                  r"animals|scum|trash|garbage|subhuman|cockroaches|rats)")
+_PUTDOWN_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    # English
+    r"\bnothing\s+but\s+" + _PUTDOWN_NOUNS + r"\b",
+    r"\b(?:they|them|these\s+people|those\s+people|such\s+people)\s+(?:are|were)\s+"
+    r"(?:all\s+|just\s+|only\s+|merely\s+|simply\s+)?" + _PUTDOWN_NOUNS + r"\b",
+    r"\b(?:subhuman|untermensch\w*)\b",
+    r"\b(?:should|must|ought\s+to)\s+(?:all\s+)?be\s+(?:exterminated|wiped\s+out|eradicated|gassed)\b",
+    r"\bdon'?t\s+deserve\s+to\s+(?:live|exist)\b",
+    # Croatian
+    r"\b(?:oni|ti\s+ljudi)\s+su\s+(?:samo\s+|obični\s+)?(?:teret|paraziti|ološ|smeće|stoka|gamad)\b",
+    r"\bsu\s+(?:oni|ti\s+ljudi)\s+(?:samo\s+|obični\s+)?(?:teret|paraziti|ološ|smeće|stoka|gamad)\b",
+    r"\bništa\s+drugo\s+nego\s+(?:teret|paraziti|ološ|smeće)\b",
+    # German
+    r"\b(?:diese\s+Leute|die|sie)\s+sind\s+(?:nur\s+|nichts\s+als\s+)?(?:eine\s+)?"
+    r"(?:Last|Parasiten|Ungeziefer|Abschaum|Pack)\b",
+    # Chinese
+    r"(?:他们|这些人|那些人)(?:就是|只是|都是|全是)?(?:社会的)?(?:负担|寄生虫|人渣|垃圾|蛀虫)",
+))
+
+
+def group_putdown(text: str) -> str:
+    """The first sweeping put-down of a group of people in *text*, or ""."""
+    for pattern in _PUTDOWN_PATTERNS:
+        m = pattern.search(text or "")
+        if m:
+            return " ".join(m.group(0).split())[:80]
+    return ""
+
+
+def putdown_note(phrase: str) -> str:
+    return (
+        "[Safety — automatic, not from the person] This request includes a sweeping put-down of a group "
+        f"of people (\"{phrase}\"). Before writing, check each reading of it. If any reading is about people "
+        "as a group (workers, a nationality, a religion, …), say plainly that you won't write that part, and "
+        "why. You may write criticism of specific conduct, decisions or institutions instead; if you do, say "
+        "that this is what you wrote and that it is not the put-down. Give that as the reason, not as a "
+        "matter of tactics or tone."
+    )

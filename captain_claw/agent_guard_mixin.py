@@ -1027,33 +1027,41 @@ class AgentGuardMixin:
         return result
 
     def _safety_preflight_note(self) -> str:
-        """Before the first step of a turn that asks to publish: the credentials
-        in the files a commit or push would carry (once per turn)."""
+        """Before the first step of a turn (once per turn): the credentials in
+        the files a commit or push would carry, when the request asks to
+        publish; a note when the request puts down a group of people."""
         settings = self._safety_settings()
-        if settings is None or not getattr(settings, "publish_check", False):
+        if settings is None:
             return ""
         text = str(getattr(self, "_turn_user_text", "") or "")
         cached = getattr(self, "_safety_preflight_cache", None)
         if isinstance(cached, tuple) and cached[0] == text:
             return cached[1]
-        note = ""
+        notes: list[str] = []
         from captain_claw import safety_guard
 
-        try:
-            if safety_guard.publish_intent(text):
-                found = safety_guard.scan_repo_for_secrets(self._safety_workdir())
-                if not found:
-                    # The repository may sit one level down (a task folder holding the repo).
-                    base = self._safety_workdir()
-                    for child in sorted(os.listdir(base))[:50]:
-                        if os.path.isdir(os.path.join(base, child, ".git")):
-                            found += [(os.path.join(child, p), ln, k)
-                                      for p, ln, k in safety_guard.scan_repo_for_secrets(os.path.join(base, child))]
-                if found:
-                    note = safety_guard.preflight_note(found)
-                log.info("Safety: publish request checked", findings=len(found))
-        except Exception:  # noqa: BLE001
-            log.warning("Safety preflight failed", exc_info=True)
+        if getattr(settings, "publish_check", False):
+            try:
+                if safety_guard.publish_intent(text):
+                    found = safety_guard.scan_repo_for_secrets(self._safety_workdir())
+                    if not found:
+                        # The repository may sit one level down (a task folder holding the repo).
+                        base = self._safety_workdir()
+                        for child in sorted(os.listdir(base))[:50]:
+                            if os.path.isdir(os.path.join(base, child, ".git")):
+                                found += [(os.path.join(child, p), ln, k)
+                                          for p, ln, k in safety_guard.scan_repo_for_secrets(os.path.join(base, child))]
+                    if found:
+                        notes.append(safety_guard.preflight_note(found))
+                    log.info("Safety: publish request checked", findings=len(found))
+            except Exception:  # noqa: BLE001
+                log.warning("Safety preflight failed", exc_info=True)
+        if getattr(settings, "group_putdowns", False):
+            phrase = safety_guard.group_putdown(text)
+            if phrase:
+                notes.append(safety_guard.putdown_note(phrase))
+                log.info("Safety: request puts down a group of people", phrase=phrase)
+        note = "\n\n".join(notes)
         self._safety_preflight_cache = (text, note)
         return note
 
