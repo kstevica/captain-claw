@@ -19,6 +19,13 @@ def _args(**kw):
     return args
 
 
+def test_the_agent_sees_pictures_when_told_and_captain_decides_otherwise(tmp_path):
+    assert dr.agent_config(_args(vision="on"), tmp_path, "b")["vision"] == "on"
+    assert dr.agent_config(_args(vision="off"), tmp_path, "b")["vision"] == "off"
+    assert "vision" not in dr.agent_config(_args(), tmp_path, "b")
+    assert "vision" not in dr.agent_config(_args(vision="auto"), tmp_path, "b")
+
+
 def test_provider_key_follows_the_provider():
     env = {"ANTHROPIC_API_KEY": "a", "GOOGLE_API_KEY": "g", "OPENAI_API_KEY": "o"}
     assert dr.provider_key("anthropic", env) == "a"

@@ -279,10 +279,13 @@ def encode_image(path: str, max_pixels: int = 1280, jpeg_quality: int = 85) -> E
         raw = file_path.read_bytes()
     except OSError:
         return None
+    from captain_claw.image_mime import sniff_image_mime
     from captain_claw.tools.image_ocr import _maybe_resize_image
 
     data, mime = _maybe_resize_image(raw, int(max_pixels), int(jpeg_quality))
-    mime = mime or mimetypes.guess_type(file_path.name)[0] or "image/png"
+    # The bytes decide, not the name: a JPEG saved as .png sent as image/png
+    # was refused by the provider and ended the turn (image_mime).
+    mime = mime or sniff_image_mime(data) or mimetypes.guess_type(file_path.name)[0] or "image/png"
     if mime not in _WIRE_MIMES:
         # BMP and the like: providers take JPEG/PNG/WebP/GIF only.
         converted = _to_jpeg(data, int(jpeg_quality))

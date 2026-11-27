@@ -51,6 +51,14 @@ def test_a_harbor_trial_runs_at_medium_and_locked_by_default():
     assert "--lock" in flags
 
 
+def test_a_harbor_trial_lets_the_model_see_pictures_unless_told_otherwise():
+    flags = ch.runner_flags("openai", "m", ch.CaptainOptions(), "/l")
+    assert ["--vision", "on"] == flags[flags.index("--vision"):][:2]
+    off = ch.runner_flags("openai", "m", ch.CaptainOptions(vision="off"), "/l")
+    assert ["--vision", "off"] == off[off.index("--vision"):][:2]
+    assert "--vision" not in ch.runner_flags("openai", "m", ch.CaptainOptions(vision="auto"), "/l")
+
+
 def test_auto_leaves_a_level_to_captain_and_lock_can_be_turned_off():
     flags = ch.runner_flags("anthropic", "m", ch.CaptainOptions(reasoning_effort="auto", drive="persistent"), "/l")
     assert "--effort" not in flags and ["--drive", "persistent"] == flags[flags.index("--drive"):][:2]
