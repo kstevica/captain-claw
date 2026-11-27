@@ -150,6 +150,7 @@ _LITERAL_RULES: tuple[tuple[re.Pattern[str], str, str], ...] = tuple(
         (r"^\[Delegated result from ", "delegated_result", "delegate"),
         (r"^\[(?:Basna|Vatra|coding session) '.*?' (?:finished successfully|ran into an error)\]",
          "delegated_result", "run_result"),
+        (r"^\[Team '.*?' (?:finished|stopped)\]", "delegated_result", "team_result"),
         (r"^\[Autonomous (?:nudge|task)\]", "autonomy", "nudge"),
         (r"^\[Plan (?:step|task)\]", "autonomy", "plan"),
         (r"^\[SCHEDULED TASK — cron job", "cron", "cron"),

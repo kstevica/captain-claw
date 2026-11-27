@@ -39,6 +39,7 @@ import { KioskInsightsPanel } from './KioskAgentInsights'
 import { MenuSheet, type MenuItem, type MenuSection } from './KioskMenuSheet'
 import { KioskSkillsPanel } from './KioskAgentSkills'
 import { TopicsPanel } from '../agents/TopicsPanel'
+import { TeamUpSetting } from '../agents/team/TeamUpSetting'
 import { SwitchTrack } from '../common/SwitchTrack'
 import {
   getAgentConfig, getAgentCourseCheck, getAgentDrive, getAgentEcoMode, getAgentMode, getAgentModelSwitch, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentModelSwitch,
@@ -890,6 +891,11 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                       </span>
                     </span>
                   </button>
+                </section>
+              )}
+              {!locked && (kind === 'docker' || kind === 'process') && (
+                <section>
+                  <TeamUpSetting kind={kind} identifier={key} title />
                 </section>
               )}
               {eco !== null && (
