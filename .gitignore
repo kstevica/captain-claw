@@ -73,3 +73,10 @@ android/
 # Captain for Mac: SwiftPM's build folder and the built app (captain-for-mac/build.sh)
 captain-for-mac/.build/
 captain-for-mac/out/
+
+# Benchmark runs: only the summaries go in git (evals/results/*/README.md says
+# what the per-trial folders hold); transcripts, task content and third-party
+# published scores stay local.
+evals/results/**/jobs/
+evals/results/**/rechecks/
+evals/results/**/published/

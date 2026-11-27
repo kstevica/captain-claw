@@ -487,6 +487,9 @@ MAX_STALL_RETRIES = 2
 # output limit, or a stream that broke mid-generation (set by the LiteLLM
 # stream collector). Such an answer is continued, up to this many times.
 _CUT_OFF_FINISH_REASONS = frozenset({"length", "max_tokens", "interrupted"})
+# A call that hit the output cap (not a broken stream): with no text and no
+# tool call, its thinking used the whole budget.
+_OUT_OF_ROOM_FINISH_REASONS = frozenset({"length", "max_tokens"})
 MAX_ANSWER_CONTINUATIONS = 2
 _CONTINUE_CUT_OFF_INSTRUCTION = (
     "Your previous reply was cut off before it was finished. Continue exactly where "
@@ -2523,6 +2526,13 @@ class AgentOrchestrationMixin:
                 self._emit_thinking("Cancelled", phase="done")
                 cancel_ev.clear()
                 self._last_complete_cancelled = True
+                # Keep what the turn did so far (its tool calls and results):
+                # only a finished answer saves the session otherwise, so a
+                # cancelled turn would vanish from the conversation.
+                try:
+                    await self.session_manager.save_session(self.session)
+                except Exception:  # noqa: BLE001 — cancelling must not fail on a save
+                    log.warning("Saving a cancelled turn failed", exc_info=True)
                 return finish("Request cancelled by user.", success=False)
 
             # ── Pipeline runtime tick ─────────────────────────────
@@ -3959,6 +3969,28 @@ class AgentOrchestrationMixin:
                     origin_detail="continue_cut_off",
                 )
                 continue
+            # Thinking used the whole output budget and nothing came back: no
+            # text, no tool call. Not a stall the model can fix — forcing a
+            # tool only buys a quick call before the next one runs out the
+            # same way. Run the call again one effort level lower (the rest of
+            # the turn stays there); with no lower level, the stall handling
+            # below takes it as an empty reply.
+            if (
+                not response.tool_calls
+                and str(response.finish_reason or "").strip().lower() in _OUT_OF_ROOM_FINISH_REASONS
+                and not str(response.content or "").strip()
+            ):
+                stepped = self._step_down_effort_after_overflow()
+                if stepped is not None:
+                    # Not new work: it gets its iteration back.
+                    soft_turn_iterations += 1
+                    hard_turn_iterations += 1
+                    log.warning(
+                        "Thinking used the whole output budget — retrying one effort level lower",
+                        finish_reason=response.finish_reason,
+                        from_level=stepped[0], to_level=stepped[1],
+                    )
+                    continue
             if _answer_parts and not response.tool_calls:
                 response.content = _join_cut_off(_answer_parts + [str(response.content or "")])
                 _answer_parts = []

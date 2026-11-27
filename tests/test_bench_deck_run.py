@@ -250,8 +250,9 @@ async def test_private_deck_is_started_and_stopped(monkeypatch, tmp_path, no_pol
     events: list[str] = []
 
     class FakePrivate:
-        def __init__(self, run_dir, port=0):
+        def __init__(self, run_dir, port=0, task_cap=0):
             self.url = "http://127.0.0.1:2"
+            events.append(f"cap {task_cap:g}")
 
         async def start(self):
             events.append("start")
@@ -263,7 +264,8 @@ async def test_private_deck_is_started_and_stopped(monkeypatch, tmp_path, no_pol
     monkeypatch.setattr(dr, "DeckClient", deck.client)
     code = await dr.run_on_deck(_args(workspace=str(tmp_path), quiet=True), "q", tmp_path)
 
-    assert code == 0 and events == ["start", "stop"]
+    # No --timeout: the harness sets the real limit, the deck allows hours.
+    assert code == 0 and events == [f"cap {dr.DEFAULT_TASK_SECONDS:g}", "start", "stop"]
     assert "forget bench-1" not in deck.calls   # a private deck is thrown away whole
 
 
@@ -314,3 +316,46 @@ async def test_a_locked_run_says_so_in_the_result(monkeypatch, tmp_path, no_poll
     assert await dr.run_on_deck(args, "q", tmp_path) == 0
     result = json.loads((tmp_path / "result.json").read_text())
     assert result["locked"] is True and result["effort"] == "max" and result["drive"] == "ambitious"
+
+
+def test_skill_archives_zip_each_skill_folder(tmp_path):
+    import io
+    import zipfile
+
+    (tmp_path / "agent-browser" / "scripts").mkdir(parents=True)
+    (tmp_path / "agent-browser" / "SKILL.md").write_text("---\nname: agent-browser\n---\nUse it.")
+    (tmp_path / "agent-browser" / "scripts" / "run.sh").write_text("echo hi")
+    (tmp_path / "notes").mkdir()                       # no SKILL.md: not a skill
+    archives = dr.skill_archives(tmp_path)
+    assert [name for name, _ in archives] == ["agent-browser"]
+    names = zipfile.ZipFile(io.BytesIO(archives[0][1])).namelist()
+    assert sorted(names) == ["agent-browser/SKILL.md", "agent-browser/scripts/run.sh"]
+    assert dr.skill_archives(tmp_path / "missing") == []
+
+
+def test_a_private_deck_lets_one_task_run_as_long_as_the_run_allows(tmp_path):
+    env = dr.PrivateDeck(tmp_path, port=1, task_cap=5400).env()
+    assert env["FD_MCP_TASK_MAX_SECONDS"] == "5460"
+
+
+def test_the_deck_mcp_task_cap_follows_its_environment(monkeypatch):
+    from captain_claw.flight_deck import mcp_server_routes as mcp
+
+    monkeypatch.delenv("FD_MCP_TASK_MAX_SECONDS", raising=False)
+    assert mcp._task_cap_seconds() == 1800.0
+    monkeypatch.setenv("FD_MCP_TASK_MAX_SECONDS", "7200")
+    assert mcp._task_cap_seconds() == 7200.0
+    for bad in ("nonsense", "3"):
+        monkeypatch.setenv("FD_MCP_TASK_MAX_SECONDS", bad)
+        assert mcp._task_cap_seconds() == 1800.0
+
+
+def test_a_local_model_endpoint_and_context_reach_the_agent(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_API_KEY", "local-key")
+    args = _args(provider="openai", model="qwen3.8-flash-next-iq3_s",
+                 base_url="http://192.168.0.2:8080/v1", max_context=200_000, max_output=16_000)
+    body = dr.agent_config(args, tmp_path, "bench-q")
+    assert body["base_url"] == "http://192.168.0.2:8080/v1" and body["provider_api_key"] == "local-key"
+    assert body["max_context"] == 200_000 and body["max_tokens"] == 16_000
+    plain = dr.agent_config(_args(), tmp_path, "b")
+    assert "max_context" not in plain and "max_tokens" not in plain

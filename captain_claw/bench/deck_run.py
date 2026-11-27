@@ -49,8 +49,15 @@ PROVIDER_KEY_ENVS: dict[str, tuple[str, ...]] = {
 # Tool keys handed to the agent when the caller has them (web search).
 TOOL_KEY_ENVS = ("BRAVE_API_KEY", "TAVILY_API_KEY", "YDC_API_KEY", "KEENABLE_API_KEY")
 # The inbound MCP caps one task at 30 minutes.
+# A deck caps one MCP task at 30 minutes; a private deck is started with that
+# cap raised to the run's own limit (FD_MCP_TASK_MAX_SECONDS). With no
+# --timeout the harness running us (Harbor) sets the real limit.
 MCP_TASK_CAP_SECONDS = 1800.0
+DEFAULT_TASK_SECONDS = 4 * 3600.0
 _POLL_SECONDS = 2.0
+# How long a stopped task waits for the deck to end the agent's turn (the deck
+# itself waits up to 60 s for a model call in flight).
+_CANCEL_SETTLE_SECONDS = 70.0
 
 
 def _say(text: str) -> None:
@@ -127,6 +134,10 @@ def agent_config(args: argparse.Namespace, workspace: Path, name: str) -> dict[s
     }
     if args.base_url:
         body["base_url"] = args.base_url
+    if getattr(args, "max_context", 0) > 0:
+        body["max_context"] = args.max_context
+    if getattr(args, "max_output", 0) > 0:
+        body["max_tokens"] = args.max_output
     if args.archetype:
         body["archetype"] = args.archetype
     return body
@@ -138,7 +149,8 @@ def agent_config(args: argparse.Namespace, workspace: Path, name: str) -> dict[s
 class PrivateDeck:
     """Flight Deck on loopback with sign-in off, in its own folder."""
 
-    def __init__(self, run_dir: Path, port: int = 0):
+    def __init__(self, run_dir: Path, port: int = 0, task_cap: float = MCP_TASK_CAP_SECONDS):
+        self.task_cap = task_cap
         self.root = run_dir / "deck"
         self.port = port or free_port()
         self.url = f"http://127.0.0.1:{self.port}"
@@ -158,6 +170,8 @@ class PrivateDeck:
             "FD_AUTH_ENABLED": "false",
             "FD_DATA_DIR": str(self.root / "data"),
             "HOME": str(home),
+            # One task may run as long as this run allows (a deck's own cap is 30 min).
+            "FD_MCP_TASK_MAX_SECONDS": str(int(self.task_cap) + 60),
         })
         return env
 
@@ -311,6 +325,20 @@ class DeckClient:
         """Off the agent list; its folder stays (never purged)."""
         await self.http.delete(f"/fd/processes/{slug}")
 
+    async def install_skill(self, info: dict[str, Any], name: str, archive: bytes) -> str:
+        """Install one skill (a zipped folder with a SKILL.md) the way the
+        deck's Skills panel does: the agent's ``/api/skills/install-upload``.
+        Returns the skill's name as the agent parsed it."""
+        resp = await self.http.post(
+            f"http://127.0.0.1:{info['web_port']}/api/skills/install-upload",
+            params={"token": info.get("web_auth") or ""},
+            files={"file": (f"{name}.zip", archive, "application/zip")},
+        )
+        data = resp.json()
+        if not data.get("ok"):
+            raise RuntimeError(f"skill {name}: {data.get('error') or resp.status_code}")
+        return str(data.get("skill_name") or name)
+
     async def usage(self, info: dict[str, Any]) -> dict[str, Any]:
         """Every LLM call the agent recorded (``/api/usage``): the turn and the
         deck's side calls around it. A fresh agent, so all of it is this run."""
@@ -332,6 +360,25 @@ class DeckClient:
         latest = max(sessions, key=lambda s: str(s.get("updated_at") or ""))
         detail = (await self.http.get(f"{base}/api/sessions/{latest['id']}", params=params)).json()
         return list(detail.get("messages") or [])
+
+
+def skill_archives(skills_dir: Path) -> list[tuple[str, bytes]]:
+    """``(name, zip bytes)`` for each skill folder (one holding a SKILL.md)
+    directly under *skills_dir*, in name order."""
+    import io
+    import zipfile
+
+    out: list[tuple[str, bytes]] = []
+    if not skills_dir.is_dir():
+        return out
+    for folder in sorted(p for p in skills_dir.iterdir() if (p / "SKILL.md").is_file()):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(folder.rglob("*")):
+                if path.is_file():
+                    zf.write(path, Path(folder.name) / path.relative_to(folder))
+        out.append((folder.name, buf.getvalue()))
+    return out
 
 
 def compact_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -441,7 +488,10 @@ async def run_on_deck(args: argparse.Namespace, instruction: str, run_dir: Path)
     workspace = user_path(args.workspace) if args.workspace else Path.cwd().resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     result_path = user_path(args.result_json) if args.result_json else run_dir / "result.json"
-    timeout = min(args.timeout, MCP_TASK_CAP_SECONDS) if args.timeout > 0 else MCP_TASK_CAP_SECONDS
+    if args.deck_url:   # that deck's own cap
+        timeout = min(args.timeout, MCP_TASK_CAP_SECONDS) if args.timeout > 0 else MCP_TASK_CAP_SECONDS
+    else:
+        timeout = args.timeout if args.timeout > 0 else DEFAULT_TASK_SECONDS
     if not args.provider or not args.model:
         print("captain-claw-once: --provider and --model are required on a deck", file=sys.stderr)
         return 2
@@ -454,6 +504,7 @@ async def run_on_deck(args: argparse.Namespace, instruction: str, run_dir: Path)
     usage: dict[str, int] = {}
     cost: float | None = None
     models_used: list[str] = []
+    skills: list[str] = []
     events: list[dict[str, Any]] = []
     messages: list[dict[str, Any]] = []
     before = snapshot(workspace)
@@ -468,7 +519,7 @@ async def run_on_deck(args: argparse.Namespace, instruction: str, run_dir: Path)
         if args.deck_url:
             url = args.deck_url
         else:
-            deck = PrivateDeck(run_dir, port=args.deck_port)
+            deck = PrivateDeck(run_dir, port=args.deck_port, task_cap=timeout)
             if not args.quiet:
                 _say(f"starting a private Flight Deck on {deck.url}")
             await deck.start()
@@ -492,6 +543,14 @@ async def run_on_deck(args: argparse.Namespace, instruction: str, run_dir: Path)
             await client.set_effort(slug, args.effort)
         if args.drive:
             await client.set_drive(slug, args.drive)
+        if getattr(args, "skills_dir", ""):
+            for skill_name, archive in skill_archives(user_path(args.skills_dir)):
+                try:
+                    skills.append(await client.install_skill(info, skill_name, archive))
+                except Exception as exc:  # one bad skill doesn't stop the task
+                    events.append({"type": "note", "text": f"skill not installed: {exc}"})
+            if not args.quiet and skills:
+                _say(f"skills installed: {', '.join(skills)}")
         if not args.quiet:
             store = f"store agent {args.archetype} · " if args.archetype else ""
             knobs = " · ".join(f"{k} {v}" for k, v in (("effort", args.effort), ("drive", args.drive)) if v)
@@ -507,6 +566,16 @@ async def run_on_deck(args: argparse.Namespace, instruction: str, run_dir: Path)
             if stop_requested.is_set() or time.monotonic() > deadline:
                 await client.mcp("cancel_task", {"task_id": task_id})
                 error = "stopped" if stop_requested.is_set() else f"timed out after {timeout:g}s"
+                # The deck cancels the agent's turn and waits for it to end;
+                # the turn saves the conversation then, which the transcript
+                # below reads.
+                settle = time.monotonic() + _CANCEL_SETTLE_SECONDS
+                while time.monotonic() < settle:
+                    got = await client.mcp("get_result", {"task_id": task_id, "since": cursor})
+                    cursor = int(got.get("next_cursor") or cursor)
+                    if got.get("done"):
+                        break
+                    await asyncio.sleep(_POLL_SECONDS)
                 break
             got = await client.mcp("get_result", {"task_id": task_id, "since": cursor})
             for event in got.get("events") or []:
@@ -560,6 +629,7 @@ async def run_on_deck(args: argparse.Namespace, instruction: str, run_dir: Path)
             "drive": args.drive or None,
             "locked": bool(lock_env(args)),
             "store_agent": args.archetype or None,
+            "skills": skills,
             "models_used": models_used,
             "deck": {"url": args.deck_url or (deck.url if deck else ""), "private": deck is not None,
                      "agent": slug, "task_id": task_id},
