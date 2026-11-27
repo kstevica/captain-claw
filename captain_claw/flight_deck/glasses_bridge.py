@@ -388,6 +388,10 @@ async def _forward_agent_msg(ch: "_ChannelState", data: dict) -> None:
             "phase": str(data.get("phase", "")),
             "ts": _now_iso(),
         })
+    elif mtype == "narration" and data.get("source") == "jev":
+        # Jev's decisions (jev_narration) are for the web chat's step list,
+        # not a phone thread or the glasses.
+        pass
     elif mtype == "narration":
         # Live between-step progress blurbs — forward so the glasses HUD and
         # WhatsApp/Messenger see them during a long task.

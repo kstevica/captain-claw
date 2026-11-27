@@ -458,6 +458,30 @@ class Agent(
             pass
         return True
 
+    def _emit_jev_narration(self, text: str) -> bool:
+        """Jev's decision as a narration line for the chat's step list
+        (jev_narration), marked ``source="jev"``. Only a narration callback
+        that takes a ``source`` gets it — the web UI's; Telegram's doesn't —
+        and the channel relay and Basna/Vatra's board skip it. Never saved
+        into the session, never folded into the answer."""
+        cb = getattr(self, "narration_callback", None)
+        if not cb or not str(text or "").strip():
+            return False
+        try:
+            import inspect
+
+            params = inspect.signature(cb).parameters
+            takes = "source" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+        except (TypeError, ValueError):
+            takes = False
+        if not takes:
+            return False
+        try:
+            cb(str(text).strip(), 0, source="jev")
+        except Exception:
+            return False
+        return True
+
     def _emit_tool_output(self, tool_name: str, arguments: dict[str, Any], output: str) -> None:
         """Forward raw tool output to UI callback when configured."""
         if tool_name == "completion_gate" and isinstance(arguments, dict) and arguments.get("passed") is False:

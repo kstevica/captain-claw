@@ -1130,6 +1130,11 @@ class AgentToolLoopMixin:
             return None
         if result.release:
             released.add(signature)
+        from captain_claw import jev_narration
+
+        self._emit_jev_narration(jev_narration.block_review(
+            tc.name, result.choice, result.probability,
+            applied=bool(result.message), released=bool(result.release)))
         self._emit_tool_output(
             "completion_gate",
             {

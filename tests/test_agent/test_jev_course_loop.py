@@ -173,7 +173,7 @@ async def test_a_fold_triggers_a_check(jev_on):
 async def test_jev_relation_replaces_the_guess(monkeypatch):
     async def ask_relation(state):
         assert state["new_message"] == "also include Porto"
-        return task_course.NEW_TASK, 0.9
+        return task_course.NEW_TASK, 0.9, {"new_task": 0.9, "amends": 0.08}
 
     monkeypatch.setattr(jev_course, "enabled", lambda: True)
     monkeypatch.setattr(jev_course, "ask_relation", ask_relation)
@@ -194,7 +194,7 @@ async def test_jev_relation_replaces_the_guess(monkeypatch):
 @pytest.mark.asyncio
 async def test_unsure_relation_keeps_the_guess(monkeypatch):
     async def ask_relation(state):
-        return task_course.NEW_TASK, 0.4
+        return task_course.NEW_TASK, 0.4, {}
 
     monkeypatch.setattr(jev_course, "enabled", lambda: True)
     monkeypatch.setattr(jev_course, "ask_relation", ask_relation)
@@ -214,7 +214,7 @@ async def test_continue_words_skip_the_relation_question(monkeypatch):
 
     async def ask_relation(state):
         asked.append(state)
-        return None, None
+        return None, None, {}
 
     monkeypatch.setattr(jev_course, "enabled", lambda: True)
     monkeypatch.setattr(jev_course, "ask_relation", ask_relation)
@@ -339,3 +339,90 @@ def test_a_plain_reply_leaves_no_record():
     agent.last_turn_start_idx = 0
     agent._course_finish("Sure.", True, {})
     assert "turn_stats" not in agent.session.metadata[task_course.KEY]
+
+
+# ── Jev's decisions as narration ─────────────────────────────────────
+
+
+def _narrations(agent: Agent) -> list[tuple[str, str]]:
+    seen: list[tuple[str, str]] = []
+
+    def cb(text, iteration=0, source=""):
+        seen.append((source, text))
+
+    agent.narration_callback = cb
+    return seen
+
+
+def test_jev_narration_reaches_only_callbacks_that_take_a_source():
+    agent = _agent()
+    seen = _narrations(agent)
+    assert agent._emit_jev_narration("Jev checked the course.") is True
+    assert seen == [("jev", "Jev checked the course.")]
+    plain: list = []
+    agent.narration_callback = lambda text, iteration=0: plain.append(text)  # Telegram's shape
+    assert agent._emit_jev_narration("Jev checked the course.") is False
+    assert plain == []
+    agent.narration_callback = None
+    assert agent._emit_jev_narration("x") is False
+
+
+@pytest.mark.asyncio
+async def test_a_course_check_is_narrated(jev_on):
+    _calls, answers = jev_on
+    agent = _agent()
+    seen = _narrations(agent)
+    agent.session.add_message("user", TASK)
+    agent._task_course_begin(TASK)
+    answers.append(jev_course.Check(step=6, stage=4.0, stage_name="checking", on_track=0.93, next="continue",
+                                    next_confidence=0.61, trigger="steps"))
+    count = await _steps(agent, 6, 0, 0)
+    await _settle()
+    await _steps(agent, 1, count, 0)
+    jev_lines = [t for src, t in seen if src == "jev"]
+    assert jev_lines == ["Jev checked the course after step 6: on track 93%; stage 4 of 5, checking; "
+                         "next: keep going (61%). No reminder needed."]
+    # Never saved into the session.
+    assert not any("Jev checked" in str(m.get("content")) for m in agent.session.messages)
+
+
+@pytest.mark.asyncio
+async def test_the_relation_is_narrated(monkeypatch):
+    async def ask_relation(state):
+        return task_course.NEW_TASK, 0.9, {"new_task": 0.9, "amends": 0.08}
+
+    monkeypatch.setattr(jev_course, "enabled", lambda: True)
+    monkeypatch.setattr(jev_course, "ask_relation", ask_relation)
+    agent = _agent()
+    seen = _narrations(agent)
+    agent.session.add_message("user", TASK)
+    agent._task_course_begin(TASK)
+    agent.session.add_message("assistant", "Here is the table.")
+    agent.session.add_message("user", "also include Porto")
+    agent._task_course_begin("also include Porto")
+    await agent._course_watch.relation_task
+    await agent._course_tick(0, 0, 3)
+    assert seen == [("jev", "Jev read your message as a new task (90%; an addition to the task 8%) "
+                            "and updated the task reminder.")]
+
+
+# ── the turn record is saved, not left in memory ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_turn_record_is_saved_right_after_it_is_written():
+    saved: list[dict] = []
+
+    class _Manager:
+        async def save_session(self, session):
+            saved.append(dict(session.metadata[task_course.KEY]))
+
+    agent = _agent()
+    agent.session_manager = _Manager()
+    agent.session.add_message("user", TASK)
+    agent._task_course_begin(TASK)
+    agent.last_turn_start_idx = 0
+    _tool_msg(agent, "a.md", 0)
+    agent._course_finish("Done.", True, {"total_tokens": 10})
+    await _settle()
+    assert saved and saved[-1]["turn_stats"][0]["outcome"] == "finished"

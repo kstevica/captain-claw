@@ -957,13 +957,14 @@ class WebServer:
         def tool_stream_cb(chunk: str) -> None:
             send({"type": "tool_stream", "chunk": chunk})
 
-        def narration_cb(text: str, iteration: int = 0) -> None:
+        def narration_cb(text: str, iteration: int = 0, source: str = "") -> None:
             from datetime import datetime, timezone
             send({
                 "type": "narration",
                 "text": text,
                 "iteration": iteration,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
+                **({"source": source} if source else {}),
             })
 
         def response_stream_cb(text: str) -> None:
@@ -1098,16 +1099,19 @@ class WebServer:
         """Broadcast a live tool output chunk to the thinking console."""
         self._broadcast({"type": "tool_stream", "chunk": chunk})
 
-    def _narration_callback(self, text: str, iteration: int = 0) -> None:
+    def _narration_callback(self, text: str, iteration: int = 0, source: str = "") -> None:
         """Broadcast the agent's between-step narration live, so it shows up in
         the chat (and on bridged channels — WhatsApp/glasses) during the run
-        instead of only landing in the final answer."""
+        instead of only landing in the final answer. ``source="jev"`` marks
+        Jev's decisions (jev_narration): the chat shows them, the channel
+        relay doesn't."""
         from datetime import datetime, timezone
         self._broadcast({
             "type": "narration",
             "text": text,
             "iteration": iteration,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            **({"source": source} if source else {}),
         })
 
     def _response_stream_callback(self, text: str) -> None:

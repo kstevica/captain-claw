@@ -20,7 +20,8 @@ from captain_claw.agent_stuck import (
     budget_partial,
 )
 from captain_claw import (
-    drive, fabrication_guard, jev_course, jev_progress, loop_guards, mail_authority, msg_origin,
+    drive, fabrication_guard, jev_course, jev_narration, jev_progress, loop_guards, mail_authority,
+    msg_origin,
     task_course,
     turn_deliverables,
     turn_register,
@@ -32,6 +33,8 @@ from captain_claw.logging import get_logger
 
 
 log = get_logger(__name__)
+# Background saves of a turn's course record (kept referenced until done).
+_COURSE_SAVES: set[asyncio.Task] = set()
 
 MAX_FABRICATION_RETRIES = fabrication_guard.MAX_FABRICATION_RETRIES
 
@@ -1374,7 +1377,7 @@ class AgentOrchestrationMixin:
         watch = self._course_watch
 
         async def _relation() -> None:
-            choice, conf = await jev_course.ask_relation(state)
+            choice, conf, probs = await jev_course.ask_relation(state)
             if choice is None:
                 return
             applied = False
@@ -1383,7 +1386,7 @@ class AgentOrchestrationMixin:
                 applied = redone is not start
                 if applied and getattr(self, "_task_course_start", None) is start:
                     self._task_course_start = redone
-            watch.relation_result = (choice, conf, start.relation, applied)
+            watch.relation_result = (choice, conf, start.relation, applied, probs)
             log.info("Jev course relation", relation=choice, confidence=conf,
                      guess=start.relation, applied=applied)
 
@@ -1451,6 +1454,30 @@ class AgentOrchestrationMixin:
         except Exception:  # noqa: BLE001 — tracking never fails a turn
             log.debug("Course turn record failed", exc_info=True)
 
+    def _course_save_soon(self) -> None:
+        """Save the session once more after the turn's record: the record is
+        written in ``finish``, after the turn's own last save, and would
+        otherwise wait in memory for the next save (lost if the agent
+        restarts first)."""
+        manager = getattr(self, "session_manager", None)
+        session = self.session
+        if manager is None or session is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _save() -> None:
+            try:
+                await manager.save_session(session)
+            except Exception:  # noqa: BLE001 — the next save carries it anyway
+                log.debug("Saving the course record failed", exc_info=True)
+
+        task = loop.create_task(_save())
+        _COURSE_SAVES.add(task)
+        task.add_done_callback(_COURSE_SAVES.discard)
+
     def _course_record_turn(
         self, watch: Any, text: Any, success: bool, turn_usage: dict[str, Any] | None,
     ) -> None:
@@ -1487,6 +1514,7 @@ class AgentOrchestrationMixin:
         if watch.latest is not None and watch.latest.stage is not None:
             stats["final_stage"] = watch.latest.stage
         task_course.record_turn(metadata, stats)
+        self._course_save_soon()
         log.info("Task course turn", **{k: v for k, v in stats.items() if k != "lines"},
                  lines=len(lines), followed=sum(1 for ln in lines if ln["followed"] is True))
         self._emit_tool_output(
@@ -1509,8 +1537,10 @@ class AgentOrchestrationMixin:
             return
         try:
             if watch.relation_result is not None:
-                choice, conf, guess, applied = watch.relation_result
+                choice, conf, guess, applied, probs = watch.relation_result
                 watch.relation_result = None
+                self._emit_jev_narration(jev_narration.relation(
+                    choice, conf, probs, guess, applied, jev_course.RELATION_CONFIDENCE))
                 self._emit_tool_output(
                     "completion_gate",
                     {"step": "jev_course_relation", "relation": choice,
@@ -1551,6 +1581,7 @@ class AgentOrchestrationMixin:
                         f"next={check.next}\nline={line_key or '-'}\njudge=jev"
                     ),
                 )
+                self._emit_jev_narration(jev_narration.course_check(check, line_key))
                 status = jev_course.status_text(check)
                 if status:
                     self._emit_thinking(status, tool="course", phase="tool")
@@ -2887,6 +2918,11 @@ class AgentOrchestrationMixin:
                             step_budget=soft_turn_iterations,
                         )
                         extend = jev_p is not None and jev_p >= jev_progress.THRESHOLD
+                if jev_p is not None:
+                    self._emit_jev_narration(jev_narration.budget(
+                        jev_p, extend,
+                        min(hard_turn_iterations, soft_turn_iterations + extension_step) if extend else None,
+                        reused=_jev_judge == "jev_course"))
                 jev_lines = (
                     f"\njudge={_jev_judge}\np_progressing={jev_p:.2f}" if jev_p is not None else ""
                 )

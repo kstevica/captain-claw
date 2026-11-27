@@ -26,6 +26,14 @@ def _resp(stage: str = "producing", probs: dict | None = None, on_track: float =
 # ── reading answers ──────────────────────────────────────────────────
 
 
+def test_parse_check_keeps_jevs_spread_over_the_options():
+    resp = _resp(probs={"producing": 0.7, "checking": 0.3})
+    resp["answers"][jc.Q_NEXT]["probabilities"] = {"continue": 0.6, "finish": 0.4}
+    check = jc.parse_check(resp, step=6)
+    assert check.stage_probs == {"producing": 0.7, "checking": 0.3}
+    assert check.next_probs == {"continue": 0.6, "finish": 0.4}
+
+
 def test_parse_check_reads_stage_on_track_and_next():
     check = jc.parse_check(_resp(), step=6, latency_ms=120, trigger="steps")
     assert check.stage == 3.0 and check.stage_name == "producing"
@@ -178,14 +186,15 @@ async def test_ask_check_and_relation_go_through_jev(monkeypatch):
     async def ask(state, questions):
         asked.append(questions)
         if jc.Q_RELATION in questions:
-            return {"answers": {jc.Q_RELATION: {"type": "choice", "choice": "amends", "confidence": 0.8}}}
+            return {"answers": {jc.Q_RELATION: {"type": "choice", "choice": "amends", "confidence": 0.8,
+                                                "probabilities": {"amends": 0.8, "new_task": 0.15}}}}
         return _resp(nxt="refocus", on_track=0.1)
 
     monkeypatch.setattr(jc, "ready", ready)
     monkeypatch.setattr(jc, "_ask", ask)
     check = await jc.ask_check({"task": "x"}, step=6, trigger="steps")
     assert check.next == "refocus" and check.step == 6
-    assert await jc.ask_relation({"x": 1}) == ("amends", 0.8)
+    assert await jc.ask_relation({"x": 1}) == ("amends", 0.8, {"amends": 0.8, "new_task": 0.15})
     assert set(asked[0]) == {jc.Q_STAGE, jc.Q_ON_TRACK, jc.Q_NEXT}
 
 
@@ -200,7 +209,7 @@ async def test_jev_errors_mean_no_check(monkeypatch):
     monkeypatch.setattr(jc, "ready", ready)
     monkeypatch.setattr(jc, "_ask", boom)
     assert await jc.ask_check({}, step=1, trigger="steps") is None
-    assert await jc.ask_relation({}) == (None, None)
+    assert await jc.ask_relation({}) == (None, None, {})
 
 
 def test_questions_validate():

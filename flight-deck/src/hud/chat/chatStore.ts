@@ -706,7 +706,7 @@ function bind(sock: AgentChatWS): void {
   on('status', onStatus)
   on('narration', (d) => {
     const t = str(d.text).trim()
-    if (!t) return
+    if (!t || d.source === 'jev') return  // Jev's decisions: the web chat's, not the glasses'
     touch()
     set({ narration: t.length > 200 ? t.slice(0, 199) + '…' : t })
   })

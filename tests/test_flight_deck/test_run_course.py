@@ -235,3 +235,40 @@ def test_the_feed_gets_the_stage_and_an_off_track_flag(monkeypatch):
     assert msg == "Researcher · stage 2 of 5 · gathering · on track 0.10 · next: refocus"
     assert extra["course_stage"] == 2.0 and extra["p_on_track"] == 0.1 and extra["group"] == "A"
     assert events[2][2]["ok"] is False
+
+
+async def test_a_workers_jev_narration_is_not_its_own_words():
+    from websockets.asyncio.server import serve
+
+    async def handler(ws):
+        await ws.send(json.dumps({"type": "welcome"}))
+        await ws.send(json.dumps({"type": "replay_done"}))
+        async for raw in ws:
+            if json.loads(raw).get("type") != "chat":
+                continue
+            await ws.send(json.dumps({"type": "narration", "text": "Jev checked the course.", "source": "jev"}))
+            await ws.send(json.dumps({"type": "narration", "text": "Reading the sources."}))
+            await ws.send(json.dumps({"type": "chat_message", "role": "assistant", "content": "done"}))
+            await ws.send(json.dumps({"type": "status", "status": "idle"}))
+
+    async def go():
+        async with serve(handler, "127.0.0.1", 0) as srv:
+            return await b._send_chat_and_collect(srv.sockets[0].getsockname()[1], "", "go", 5.0)
+
+    _out, actions = await asyncio.create_task(go(), context=contextvars.Context())
+    assert [a["detail"] for a in actions if a["tool"] == "narration"] == ["Reading the sources."]
+
+
+async def test_the_channel_relay_skips_jev_narration(monkeypatch):
+    from captain_claw.flight_deck import glasses_bridge as gb
+
+    sent: list[dict] = []
+
+    async def broadcast(ch, event):
+        sent.append(event)
+
+    monkeypatch.setattr(gb, "_broadcast", broadcast)
+    ch = SimpleNamespace()
+    await gb._forward_agent_msg(ch, {"type": "narration", "text": "Jev checked the course.", "source": "jev"})
+    await gb._forward_agent_msg(ch, {"type": "narration", "text": "Reading the sources."})
+    assert [e.get("text") for e in sent if e.get("type") == "narration"] == ["Reading the sources."]
