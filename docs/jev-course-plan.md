@@ -261,6 +261,8 @@ the bundle.
 
 ## 5. Tracking whether it helps
 
+**Built (phase 4):** each turn's record is kept on the anchor (`turn_stats`, newest 10) and in the closed summary, logged as `Task course turn`, and shown on the monitor as `step=course_turn`; `scripts/course_report.py` summarises any number of `sessions.db` files read-only, counts only. A per-turn usage-DB column was not needed: the record lives with the anchor.
+
 **Recorded per check:** stage, p_on_track, next, the line shown, latency.
 
 **Recorded per turn**, in the existing usage record and `process.log`:

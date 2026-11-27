@@ -9,6 +9,7 @@ validation have been moved to ``AgentCompletionMixin``.
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from typing import Any, AsyncIterator, Callable
 
 from captain_claw.agent_scale_detection_mixin import _build_scale_advisory
@@ -1434,11 +1435,69 @@ class AgentOrchestrationMixin:
         if self.session is not None:
             watch.scan_idx = len(self.session.messages)
 
-    def _course_finish(self) -> None:
+    def _course_finish(
+        self, text: Any = "", success: bool = True, turn_usage: dict[str, Any] | None = None,
+    ) -> None:
+        """End of turn: stop the check in flight, and keep the turn's record
+        on the anchor (outcome, steps, tokens, checks, and whether each
+        corrective line was followed) — docs/jev-course-plan.md §5."""
         watch = getattr(self, "_course_watch", None)
         if watch is not None:
             watch.cancel()
         self._task_course_live = None
+        try:
+            self._course_record_turn(watch, text, success, turn_usage)
+        except Exception:  # noqa: BLE001 — tracking never fails a turn
+            log.debug("Course turn record failed", exc_info=True)
+
+    def _course_record_turn(
+        self, watch: Any, text: Any, success: bool, turn_usage: dict[str, Any] | None,
+    ) -> None:
+        start_idx = getattr(self, "last_turn_start_idx", None)
+        if watch is None or not isinstance(start_idx, int) or not self.session:
+            return
+        metadata = self.session.metadata
+        if not isinstance(metadata, dict) or task_course.current(metadata) is None:
+            return
+        targets = task_course.turn_targets(self.session.messages[start_idx:])
+        if not targets:
+            return  # a plain chat reply: nothing to track
+        usage = turn_usage or {}
+        tokens = int(usage.get("total_tokens") or 0) or (
+            int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0))
+        start = getattr(self, "_task_course_start", None)
+        lines = [
+            {"line": key, "at": at, "followed": task_course.followed(targets, at)}
+            for key, at in watch.line_marks
+        ]
+        frame = getattr(self, "_course_frame", None)
+        stats = {
+            "at": datetime.now(UTC).isoformat(),
+            "outcome": task_course.outcome(text, success),
+            "relation": getattr(start, "relation", ""),
+            "tool_steps": watch.tool_steps,
+            "tool_calls": len(targets),
+            "tokens": tokens,
+            "checks": watch.checks_done,
+            "jev": watch.checks_done > 0,
+            "worker": isinstance(frame, dict),
+            "lines": lines,
+        }
+        if watch.latest is not None and watch.latest.stage is not None:
+            stats["final_stage"] = watch.latest.stage
+        task_course.record_turn(metadata, stats)
+        log.info("Task course turn", **{k: v for k, v in stats.items() if k != "lines"},
+                 lines=len(lines), followed=sum(1 for ln in lines if ln["followed"] is True))
+        self._emit_tool_output(
+            "completion_gate",
+            {"step": "course_turn", **stats},
+            (
+                "step=course_turn\n"
+                f"outcome={stats['outcome']}\ntool_steps={stats['tool_steps']}\n"
+                f"tokens={tokens}\nchecks={stats['checks']}\n"
+                f"lines={len(lines)}\nfollowed={sum(1 for ln in lines if ln['followed'] is True)}"
+            ),
+        )
 
     async def _course_tick(self, iteration: int, tools_executed: int, turn_start_idx: int) -> None:
         """Once per loop step, before the model call: count the step, apply a
@@ -1476,6 +1535,8 @@ class AgentOrchestrationMixin:
                 if line_key:
                     watch.lines_shown.append(line_key)
                     live["line"] = jev_course.LINES[line_key]
+                    watch.line_marks.append(
+                        (line_key, len(task_course.turn_targets(messages[turn_start_idx:]))))
                 record = check.record(line_key)
                 task_course.record_check(self.session.metadata, record)
                 self._emit_tool_output(
@@ -2015,7 +2076,7 @@ class AgentOrchestrationMixin:
             # steps, stuck, cancelled, a guard) still owes the person the
             # answer that was finished before the step began.
             text, success = self._extra_work_rescue(text, success)
-            self._course_finish()
+            self._course_finish(text, success, turn_usage)
             self._emit_thinking("", phase="done")
             self._turn_request_messages = None   # held for the made-up ID check only
             if planning_pipeline is not None:
