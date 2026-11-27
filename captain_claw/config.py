@@ -471,6 +471,11 @@ class JevToolConfig(BaseModel):
     # When a guard refuses a repeated call, ask Jev what the agent should do
     # next (captain_claw/jev_block_review.py).
     review_blocks: bool = True
+    # Keep long turns on course: every few steps Jev reads the task anchor
+    # and the recent steps, and the agent gets the stage and, when Jev is
+    # confident, one refocus/finish/ask line (captain_claw/jev_course.py).
+    # The agent's Settings switch (course_check.txt) overrides it.
+    course_check: bool = True
     # When a reply names no picture file but the turn saved pictures, ask Jev
     # whether the reply hands one over, and which (captain_claw/reply_images.py).
     find_images: bool = True

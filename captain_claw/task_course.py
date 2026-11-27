@@ -269,6 +269,16 @@ class TurnStart:
     automated: bool = False
     turn_msg: int | None = None
     before: dict[str, Any] = field(default_factory=dict)
+    after: tuple[Any, ...] = ()
+    prev: PreviousTurn | None = None
+
+
+def _signature(metadata: dict[str, Any]) -> tuple[Any, ...]:
+    """What identifies the anchor's state after a turn began (a course check
+    being recorded doesn't change it)."""
+    course = metadata.get(KEY) if isinstance(metadata.get(KEY), dict) else {}
+    return (course.get("id"), course.get("turns"), course.get("updated_at"),
+            course.get("status"), len(course.get("amendments") or []))
 
 
 def begin_turn(
@@ -292,7 +302,7 @@ def begin_turn(
     }
     course = metadata.get(KEY) if isinstance(metadata.get(KEY), dict) else None
     if not words:
-        return TurnStart(NOT_A_TASK, words, automated, turn_msg, before)
+        return TurnStart(NOT_A_TASK, words, automated, turn_msg, before, _signature(metadata), prev)
     if relation not in RELATIONS:
         relation = NEW_TASK if automated else guess_relation(
             words, course, prev=prev, now=now, topic_switch=topic_switch,
@@ -334,7 +344,7 @@ def begin_turn(
         course["turns"] = int(course.get("turns", 0) or 0) + 1
         course["updated_at"] = _iso(now)
         metadata[KEY] = course
-    return TurnStart(relation, words, automated, turn_msg, before)
+    return TurnStart(relation, words, automated, turn_msg, before, _signature(metadata), prev)
 
 
 def redo_turn(metadata: dict[str, Any], start: TurnStart, relation: str) -> TurnStart:
@@ -342,6 +352,8 @@ def redo_turn(metadata: dict[str, Any], start: TurnStart, relation: str) -> Turn
     ``relation`` (Jev's answer). A no-op when it agrees."""
     if relation not in RELATIONS or relation == start.relation:
         return start
+    if start.after and _signature(metadata) != start.after:
+        return start  # a later turn already moved the anchor on
     current = metadata.get(KEY) if isinstance(metadata.get(KEY), dict) else {}
     kept_checks = list(current.get("checks") or []) if relation != NEW_TASK else []
     for key, value in start.before.items():
@@ -350,8 +362,8 @@ def redo_turn(metadata: dict[str, Any], start: TurnStart, relation: str) -> Turn
         else:
             metadata[key] = copy.deepcopy(value)
     redone = begin_turn(
-        metadata, start.message, relation=relation, automated=start.automated,
-        turn_msg=start.turn_msg,
+        metadata, start.message, relation=relation, prev=start.prev,
+        automated=start.automated, turn_msg=start.turn_msg,
     )
     redone.before = start.before
     course = metadata.get(KEY)

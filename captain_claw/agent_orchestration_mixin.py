@@ -19,7 +19,8 @@ from captain_claw.agent_stuck import (
     budget_partial,
 )
 from captain_claw import (
-    drive, fabrication_guard, jev_progress, loop_guards, mail_authority, msg_origin, task_course,
+    drive, fabrication_guard, jev_course, jev_progress, loop_guards, mail_authority, msg_origin,
+    task_course,
     turn_deliverables,
 )
 from captain_claw.config import get_config
@@ -1328,15 +1329,17 @@ class AgentOrchestrationMixin:
     def _task_course_begin(self, user_input: str, *, automated: bool = False) -> None:
         """Update the session's task anchor for this turn's message
         (task_course). Runs right after the message joins the session; never
-        fails the turn."""
+        fails the turn. With Jev on, Jev's answer on how the message relates
+        to the open task replaces the rule-based guess (in the background)."""
         self._task_course_start = None
         self._task_course_live = None
+        self._course_watch = jev_course.TurnWatch(max_checks=self._course_max_checks())
         if not self.session or not isinstance(self.session.metadata, dict):
             return
         try:
             messages = self.session.messages
             prev = task_course.previous_turn(messages[:-1])
-            self._task_course_start = task_course.begin_turn(
+            start = task_course.begin_turn(
                 self.session.metadata,
                 user_input,
                 prev=prev,
@@ -1344,8 +1347,160 @@ class AgentOrchestrationMixin:
                 automated=automated,
                 turn_msg=len(messages) - 1,
             )
+            self._task_course_start = start
         except Exception:  # noqa: BLE001 — the anchor is a help, never a blocker
             log.debug("Task anchor update failed", exc_info=True)
+            return
+        if automated or not jev_course.enabled():
+            return
+        before = start.before.get(task_course.KEY)
+        if not task_course.is_open(before) or task_course.is_continue(start.message):
+            return
+        last_reply = ""
+        for msg in reversed(messages[:-1]):
+            if isinstance(msg, dict) and msg.get("role") == "assistant" and str(msg.get("content") or "").strip():
+                last_reply = str(msg.get("content"))
+                break
+        state = jev_course.relation_state(before, start.message, last_reply)
+        metadata = self.session.metadata
+        watch = self._course_watch
+
+        async def _relation() -> None:
+            choice, conf = await jev_course.ask_relation(state)
+            if choice is None:
+                return
+            applied = False
+            if (conf or 0.0) >= jev_course.RELATION_CONFIDENCE:
+                redone = task_course.redo_turn(metadata, start, choice)
+                applied = redone is not start
+                if applied and getattr(self, "_task_course_start", None) is start:
+                    self._task_course_start = redone
+            watch.relation_result = (choice, conf, start.relation, applied)
+            log.info("Jev course relation", relation=choice, confidence=conf,
+                     guess=start.relation, applied=applied)
+
+        try:
+            watch.relation_task = asyncio.get_running_loop().create_task(_relation())
+        except RuntimeError:
+            pass
+
+    def _course_max_checks(self) -> int:
+        """Checks a turn may make: the default, or a worker's share of its
+        run's cap (set from the dispatch frame's course)."""
+        frame = getattr(self, "_course_frame", None)
+        if isinstance(frame, dict) and isinstance(frame.get("max_checks"), int):
+            return max(0, min(jev_course.MAX_CHECKS_PER_TURN, frame["max_checks"]))
+        return jev_course.MAX_CHECKS_PER_TURN
+
+    def _course_request(self, user_input: str) -> str:
+        """The request a Jev judge should read: the task anchor (with what
+        was added since and the latest message) when one is open — a
+        "continue" turn's own message says nothing — else the turn's text."""
+        text = str(user_input or "")
+        try:
+            course = task_course.current(getattr(self.session, "metadata", None))
+            if course is None:
+                return text
+            plain = (not course.get("goal") and not course.get("amendments")
+                     and not course.get("latest")
+                     and course.get("anchor") == task_course.person_words(text))
+            # A plain turn reads as it always did; the anchor only when it
+            # says more than the turn's own message.
+            return text if plain else (task_course.note(course) or text)
+        except Exception:
+            return text
+
+    def _course_mark_folded(self) -> None:
+        """A fold or compaction just shrank the turn's context: the next tick
+        checks the course, and re-reads the session from its new end."""
+        watch = getattr(self, "_course_watch", None)
+        if watch is None:
+            return
+        watch.folded = True
+        if self.session is not None:
+            watch.scan_idx = len(self.session.messages)
+
+    def _course_finish(self) -> None:
+        watch = getattr(self, "_course_watch", None)
+        if watch is not None:
+            watch.cancel()
+        self._task_course_live = None
+
+    async def _course_tick(self, iteration: int, tools_executed: int, turn_start_idx: int) -> None:
+        """Once per loop step, before the model call: count the step, apply a
+        finished course check (stage line, at most one corrective line for
+        one call), and start the next check when one is due. Never raises."""
+        watch = getattr(self, "_course_watch", None)
+        if watch is None or not self.session or not isinstance(self.session.metadata, dict):
+            return
+        try:
+            if watch.relation_result is not None:
+                choice, conf, guess, applied = watch.relation_result
+                watch.relation_result = None
+                self._emit_tool_output(
+                    "completion_gate",
+                    {"step": "jev_course_relation", "relation": choice,
+                     "confidence": None if conf is None else round(conf, 3),
+                     "guess": guess, "applied": applied},
+                    (f"step=jev_course_relation\nrelation={choice}\nguess={guess}\n"
+                     f"applied={applied}\njudge=jev"),
+                )
+            messages = self.session.messages
+            if watch.scan_idx is None:
+                watch.scan_idx = turn_start_idx
+            if tools_executed != watch.tools_seen:
+                watch.tools_seen = tools_executed
+                failed, ok = jev_course.failures_in(messages[watch.scan_idx:])
+                watch.note_tool_step(failed, ok)
+            watch.scan_idx = len(messages)
+
+            live = dict(getattr(self, "_task_course_live", None) or {})
+            live.pop("line", None)
+            check = watch.collect()
+            if check is not None:
+                line_key = jev_course.corrective(check, watch.lines_shown)
+                if line_key:
+                    watch.lines_shown.append(line_key)
+                    live["line"] = jev_course.LINES[line_key]
+                record = check.record(line_key)
+                task_course.record_check(self.session.metadata, record)
+                self._emit_tool_output(
+                    "completion_gate",
+                    {"step": "jev_course", "at_step": check.step,
+                     **{k: v for k, v in record.items() if k not in ("step", "at")}},
+                    (
+                        "step=jev_course\n"
+                        f"at_step={check.step}\ntrigger={check.trigger}\n"
+                        f"stage={check.stage}\np_on_track={check.on_track}\n"
+                        f"next={check.next}\nline={line_key or '-'}\njudge=jev"
+                    ),
+                )
+                status = jev_course.status_text(check)
+                if status:
+                    self._emit_thinking(status, tool="course", phase="tool")
+            if watch.latest is not None:
+                stage = jev_course.stage_text(watch.latest, watch.tool_steps - watch.latest.step)
+                if stage:
+                    live["stage"] = stage
+            self._task_course_live = live or None
+
+            trigger = watch.due()
+            course = task_course.current(self.session.metadata)
+            if trigger and course is not None and jev_course.enabled():
+                state = jev_course.check_state(
+                    course, messages[turn_start_idx:], steps_used=iteration,
+                )
+                step = watch.tool_steps
+
+                async def _check() -> jev_course.Check | None:
+                    if not await jev_course.ready():
+                        watch.disabled = True
+                        return None
+                    return await jev_course.ask_check(state, step=step, trigger=trigger)
+
+                watch.started(asyncio.get_running_loop().create_task(_check()))
+        except Exception:  # noqa: BLE001 — a help, never a blocker
+            log.debug("Course tick failed", exc_info=True)
 
     def _turn_made_no_tool_call(self, turn_start_idx: int) -> bool:
         """No tool ran or was attempted in this turn: no call stored (a
@@ -1845,6 +2000,7 @@ class AgentOrchestrationMixin:
             # steps, stuck, cancelled, a guard) still owes the person the
             # answer that was finished before the step began.
             text, success = self._extra_work_rescue(text, success)
+            self._course_finish()
             self._emit_thinking("", phase="done")
             self._turn_request_messages = None   # held for the made-up ID check only
             if planning_pipeline is not None:
@@ -2569,6 +2725,9 @@ class AgentOrchestrationMixin:
                     log.warning("Saving a cancelled turn failed", exc_info=True)
                 return finish("Request cancelled by user.", success=False)
 
+            # ── Course check (task anchor + Jev) ─────────────────
+            await self._course_tick(iteration, _tools_executed_count, turn_start_idx)
+
             # ── Pipeline runtime tick ─────────────────────────────
             if planning_pipeline is not None:
                 runtime_update = self._tick_pipeline_runtime(
@@ -2620,23 +2779,33 @@ class AgentOrchestrationMixin:
                         )
                 judged_by = "progress" if extend else ""
                 jev_p: float | None = None
+                _jev_judge = "jev"
                 if not extend and jev_ready:
-                    self._emit_thinking(
-                        "Step budget used up — asking Jev whether the work is still moving",
-                        tool="progress", phase="tool",
-                    )
-                    jev_p = await jev_progress.progress_probability(
-                        user_input,
-                        self.session.messages[turn_start_idx:],
-                        steps_used=iteration,
-                        step_budget=soft_turn_iterations,
-                    )
-                    extend = jev_p is not None and jev_p >= jev_progress.THRESHOLD
+                    # A course check from the last few steps already answers
+                    # "is it still moving toward the task?" — no second call.
+                    _watch = getattr(self, "_course_watch", None)
+                    _fresh = _watch.fresh() if _watch is not None else None
+                    if _fresh is not None and _fresh.on_track is not None:
+                        jev_p = _fresh.on_track
+                        extend = jev_course.budget_verdict(_fresh)
+                        _jev_judge = "jev_course"
+                    else:
+                        self._emit_thinking(
+                            "Step budget used up — asking Jev whether the work is still moving",
+                            tool="progress", phase="tool",
+                        )
+                        jev_p = await jev_progress.progress_probability(
+                            self._course_request(user_input),
+                            self.session.messages[turn_start_idx:],
+                            steps_used=iteration,
+                            step_budget=soft_turn_iterations,
+                        )
+                        extend = jev_p is not None and jev_p >= jev_progress.THRESHOLD
                 jev_lines = (
-                    f"\njudge=jev\np_progressing={jev_p:.2f}" if jev_p is not None else ""
+                    f"\njudge={_jev_judge}\np_progressing={jev_p:.2f}" if jev_p is not None else ""
                 )
                 jev_data = (
-                    {"judge": "jev", "p_progressing": round(jev_p, 3)}
+                    {"judge": _jev_judge, "p_progressing": round(jev_p, 3)}
                     if jev_p is not None else {}
                 )
                 if extend:
@@ -2854,7 +3023,8 @@ class AgentOrchestrationMixin:
             # Governed: fold older results before the request outgrows ~80%
             # of the real window (one batch, then append-only again).
             if self._governor_on():
-                self._maybe_fold_turn_context(turn_start_idx)
+                if self._maybe_fold_turn_context(turn_start_idx):
+                    self._course_mark_folded()
             # The gate feedback rides after the build: the governed budget
             # leaves room for it.
             self._pending_feedback_tokens = (
@@ -3156,6 +3326,7 @@ class AgentOrchestrationMixin:
                             turn_user_msg, turn_start_idx,
                         )
                         self.last_turn_start_idx = turn_start_idx
+                        self._course_mark_folded()
                         messages = self._build_messages(
                             tool_messages_from_index=turn_start_idx,
                             query=effective_user_input,

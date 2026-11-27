@@ -1,6 +1,6 @@
 # Keep on course: a task anchor for every agent, and a Jev course check on top
 
-**Status:** plan, nothing built. Written 2026-11-27.
+**Status:** being built, one PR per phase. Written 2026-11-27.
 
 ## Why
 
@@ -145,7 +145,7 @@ which only knows English.
 
 | Name | Type | Meaning |
 |---|---|---|
-| `stage` | score, 5 levels | 1 orienting · 2 gathering · 3 producing · 4 checking · 5 delivered |
+| `stage` | choice, 5 options | orienting · gathering · producing · checking · delivered — a choice rather than a score, so the answer reads without guessing the score's level numbering; the stage is the probability-weighted 1–5 |
 | `on_track` | noul | Are the recent steps serving the anchor (not a side quest, not a different question, not redoing finished work)? |
 | `next` | choice | `continue` · `refocus` · `finish` · `ask_person` |
 
