@@ -1923,6 +1923,11 @@ class AgentOrchestrationMixin:
         self._delivery_check_done: bool = False
         self._caveat_check_done: bool = False
         self._snippet_check_done: bool = False
+        # The format check reads the files changed on disk since this moment.
+        self._format_check_done: bool = False
+        import time as _time
+
+        self._turn_started_wall: float = _time.time()
         # Drive's extra-work step: None until the asked work is delivered at
         # Ambitious, then its state for the rest of the turn.
         self._extra_work: dict[str, Any] | None = None
