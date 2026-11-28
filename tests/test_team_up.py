@@ -898,3 +898,108 @@ def test_cost_in_dollars_when_the_price_is_known(monkeypatch):
         h.model, h.usage = "known", {"prompt_tokens": 10}
     assert team.usd() == 1.0
     assert team.snapshot()["helpers"][0]["usd"] == 0.5 and team.snapshot()["usd"] == 1.0
+
+
+# ── P3: learning once over the team's work, recalling it later ───────────
+
+def _insights_on(monkeypatch, enabled=True):
+    import captain_claw.config as config_mod
+    import captain_claw.insights as insights
+
+    calls: list[tuple] = []
+
+    async def fake_extract(agent, *, trigger="periodic", tool_context=None):
+        calls.append((agent, trigger, tool_context))
+        return []
+
+    monkeypatch.setattr(insights, "extract_insights", fake_extract)
+    cfg = SimpleNamespace(insights=SimpleNamespace(enabled=enabled, auto_extract=True),
+                          session=SimpleNamespace(automation_lane=""))
+    monkeypatch.setattr(config_mod, "get_config", lambda: cfg)
+    return calls
+
+
+def test_team_digest_has_results_and_remember_notes():
+    team, _a1, _a2 = _helper_agent()
+    team.helpers[0].state, team.helpers[0].result = "done", "Acme  is\n€389"
+    team.helpers[1].state, team.helpers[1].error = "failed", "timeout"
+    team.board.add("remember", "h1", "Prices", "Acme quotes need a VAT id")
+    digest = team_up.team_digest(team)
+    assert "- Prices (g): Acme is €389" in digest
+    assert "- Reviews: failed — timeout" in digest
+    assert "Prices: Acme quotes need a VAT id" in digest
+    assert len(digest) <= team_up.DIGEST_CHARS
+
+
+@pytest.mark.asyncio
+async def test_learning_runs_once_over_the_team_after_the_finishing_turn(server, monkeypatch):
+    calls = _insights_on(monkeypatch)
+    team = await _done_team(server, monkeypatch)
+    await _until(lambda: team.learned_at > 0)
+    assert len(calls) == 1
+    agent, trigger, context = calls[0]
+    assert agent is server.agent and trigger == "team"
+    assert context.startswith("Team up 'Compare'") and "- Prices" in context
+    assert server.agent.session.metadata["team_runs"][-1]["learned_at"] == team.learned_at
+    # Helpers never learn: only the lead was asked.
+    assert all(c[0] is server.agent for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_no_learning_when_insights_are_off_or_the_team_was_stopped(monkeypatch):
+    calls = _insights_on(monkeypatch, enabled=False)
+    srv = FakeServer()
+    sm = FakeSM()
+    import captain_claw.session as session_mod
+    import captain_claw.web.chat_handler as ch
+
+    monkeypatch.setattr(session_mod, "get_session_manager", lambda: sm)
+
+    async def fake_handle_chat(srv_, ws, content, **kw):
+        return True
+
+    monkeypatch.setattr(ch, "handle_chat", fake_handle_chat)
+    team_up.bind_server(srv)
+    team, _ = await team_up.propose(srv.agent, "Compare", _parts(2))
+    await team_up.start(team)
+    await _until(lambda: team.state == "done")
+    await asyncio.sleep(0.1)
+    assert calls == [] and team.learned_at == 0
+
+
+@pytest.mark.asyncio
+async def test_recall_what_an_earlier_team_found(server, monkeypatch):
+    team = await _done_team(server, monkeypatch)
+    for s in server.sm.created:  # each helper's own turn, after the fork
+        s.messages += [{"role": "user", "content": "brief"},
+                       {"role": "assistant", "content": "", "tool_calls": [{"id": "x"}]},
+                       {"role": "tool", "content": "r"},
+                       {"role": "assistant", "content": "FULL RESULT " + "x" * 3000}]
+    monkeypatch.setattr(team_up, "_TEAMS", {})  # after a restart: records only
+    overview = await team_up.recall_text(server.agent)
+    assert "'Compare' — done" in overview and "- Prices (done): Result for" in overview
+    one = await team_up.recall_text(server.agent, "prices")
+    assert one.startswith("Prices — part of the team 'Compare'")
+    assert "FULL RESULT" in one and len(one) > 3000
+    found = await team_up.recall_text(server.agent, query="result")
+    assert found.startswith("About 'result'") and "Prices" in found
+    assert "No helper called" in await team_up.recall_text(server.agent, "Nobody")
+    assert "Nothing about" in await team_up.recall_text(server.agent, query="zebra")
+    assert team.id  # the record outlived the team in memory
+
+    from captain_claw.tools.team import TeamTool
+
+    res = await TeamTool().execute(action="recall", helper="Reviews", _agent=server.agent)
+    assert res.success and res.content.startswith("Reviews — part of the team")
+    res = await TeamTool().execute(action="status", _agent=server.agent)
+    assert res.success and res.content.startswith("Teams in this conversation")
+
+
+@pytest.mark.asyncio
+async def test_recall_with_no_team_yet():
+    agent = FakeAgent()
+    assert "No team has worked" in await team_up.recall_text(agent)
+    from captain_claw.tools.team import TeamTool
+
+    res = await TeamTool().execute(action="status", _agent=agent)
+    assert not res.success and "no team" in res.error

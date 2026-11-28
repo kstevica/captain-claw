@@ -309,6 +309,7 @@ class Team:
     lead_usage: dict = field(default_factory=dict)
     routed: set = field(default_factory=set)  # ask ids handed to the lead
     fork_len: int = 0          # how many lead messages the helpers inherited
+    learned_at: float = 0.0    # when post-turn learning ran over the team's work
 
     def used(self) -> int:
         return sum(h.tokens for h in self.helpers) + self.lead_tokens
@@ -1493,6 +1494,8 @@ async def _watch(team: Team) -> None:
         _clear_lead_note(team)
     _emit_team(team)
     _save_record(team)
+    if delivered and team.state == "done":
+        asyncio.get_running_loop().create_task(_learn(team), name=f"team-{team.id}-learn")
 
 
 def _clear_lead_note(team: Team) -> None:
@@ -1649,7 +1652,7 @@ def _save_record(team: Team) -> None:
         "note": team.note, "created_at": team.created_at, "started_at": team.started_at,
         "ended_at": team.ended_at, "budget": team.budget, "used": team.used(),
         "lead_tokens": team.lead_tokens, "usd": team.usd(), "fork_len": team.fork_len,
-        "delivered": team.delivered,
+        "delivered": team.delivered, "learned_at": team.learned_at,
         "helpers": [{"id": h.id, "name": h.name, "goal": h.goal, "produces": h.produces, "state": h.state,
                      "session_id": h.session_id, "tokens": h.tokens, "usage": dict(h.usage),
                      "model": h.model, "step_count": h.step_count, "tool_count": h.tool_count,
@@ -1731,6 +1734,176 @@ def record_snapshot(record: dict[str, Any], lane: str = "") -> dict[str, Any]:
         "helpers": helpers, "board": [dict(e) for e in record.get("board") or [] if isinstance(e, dict)],
         "from_record": True,
     }
+
+
+# ── Learning once over the team's work, and recalling it later (P3) ─────
+
+DIGEST_CHARS = 3000
+LEARN_WAIT_SECONDS = 600.0
+
+
+def team_digest(team: Team) -> str:
+    """What the team found, short: the material post-turn learning reads once
+    (the chat's own learning sees only the last messages, each cut short)."""
+    lines = [f"Team up '{team.title}' — {len(team.helpers)} helpers, copies of the agent, worked on parts of "
+             "the user's request. What they found:"]
+    share = max(300, (DIGEST_CHARS - 600) // max(1, len(team.helpers)))
+    for h in team.helpers:
+        if h.state == "done" and h.result:
+            text = re.sub(r"\s+", " ", h.result).strip()
+            lines.append(f"- {h.name} ({h.goal[:120]}): {text[:share]}")
+        else:
+            lines.append(f"- {h.name}: {h.state}" + (f" — {h.error[:120]}" if h.error else ""))
+    notes = team.board.remember_notes()
+    if notes:
+        lines.append("Notes the helpers marked worth remembering:")
+        lines += [f"- {e['who_name']}: {e['text'][:300]}" for e in notes[-8:]]
+    return "\n".join(lines)[:DIGEST_CHARS]
+
+
+async def _learn(team: Team) -> None:
+    """Post-turn learning, once, over the team's work — never per helper.
+    Waits for the finishing turn (and its own learning) to end first."""
+    lead = team.lead
+    server = _SERVER
+    try:
+        from captain_claw import insights
+        from captain_claw.config import get_config
+
+        cfg = get_config()
+        if not (cfg.insights.enabled and cfg.insights.auto_extract):
+            return
+        deadline = time.monotonic() + LEARN_WAIT_SECONDS
+        while time.monotonic() < deadline and (
+                (server is not None and _lead_busy(server, team)) or getattr(lead, insights._ATTR_RUNNING, False)):
+            await asyncio.sleep(1.0)
+        if getattr(lead, insights._ATTR_RUNNING, False):
+            return
+        setattr(lead, insights._ATTR_RUNNING, True)
+        try:
+            await insights.extract_insights(lead, trigger="team", tool_context=team_digest(team))
+        finally:
+            setattr(lead, insights._ATTR_RUNNING, False)
+        team.learned_at = _now()
+        _save_record(team)
+    except Exception as exc:  # noqa: BLE001 — learning is best effort
+        log.debug("Team up: learning over the team skipped", team=team.id, error=str(exc))
+
+
+RECALL_RESULT_CHARS = 12_000
+
+
+def _ago(ts: float) -> str:
+    if not ts:
+        return ""
+    return _duration(_now() - ts) + " ago"
+
+
+def _helper_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
+    return [h for h in record.get("helpers") or [] if isinstance(h, dict)]
+
+
+def _final_answer(messages: list[Any]) -> str:
+    """A helper's result as its session holds it: its last plain answer."""
+    for msg in reversed(list(messages or [])):
+        if isinstance(msg, dict) and msg.get("role") == "assistant" and not msg.get("tool_calls"):
+            text = _text_of(msg.get("content")).strip()
+            if text:
+                return text
+    return ""
+
+
+def _words(text: str) -> list[str]:
+    return [w for w in re.findall(r"[\w€$£%.-]+", str(text or "").lower()) if len(w) > 2]
+
+
+async def recall_text(agent: Any, helper_ref: str = "", query: str = "") -> str:
+    """What earlier teams in this conversation found (the team records on the
+    agent's session): an overview, one helper's full result, or a search."""
+    records = list(reversed(records_of(getattr(agent, "session", None))))
+    if not records:
+        return "No team has worked in this conversation yet (or its record is gone)."
+    ref = str(helper_ref or "").strip().lower()
+    words = _words(query)
+
+    def _matches_title(r: dict[str, Any]) -> bool:
+        title = str(r.get("title") or "").lower()
+        return not words or any(w in title for w in words)
+
+    if ref:
+        for r in [x for x in records if _matches_title(x)] or records:
+            h = next((x for x in _helper_rows(r) if ref in (str(x.get("id", "")).lower(),
+                                                              str(x.get("name", "")).lower())), None)
+            if h is None:
+                continue
+            full = ""
+            session_id = str(h.get("session_id") or "")
+            if session_id:
+                live = find(str(r.get("id") or ""))
+                live_h = live.helper(str(h.get("id") or "")) if live is not None else None
+                session = getattr(getattr(live_h, "agent", None), "session", None)
+                if session is None:
+                    try:
+                        from captain_claw.session import get_session_manager
+
+                        session = await get_session_manager().load_session(session_id)
+                    except Exception:
+                        session = None
+                if session is not None:
+                    own = list(getattr(session, "messages", None) or [])[int(r.get("fork_len") or 0):]
+                    full = _final_answer(own)
+            result = full or str(h.get("result") or "")
+            lines = [f"{h.get('name')} — part of the team '{r.get('title')}' ({r.get('state')}, "
+                     f"{_ago(float(r.get('ended_at') or r.get('started_at') or 0))})",
+                     f"Part: {h.get('goal', '')}", f"State: {h.get('state', '')}"]
+            if result:
+                cut = len(result) > RECALL_RESULT_CHARS
+                lines += ["Result:", result[:RECALL_RESULT_CHARS] + (" …" if cut else "")]
+            elif h.get("error"):
+                lines.append(f"Error: {h['error']}")
+            if h.get("files"):
+                lines.append("Files: " + ", ".join(h["files"]))
+            posts = [e for e in r.get("board") or [] if isinstance(e, dict) and e.get("who") == h.get("id")
+                     and e.get("kind") in ("post", "remember")]
+            if posts:
+                lines.append("Its posts on the board:")
+                lines += [f"- {e.get('kind')}: {str(e.get('text') or '')[:300]}" for e in posts[-6:]]
+            return "\n".join(lines)
+        names = sorted({str(h.get("name")) for r in records for h in _helper_rows(r)})
+        return f"No helper called {helper_ref!r} in this conversation's teams. Helpers: {', '.join(names)}."
+
+    if words:
+        hits: list[tuple[int, str]] = []
+        for r in records:
+            title = str(r.get("title") or "")
+            for h in _helper_rows(r):
+                text = str(h.get("result") or "")
+                score = sum(text.lower().count(w) for w in words)
+                if score:
+                    i = min((text.lower().find(w) for w in words if w in text.lower()), default=0)
+                    snippet = text[max(0, i - 120): i + 300].replace("\n", " ")
+                    hits.append((score, f"- '{title}' · {h.get('name')}: …{snippet}…"))
+            for e in r.get("board") or []:
+                if not isinstance(e, dict):
+                    continue
+                text = str(e.get("text") or "")
+                score = sum(text.lower().count(w) for w in words)
+                if score:
+                    hits.append((score, f"- '{title}' · board #{e.get('id')} {e.get('who_name')}: {text[:300]}"))
+        if not hits:
+            return f"Nothing about {query!r} in this conversation's teams."
+        hits.sort(key=lambda x: -x[0])
+        return f"About {query!r} in earlier teams:\n" + "\n".join(row for _s, row in hits[:8])
+
+    lines = ["Teams in this conversation, newest first (team recall helper=<name> for one helper's full "
+             "result, query=<words> to search):"]
+    for r in records[:6]:
+        when = _ago(float(r.get("ended_at") or r.get("started_at") or 0))
+        lines.append(f"\n'{r.get('title')}' — {r.get('state')}{', ' + when if when else ''}")
+        for h in _helper_rows(r):
+            first = re.sub(r"\s+", " ", str(h.get("result") or h.get("error") or "")).strip()[:160]
+            lines.append(f"- {h.get('name')} ({h.get('state')}): {first}")
+    return "\n".join(lines)
 
 
 # ── A helper's transcript (the panel's "Transcript") ─────────────────────

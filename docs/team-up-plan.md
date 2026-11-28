@@ -3,8 +3,9 @@
 Status: **P0 built** on branch `feat/team-up-p0` (PR #818), with the chat UI
 and the per-agent setting pulled in from P2. **P1 (the board)** on
 `feat/team-up-p1` (PR #819), stacked on P0. **P2 (the rest of the chat UI)**
-on `feat/team-up-p2`, stacked on P1. Owner decisions in. See "P0 as built",
-"P1 as built" and "P2 as built" at the end.
+on `feat/team-up-p2` (PR #820), stacked on P1. **P3 (learning and recall)**
+on `feat/team-up-p3`, stacked on P2. Owner decisions in. See the "as built"
+sections at the end.
 
 ## The idea
 
@@ -467,4 +468,52 @@ settings) came with P0 and P1. This phase adds the rest.
   - The cost came out at $0.0022 for the scripted usage.
 - UI: the harness in dark and light, desktop and phone: the cost, the
   transcript view, and a card rebuilt from a record.
+
+
+## P3 as built (2026-11-28): learning once over the team, recalling it later
+
+**Learning, once**
+- After learning on the finishing turn has ended, the runner runs insight
+  extraction **once** over a digest of the team. It runs only when the
+  finishing turn reached the chat and the team is done.
+  - The digest (`team_digest`, at most 3,000 characters) holds each helper's
+    part and result and the `remember:` notes.
+  - Extraction uses `trigger="team"`.
+- Why: the chat's own learning sees only the last 15 messages, each cut to
+  500 characters, and runs on a cooldown. On its own it would learn almost
+  nothing from the helpers' results.
+- Helpers still never learn: none of their turns go through the chat
+  handler's learning jobs.
+- It honours the insights setting (enabled + auto-extract). It waits while the
+  lead is busy or another extraction runs, at most 10 minutes.
+- The record gets `learned_at`.
+- `remember:` notes: as in P1, the finishing turn lists them and the agent
+  keeps the ones that matter with its memory tools. They are also in the
+  digest above.
+
+**"What did Prices find?" later**
+- New lead action **`team recall`**, which works from the team records on the
+  conversation's session, so it also works after a restart:
+  - With no arguments, it lists the conversation's teams, newest first, with a
+    line per helper.
+  - With `helper`, it gives that helper's **full** result, read from its own
+    session (its last plain answer after the conversation it inherited). It
+    falls back to the record's 2,000 characters. Its files and its posts on
+    the board come with it. `query` narrows which team.
+  - With `query`, it searches the helpers' results and the boards of every
+    recorded team.
+- With no team in memory, `status`, `read`, `search` and `map` answer from the
+  records too, instead of "You have no team".
+- The tool description tells the model to use `recall` for questions about
+  what an earlier team found.
+
+**Checked**
+- 78 unit tests (5 new).
+- The real-stack run, with a scripted model:
+  - After the team finished, the real insights path ran once, with the team
+    digest in its context, and the record got `learned_at`.
+  - The in-memory teams were then cleared, as a restart would. The person
+    asked "what did Prices find …?". The lead called `team recall
+    helper=Prices`. The tool returned Prices' full result from its session,
+    and its board post, and the reply was built from it.
 
