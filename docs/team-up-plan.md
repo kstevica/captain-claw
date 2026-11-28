@@ -1,12 +1,10 @@
 # Team up (mini Vatra): an agent splits a task among copies of itself
 
-Status: **P0 built** on branch `feat/team-up-p0` (PR #818), with the chat UI
-and the per-agent setting pulled in from P2. **P1 (the board)** on
-`feat/team-up-p1` (PR #819), stacked on P0. **P2 (the rest of the chat UI)**
-on `feat/team-up-p2` (PR #820), stacked on P1. **P3 (learning and recall)**
-on `feat/team-up-p3` (PR #821), stacked on P2. **P4 (Telegram and WhatsApp)**
-on `feat/team-up-p4`, stacked on P3. Owner decisions in. See the "as built"
-sections at the end.
+Status: **P0–P4 merged** into main on 2026-11-28 (PRs #818–#822): P0 with
+the chat UI and the per-agent setting pulled in from P2, P1 the board, P2 the
+rest of the chat UI, P3 learning and recall, P4 Telegram and WhatsApp. Then
+**the prompt section** (below), after a deck agent never offered a team.
+Owner decisions in. See the "as built" sections at the end.
 
 ## The idea
 
@@ -598,3 +596,25 @@ person keeps chatting, then one reply)
       `whatsapp_media_to=<waid>`, and its reply went out on lane A, which
       Flight Deck relays to the number.
 - UI: the chip and the footer, in the harness.
+
+## After P4: the prompt section (2026-11-28)
+
+On the staging deck, an agent on Haiku got "compare A and B, do a thorough
+research on both" and did all the research itself. The `team` tool was in its
+tool list, but the plan's "tool description **and prompt**" (When not to
+split) had only got the description. Among 38 tools, and with the prompt's
+"just produce the output, don't ask should I proceed" rules, nothing pointed
+it at a team.
+
+- `section_team_up.md`, as `{team_block}` after `{jev_block}` in
+  `system_prompt.md` and `micro_system_prompt.md` (not nano):
+  - when to offer: several subjects to research or compare, a big folder or
+    list in parts, a large report whose sections each need their own research;
+  - call `team propose` FIRST, before any search or read for the task;
+  - offering a team is not a "should I proceed?" gate;
+  - when not to, what to do on a refusal or a no, and that helpers ignore it.
+- Only while the tool is offered (`team_up.listed()`: a web chat in this
+  process, setting not Off), and never for a shared agent's member. Helpers
+  get the same text, so the cached prompt prefix stays the lead's.
+- Tests: `tests/test_team_up_prompt.py`.
+- Not yet checked with the real model.

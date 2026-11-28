@@ -3443,6 +3443,20 @@ class AgentContextMixin:
             return "\n\n" + self.instructions.render(section_file, **variables)
         return "\n\n" + self.instructions.load(section_file)
 
+    def _build_team_up_block(self) -> str:
+        """When to offer a team (``section_team_up.md``), only while the `team`
+        tool is offered: a web chat in this process with the setting not Off
+        (``team_up.listed()``). Helpers get the same text, so their prompt
+        prefix stays the lead's; the section tells them it isn't theirs."""
+        try:
+            from captain_claw import team_up as _team_up
+
+            if not _team_up.listed():
+                return ""
+        except Exception:
+            return ""
+        return self._build_conditional_section("team", "section_team_up.md")
+
     def _build_env_now_text(self) -> str:
         """Clock, host facts and activity timing for the current turn.
 
@@ -3850,6 +3864,7 @@ class AgentContextMixin:
                 jev_block = self._build_conditional_section("jev", "section_jev.md")
         except Exception:
             jev_block = ""
+        team_block = self._build_team_up_block()
         insights_block = self._build_insights_block()
         nervous_system_block = self._build_nervous_system_block()
         briefing_block = self._build_briefing_block()
@@ -3909,6 +3924,7 @@ class AgentContextMixin:
             write_direct_block=write_direct_block,
             google_block=google_block,
             jev_block=jev_block,
+            team_block=team_block,
             datastore_block=datastore_block,
             insights_block=insights_block,
             nervous_system_block=nervous_system_block,

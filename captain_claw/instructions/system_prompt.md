@@ -196,6 +196,7 @@ Conversation context and follow-up awareness:
 
 {google_block}
 {jev_block}
+{team_block}
 {datastore_block}
 {insights_block}
 {nervous_system_block}
