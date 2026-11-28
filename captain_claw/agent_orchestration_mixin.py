@@ -1089,6 +1089,25 @@ _PUBLISH_COMMAND_DIRECTIVE = (
 )
 
 
+TEAM_COMMAND_HELP = (
+    "👥 *Team up* — split a big task among helpers, copies of this agent that work on their parts "
+    "at the same time while you keep chatting.\n\n"
+    "Usage:\n"
+    "  `/team <task>` — e.g. `/team compare these three suppliers on price, reviews and delivery`"
+)
+
+# Injected in place of a `/team <task>` message: the MODEL splits the task and
+# calls `team propose`; the person asked for the team, so it starts at once
+# (agent._team_forced, read by team_up.propose).
+_TEAM_COMMAND_DIRECTIVE = (
+    "[/team command] The user asked you to team up on this task: \"{task}\"\n\n"
+    "Split it into 2–{most} independent parts and call the `team` tool with action='propose' "
+    "(`title`, `parts`: [{{name, goal, produces}}], each part self-contained). It starts at once — "
+    "the user asked for the team. Then end your turn with one short line. If the task truly has only "
+    "one part, say so in one line and do it yourself. Reply in the user's language."
+)
+
+
 def _detect_basna_run(user_input: str) -> str | None:
     """If the message is a 'run a Basna' command, return the task to run, else None."""
     if not user_input:
@@ -1858,6 +1877,24 @@ class AgentOrchestrationMixin:
             user_input = _PUBLISH_COMMAND_DIRECTIVE.format(args=_args)
             # fall through to the normal model turn below
 
+        # `/team` slash command — same shape as `/code`: the model splits the
+        # task and calls `team propose`, which starts at once (the person asked).
+        self._team_forced = False
+        if _st.lower() == "/team" or _st.lower().startswith("/team "):
+            _args = _st[len("/team"):].strip()
+            from captain_claw import team_up as _team_up
+
+            _refused = _team_up.refusal_for_person(self)
+            if not _args or _refused:
+                self._add_session_message(role="user", content=user_input)
+                _reply = _refused or TEAM_COMMAND_HELP
+                self._add_session_message(role="assistant", content=_reply, origin="command")
+                return _reply
+            self._team_forced = True
+            user_input = _TEAM_COMMAND_DIRECTIVE.format(
+                task=_args[:4000], most=_team_up.read_settings()["max_helpers"])
+            # fall through to the normal model turn below
+
         # Deterministic Basna relay: when the user explicitly asks to run/execute
         # a Basna, hand the task straight to the `basna` tool rather than relying
         # on the model to pick the tool — weak models otherwise do the research
@@ -1923,6 +1960,11 @@ class AgentOrchestrationMixin:
         self._delivery_check_done: bool = False
         self._caveat_check_done: bool = False
         self._snippet_check_done: bool = False
+        # The format check reads the files changed on disk since this moment.
+        self._format_check_done: bool = False
+        import time as _time
+
+        self._turn_started_wall: float = _time.time()
         # Drive's extra-work step: None until the asked work is delivered at
         # Ambitious, then its state for the rest of the turn.
         self._extra_work: dict[str, Any] | None = None

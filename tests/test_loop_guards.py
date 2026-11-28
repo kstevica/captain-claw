@@ -107,6 +107,17 @@ def test_a_command_names_the_files_it_runs(tmp_path):
     assert lg.touched_files("shell", {"command": "make test"}, tmp_path, path_tools={"read"}) == []
 
 
+def test_a_tilde_word_in_a_command_is_not_a_home_folder(tmp_path):
+    # "~1.5" and "~March" read as homes of users who don't exist, and Path
+    # raised RuntimeError, which ended the agent's turn before the command ran.
+    (tmp_path / "build.py").write_text("print(1)\n")
+    command = ("cat > /tmp/draft.json <<'EOF'\n{\"content\": \"about ~1.5 weeks, ~60% done, "
+               "launch ~March, ~$88,000.\"}\nEOF\npython build.py")
+    files = lg.touched_files("shell", {"command": command}, tmp_path, path_tools={"read"})
+    assert files == [(tmp_path / "build.py").resolve()]
+    assert lg.touched_files("read", {"path": "~nosuchuser.txt"}, tmp_path, path_tools={"read"}) == []
+
+
 def test_a_change_zeroes_runs_and_reads_of_that_file_but_not_the_edit():
     counts = {
         "shell|{\"command\": \"make\"}": 1,

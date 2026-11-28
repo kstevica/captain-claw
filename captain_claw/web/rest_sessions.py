@@ -35,6 +35,8 @@ async def list_sessions(server: WebServer, request: web.Request) -> web.Response
     query = (request.query.get("q") or "").strip().lower()
     result: list[dict[str, Any]] = []
     for s in sessions:
+        if isinstance((s.metadata or {}).get("team_helper"), dict):
+            continue  # a Team up helper's session belongs to its team
         desc = (s.metadata or {}).get("description", "")
         if query and query not in s.name.lower() and query not in desc.lower():
             continue

@@ -162,7 +162,10 @@ def _resolve(raw: str, base: Path | None) -> Path | None:
         for cand in candidates:
             if cand.is_file():
                 return cand.resolve()
-    except (OSError, ValueError):
+    # RuntimeError: a word like "~1.5" or "~March" in a command's text reads
+    # as the home of a user who doesn't exist ("Could not determine home
+    # directory"). It is not a file, and it must not end the turn.
+    except (OSError, ValueError, RuntimeError):
         return None
     return None
 

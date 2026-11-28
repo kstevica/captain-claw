@@ -471,6 +471,20 @@ export const setAgentModelSwitch = (kind: 'process' | 'docker', id: string, enab
     body: JSON.stringify({ enabled }),
   })
 
+/** Team up (captain_claw/team_up.py): Off, Ask me (the person taps Team up)
+ *  or On; at most how many helpers; the budget as a multiple of the agent's
+ *  normal turn. Applies from its next message. */
+export interface TeamUpSettings { mode: 'off' | 'ask' | 'on'; max_helpers: number; budget_x: number }
+
+export const getAgentTeamUp = (kind: 'process' | 'docker', id: string) =>
+  fdFetch<TeamUpSettings>(`/agent-team-up/${kind}/${id}`)
+
+export const setAgentTeamUp = (kind: 'process' | 'docker', id: string, settings: TeamUpSettings) =>
+  fdFetch<{ ok: boolean } & TeamUpSettings>(`/agent-team-up/${kind}/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(settings),
+  })
+
 /** Eco mode: compact instructions and a small set of tools. `locked` says why
  *  it stays on whatever the switch says ("nano", "config"; "" when the switch
  *  decides). Applies from its next message. */

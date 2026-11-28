@@ -6090,6 +6090,54 @@ async def update_agent_model_switch(
     return {"ok": True, "enabled": body.enabled}
 
 
+# ── Team up: the agent splits a task among helpers, copies of itself (team_up.py) ──
+
+class AgentTeamUpUpdate(BaseModel):
+    mode: str = Field(default="ask", pattern="^(off|ask|on)$")
+    max_helpers: int = Field(default=3, ge=2, le=4)
+    budget_x: int = Field(default=6, ge=3, le=12)
+
+
+def _read_agent_team_up(agent_dir: Path, kind: str) -> dict:
+    from captain_claw import team_up
+
+    return team_up.read_settings(_agent_home_cc(agent_dir, kind) / team_up.SETTINGS_FILENAME)
+
+
+@app.get("/fd/agent-team-up/{kind}/{identifier}")
+async def get_agent_team_up(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Team up: Off, Ask me (the person taps Team up) or On; how many helpers
+    at most; the team's budget as a multiple of the agent's normal turn."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    return _read_agent_team_up(agent_dir, kind)
+
+
+@app.put("/fd/agent-team-up/{kind}/{identifier}")
+async def update_agent_team_up(
+    kind: str, identifier: str, body: AgentTeamUpUpdate, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Save the agent's Team up settings. The file applies from its next
+    message — no restart."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    from captain_claw import team_up
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    text = team_up.render_settings(body.model_dump())
+    for cc_dir in _agent_reasoning_dirs(agent_dir, kind):
+        if cc_dir.is_dir():
+            (cc_dir / team_up.SETTINGS_FILENAME).write_text(text, encoding="utf-8")
+    return {"ok": True, **team_up.normalize_settings(body.model_dump())}
+
+
 # ── Tool search: past a budget, rarely used tools load on demand (tool_search.py) ──
 
 class AgentToolSearchUpdate(BaseModel):

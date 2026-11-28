@@ -660,6 +660,7 @@ class ToolRegistry:
                     and not self._tool_metadata.get(t.name, {}).get("requires_whatsapp_web")
                     and not self._tool_metadata.get(t.name, {}).get("requires_line")
                     and not self._tool_metadata.get(t.name, {}).get("requires_knowledge")
+                    and not self._tool_metadata.get(t.name, {}).get("requires_team_up")
                 ]
         except Exception:
             pass
@@ -806,6 +807,19 @@ class ToolRegistry:
                              if not self._tool_metadata.get(t.name, {}).get("requires_telegram_inbox")]
         except Exception:
             tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_telegram_inbox")]
+
+        # Team up: shown only where helpers can run (a web chat in this process)
+        # and while the agent's setting isn't Off (``team_up.listed()``, no
+        # network). The same list for the lead and its helpers, so a helper's
+        # prompt prefix matches the lead's.
+        try:
+            if any(self._tool_metadata.get(t.name, {}).get("requires_team_up") for t in tools):
+                from captain_claw import team_up as _team_up
+
+                if not _team_up.listed():
+                    tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_team_up")]
+        except Exception:
+            tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_team_up")]
 
         # The Line: shown only under Flight Deck and never on a member's turn
         # (``line_client.usable()``, no network). Owner-only; fails closed.
@@ -1128,6 +1142,17 @@ class ToolRegistry:
             exam_error = _exam_turn.tool_block(name, arguments or {}, (arguments or {}).get("_agent"))
             if exam_error:
                 raise ToolBlockedError(name, exam_error)
+
+            # Team up: a helper (a copy of the agent working one part) changes
+            # nothing outside and starts no other runs; the browser has one
+            # holder at a time while a team runs (team_up.tool_block).
+            from captain_claw import team_up as _team_up
+
+            team_error = _team_up.tool_block(name, arguments or {}, (arguments or {}).get("_agent"))
+            if team_error:
+                raise ToolBlockedError(name, team_error)
+            if name == "ask_user" and _team_up.is_helper((arguments or {}).get("_agent")):
+                arguments = _team_up.labelled_question((arguments or {}).get("_agent"), arguments)
 
         # A Captain Swarm rehearsal (CLAW_REHEARSAL on this worker): nothing in the
         # world is changed — outward calls become intents, the browser stops at
