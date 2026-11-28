@@ -589,6 +589,11 @@ def member_session_refusal(session: Any) -> str | None:
 _OWNER_SCAN_MAX = 2000
 
 
+def _is_team_helper_session(session: Any) -> bool:
+    meta = getattr(session, "metadata", None)
+    return isinstance(meta, dict) and isinstance(meta.get("team_helper"), dict)
+
+
 async def list_owner_sessions(sm: Any, limit: int = 20) -> list[Any]:
     """``sm.list_sessions(limit)`` without members' sessions, so the owner's
     session lists and their ``#N`` indices never count them."""
@@ -596,7 +601,8 @@ async def list_owner_sessions(sm: Any, limit: int = 20) -> list[Any]:
     fetch = limit
     while True:
         rows = await sm.list_sessions(limit=fetch)
-        owned = [s for s in rows if not is_member_session(s)]
+        # Team up helpers' sessions are part of a team, not conversations.
+        owned = [s for s in rows if not is_member_session(s) and not _is_team_helper_session(s)]
         if len(owned) >= limit or len(rows) < fetch or fetch >= _OWNER_SCAN_MAX:
             return owned[:limit]
         fetch = min(fetch * 2 + 20, _OWNER_SCAN_MAX)

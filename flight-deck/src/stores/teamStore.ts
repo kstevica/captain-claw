@@ -53,7 +53,27 @@ export interface TeamHelper {
   wrap_up: boolean
   stopped_by: string
   model: string
+  /** Dollars so far; null when the model's price isn't known. */
+  usd: number | null
   steps: TeamStep[]
+}
+
+/** One line of a helper's transcript (team_up.transcript_items). */
+export interface TranscriptItem {
+  role: 'user' | 'assistant' | 'tool'
+  kind?: 'brief' | 'note'
+  text: string
+  cut?: boolean
+  name?: string
+  calls?: { name: string; args: string }[]
+}
+
+export interface HelperTranscript {
+  items: TranscriptItem[]
+  total: number
+  loading: boolean
+  error: string
+  at: number
 }
 
 export type TeamState = 'proposed' | 'running' | 'finishing' | 'done' | 'stopped' | 'dismissed' | 'failed'
@@ -76,6 +96,10 @@ export interface TeamRun {
   board: BoardEntry[]
   /** Tokens the agent spent answering helpers' asks. */
   lead_tokens: number
+  /** Dollars so far; null when no part of it has a known price. */
+  usd: number | null
+  /** Rebuilt from the record on the agent's session (after a restart). */
+  from_record?: boolean
   /** Runtime only: the last refusal of a tap (shown on the card). */
   error?: string
   /** Runtime only: a tap sent and not answered yet. */
@@ -107,6 +131,26 @@ function str(v: unknown): string {
 function num(v: unknown): number {
   const n = typeof v === 'number' ? v : Number(v)
   return Number.isFinite(n) ? n : 0
+}
+
+function usd(v: unknown): number | null {
+  if (v == null || v === '') return null
+  const n = typeof v === 'number' ? v : Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+function toItem(raw: unknown): TranscriptItem | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const role = str(r.role) as TranscriptItem['role']
+  if (!['user', 'assistant', 'tool'].includes(role)) return null
+  const calls = Array.isArray(r.calls)
+    ? (r.calls as Record<string, unknown>[]).map((c) => ({ name: str(c?.name), args: str(c?.args) })).filter((c) => c.name)
+    : []
+  return {
+    role, text: str(r.text), ...(r.kind ? { kind: str(r.kind) as TranscriptItem['kind'] } : {}),
+    ...(r.cut ? { cut: true } : {}), ...(r.name ? { name: str(r.name) } : {}), ...(calls.length ? { calls } : {}),
+  }
 }
 
 function toStep(raw: unknown): TeamStep | null {
@@ -165,6 +209,7 @@ function toHelper(raw: Record<string, unknown>, prev?: TeamHelper): TeamHelper {
     wrap_up: !!raw.wrap_up,
     stopped_by: str(raw.stopped_by),
     model: str(raw.model),
+    usd: 'usd' in raw ? usd(raw.usd) : prev?.usd ?? null,
     steps: steps.slice(-STEPS_KEPT),
   }
 }
@@ -190,6 +235,8 @@ function toTeam(raw: Record<string, unknown>, prev?: TeamRun): TeamRun {
       ? (raw.board as unknown[]).map(toEntry).filter((e): e is BoardEntry => e !== null)
       : prev?.board ?? [],
     lead_tokens: num(raw.lead_tokens),
+    usd: 'usd' in raw ? usd(raw.usd) : prev?.usd ?? null,
+    ...(raw.from_record ? { from_record: true } : {}),
     // A tap is answered by the state it asked for (or by a refusal).
     pending: prev?.pending && prev.state === str(raw.state) ? prev.pending : '',
     error: prev?.state === str(raw.state) ? prev?.error : undefined,
@@ -201,18 +248,41 @@ interface TeamStoreState {
   byKey: Record<string, Record<string, TeamRun>>
   /** The Team panel: which chat and team it shows (null = closed). */
   panel: { key: string; teamId: string } | null
+  /** transcriptKey(chat, team, helper) → the helper's transcript, as last read. */
+  transcripts: Record<string, HelperTranscript>
   apply: (key: string, frame: Record<string, unknown>) => void
+  transcriptLoading: (key: string, teamId: string, helperId: string) => void
   openPanel: (key: string, teamId: string) => void
   closePanel: () => void
   setPending: (key: string, teamId: string, pending: TeamRun['pending']) => void
 }
 
+export const transcriptKey = (key: string, teamId: string, helperId: string) => [key, teamId, helperId].join('|')
+
 export const useTeamStore = create<TeamStoreState>((set) => ({
   byKey: {},
   panel: null,
+  transcripts: {},
+
+  transcriptLoading: (key, teamId, helperId) => set((state) => {
+    const k = transcriptKey(key, teamId, helperId)
+    const prev = state.transcripts[k]
+    return { transcripts: { ...state.transcripts, [k]: {
+      items: prev?.items ?? [], total: prev?.total ?? 0, loading: true, error: '', at: prev?.at ?? 0,
+    } } }
+  }),
 
   apply: (key, frame) => set((state) => {
     const event = str(frame.event)
+    if (event === 'transcript') {
+      const k = transcriptKey(key, str(frame.team_id), str(frame.helper_id))
+      const items = Array.isArray(frame.messages)
+        ? (frame.messages as unknown[]).map(toItem).filter((i): i is TranscriptItem => i !== null)
+        : []
+      return { transcripts: { ...state.transcripts, [k]: {
+        items, total: num(frame.total) || items.length, loading: false, error: str(frame.error), at: Date.now(),
+      } } }
+    }
     const teams = { ...(state.byKey[key] ?? {}) }
     const teamId = str(frame.team_id)
     const patchHelper = (fn: (h: TeamHelper) => TeamHelper): boolean => {
@@ -330,6 +400,14 @@ export function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1000) return `${Math.round(n / 1000)}k`
   return String(Math.max(0, Math.round(n)))
+}
+
+export function fmtUsd(v: number | null | undefined): string {
+  if (v == null) return ''
+  if (v === 0) return '$0'
+  if (v < 0.01) return '<$0.01'
+  if (v < 10) return '$' + v.toFixed(2)
+  return '$' + Math.round(v)
 }
 
 export function fmtElapsed(seconds: number): string {

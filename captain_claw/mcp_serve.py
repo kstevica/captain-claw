@@ -197,6 +197,7 @@ async def _handle_sessions_list(args: dict[str, Any]) -> list[dict[str, Any]]:
             "updated_at": s.updated_at,
         }
         for s in sessions
+        if not isinstance((s.metadata or {}).get("team_helper"), dict)  # Team up helpers
     ]
 
 
