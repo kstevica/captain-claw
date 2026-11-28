@@ -36,7 +36,9 @@ class TeamTool(Tool):
         "a note to memory), 'ask' (`to`: a helper's name, 'anyone' or 'lead'; `text` — doesn't block), "
         "'answer' (`ask_id`, `text`), 'inbox' (answers to your asks; `wait` ≤30 s), 'wait' (`helper` "
         "to finish, or `query` for a post; `wait` ≤120 s). Both: 'read' (`helper`, `kind`), 'search' "
-        "(`query`), 'map' (who covers what). Helpers never send, publish, pay or change memory."
+        "(`query`), 'map' (who covers what). Helpers never send, publish, pay or change memory.\n"
+        "Later, to answer what an earlier team found ('what did Prices find?'): 'recall' — no arguments "
+        "for the teams in this conversation, `helper` for one helper's full result, `query` to search them."
     )
     # `wait` may block up to two minutes.
     timeout_seconds = 150.0
@@ -47,7 +49,7 @@ class TeamTool(Tool):
             "action": {
                 "type": "string",
                 "enum": ["propose", "start", "status", "tell", "stop",
-                         "post", "ask", "answer", "inbox", "wait", "read", "search", "map"],
+                         "post", "ask", "answer", "inbox", "wait", "read", "search", "map", "recall"],
                 "description": "What to do (see the tool description).",
             },
             "title": {"type": "string", "description": "propose: the whole task in a few words. post: a short label."},
@@ -64,11 +66,11 @@ class TeamTool(Tool):
                     "required": ["name", "goal"],
                 },
             },
-            "helper": {"type": "string", "description": "status/tell/stop/read/wait: a helper's name ('all' for tell/stop)."},
+            "helper": {"type": "string", "description": "status/tell/stop/read/wait/recall: a helper's name ('all' for tell/stop)."},
             "text": {"type": "string", "description": "tell/post/ask/answer: the message."},
             "to": {"type": "string", "description": "ask: a helper's name, 'anyone' or 'lead'."},
             "ask_id": {"type": "integer", "description": "answer: the ask's number (#)."},
-            "query": {"type": "string", "description": "search, or wait: words of the post you need."},
+            "query": {"type": "string", "description": "search/recall, or wait: words of the post you need."},
             "kind": {"type": "string", "description": "read: post, ask, answer or remember."},
             "wait": {"type": "integer", "description": "inbox (≤30) / wait (≤120): seconds to block."},
         },
@@ -100,8 +102,13 @@ class TeamTool(Tool):
                 "End your turn now with one short line (don't repeat the parts, don't start the work). "
                 "If they tap Team up the helpers start; if they say go ahead in a message, call team start."))
 
+        if act == "recall":
+            return ToolResult(content=await team_up.recall_text(agent, helper, query or text))
         team = team_up.active_for(agent) or self._latest(agent)
         if team is None:
+            # No team in memory (none yet, or the agent restarted): the records of earlier ones.
+            if act in ("status", "read", "search", "map") and team_up.records_of(getattr(agent, "session", None)):
+                return ToolResult(content=await team_up.recall_text(agent, helper, query or text))
             return ToolResult(success=False, error="You have no team. Use team propose to offer one.")
 
         if act == "start":
