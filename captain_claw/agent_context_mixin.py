@@ -69,7 +69,7 @@ _FLEET_NOTICE_RE = re.compile(
 )
 # Order of the live task-state notes inside their block.
 _LIVE_NOTE_ORDER = (
-    "task_course", "planning_context", "list_task_memory", "scale_progress", "context_pressure",
+    "team_status", "task_course", "planning_context", "list_task_memory", "scale_progress", "context_pressure",
 )
 # Block markers quoted inside a note body (e.g. a snippet of an earlier prompt).
 _NESTED_BLOCK_MARKER_RE = re.compile(r"\[((?:END )?INTERNAL CONTEXT)", re.IGNORECASE)
@@ -2979,6 +2979,11 @@ class AgentContextMixin:
             # outside a Vatra run, so registration cost is negligible.
             from captain_claw.tools.vatra import VatraTool
             self.tools.register(VatraTool())
+            # Team up — split a task among helpers (copies of this agent) in the
+            # web chat. Hidden unless helpers can run here and the setting isn't
+            # Off (requires_team_up, team_up.listed()).
+            from captain_claw.tools.team import TeamTool
+            self.tools.register(TeamTool(), metadata={"requires_team_up": True})
             # Bat — the stubborn finisher. Always registered; starts/inspects a
             # long-running finish-at-any-cost run (clear error when FD_URL is
             # unavailable; the tool refuses recursion from inside any run).
@@ -5769,6 +5774,34 @@ class AgentContextMixin:
                 "role": "user",
                 "content": _btw_note,
                 "token_count": self._count_tokens(_btw_note),
+            })
+            candidate_sidx.append(None)
+        # Team up (team_up.py): the lead's live "Team now" block while its
+        # helpers work, or a helper's "from your lead" messages. Live, small,
+        # at the end — never part of the cached prefix.
+        _team_note = ""
+        _team_note_fn = getattr(self, "_team_note_fn", None)
+        if callable(_team_note_fn):
+            try:
+                _team_note = str(_team_note_fn() or "").strip()
+            except Exception:  # noqa: BLE001 — a status note never blocks a call
+                _team_note = ""
+        if _team_note and isinstance(getattr(self, "_team_helper", None), tuple):
+            # A helper: its lead's messages are instructions, like /btw notes.
+            must_include.add(len(candidate_messages))
+            candidate_messages.append({
+                "role": "user",
+                "content": _team_note,
+                "token_count": self._count_tokens(_team_note),
+            })
+            candidate_sidx.append(None)
+        elif _team_note:
+            # The lead: its team's state, riding on the last message.
+            must_include.add(len(candidate_messages))
+            candidate_messages.append({
+                "role": "user",
+                "content": _team_note,
+                "_live_notes": [("team_status", _team_note)],
             })
             candidate_sidx.append(None)
 

@@ -162,6 +162,16 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
             await server._send(ws, {"type": "replay_batch", "messages": batch})
         await server._send(ws, {"type": "replay_done"})
 
+    # Team up: the lane's teams (live and recent), so the chat rebuilds its
+    # cards and panel after a reload or a reconnect.
+    from captain_claw.speaker import speaker_key_of as _speaker_key_of
+
+    if not public_session_id and _speaker_key_of(ws) is None:
+        try:
+            await _send_team_sync(server, ws)
+        except Exception as exc:  # noqa: BLE001 — cards recover on the next sync
+            log.debug("Team sync on connect failed", error=str(exc))
+
     # ConnectionResetError comes from aiohttp's internal PONG-on-PING write
     # when the peer transport is already closing (FD page refresh, network
     # blip). It surfaces through `async for raw_msg in ws` and would
@@ -189,6 +199,40 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         server._lane_sockets.get(getattr(ws, "_lane", ""), set()).discard(ws)
 
     return ws
+
+
+async def _send_team_sync(server: Any, ws: Any) -> None:
+    """Every team on this socket's lane, as snapshot frames."""
+    from captain_claw import team_up
+
+    lane = server.normalize_lane(getattr(ws, "_lane", ""))
+    frames = team_up.sync_frames(lane)
+    await server._send(ws, {"type": "team", "event": "sync", "lane": lane,
+                            "teams": [f["team"] for f in frames]})
+
+
+async def _handle_team_action(server: Any, ws: Any, data: dict) -> None:
+    """A tap on a team card: start / dismiss / stop (one helper or all)."""
+    from captain_claw import team_up
+
+    team = team_up.find(str(data.get("team_id") or ""))
+    lane = server.normalize_lane(getattr(ws, "_lane", ""))
+    action = str(data.get("action") or "").strip().lower()
+    if team is None or team.lane != lane:
+        await server._send(ws, {"type": "team", "event": "error", "team_id": str(data.get("team_id") or ""),
+                                "message": "That team isn't here any more."})
+        return
+    error = ""
+    if action == "start":
+        error = await team_up.start(team, by="person")
+    elif action == "dismiss":
+        error = team_up.dismiss(team)
+    elif action == "stop":
+        error = team_up.stop(team, str(data.get("helper") or ""), by="you")
+    else:
+        error = f"Unknown team action {action!r}."
+    if error:
+        await server._send(ws, {"type": "team", "event": "error", "team_id": team.id, "message": error})
 
 
 _FLEET_EVENTS_KEPT = 40
@@ -1015,6 +1059,18 @@ async def handle_ws_message(
                     break
             sm = get_session_manager()
             await sm.save_session(session)
+
+    elif msg_type in ("team_action", "team_sync"):
+        # Team up (team_up.py): the chat's card and panel — start or dismiss a
+        # proposed team, stop a helper or the whole team, or re-sync the cards.
+        # The owner's own chat only: never a public visitor or a member.
+        if getattr(ws, "_public_session_id", None) or speaker_key_of(ws) is not None:
+            await server._send(ws, {"type": "error", "message": "Team up isn't available here."})
+            return
+        if msg_type == "team_sync":
+            await _send_team_sync(server, ws)
+            return
+        await _handle_team_action(server, ws, data)
 
     elif msg_type == "cancel":
         _pub_sid = getattr(ws, "_public_session_id", None)

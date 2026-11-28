@@ -30,6 +30,7 @@ export function notificationOrigin(content: string): string {
   if (/^\[Flight Deck\] Agent '[^']*' has \w+ the fleet/.test(t)) return 'fleet_notice'
   if (/^\[Delegated result from /.test(t)) return 'delegated_result'
   if (/^\[(?:Basna|Vatra|coding session) '.*?' (?:finished successfully|ran into an error)\]/.test(t)) return 'delegated_result'
+  if (/^\[Team '.*?' (?:finished|stopped)\]/.test(t)) return 'delegated_result'
   return 'notification'
 }
 
@@ -65,8 +66,16 @@ export function noteSummary(origin: string, content: string): { label: string; p
     const body = text.indexOf('\n\n')
     if (body >= 0) text = text.slice(body + 2)
   } else {
-    const run = /^\[((?:Basna|Vatra|coding session) '.*?') ([^\]]+)\]\s*/.exec(text)
-    if (run) {
+    const team = /^\[Team '(.*?)' (finished|stopped)\]\s*/.exec(text)
+    const run = team ? null : /^\[((?:Basna|Vatra|coding session) '.*?') ([^\]]+)\]\s*/.exec(text)
+    if (team) {
+      // Team up's results for the agent: past its note, to the first helper.
+      label = `Team results · ${team[1]}`
+      text = text.slice(team[0].length)
+      // How each helper ended ("## Prices — done"), as one line.
+      const ends = [...text.matchAll(/^## (.+?) — (.+)$/gm)].map((m) => `${m[1]} ${m[2]}`)
+      if (ends.length) text = ends.join(' · ')
+    } else if (run) {
       label = `${run[1]} ${run[2]}`
       text = text.slice(run[0].length)
       const body = text.indexOf('\n\n')

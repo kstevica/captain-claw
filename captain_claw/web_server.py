@@ -397,6 +397,10 @@ class WebServer:
         self.agent.peer_consult_approval_callback = self._peer_consult_approval_callback
         self.agent.ws_broadcast = self._broadcast
         await self.agent.initialize()
+        # Team up builds its helpers here, beside the lanes (team_up.py).
+        from captain_claw import team_up as _team_up
+
+        _team_up.bind_server(self)
 
         # Give the game registry access to the LLM provider for AgentSeat.
         from captain_claw.games.registry import get_registry

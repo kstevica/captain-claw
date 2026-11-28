@@ -77,6 +77,9 @@ export interface ChatMessage {
    *  (Autonomous Work, a plan, a scheduled job): what ran it, as a person
    *  reads it. Shown as a small preview that opens in a dialog. */
   automation?: string
+  /** A Team up card (captain_claw/team_up.py): the team's id; `content` is
+   *  its title. The card reads the live team from the team store. */
+  team?: string
 }
 
 export interface TaskMark {

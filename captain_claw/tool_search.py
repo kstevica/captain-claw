@@ -56,9 +56,12 @@ log = get_logger(__name__)
 SEARCH_TOOLS_NAME = "search_tools"
 STATE_KEY = "tool_search"
 
-# Never deferred: the file and web basics a strong model reaches for first.
+# Never deferred: the file and web basics a strong model reaches for first,
+# and `team` (Team up, team_up.py) — the agent must think of it by itself to
+# offer a team, and never would by searching. Only while listed: with Team up
+# off it isn't in the registry's list at all.
 ESSENTIAL_TOOLS: frozenset[str] = frozenset({
-    "shell", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search",
+    "shell", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "team",
 })
 
 DEFAULT_LIMIT = 3

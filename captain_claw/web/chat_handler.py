@@ -2075,6 +2075,15 @@ async def _run_agent(
                 response_preview=(response[:200] if response else "<empty>"),
                 public=is_public,
             )
+            # Team up's budget is a multiple of a normal turn: the person's own
+            # chat turns on this agent, recorded as they end (team_up.note_turn).
+            if automation is None and not is_public and not speaker_key and not exam:
+                try:
+                    from captain_claw import team_up as _team_up
+
+                    _team_up.note_turn(getattr(agent, "last_usage", None))
+                except Exception:
+                    pass
 
             _fd_delivers_now = fd_still_delivers(fd_delivers, automation, ws)
             send({
