@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from captain_claw import team_board
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -226,6 +227,7 @@ class Helper:
     wrap_up: bool = False
     stopped_by: str = ""
     model: str = ""
+    seen_board: int = 0  # the last board entry pointed out to it as new
 
     def last_step(self) -> str:
         return self.steps[-1]["text"] if self.steps else ""
@@ -277,9 +279,13 @@ class Team:
     delivered: bool = False
     note: str = ""
     watch: asyncio.Task | None = None
+    board: team_board.Board = field(default_factory=team_board.Board)
+    lead_tokens: int = 0       # the lead's quiet answers to helpers' asks
+    routed: set = field(default_factory=set)  # ask ids handed to the lead
+    fork_len: int = 0          # how many lead messages the helpers inherited
 
     def used(self) -> int:
-        return sum(h.tokens for h in self.helpers)
+        return sum(h.tokens for h in self.helpers) + self.lead_tokens
 
     def helper(self, ref: str) -> Helper | None:
         key = str(ref or "").strip().lower()
@@ -311,7 +317,9 @@ class Team:
             "warned": self.warned,
             "browser_holder": self.browser_holder,
             "note": self.note,
+            "lead_tokens": self.lead_tokens,
             "helpers": [h.snapshot(steps=steps) for h in self.helpers],
+            "board": self.board.snapshot(),
         }
 
 
@@ -638,6 +646,7 @@ async def start(team: Team, *, by: str = "person") -> str:
     team.started_at = _now()
     team.note = f"started by {'you' if by == 'person' else 'the agent'}"
     base = _fork_messages(lead)
+    team.fork_len = len(getattr(getattr(lead, "session", None), "messages", None) or [])
     meta = _fork_metadata(getattr(getattr(lead, "session", None), "metadata", None))
     # Helpers keep their files in the lead's session folders: the finishing
     # turn hands them over with the reply, and the system prompt (which names
@@ -727,12 +736,20 @@ def helper_brief(team: Team, h: Helper) -> str:
         "- Do only your part, thoroughly, with your usual tools. Don't redo the others' parts.",
         "- You can't send, post, publish, pay, change the calendar or mailbox, schedule anything, or "
         "change your memory or settings here: the lead does such things once, after the team is done. "
-        "If your part calls for one, write in your result exactly what should be done. Something worth "
-        "remembering goes in your result as a line starting \"remember:\".",
+        "If your part calls for one, write in your result exactly what should be done.",
         f"- Files you make go under {folder}/ so they don't collide with the others'.",
         "- The browser is shared: only one helper holds it at a time. Prefer web_search and web_fetch.",
-        "- `team status` shows what the other helpers are doing.",
-        "- Messages from the lead may appear while you work. Follow them.",
+        "- The team board connects you with the others while you work:",
+        "  · team post — share a finding, figure or decision another part may need (short, concrete). "
+        "Start it with \"remember:\" for something worth keeping in memory: the lead decides after the team.",
+        "  · team ask — when you need something another part owns: to a helper by name, to anyone, or to "
+        "the lead (you, the agent the user talks to). It doesn't block; keep working.",
+        "  · team answer — answer an ask addressed to you (it shows at your next step).",
+        "  · team read / search / map — what the others found, who covers what. Check before researching "
+        "something another part may already have.",
+        "  · team inbox (wait) or team wait — block only when your part truly depends on an answer, another "
+        "helper's result or post.",
+        "- Messages from the lead and the board's news appear while you work. Follow the lead's.",
         "- Ask the user (ask_user) only if you truly can't go on without them.",
         "- When you're done, reply with your result. It goes to the lead, not straight to the user: be "
         "complete and concrete (facts, numbers, sources, file paths), no greeting, no offer of more help.",
@@ -740,16 +757,49 @@ def helper_brief(team: Team, h: Helper) -> str:
     return "\n".join(lines)
 
 
+HELPER_NOTE_CHARS = 6000
+
+
 def helper_note(team: Team, h: Helper) -> str:
-    """The live "New for you" block on each of a helper's calls."""
+    """The live "New for you" block on each of a helper's calls: the lead's
+    messages, asks addressed to it, answers to its own asks, and pointers to
+    new posts by the others."""
     parts: list[str] = []
     if h.tells:
         parts.append("[From your lead — added while you work. Follow these.]\n"
                      + "\n".join(f"- {t}" for t in h.tells[-TELLS_KEPT:]))
+    board = team.board
+    asked = board.open_asks_for(h.id)
+    if asked:
+        parts.append("[Asked of you on the team board — answer each with team answer (ask_id, text) when you "
+                     "can; keep it short. Skip one you can't help with.]\n"
+                     + "\n".join(f"- #{e['id']} {e['who_name']} asks"
+                                  f"{' anyone' if e.get('to') == team_board.ANYONE else ' you'}: {e['text'][:700]}"
+                                  for e in asked[-6:]))
+    mine: list[str] = []
+    for ask in reversed(board.asks_by(h.id)):
+        answers = board.answers_to(ask["id"])
+        if answers:
+            got = " | ".join(f"{a['who_name']}: {a['text'][:900]}" for a in answers[-2:])
+            mine.append(f"- #{ask['id']} you asked {ask.get('to_name') or ask.get('to')}: {ask['text'][:200]} → {got}")
+        else:
+            mine.append(f"- #{ask['id']} you asked {ask.get('to_name') or ask.get('to')}: {ask['text'][:200]} — "
+                        "no answer yet")
+    if mine:
+        parts.append("[Your asks on the team board]\n" + "\n".join(mine[:8]))
+    fresh = [e for e in board.entries
+             if e["id"] > h.seen_board and e["who"] != h.id and e["kind"] in ("post", "remember")]
+    if fresh:
+        rows = [f"- #{e['id']} {e['who_name']}: {e.get('title') or e['text'][:120]}" for e in fresh[-5:]]
+        more = len(fresh) - len(rows)
+        parts.append("[New on the team board — team read or team search to see them]\n" + "\n".join(rows)
+                     + (f"\n(and {more} more)" if more > 0 else ""))
+        h.seen_board = fresh[-1]["id"]
     if h.wrap_up:
         parts.append("[Team budget reached — stop researching now. Write your final result with what you "
                      "have, and say what is left undone.]")
-    return "\n\n".join(parts)
+    note = "\n\n".join(parts)
+    return note if len(note) <= HELPER_NOTE_CHARS else note[:HELPER_NOTE_CHARS].rstrip() + "\n…"
 
 
 def lead_note(team: Team) -> str:
@@ -772,6 +822,16 @@ def lead_note(team: Team) -> str:
                 bits.append(f"last: {last[:120]}")
         bits.append(f"{_k(h.tokens)} tokens")
         lines.append(f"- {h.name}: " + " · ".join(bits))
+    board = team.board
+    to_lead = [e for e in board.entries if e["kind"] == "ask" and e.get("to") == team_board.LEAD]
+    for ask in to_lead[-2:]:
+        answers = board.answers_to(ask["id"])
+        got = answers[-1]["text"][:200] if answers else "(answering…)"
+        lines.append(f"{ask['who_name']} asked you: {ask['text'][:160]} — your answer: {got}")
+    if board.entries:
+        posts = sum(1 for e in board.entries if e["kind"] in ("post", "remember"))
+        open_asks = sum(1 for e in board.entries if e["kind"] == "ask" and not e.get("answered"))
+        lines.append(f"Board: {posts} posts, {open_asks} open asks (team read to see it).")
     used = team.used()
     lines.append(f"Budget: {_k(used)} of {_k(team.budget)} tokens.")
     if team.state == "finishing":
@@ -910,6 +970,7 @@ async def _run_helper(team: Team, h: Helper) -> None:
         label = {"done": "Done", "stopped": "Stopped", "failed": "Failed"}.get(h.state, h.state)
         _step(team, h, "note", label + (f" — {h.error}" if h.state == "failed" and h.error else ""))
         _emit_helper(team, h)
+        _route_open_asks(team, h)
 
 
 def _request_stop(team: Team, h: Helper, *, by: str) -> None:
@@ -975,6 +1036,345 @@ def tell(team: Team, helper_ref: str, text: str) -> str:
         h.tells.append(message)
         _step(team, h, "tell", message)
     return ""
+
+
+# ── The board (team_board.py): helpers talking while they work ───────────
+
+LEAD_NAME = "Lead"
+LEAD_ANSWER_TIMEOUT = 90.0
+LEAD_ANSWER_TOKENS = 700
+
+
+def _author(h: Helper | None) -> tuple[str, str]:
+    return (h.id, h.name) if h is not None else (team_board.LEAD, LEAD_NAME)
+
+
+def _board_add(team: Team, kind: str, h: Helper | None, text: str, **kw: Any) -> dict[str, Any]:
+    who, who_name = _author(h)
+    entry = team.board.add(kind, who, who_name, text, **kw)
+    _emit(team, "board", entry=entry)
+    return entry
+
+
+def _not_running(team: Team) -> str:
+    return "" if team.state == "running" else f"The team is {team.state}; the board is closed."
+
+
+def board_post(team: Team, h: Helper, text: str, title: str = "") -> str:
+    """A finding, decision or draft for the others; "remember: …" is a note for memory."""
+    closed = _not_running(team)
+    if closed:
+        return closed
+    body = str(text or "").strip()
+    if not body:
+        return "Give the text to post."
+    if team.board.posts_by(h.id) >= team_board.MAX_POSTS_PER_AUTHOR:
+        return "You've posted a lot already. Put the rest in your final result."
+    if team_board.is_remember(body):
+        note = team_board.strip_remember(body)
+        if not note:
+            return "Say what to remember after \"remember:\"."
+        entry = _board_add(team, "remember", h, note, title=title)
+        _step(team, h, "remember", f"Noted to remember: {note[:160]}")
+        return (f"Noted for memory (#{entry['id']}). The lead decides after the team; don't repeat it in "
+                "your result.")
+    entry = _board_add(team, "post", h, body, title=title)
+    _step(team, h, "post", f"Posted {('«' + entry['title'] + '»') if entry['title'] else ''} {body[:140]}".strip())
+    return f"Posted #{entry['id']}. The others see it at their next step."
+
+
+def _resolve_to(team: Team, h: Helper | None, to: str) -> tuple[str, str, Helper | None, str]:
+    """(to id, to name, the helper or None, error)."""
+    ref = str(to or "").strip().lower()
+    if ref in ("", "anyone", "any", "all", "everyone", "team"):
+        return team_board.ANYONE, "anyone", None, ""
+    if ref in ("lead", "the lead", "agent", "you", "boss"):
+        return team_board.LEAD, LEAD_NAME, None, ""
+    target = team.helper(ref)
+    if target is None:
+        names = ", ".join(x.name for x in team.helpers)
+        return "", "", None, f"No helper called {to!r}. Ask one of: {names}, anyone, or lead."
+    if h is not None and target is h:
+        return "", "", None, "That's you. Ask another helper, anyone, or the lead."
+    return target.id, target.name, target, ""
+
+
+async def board_ask(team: Team, h: Helper, to: str, text: str) -> str:
+    """Ask a helper, anyone or the lead. Doesn't block."""
+    closed = _not_running(team)
+    if closed:
+        return closed
+    body = str(text or "").strip()
+    if not body:
+        return "Say what you need."
+    to_id, to_name, target, error = _resolve_to(team, h, to)
+    if error:
+        return error
+    same = team.board.same_open_ask(h.id, to_id, body)
+    if same is not None:
+        return f"You already asked that (#{same['id']}); its answer shows at a later step."
+    if team.board.asks >= team_board.MAX_ASKS:
+        return ("The team has used all its asks. Decide yourself — say what you assumed in your result — "
+                "or use team read / search.")
+    entry = _board_add(team, "ask", h, body, to=to_id, to_name=to_name)
+    _step(team, h, "ask", f"Asked {to_name}: {body[:160]}")
+    others_live = [x for x in team.helpers if x is not h and x.state in ("working", "waiting")]
+    if (to_id == team_board.LEAD or (target is not None and target.state not in _LIVE_HELPER)
+            or (to_id == team_board.ANYONE and not others_live)):
+        _spawn_lead_answer(team, entry)
+        who = "The lead answers"
+    else:
+        who = f"{to_name} sees it at its next step"
+        if target is not None:
+            _step(team, target, "ask", f"{h.name} asks: {body[:160]}")
+    return (f"Asked {to_name} (#{entry['id']}). {who}; keep working — the answer shows at a later step, or "
+            "use team inbox with wait to block for it.")
+
+
+def board_answer(team: Team, h: Helper | None, ask_id: Any, text: str) -> str:
+    """Answer an ask (a helper: one addressed to it or to anyone)."""
+    closed = _not_running(team)
+    if closed:
+        return closed
+    try:
+        ask = team.board.get(int(str(ask_id).lstrip("#")))
+    except (TypeError, ValueError):
+        ask = None
+    if ask is None or ask["kind"] != "ask":
+        return f"No ask #{ask_id} on the board. team read kind=ask lists them."
+    if h is not None:
+        if ask["who"] == h.id:
+            return "That's your own ask."
+        if ask.get("to") not in (h.id, team_board.ANYONE):
+            return f"Ask #{ask['id']} is for {ask.get('to_name')}, not you."
+    body = str(text or "").strip()
+    if not body:
+        return "Give the answer."
+    entry = _board_add(team, "answer", h, body, ask_id=ask["id"], to=ask["who"], to_name=ask["who_name"])
+    who = h.name if h is not None else LEAD_NAME
+    if h is not None:
+        _step(team, h, "answer", f"Answered {ask['who_name']}: {body[:160]}")
+    asker = team.helper(ask["who"]) if ask["who"] != team_board.LEAD else None
+    if asker is not None:
+        _step(team, asker, "answer", f"{who} answered: {body[:160]}")
+    return f"Answered #{ask['id']} (#{entry['id']})."
+
+
+def _spawn_lead_answer(team: Team, ask: dict[str, Any]) -> None:
+    if ask["id"] in team.routed:
+        return
+    team.routed.add(ask["id"])
+
+    async def _run() -> None:
+        try:
+            await _lead_answers(team, ask)
+        except Exception as exc:  # noqa: BLE001 — the asker gets a plain fallback instead
+            log.warning("Team up: lead answer failed", team=team.id, ask=ask.get("id"), error=str(exc))
+            if team.state == "running":
+                board_answer(team, None, ask["id"],
+                             "I couldn't answer that just now. Decide yourself and say what you assumed in "
+                             "your result, or ask the user with ask_user if it truly needs them.")
+
+    asyncio.create_task(_run(), name=f"team-{team.id}-lead-answer-{ask.get('id')}")
+
+
+def _lead_context(team: Team, ask: dict[str, Any]) -> str:
+    """What the lead knows when it answers: the conversation (most of all what
+    the user said after the team started), the team and the board."""
+    messages = list(getattr(getattr(team.lead, "session", None), "messages", None) or [])
+    since = [m for m in messages[team.fork_len:] if isinstance(m, dict)
+             and m.get("role") in ("user", "assistant") and str(m.get("content") or "").strip()]
+    before = [m for m in messages[:team.fork_len] if isinstance(m, dict)
+              and m.get("role") in ("user", "assistant") and str(m.get("content") or "").strip()][-6:]
+
+    def _rows(ms: list[dict]) -> str:
+        return "\n".join(f"{m['role']}: {str(m.get('content') or '')[:800]}" for m in ms) or "(nothing)"
+
+    lines = [
+        f"The task you split: {team.title}",
+        "",
+        "Conversation with the user before the team started (most recent):",
+        _rows(before),
+        "",
+        "What the user and you said since the team started:",
+        _rows(since[-12:]),
+        "",
+        "Your helpers:",
+    ]
+    for x in team.helpers:
+        row = f"- {x.name} ({x.state}): {x.goal}"
+        if x.state == "done" and x.result:
+            row += f"\n  Result: {x.result[:1500]}"
+        lines.append(row)
+    lines += ["", "The team board:", team_board.digest(team.board, limit=15, chars=400), ""]
+    target = team.helper(ask.get("to", "")) if ask.get("to") not in (team_board.LEAD, team_board.ANYONE) else None
+    if target is not None:
+        lines.append(f"{ask['who_name']} asked {target.name}, who has finished ({target.state}); answer for it "
+                     "from its result.")
+    lines.append(f"{ask['who_name']} asks: {ask['text']}")
+    return "\n".join(lines)
+
+
+LEAD_ANSWER_SYSTEM = (
+    "You are the lead of a Team up: the agent the user is talking to. Your helpers are copies of you, each "
+    "working on one part of the user's task in the background. One of them asks you something. Answer in a "
+    "few sentences from what you know: the conversation with the user, the helpers' results and the team "
+    "board. If it needs a decision only the user can make and you don't know it, say so plainly and tell the "
+    "helper to go with the most reasonable choice and say so in its result, or to ask the user with ask_user. "
+    "Never make up facts. Reply with the answer only."
+)
+
+
+async def _lead_answers(team: Team, ask: dict[str, Any]) -> None:
+    """The lead answers an ask quietly: one call on its own model, no tools,
+    nothing in the chat (the panel shows the answer on the board)."""
+    from captain_claw.llm import Message
+
+    provider = getattr(team.lead, "provider", None)
+    if provider is None:
+        raise RuntimeError("the lead has no model")
+    try:
+        provider = copy.copy(provider)
+    except Exception:
+        pass
+    messages = [Message(role="system", content=LEAD_ANSWER_SYSTEM),
+                Message(role="user", content=_lead_context(team, ask))]
+    response = await asyncio.wait_for(
+        provider.complete(messages, tools=None, max_tokens=LEAD_ANSWER_TOKENS), timeout=LEAD_ANSWER_TIMEOUT)
+    team.lead_tokens += turn_tokens(getattr(response, "usage", None) or {})
+    answer = str(getattr(response, "content", "") or "").strip()
+    if not answer:
+        answer = ("I don't know that. Decide yourself and say what you assumed in your result, or ask the user "
+                  "with ask_user if it truly needs them.")
+    if team.state == "running":
+        board_answer(team, None, ask["id"], answer)
+        _check_budget(team)
+
+
+def _route_open_asks(team: Team, h: Helper) -> None:
+    """A helper finished: the asks still waiting on it (or on anyone, when no
+    one else works) are answered by the lead from what it knows."""
+    if team.state != "running":
+        return
+    live = [x for x in team.helpers if x.state in ("working", "waiting")]
+    for e in list(team.board.entries):
+        if e["kind"] != "ask" or e.get("answered") or e["id"] in team.routed:
+            continue
+        if e.get("to") == h.id or (e.get("to") == team_board.ANYONE and not live):
+            _spawn_lead_answer(team, e)
+
+
+async def board_inbox(team: Team, h: Helper, wait: Any = 0) -> str:
+    """The answers to this helper's asks; with *wait*, block a while for one."""
+    try:
+        seconds = max(0, min(team_board.INBOX_WAIT_MAX, int(wait or 0)))
+    except (TypeError, ValueError):
+        seconds = 0
+    deadline = time.monotonic() + seconds
+    while True:
+        asks = team.board.asks_by(h.id)
+        if not asks:
+            return "You have no asks on the board."
+        waiting = [a for a in asks if not team.board.answers_to(a["id"])]
+        if not waiting or time.monotonic() >= deadline or team.state != "running":
+            break
+        await team.board.changed(deadline - time.monotonic())
+    rows = []
+    for a in asks:
+        answers = team.board.answers_to(a["id"])
+        head = f"#{a['id']} to {a.get('to_name') or a.get('to')}: {a['text'][:200]}"
+        rows.append(head + ("".join(f"\n  → {x['who_name']}: {x['text']}" for x in answers) if answers
+                            else "\n  (no answer yet)"))
+    return "\n".join(rows)
+
+
+async def board_wait(team: Team, h: Helper, helper_ref: str = "", query: str = "", wait: Any = 0) -> str:
+    """Block until another helper finishes, or a post matching *query* appears."""
+    try:
+        seconds = max(5, min(team_board.WAIT_MAX, int(wait or team_board.WAIT_MAX)))
+    except (TypeError, ValueError):
+        seconds = team_board.WAIT_MAX
+    target: Helper | None = None
+    if helper_ref:
+        target = team.helper(helper_ref)
+        if target is None:
+            return f"No helper called {helper_ref!r}. Helpers: " + ", ".join(x.name for x in team.helpers)
+        if target is h:
+            return "You can't wait for yourself."
+    elif not str(query or "").strip():
+        return "Give a helper to wait for, or a query for the post you need."
+    start_id = team.board.next_id
+    deadline = time.monotonic() + seconds
+    _step(team, h, "note", f"Waiting for {target.name if target else repr(query)}")
+    while True:
+        if target is not None and target.state not in _LIVE_HELPER:
+            result = target.result or target.error or "(no result)"
+            return f"{target.name} is {target.state}. Its result:\n{result[:6000]}"
+        if query:
+            hits = [e for e in team.board.search(query, exclude_who=h.id, limit=5) if e["kind"] in ("post", "remember")]
+            fresh = [e for e in hits if e["id"] >= start_id] or hits
+            if fresh:
+                return "Found on the board:\n" + "\n".join(team_board.fmt_entry(e) for e in fresh)
+        if team.state != "running" or h.state != "working" or time.monotonic() >= deadline:
+            break
+        await team.board.changed(min(5.0, max(0.1, deadline - time.monotonic())))
+    return ("Not there yet — go on with what you can, and say in your result what you assumed. The board now:\n"
+            + team_board.digest(team.board, limit=10))
+
+
+def board_read(team: Team, helper_ref: str = "", kind: str = "", limit: Any = 15) -> str:
+    who = ""
+    if helper_ref:
+        ref = str(helper_ref).strip().lower()
+        if ref == "lead":
+            who = team_board.LEAD
+        else:
+            target = team.helper(ref)
+            if target is None:
+                return f"No helper called {helper_ref!r}."
+            who = target.id
+    kinds = str(kind or "").strip().lower()
+    if kinds and kinds not in team_board.KINDS:
+        return f"kind is one of {', '.join(team_board.KINDS)}."
+    try:
+        n = max(1, min(40, int(limit or 15)))
+    except (TypeError, ValueError):
+        n = 15
+    rows = team.board.recent(who=who, kind=kinds, limit=n)
+    if not rows:
+        return "Nothing on the board yet." if not team.board.entries else "Nothing matches."
+    return "\n".join(team_board.fmt_entry(e) for e in rows)
+
+
+def board_search(team: Team, query: str, *, for_helper: Helper | None = None) -> str:
+    hits = team.board.search(query, exclude_who=for_helper.id if for_helper else "")
+    if not hits:
+        return f"Nothing on the board matches {query!r}."
+    return "\n".join(team_board.fmt_entry(e) for e in hits)
+
+
+def board_map(team: Team, *, for_helper: Helper | None = None) -> str:
+    """Who covers what, how far each is, what they made, and what's open."""
+    lines = [f"Team '{team.title}' — {team.state}"]
+    for x in team.helpers:
+        me = " (you)" if x is for_helper else ""
+        lines.append(f"- {x.name}{me} — {x.state} · {x.step_count} steps: {x.goal}")
+        last = x.last_step()
+        if last and x.state in _LIVE_HELPER:
+            lines.append(f"  now: {last[:160]}")
+        if x.files:
+            lines.append("  files: " + ", ".join(x.files[-6:]))
+        if x.state == "done" and x.result and x is not for_helper:
+            lines.append(f"  result: {x.result[:300]}" + (" …" if len(x.result) > 300 else ""))
+    open_asks = [e for e in team.board.entries if e["kind"] == "ask" and not e.get("answered")]
+    if open_asks:
+        lines.append("Open asks:")
+        lines += [f"  {team_board.fmt_entry(e, full=False, chars=200)}" for e in open_asks[-6:]]
+    posts = [e for e in team.board.entries if e["kind"] in ("post", "remember")]
+    if posts:
+        lines.append("Latest posts:")
+        lines += [f"  #{e['id']} {e['who_name']}: {e.get('title') or e['text'][:120]}" for e in posts[-8:]]
+    return "\n".join(lines)
 
 
 async def _watch(team: Team) -> None:
@@ -1052,6 +1452,19 @@ def result_message(team: Team) -> str:
             lines.append("No result.")
         if h.files:
             lines.append("Files: " + ", ".join(h.files[-12:]))
+    board = team.board
+    notes = board.remember_notes()
+    if notes:
+        lines += ["", "## Worth remembering — the helpers' notes. Keep the ones that will matter later (your "
+                  "memory tools); skip the rest. Don't list them to the user unless they ask."]
+        lines += [f"- {e['who_name']}: {e['text'][:600]}" for e in notes[-12:]]
+    if board.entries:
+        posts = sum(1 for e in board.entries if e["kind"] == "post")
+        asks = [e for e in board.entries if e["kind"] == "ask"]
+        unanswered = [e for e in asks if not e.get("answered")]
+        lines += ["", f"Board: {posts} posts, {len(asks)} asks ({len(unanswered)} unanswered)."]
+        for e in unanswered[-4:]:
+            lines.append(f"- Unanswered: {e['who_name']} asked {e.get('to_name') or e.get('to')}: {e['text'][:300]}")
     return "\n".join(lines)
 
 
@@ -1149,6 +1562,8 @@ def _save_record(team: Team) -> None:
         "helpers": [{"id": h.id, "name": h.name, "goal": h.goal, "state": h.state,
                      "session_id": h.session_id, "tokens": h.tokens,
                      "result": h.result[:1500], "files": h.files[-12:]} for h in team.helpers],
+        "board": [{k: e.get(k) for k in ("id", "kind", "who_name", "to_name", "ask_id", "title")}
+                  | {"text": str(e.get("text") or "")[:300]} for e in team.board.entries[-20:]],
     }
     runs = [r for r in meta.get("team_runs", []) if isinstance(r, dict) and r.get("id") != team.id]
     meta["team_runs"] = (runs + [record])[-RECORDS_KEPT:]
@@ -1179,13 +1594,17 @@ _HELPER_OK_OTHER = frozenset({"team", "web_chrome", "stt", "knowledge", "line", 
 
 OUTWARD = ("{what} isn't available to a helper: helpers change nothing outside the agent. Write in your "
            "result exactly what should be done; the lead does it once, after the team.")
-KEEP = ("{what} isn't available to a helper: memory and settings are the lead's. Put a line starting "
-        "\"remember:\" in your result instead.")
+KEEP = ("{what} isn't available to a helper: memory and settings are the lead's. Post it with team post "
+        "text=\"remember: …\" instead; the lead decides after the team.")
 REFUSED = "{what} isn't available to a helper: helpers don't start other runs, agents or the screen."
 BROWSER_BUSY = ("The browser is in use by {holder} right now (one holder at a time). Use web_search or "
                 "web_fetch, or do other parts of your work and try the browser later.")
 LEAD_BROWSER_BUSY = ("The browser is in use by your helper {holder} until it finishes. Use web_search or "
                      "web_fetch for now, or stop that helper first.")
+
+
+# What a helper may do with the `team` tool: look, and talk on the board.
+HELPER_TEAM_ACTIONS = frozenset({"status", "map", "read", "search", "post", "ask", "answer", "inbox", "wait"})
 
 
 def _action(arguments: Any) -> str:
@@ -1211,8 +1630,8 @@ def tool_block(name: str, arguments: Any, agent: Any) -> str:
     action = _action(arguments)
     what = f"{tool} {action}".strip()
     if tool == "team":
-        return "" if action in ("status", "") else (
-            "Only the lead starts, steers or stops the team. Use team status to see the other helpers.")
+        return "" if action in HELPER_TEAM_ACTIONS or action == "" else (
+            "Only the lead starts, steers or stops the team. Use team status or team map to see the others.")
     if tool in _HELPER_REFUSED_TOOLS:
         return REFUSED.format(what=what)
     from captain_claw.flight_deck.tool_risk import risk_for
@@ -1258,6 +1677,9 @@ def labelled_question(agent: Any, arguments: Any) -> Any:
 
 def status_text(team: Team, helper_ref: str = "", *, for_helper: Helper | None = None) -> str:
     lines = [f"Team '{team.title}' — {team.state} · {_k(team.used())} of {_k(team.budget)} tokens"]
+    if team.board.entries:
+        open_asks = sum(1 for e in team.board.entries if e["kind"] == "ask" and not e.get("answered"))
+        lines.append(f"Board: {len(team.board.entries)} entries, {open_asks} open asks (team read / map).")
     if team.browser_holder:
         holder = team.helper(team.browser_holder)
         if holder is not None:

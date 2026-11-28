@@ -1,8 +1,9 @@
 # Team up (mini Vatra): an agent splits a task among copies of itself
 
-Status: **P0 built** on branch `feat/team-up-p0` (2026-11-27), with the chat UI
-and the per-agent setting pulled in from P2. Owner decisions in. See "P0 as
-built" at the end.
+Status: **P0 built** on branch `feat/team-up-p0` (PR #818), with the chat UI
+and the per-agent setting pulled in from P2. **P1 (the board) built** on
+`feat/team-up-p1`, stacked on P0. Owner decisions in. See "P0 as built" and
+"P1 as built" at the end.
 
 ## The idea
 
@@ -332,8 +333,69 @@ asks, the lead's `tell` messages, and posts that match its part. It is capped at
 
 **Not done yet**
 - A run with a real model, and a measured cache-hit rate on a provider.
-- The board (P1): post, ask, inbox, wait, and helpers asking the lead.
 - Helper sessions show in the session list (no filter yet).
 - The `remember:` notes, and answering "what did Prices find?" from the record
   (P3).
 - Telegram and WhatsApp (P4).
+
+
+## P1 as built (2026-11-27): the board
+
+**Agent side**
+- `captain_claw/team_board.py`: one board per team, in memory. Entries are post,
+  ask, answer and remember. A board event wakes waiters. Limits: 12 asks per
+  team, 40 posts per author, 300 entries, 4,000 characters per text.
+- `team_up.py`:
+  - `board_post` turns "remember: …" into a remember note.
+  - `board_ask` takes a helper's name, `anyone` or `lead`, refuses duplicates
+    and self-asks, and doesn't block.
+  - `board_answer`, `board_inbox` (wait up to 30 s), and `board_wait` (on a
+    helper's result, or a post matching a query; up to 120 s, then a board
+    digest).
+  - `board_read`, `board_search` and `board_map`.
+- **Asks to the lead** are answered at once and quietly: one call on a copy
+  of the lead's provider, no tools, nothing in the chat. Its context is the
+  conversation before the team, everything the user and the lead said since,
+  the helpers' parts and results, the board, and the question. The tokens
+  count toward the team budget (`lead_tokens`).
+- **Routing to the lead.** The lead also answers asks to a helper that has
+  finished, and asks to `anyone` when nobody else is working. When a helper
+  finishes, its open asks go to the lead (`_route_open_asks`).
+- **Push.** A helper's "New for you" block now carries the lead's messages,
+  asks addressed to it, its own asks with their answers, and one-time
+  pointers to new posts. It is capped at 6,000 characters.
+- **The lead's "Team now"** shows the asks addressed to it with its answers,
+  plus the board's size.
+- **Memory.** Memory writes still refuse; the refusal now points to
+  `team post "remember: …"`. The finishing turn lists the remember notes
+  ("keep the ones that will matter") and up to 4 unanswered asks. The record
+  keeps the last 20 entries.
+- **The `team` tool** has the board verbs (post, ask, answer, inbox, wait,
+  read, search, map) and a 150 s timeout. The lead can read, search and map.
+  Helpers can't start, tell or stop.
+
+**Flight Deck**
+- `teamStore`: `board` entries on each team, `{"event": "board"}`, and an
+  answer marks its ask as answered.
+- Team panel: a **Board** tab, with a count badge that turns blue while asks
+  are open.
+  - Posts show as cards. Asks show who asks whom and Open / Answered, with
+    the answers threaded under them; the lead's answers show under the
+    agent's name.
+  - "Worth remembering" notes are amber.
+  - The tab follows new entries while the team works.
+- Board steps (post, ask, answer, remember) show in the helper cards and the
+  timeline.
+
+**Checked**
+- 65 unit tests.
+- The regression subset fails exactly as main does: the same 24 tests.
+- The real-stack run, with a scripted model:
+  - Prices posted, was refused `send_mail`, answered Reviews' ask, and posted
+    a remember note.
+  - Reviews asked Prices and got the answer through `inbox`.
+  - Delivery asked the lead. The quiet answer arrived, and its context held
+    the question.
+  - The lead's `tell` still reached Delivery.
+  - The finishing turn saw every result and the remember note.
+- Board UI: the harness in dark and light, desktop and phone.

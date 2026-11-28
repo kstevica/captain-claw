@@ -541,3 +541,236 @@ def test_team_is_never_deferred_by_tool_search():
     from captain_claw import tool_search
 
     assert "team" in tool_search.ESSENTIAL_TOOLS
+
+
+# ── P1: the team board ───────────────────────────────────────────────────
+
+class _Resp:
+    def __init__(self, content, usage=None):
+        self.content = content
+        self.usage = usage or {"prompt_tokens": 900, "completion_tokens": 60}
+
+
+class LeadProvider:
+    """The lead's model for quiet answers: records what it was asked."""
+
+    provider = "anthropic"
+    model = "claude-haiku-5-5"
+    base_url = ""
+
+    def __init__(self, answer="Use EU suppliers only."):
+        self.answer = answer
+        self.calls: list[list] = []
+
+    async def complete(self, messages, tools=None, temperature=None, max_tokens=None):
+        self.calls.append(messages)
+        return _Resp(self.answer)
+
+
+def _board_team(lead_answer="Use EU suppliers only."):
+    srv = FakeServer()
+    team_up.bind_server(srv)
+    team, a1, a2 = _helper_agent()
+    team.lead = srv.agent
+    team.lead.provider = LeadProvider(lead_answer)
+    team.helpers.append(team_up.Helper(id="h3", name="Delivery", goal="g", state="working"))
+    return srv, team
+
+
+def _board_events(srv):
+    return [f["entry"] for f in srv.frames if f.get("type") == "team" and f.get("event") == "board"]
+
+
+def test_post_and_remember_go_on_the_board():
+    srv, team = _board_team()
+    prices, reviews = team.helpers[0], team.helpers[1]
+    assert team_up.board_post(team, prices, "Acme is €389 list", "Acme price").startswith("Posted #1")
+    out = team_up.board_post(team, prices, "remember: Acme quotes need a VAT id")
+    assert out.startswith("Noted for memory")
+    kinds = [e["kind"] for e in team.board.entries]
+    assert kinds == ["post", "remember"]
+    assert team.board.entries[1]["text"] == "Acme quotes need a VAT id"
+    assert [e["id"] for e in _board_events(srv)] == [1, 2]
+    # The others see a pointer once, at their next step.
+    note = team_up.helper_note(team, reviews)
+    assert "#1 Prices: Acme price" in note
+    assert "New on the team board" not in team_up.helper_note(team, reviews)
+    assert team_up.board_post(team, prices, "") == "Give the text to post."
+    team.state = "done"
+    assert "board is closed" in team_up.board_post(team, prices, "late")
+
+
+@pytest.mark.asyncio
+async def test_ask_a_helper_then_answer_shows_to_the_asker():
+    srv, team = _board_team()
+    prices, reviews = team.helpers[0], team.helpers[1]
+    out = await team_up.board_ask(team, prices, "Reviews", "Which supplier has the slowest returns?")
+    assert out.startswith("Asked Reviews (#1)")
+    assert "#1 Prices asks you: Which supplier" in team_up.helper_note(team, reviews)
+    assert "no answer yet" in team_up.helper_note(team, prices)
+    assert team_up.board_answer(team, team.helpers[2], 1, "x").startswith("Ask #1 is for Reviews")
+    assert team_up.board_answer(team, reviews, 1, "Corvid, 3 weeks").startswith("Answered #1")
+    assert team.board.get(1)["answered"] is True
+    assert "→ Reviews: Corvid, 3 weeks" in team_up.helper_note(team, prices)
+    assert "asks you" not in team_up.helper_note(team, reviews)
+    assert any(s["kind"] == "answer" and "Reviews answered" in s["text"] for s in prices.steps)
+    assert srv.agent.provider.calls == []  # a working helper answers itself
+
+
+@pytest.mark.asyncio
+async def test_ask_the_lead_is_answered_quietly_from_what_it_knows():
+    srv, team = _board_team()
+    prices = team.helpers[0]
+    team.fork_len = 2
+    srv.agent.session.messages.append({"role": "user", "content": "only EU suppliers please", "origin": "human"})
+    await team_up.board_ask(team, prices, "lead", "Should I include US suppliers?")
+    await _until(lambda: team.board.get(1)["answered"])
+    answer = team.board.answers_to(1)[0]
+    assert answer["who"] == "lead" and answer["text"] == "Use EU suppliers only."
+    sent = srv.agent.provider.calls[0]
+    ctx = sent[1].content
+    assert "only EU suppliers please" in ctx and "Should I include US suppliers?" in ctx
+    assert team.lead_tokens == 960 and team.used() >= 960
+    assert "Prices asked you: Should I include US" in team_up.lead_note(team)
+    # Nothing went to the chat as a message — only board/step frames.
+    assert not [f for f in srv.frames if f.get("type") == "chat_message"]
+
+
+@pytest.mark.asyncio
+async def test_ask_to_a_finished_helper_or_anyone_alone_goes_to_the_lead():
+    srv, team = _board_team(lead_answer="Reviews found Borealis best.")
+    prices, reviews, delivery = team.helpers
+    reviews.state = "done"
+    reviews.result = "Borealis 4.6, Acme 4.4"
+    await team_up.board_ask(team, prices, "Reviews", "Who had the best reviews?")
+    await _until(lambda: team.board.get(1)["answered"])
+    assert "who has finished" in srv.agent.provider.calls[0][1].content
+    delivery.state = "done"
+    await team_up.board_ask(team, prices, "anyone", "Any data on Corvid support?")
+    await _until(lambda: team.board.get(3)["answered"])
+
+
+@pytest.mark.asyncio
+async def test_open_asks_go_to_the_lead_when_their_helper_finishes():
+    srv, team = _board_team()
+    prices, reviews = team.helpers[0], team.helpers[1]
+    await team_up.board_ask(team, prices, "Reviews", "Return times?")
+    assert srv.agent.provider.calls == []
+    reviews.state = "done"
+    team_up._route_open_asks(team, reviews)
+    team_up._route_open_asks(team, reviews)  # once only
+    await _until(lambda: team.board.get(1)["answered"])
+    await asyncio.sleep(0.05)
+    assert len(srv.agent.provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ask_limits_and_mistakes():
+    srv, team = _board_team()
+    prices = team.helpers[0]
+    assert "That's you" in await team_up.board_ask(team, prices, "Prices", "x")
+    assert "No helper called" in await team_up.board_ask(team, prices, "Nobody", "x")
+    await team_up.board_ask(team, prices, "Reviews", "Return times?")
+    assert "already asked" in await team_up.board_ask(team, prices, "reviews", "return times")
+    team.board.asks = team_board_max = __import__("captain_claw.team_board", fromlist=["x"]).MAX_ASKS
+    assert team_board_max == 12
+    assert "used all its asks" in await team_up.board_ask(team, prices, "Reviews", "Another?")
+
+
+@pytest.mark.asyncio
+async def test_inbox_waits_for_an_answer():
+    srv, team = _board_team()
+    prices, reviews = team.helpers[0], team.helpers[1]
+    await team_up.board_ask(team, prices, "Reviews", "Return times?")
+
+    async def answer_soon():
+        await asyncio.sleep(0.1)
+        team_up.board_answer(team, reviews, 1, "Two weeks")
+
+    asyncio.create_task(answer_soon())
+    t0 = asyncio.get_event_loop().time()
+    out = await team_up.board_inbox(team, prices, wait=10)
+    assert "→ Reviews: Two weeks" in out
+    assert asyncio.get_event_loop().time() - t0 < 2
+
+
+@pytest.mark.asyncio
+async def test_wait_for_a_helper_or_a_post():
+    srv, team = _board_team()
+    prices, reviews = team.helpers[0], team.helpers[1]
+
+    async def finish_soon():
+        await asyncio.sleep(0.1)
+        reviews.state = "done"
+        reviews.result = "Borealis wins"
+        team.board._pulse()
+
+    asyncio.create_task(finish_soon())
+    out = await team_up.board_wait(team, prices, helper_ref="Reviews", wait=10)
+    assert "Reviews is done" in out and "Borealis wins" in out
+
+    async def post_soon():
+        await asyncio.sleep(0.1)
+        team_up.board_post(team, team.helpers[2], "Corvid delivers to Milan in 2 days", "Milan delivery")
+
+    asyncio.create_task(post_soon())
+    out = await team_up.board_wait(team, prices, query="Milan delivery", wait=10)
+    assert "Found on the board" in out and "Corvid delivers" in out
+    assert "can't wait for yourself" in await team_up.board_wait(team, prices, helper_ref="Prices")
+
+
+def test_read_search_map():
+    srv, team = _board_team()
+    prices, reviews = team.helpers[0], team.helpers[1]
+    team_up.board_post(team, prices, "Acme €389, net 30", "Acme price")
+    team_up.board_post(team, reviews, "Borealis 4.6 stars", "Borealis reviews")
+    assert "Borealis 4.6" in team_up.board_read(team, "Reviews")
+    assert "Acme" not in team_up.board_read(team, "Reviews")
+    assert "Acme price" in team_up.board_search(team, "acme")
+    assert team_up.board_search(team, "acme", for_helper=prices).startswith("Nothing")
+    m = team_up.board_map(team, for_helper=prices)
+    assert "Prices (you)" in m and "Latest posts" in m and "Borealis reviews" in m
+    assert "kind is one of" in team_up.board_read(team, kind="gossip")
+
+
+def test_result_message_lists_remember_notes_and_unanswered_asks():
+    srv, team = _board_team()
+    prices, reviews = team.helpers[0], team.helpers[1]
+    team_up.board_post(team, prices, "remember: our Milan office prefers Corvid")
+    team.board.add("ask", "h2", "Reviews", "Is Acme's warranty 2 or 3 years?", to="h1", to_name="Prices")
+    for h in team.helpers:
+        h.state, h.result, h.ended_at = "done", "ok", 10.0
+    text = team_up.result_message(team)
+    assert "## Worth remembering" in text and "our Milan office prefers Corvid" in text
+    assert "Unanswered: Reviews asked Prices: Is Acme" in text
+
+
+def test_guard_lets_helpers_use_the_board_only():
+    _team, a1, _a2 = _helper_agent()
+    for act in ("post", "ask", "answer", "inbox", "wait", "read", "search", "map", "status"):
+        assert team_up.tool_block("team", {"action": act}, a1) == "", act
+    for act in ("propose", "start", "tell", "stop"):
+        assert team_up.tool_block("team", {"action": act}, a1), act
+    assert "remember:" in team_up.tool_block("facts", {"action": "add"}, a1)
+
+
+@pytest.mark.asyncio
+async def test_team_tool_routes_helper_and_lead_verbs():
+    from captain_claw.tools.team import TeamTool
+
+    srv, team = _board_team()
+    prices = team.helpers[0]
+    agent = FakeAgent()
+    agent._team_helper = (team.id, prices.id)
+    tool = TeamTool()
+    r = await tool.execute(action="post", text="Acme €389", title="Acme", _agent=agent)
+    assert r.success and "Posted #1" in r.content
+    r = await tool.execute(action="ask", to="Reviews", text="Returns?", _agent=agent)
+    assert r.success and "Asked Reviews" in r.content
+    r = await tool.execute(action="propose", _agent=agent)
+    assert not r.success
+    team.lead = srv.agent
+    r = await tool.execute(action="read", _agent=srv.agent)
+    assert r.success and "Acme" in r.content
+    r = await tool.execute(action="post", text="x", _agent=srv.agent)
+    assert not r.success and "for your helpers" in r.error

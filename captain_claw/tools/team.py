@@ -6,7 +6,8 @@ is "On"); the helpers work in the background while the person keeps talking to
 the lead; the lead checks on them, tells them things and stops them; when they
 are done the lead gets their results and writes the reply.
 
-Inside a helper only ``status`` works (it shows what the other helpers do).
+Inside a helper the tool is the team board (team_board.py): status, map, read,
+search, post, ask, answer, inbox and wait. The agent itself can read the board too.
 """
 
 from __future__ import annotations
@@ -26,29 +27,33 @@ class TeamTool(Tool):
         "parts (research several companies or options, go through a large folder in parts, gather "
         "data for different sections). Never for a short answer, for steps that depend on each "
         "other, or for work on one account (one inbox).\n"
-        "'propose' — offer the team (`title`, `parts`: [{name, goal, produces}]). The user usually "
-        "taps Team up on a card; then end your turn with one short line — don't do the work too.\n"
-        "'start' — start the team you offered, only when the user's message says go ahead.\n"
-        "'status' — what every helper is doing (`helper` for one in detail, with its result).\n"
-        "'tell' — a message to a helper (`helper`, or 'all') shown at its next step (`text`).\n"
-        "'stop' — stop one helper (`helper`) or the whole team.\n"
-        "Helpers can't send, publish, pay or change memory: when they finish you get their results "
-        "and write the user one reply, and you do any such action once."
+        "As the agent: 'propose' (`title`, `parts`: [{name, goal, produces}]) — the user usually taps "
+        "Team up on a card; end your turn with one short line and don't do the work too. 'start' — "
+        "only when the user's message says go ahead. 'status' (`helper` for one in detail), 'tell' "
+        "(`helper` or 'all', `text`: shown at its next step), 'stop' (`helper`, or all). When they "
+        "finish you get their results and write the user one reply.\n"
+        "As a helper — the team board: 'post' (`text`, `title`; start the text with 'remember:' for "
+        "a note to memory), 'ask' (`to`: a helper's name, 'anyone' or 'lead'; `text` — doesn't block), "
+        "'answer' (`ask_id`, `text`), 'inbox' (answers to your asks; `wait` ≤30 s), 'wait' (`helper` "
+        "to finish, or `query` for a post; `wait` ≤120 s). Both: 'read' (`helper`, `kind`), 'search' "
+        "(`query`), 'map' (who covers what). Helpers never send, publish, pay or change memory."
     )
-    timeout_seconds = 60.0
+    # `wait` may block up to two minutes.
+    timeout_seconds = 150.0
 
     parameters = {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["propose", "start", "status", "tell", "stop"],
-                "description": "propose | start | status | tell | stop",
+                "enum": ["propose", "start", "status", "tell", "stop",
+                         "post", "ask", "answer", "inbox", "wait", "read", "search", "map"],
+                "description": "What to do (see the tool description).",
             },
-            "title": {"type": "string", "description": "For propose: the whole task in a few words."},
+            "title": {"type": "string", "description": "propose: the whole task in a few words. post: a short label."},
             "parts": {
                 "type": "array",
-                "description": "For propose: 2–4 independent parts, one per helper.",
+                "description": "propose: 2–4 independent parts, one per helper.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -59,23 +64,26 @@ class TeamTool(Tool):
                     "required": ["name", "goal"],
                 },
             },
-            "helper": {"type": "string", "description": "For status/tell/stop: a helper's name ('all' = every one)."},
-            "text": {"type": "string", "description": "For tell: the message."},
+            "helper": {"type": "string", "description": "status/tell/stop/read/wait: a helper's name ('all' for tell/stop)."},
+            "text": {"type": "string", "description": "tell/post/ask/answer: the message."},
+            "to": {"type": "string", "description": "ask: a helper's name, 'anyone' or 'lead'."},
+            "ask_id": {"type": "integer", "description": "answer: the ask's number (#)."},
+            "query": {"type": "string", "description": "search, or wait: words of the post you need."},
+            "kind": {"type": "string", "description": "read: post, ask, answer or remember."},
+            "wait": {"type": "integer", "description": "inbox (≤30) / wait (≤120): seconds to block."},
         },
         "required": ["action"],
     }
 
     async def execute(self, action: str = "status", title: str = "", parts: Any = None,
-                      helper: str = "", text: str = "", **kwargs: Any) -> ToolResult:
+                      helper: str = "", text: str = "", to: str = "", ask_id: Any = None,
+                      query: str = "", kind: str = "", wait: Any = 0, **kwargs: Any) -> ToolResult:
         agent = kwargs.get("_agent")
         act = str(action or "status").strip().lower()
         found = team_up.helper_of(agent)
         if found is not None:
-            team, me = found
-            if act != "status":
-                return ToolResult(success=False, error=(
-                    "Only the lead starts, steers or stops the team. Use team status to see the others."))
-            return ToolResult(content=team_up.status_text(team, helper, for_helper=me))
+            return await self._as_helper(found, act, helper=helper, text=text, title=title, to=to,
+                                         ask_id=ask_id, query=query, kind=kind, wait=wait)
 
         if act == "propose":
             team, error = await team_up.propose(agent, title, parts)
@@ -124,7 +132,51 @@ class TeamTool(Tool):
                 return ToolResult(content="Stopping the whole team. Nothing more comes from it.")
             return ToolResult(content=(
                 f"Stopping {helper}. The others go on; you get the results when they finish."))
-        return ToolResult(success=False, error=f"Unknown action {action!r} — propose, start, status, tell or stop.")
+        if act == "read":
+            return ToolResult(content=team_up.board_read(team, helper, kind))
+        if act == "search":
+            return ToolResult(content=team_up.board_search(team, query or text))
+        if act == "map":
+            return ToolResult(content=team_up.board_map(team))
+        if act in ("post", "ask", "answer", "inbox", "wait"):
+            return ToolResult(success=False, error=(
+                f"'{act}' is for your helpers. To steer one, use team tell; their asks to you are "
+                "answered automatically and show in Team now."))
+        return ToolResult(success=False, error=f"Unknown action {action!r}.")
+
+    @staticmethod
+    async def _as_helper(found: Any, act: str, *, helper: str, text: str, title: str, to: str,
+                         ask_id: Any, query: str, kind: str, wait: Any) -> ToolResult:
+        team, me = found
+
+        def _done(msg: str, ok_prefixes: tuple[str, ...]) -> ToolResult:
+            if msg.startswith(ok_prefixes):
+                return ToolResult(content=msg)
+            return ToolResult(success=False, error=msg)
+
+        if act == "status":
+            return ToolResult(content=team_up.status_text(team, helper, for_helper=me))
+        if act == "map":
+            return ToolResult(content=team_up.board_map(team, for_helper=me))
+        if act == "read":
+            return ToolResult(content=team_up.board_read(team, helper, kind))
+        if act == "search":
+            if not str(query or text).strip():
+                return ToolResult(success=False, error="Give a query.")
+            return ToolResult(content=team_up.board_search(team, query or text, for_helper=me))
+        if act == "post":
+            return _done(team_up.board_post(team, me, text, title), ("Posted", "Noted"))
+        if act == "ask":
+            return _done(await team_up.board_ask(team, me, to or helper, text), ("Asked", "You already asked"))
+        if act == "answer":
+            return _done(team_up.board_answer(team, me, ask_id, text), ("Answered",))
+        if act == "inbox":
+            return ToolResult(content=await team_up.board_inbox(team, me, wait))
+        if act == "wait":
+            return ToolResult(content=await team_up.board_wait(team, me, helper, query, wait))
+        return ToolResult(success=False, error=(
+            "Only the lead starts, steers or stops the team. Helpers use the board: post, ask, answer, "
+            "inbox, wait, read, search, map, status."))
 
     @staticmethod
     def _latest(agent: Any) -> Any:
