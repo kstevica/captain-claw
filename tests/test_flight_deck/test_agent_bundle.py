@@ -1127,3 +1127,80 @@ async def test_a_scheduled_task_that_runs_a_flow_stays_out_and_says_so(deck):
     summary = made.json()["manifest"]
     assert summary["counts"]["schedules"] == 1
     assert any("run a flow stayed out" in n for n in summary["notes"])
+
+
+# ── an admin acting for someone takes nothing of theirs out ─────────────────
+
+ADMIN = "user-admin"
+
+
+async def _add_admin(db) -> None:
+    await db._db.execute(
+        "INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)"
+        " VALUES (?, 'admin@x.co', 'h', 'Admin', 'admin', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        (ADMIN,))
+    await db._db.commit()
+
+
+def _as_bob() -> dict:
+    return {**_hdr(ADMIN), fd_auth.ACT_AS_HEADER: BOB}
+
+
+@pytest.mark.asyncio
+async def test_acting_for_someone_exports_only_a_template_of_their_agent(deck):
+    await _add_admin(deck)
+    async with _client() as c:
+        made = await c.post("/fd/agent-bundle/export/bob-agent", json={"preset": "template"}, headers=_as_bob())
+        assert made.status_code == 200, made.text
+        got = await c.get(f"/fd/agent-bundle/exports/{made.json()['id']}/download", headers=_as_bob())
+        assert got.status_code == 200
+        names = _names(got.content)
+        assert f"agent/{HC}/lessons.json" in names
+        assert not any(n.startswith("stores/") for n in names) and "fd/chats.json" not in names
+        for body in ({"preset": "full"}, {"preset": "trained"},
+                     {"preset": "template", "categories": ["identity", "conversations"]},
+                     {"preset": "template", "categories": ["identity", "files"]},
+                     {"preset": "template", "contacts": True},
+                     {"preset": "full", "categories": ["identity"], "passphrase": "open sesame"}):
+            r = await c.post("/fd/agent-bundle/export/bob-agent", json=body, headers=_as_bob())
+            assert r.status_code == 403, body
+            assert "stay theirs" in r.json()["detail"]
+        assert (await c.get("/fd/agent-bundle/review/bob-agent", headers=_as_bob())).status_code == 403
+        # what Bob made himself stays his, even with its id in hand
+        own = await c.post("/fd/agent-bundle/export/bob-agent", json={"preset": "full"}, headers=_hdr(BOB))
+        assert own.status_code == 200
+        bundle_id = own.json()["id"]
+        assert (await c.get(f"/fd/agent-bundle/exports/{bundle_id}/download", headers=_as_bob())).status_code == 403
+        assert (await c.get(f"/fd/agent-bundle/exports/{bundle_id}/download", headers=_hdr(BOB))).status_code == 200
+        assert (await c.get("/fd/agent-bundle/review/bob-agent", headers=_hdr(BOB))).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_acting_for_someone_restores_their_backups_but_cant_download_or_move_them(deck, tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp_path / "vfs"))
+    await _add_admin(deck)
+    async with _client() as c:
+        r = await c.put("/fd/agent-bundle/backups/settings", headers=_hdr(BOB),
+                        json={"enabled": False, "keep": 3, "folder": "backups/agents"})
+        assert r.status_code == 200
+        assert (await c.post("/fd/agent-bundle/backups/run", json={}, headers=_hdr(BOB))).status_code == 200
+        listed = (await c.get("/fd/agent-bundle/backups", headers=_as_bob())).json()
+        assert len(listed["backups"]) == 1
+        bid = listed["backups"][0]["id"]
+        r = await c.get(f"/fd/agent-bundle/backups/{bid}/download", headers=_as_bob())
+        assert r.status_code == 403 and "only they can download" in r.json()["detail"]
+        assert (await c.get(f"/fd/agent-bundle/backups/{bid}/download", headers=_hdr(BOB))).status_code == 200
+        # the copy folder stays where Bob put it
+        r = await c.put("/fd/agent-bundle/backups/settings", headers=_as_bob(),
+                        json={"enabled": True, "folder": "shared/elsewhere"})
+        assert r.status_code == 403
+        r = await c.put("/fd/agent-bundle/backups/settings", headers=_as_bob(), json={"enabled": True, "keep": 5})
+        assert r.status_code == 200, r.text
+        assert r.json()["settings"]["folder"] == "backups/agents" and r.json()["settings"]["keep"] == 5
+        # putting the agent back works; its safety backup can't be downloaded while acting
+        r = await c.post(f"/fd/agent-bundle/backups/{bid}/restore", headers=_as_bob())
+        assert r.status_code == 200, r.text
+        safety = r.json()["safety_backup"]["id"]
+        r = await c.get(f"/fd/agent-bundle/safety/{safety}/download", headers=_as_bob())
+        assert r.status_code == 403
+        assert (await c.get(f"/fd/agent-bundle/safety/{safety}/download", headers=_hdr(BOB))).status_code == 200

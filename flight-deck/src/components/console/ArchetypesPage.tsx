@@ -382,6 +382,17 @@ function ArchetypeCard({ a, tierLabel, onOpen, onCopy, onShare, onPromote, onDel
   )
 }
 
+// What an archetype made from an onboarded agent passes on, in words: "3 documents, 12 lessons and 2 skills".
+function onboardingLine(a: Archetype): string {
+  const c = a.onboarding?.package ? a.onboarding.counts || {} : null
+  if (!c) return ''
+  const parts = ([['docs', 'document'], ['lessons', 'lesson'], ['skills', 'skill'], ['questions', 'exam question']] as const)
+    .filter(([k]) => (c[k] || 0) > 0)
+    .map(([k, noun]) => `${c[k]} ${noun}${c[k] === 1 ? '' : 's'}`)
+  if (!parts.length) return 'what it was taught'
+  return parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`
+}
+
 // ── One of yours, made a company archetype ──
 // It joins a company group (an existing one, or a new one named here) through
 // the same publish as Generate a group, and leaves your own archetypes.
@@ -405,6 +416,7 @@ function PromoteSheet({ a, onClose, onDone }: { a: Archetype; onClose: () => voi
         group: group === NEW_GROUP ? { label: label.trim() } : { id: group },
         family: { name: input.family, icon: '', color: '' },
         archetypes: [{ ...input, archetype_id: input.archetype_id, family: input.family }],
+        own: true,
       })
       await deleteArchetype(a.id)
       onDone()
@@ -430,6 +442,11 @@ function PromoteSheet({ a, onClose, onDone }: { a: Archetype; onClose: () => voi
           Everyone on this deck can then start an agent from it, under Company in their New agent picker.
           It moves out of your own archetypes. Only admins can change it.
         </p>
+        {onboardingLine(a) && (
+          <p className="text-sm leading-relaxed text-zinc-400">
+            Its onboarding goes with it: {onboardingLine(a)}. Every agent made from it starts with that as its base.
+          </p>
+        )}
         {error && <Notice tone="red">{error}</Notice>}
         <Field label="Company group">
           <select value={group} onChange={(e) => setGroup(e.target.value)} className={inputCls}>

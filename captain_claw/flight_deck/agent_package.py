@@ -10,8 +10,11 @@ The package is kept by Flight Deck (``onboarding-packages/<id>/``), and a new
 archetype of its owner's names it. The archetype also carries the agent's
 role, instructions, tools and mode.
 
-An agent made from that archetype by anyone it is shared with starts with all
-of it as its base: what its new user teaches it adds to that, and can't change
+When an admin makes their archetype a company archetype, the deck keeps a copy
+of the package (``copy_for_team``, owner :data:`TEAM_OWNER`), so it goes with
+it to everyone. An agent made from that archetype by anyone it is shared with
+(or, as a company archetype, by anyone on the deck) starts with all of it as
+its base: what its new user teaches it adds to that, and can't change
 it (agent_lessons). Its owner's own agents made from it start with it as their
 own, as it was (the base of an admin's stays the base). The exam's questions
 wait in its Exams tab, to be asked when its user wants (the answers and scores
@@ -51,6 +54,11 @@ _SAFE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]*\.(?:md|txt)")     # what k
 _SHARED_FILES = ("INDEX.md", "glossary.md")              # written from the record with the documents and glossary
 _QUESTION = ("id", "kind", "question", "expected", "points", "doc", "doc_title", "doc_name", "title", "path", "key",
              "read", "language")
+
+
+# The owner of a package the deck keeps for a company archetype (team_archetypes):
+# agents made from it get its onboarding as their base, whoever they belong to.
+TEAM_OWNER = "@deck"
 
 
 def packages_dir() -> Path:
@@ -213,6 +221,30 @@ def forget(package_id: str) -> None:
     where = _package_dir(package_id)
     if where is not None:
         shutil.rmtree(where, ignore_errors=True)
+
+
+def copy_for_team(package_id: str, owner: str) -> dict | None:
+    """A copy of *owner*'s package for the deck to keep, when their archetype
+    becomes a company archetype: removing their own archetype afterwards
+    forgets only the original. The copy's package record; None when *owner*
+    has no such package."""
+    package = load(package_id)
+    src = _package_dir(package_id)
+    if not package or src is None or str(package.get("owner") or "") != owner:
+        return None
+    copy_id = secrets.token_hex(8)
+    target = packages_dir() / copy_id
+    shutil.copytree(src, target)
+    copied = {**package, "id": copy_id, "owner": TEAM_OWNER, "copied_from": package_id}
+    (target / _FILE).write_text(json.dumps(copied, ensure_ascii=False, default=str), encoding="utf-8")
+    return copied
+
+
+def forget_team(package_id: str) -> None:
+    """Forget a package the deck kept for a company archetype — never anyone's own."""
+    package = load(package_id)
+    if package and str(package.get("owner") or "") == TEAM_OWNER:
+        forget(package_id)
 
 
 def unpack(package_id: str, owner: str, agent_dir: Path, workspace: Path, agent_name: str,

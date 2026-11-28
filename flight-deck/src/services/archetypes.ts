@@ -218,7 +218,9 @@ export async function publishTeamPack(body: {
   group: { id?: string; label?: string; hint?: string }
   family: PackFamily
   archetypes: (Omit<ArchetypeInput, 'family'> & { family: string })[]
-}): Promise<{ published: number; group: string; family: string; ids: string[] }> {
+  // The admin's own archetypes made company ones: each brings its onboarding (documents, lessons…).
+  own?: boolean
+}): Promise<{ published: number; group: string; family: string; ids: string[]; with_onboarding?: number }> {
   return jsonOrThrow(await authFetch('/fd/archetypes/team', { method: 'POST', body: JSON.stringify(body) }))
 }
 

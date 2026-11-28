@@ -2658,11 +2658,15 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
     if arch.get("recall_mode"):
         config.grid_recall_mode = str(arch["recall_mode"])
     # Passed on from an onboarded agent: the spawn unpacks its onboarding — only a package of the
-    # archetype's own owner's (the caller's, or whoever shared it with them).
+    # archetype's own owner's (the caller's, whoever shared it with them, or for a company
+    # archetype the deck's own copy).
     onboarding = arch.get("onboarding")
     if isinstance(onboarding, dict) and onboarding.get("package"):
+        from captain_claw.flight_deck.agent_package import TEAM_OWNER
+        source = arch.get("source")
         config._onboarding = {"package": str(onboarding["package"]),
-                              "owner": str(arch.get("shared_owner") or "") if arch.get("source") == "shared" else uid}
+                              "owner": str(arch.get("shared_owner") or "") if source == "shared"
+                              else TEAM_OWNER if source == "team" else uid}
 
     # Model: the requested tier (`@tier` wins, else the archetype's own default
     # tier) resolved against the OWNER's Library tier config — the same source

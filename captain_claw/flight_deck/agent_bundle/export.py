@@ -391,7 +391,7 @@ async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: 
                                            lambda raw: signing.sign(raw, deck))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    record = {"id": bundle_id, "owner": owner_id, "slug": slug,
+    record = {"id": bundle_id, "owner": owner_id, "slug": slug, "categories": sorted(categories),
               "file_name": file_name(agent["name"], preset), "size": out.stat().st_size, "made": manifest["made"]}
     (out.with_suffix(".json")).write_text(json.dumps(record), encoding="utf-8")
     return {**record, "manifest": summary(manifest)}
