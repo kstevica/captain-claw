@@ -34,6 +34,7 @@ _DELIVERY_LOG_ARGS = 200
 _DELIVERY_LOG_RESULT = 400
 _DELIVERY_REQUEST_CHARS = 6000
 _DELIVERY_REPLY_CHARS = 12000
+_DELIVERY_EARLIER_CHARS = 2000  # the exchange before the request, each side
 # The checker's answer, and the room on top for a model that thinks first.
 _DELIVERY_ANSWER_TOKENS = 1500
 _DELIVERY_THINKING_ROOM = 8000
@@ -1288,6 +1289,38 @@ class AgentCompletionMixin:
             lines.insert(0, f"({len(work) - _DELIVERY_LOG_CALLS} earlier tool call(s) not shown)")
         return "\n".join(lines) or "(no tool calls)"
 
+    def _delivery_earlier(self, turn_start_idx: int) -> str:
+        """The exchange just before this turn — the person's previous message
+        and the reply to it, each cut short — so the checker can tell what a
+        short request ("compare them") points back to. Notes other lanes put
+        in the conversation ("[Autonomous Work — …]") are skipped."""
+        from captain_claw import msg_origin
+
+        def _plain(content: Any) -> str:
+            if isinstance(content, list):
+                content = " ".join(str(p.get("text", "")) for p in content if isinstance(p, dict))
+            return " ".join(str(content or "").split())
+
+        messages = list(getattr(getattr(self, "session", None), "messages", None) or [])
+        earlier = messages[: max(0, min(int(turn_start_idx or 0), len(messages)))]
+        asked = answered = ""
+        for msg in reversed(earlier):
+            if not isinstance(msg, dict):
+                continue
+            if msg_origin.is_human_input(msg):
+                asked = _plain(msg.get("content"))
+                break
+            if (not answered and str(msg.get("role", "")).strip().lower() == "assistant"
+                    and not msg.get("tool_calls")):
+                text = _plain(msg.get("content"))
+                if text and not text.startswith("["):
+                    answered = text
+        if not asked and not answered:
+            return "(nothing before it)"
+        cut = _DELIVERY_EARLIER_CHARS
+        return (f"The person: {asked[:cut] + (' …' if len(asked) > cut else '') or '(not found)'}\n"
+                f"The reply: {answered[:cut] + (' …' if len(answered) > cut else '') or '(none)'}")
+
     async def _delivery_check(
         self,
         *,
@@ -1308,6 +1341,7 @@ class AgentCompletionMixin:
                 Message(role="user", content=self.instructions.render(
                     "delivery_check_user_prompt.md",
                     user_input=str(user_input or "")[:_DELIVERY_REQUEST_CHARS],
+                    earlier=self._delivery_earlier(turn_start_idx),
                     work_log=self._delivery_work_log(turn_start_idx),
                     candidate_response=str(candidate_response or "")[:_DELIVERY_REPLY_CHARS],
                 )),
