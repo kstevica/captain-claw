@@ -14,7 +14,7 @@ from captain_claw.instructions import InstructionLoader
 from captain_claw.llm import LLMProvider, LLMResponse
 
 _INSTRUCTIONS = Path(acm.__file__).resolve().parent / "instructions"
-HEAD = "Team up — big work split among helpers:"
+HEAD = "Team up — work split among helpers:"
 
 
 class _Provider(LLMProvider):
@@ -66,6 +66,7 @@ def test_section_when_team_up_is_offered(monkeypatch, tmp_path, level):
     prompt = _prompt(monkeypatch, tmp_path, level=level)
     assert prompt.count(HEAD) == 1
     assert "call `team propose` FIRST" in prompt
+    assert "even when each part looks quick" in prompt
     assert "{team_block}" not in prompt
 
 
@@ -84,3 +85,12 @@ def test_no_section_when_the_setting_is_off(monkeypatch, tmp_path):
 def test_no_section_for_a_shared_agent_member(monkeypatch, tmp_path):
     team_up.bind_server(object())
     assert HEAD not in _prompt(monkeypatch, tmp_path, member=True)
+
+
+def test_tool_description_offers_for_quick_parts_too():
+    from captain_claw.tools.team import TeamTool
+
+    text = TeamTool.description
+    assert "even quick ones" in text
+    assert "ONLY when" not in text and "substantial" not in text
+

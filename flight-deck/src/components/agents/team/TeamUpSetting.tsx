@@ -96,10 +96,7 @@ export function TeamUpSetting({ kind, identifier, title = false }: {
             label="Helpers at most" value={s.max_helpers} min={2} max={4} disabled={busy || off}
             onChange={(v) => save({ ...s, max_helpers: v })}
           />
-          <Stepper
-            label="Team budget" value={s.budget_x} min={3} max={12} suffix="× a normal turn" disabled={busy || off}
-            onChange={(v) => save({ ...s, budget_x: v })}
-          />
+          {/* No team budget for now (team_up.BUDGET_CAP): the setting is kept, not shown. */}
         </div>
       </div>
       {error && <p className="mt-1.5 text-[11px] text-red-500">{error}</p>}

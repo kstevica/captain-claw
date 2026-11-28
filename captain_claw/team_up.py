@@ -23,11 +23,15 @@ team starts at once; "Off" offers nothing.
   prompt cache — stays the same as the lead's. The lead does such things once,
   after the team is done.
 * **One browser holder at a time** (the lead included while a team runs).
-* **Budget: a multiple of a normal turn** — the median tokens of this agent's
-  recent chat turns, times the setting (6x by default). At the budget each
-  working helper is told to finish with what it has; past 1.15x it is stopped.
+* **Budget: off for now** (``BUDGET_CAP``; owner 2026-11-28). Tokens are still
+  counted and shown. With the cap on it is a multiple of a normal turn — the
+  median tokens of this agent's recent chat turns, times the setting (6x by
+  default): at the budget each working helper is told to finish with what it
+  has; past 1.15x it is stopped.
 * **When every helper is done** the lead gets a turn with their results (once
-  it is free) and writes the person one reply.
+  it is free) and writes the person one reply. **A stop** (the person's or the
+  lead's) ends the helpers at once; the lead still gets that turn, with each
+  stopped helper's work so far (:func:`partial_result`).
 
 Helpers can't team up (depth 1), one team per lead at a time, 2–4 helpers.
 """
@@ -76,7 +80,10 @@ TELLS_KEPT = 8            # lead messages a helper keeps in view
 RESULT_CHARS = 14_000     # one helper's result in the lead's finishing turn
 RESULTS_CHARS = 42_000    # all of them
 TEAMS_KEPT = 12           # finished teams kept in memory for the cards
-RECORDS_KEPT = 10         # team records kept on the lead's session
+RECORDS_KEPT = 30         # team records kept on the lead's session: the run history
+RECORDS_FULL = 10         # the newest keep their board and long results; older ones are slimmed
+RECORD_SLIM_CHARS = 600   # a slimmed record's result / work so far, per helper
+BUDGET_CAP = False        # owner 2026-11-28: no budget cap for now (tokens are still counted)
 WRAP_UP_AT = 1.0          # x budget: helpers are told to finish
 HARD_STOP_AT = 1.15       # x budget: helpers still working are stopped
 WARN_AT = 0.8             # x budget: the lead and the person are told
@@ -187,6 +194,9 @@ def normal_turn() -> int:
 
 
 def team_budget(settings: dict[str, Any] | None = None) -> int:
+    """The team's token budget, 0 = no cap (``BUDGET_CAP`` off)."""
+    if not BUDGET_CAP:
+        return 0
     cfg = normalize_settings(settings) if settings is not None else read_settings()
     return normal_turn() * int(cfg["budget_x"])
 
@@ -242,6 +252,7 @@ class Helper:
     tokens: int = 0
     usage: dict[str, int] = field(default_factory=dict)
     result: str = ""
+    partial: str = ""  # a stopped or failed helper's work so far (partial_result)
     error: str = ""
     draft: str = ""
     tells: list[str] = field(default_factory=list)
@@ -272,6 +283,7 @@ class Helper:
             "error": self.error[:400],
             "draft": self.draft[-600:] if self.state in _LIVE_HELPER else "",
             "result": self.result[:4000] if self.state not in _LIVE_HELPER else "",
+            "partial": bool(self.partial),
             "files": list(self.files[-12:]),
             "started_at": self.started_at,
             "ended_at": self.ended_at,
@@ -585,12 +597,16 @@ def is_helper_session(session: Any) -> bool:
 # ── Events to the lead's chat ────────────────────────────────────────────
 
 def _lane_send(team: Team) -> Callable[[dict], None] | None:
+    return _lane_send_for(team.lane)
+
+
+def _lane_send_for(lane: str) -> Callable[[dict], None] | None:
     server = _SERVER
     if server is None:
         return None
-    if team.lane == getattr(server, "LANE_MAIN", "A"):
+    if lane == getattr(server, "LANE_MAIN", "A"):
         return lambda msg: server._broadcast(msg)
-    return server._lane_send(team.lane)
+    return server._lane_send(lane)
 
 
 def _emit(target: Team, event: str, **payload: Any) -> None:
@@ -777,7 +793,9 @@ async def start(team: Team, *, by: str = "person", from_tap: bool = False) -> st
     team.started_at = _now()
     team.note = f"started by {'you' if by == 'person' else 'the agent'}"
     base = _fork_messages(lead)
-    team.fork_len = len(getattr(getattr(lead, "session", None), "messages", None) or [])
+    # What every helper inherited (a team started inside the lead's turn
+    # inherits less than the lead's whole session): its own work follows.
+    team.fork_len = len(base)
     meta = _fork_metadata(getattr(getattr(lead, "session", None), "metadata", None))
     # Helpers keep their files in the lead's session folders: the finishing
     # turn hands them over with the reply, and the system prompt (which names
@@ -841,6 +859,76 @@ def dismiss(team: Team) -> str:
     team.ended_at = _now()
     _clear_lead_note(team)
     _emit_team(team)
+    return ""
+
+
+# ── The run history ──────────────────────────────────────────────────────
+
+async def remove(lane: str, team_id: str) -> str:
+    """Remove a finished run from the history: its card, its record on the
+    lead's session and its helpers' sessions (their transcripts). "" or why
+    not. A live team is stopped first."""
+    from captain_claw.session import get_session_manager
+
+    team_id = str(team_id or "").strip()
+    team = find(team_id)
+    if team is not None and team.lane != lane:
+        return "That team isn't here any more."
+    if team is not None and team.state in ("running", "finishing"):
+        return "That team is still working: stop it first."
+    sm = get_session_manager()
+    helper_sessions: set[str] = set()
+    lead_session_id = ""
+    if team is not None:
+        helper_sessions.update(h.session_id for h in team.helpers if h.session_id)
+        lead_session_id = team.lead_session_id
+    agent = _lane_agent(lane)
+    sessions = []
+    current = getattr(agent, "session", None) if agent is not None else None
+    if current is not None:
+        sessions.append(current)
+    if lead_session_id and (current is None or str(getattr(current, "id", "")) != lead_session_id):
+        try:
+            other = await sm.load_session(lead_session_id)
+        except Exception:
+            other = None
+        if other is not None:
+            sessions.append(other)
+    found = team is not None
+    for session in sessions:
+        meta = getattr(session, "metadata", None)
+        if not isinstance(meta, dict):
+            continue
+        runs = [r for r in meta.get("team_runs") or [] if isinstance(r, dict)]
+        gone = [r for r in runs if r.get("id") == team_id]
+        if not gone:
+            continue
+        found = True
+        for r in gone:
+            helper_sessions.update(str(h.get("session_id") or "") for h in _helper_rows(r))
+        meta["team_runs"] = [r for r in runs if r.get("id") != team_id]
+        try:
+            await sm.save_session(session)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Team up: history not saved", team=team_id, error=str(exc))
+    if not found:
+        return "That team isn't in the history."
+    if team is not None:
+        _TEAMS.pop(team.id, None)
+        if team.state == "proposed":
+            _clear_lead_note(team)
+    for session_id in sorted(x for x in helper_sessions if x):
+        try:
+            await sm.delete_session(session_id)
+        except Exception as exc:  # noqa: BLE001 — the run is gone from the history either way
+            log.debug("Team up: helper session not deleted", session=session_id, error=str(exc))
+    send = _lane_send_for(lane)
+    if send is not None:
+        try:
+            send({"type": "team", "event": "removed", "team_id": team_id})
+        except Exception:
+            pass
+    log.info("Team up: removed from the history", team=team_id, lane=lane, sessions=len(helper_sessions))
     return ""
 
 
@@ -967,7 +1055,8 @@ def lead_note(team: Team) -> str:
         open_asks = sum(1 for e in board.entries if e["kind"] == "ask" and not e.get("answered"))
         lines.append(f"Board: {posts} posts, {open_asks} open asks (team read to see it).")
     used = team.used()
-    lines.append(f"Budget: {_k(used)} of {_k(team.budget)} tokens.")
+    lines.append(f"Budget: {_k(used)} of {_k(team.budget)} tokens." if team.budget > 0
+                 else f"Tokens so far: {_k(used)}.")
     if team.state == "finishing":
         lines.append("All helpers are done; their results reach you in a moment.")
     else:
@@ -1069,8 +1158,10 @@ async def _run_helper(team: Team, h: Helper) -> None:
         msg_origin.hint_turn_provenance(agent, channel="web", turn_origin="worker_task")
         _step(team, h, "note", "Started")
         reply = await agent.complete(brief)
-        h.result = str(reply or "").strip()
-        if h.state == "stopping" or getattr(agent, "_last_complete_cancelled", False):
+        cancelled = bool(getattr(agent, "_last_complete_cancelled", False))
+        # A stopped turn's reply is only "Request cancelled by user."
+        h.result = "" if cancelled else str(reply or "").strip()
+        if cancelled or (h.state == "stopping" and not h.result):
             h.state = "stopped"
             h.stopped_by = h.stopped_by or "you"
         elif not h.result:
@@ -1096,6 +1187,12 @@ async def _run_helper(team: Team, h: Helper) -> None:
             pass
         if team.browser_holder == h.id:
             team.browser_holder = ""
+        if h.state in ("stopped", "failed") and not h.result:
+            try:
+                h.partial = partial_result(getattr(getattr(agent, "session", None), "messages", None) or [],
+                                           team.fork_len)
+            except Exception as exc:  # noqa: BLE001 — the work so far is a bonus
+                log.debug("Team up: work so far not read", helper=h.id, error=str(exc))
         if agent is not None and getattr(agent, "session", None) is not None:
             try:
                 await get_session_manager().save_session(agent.session)
@@ -1524,7 +1621,8 @@ async def _watch(team: Team) -> None:
         return
     lead = team.lead
     stopped_by_person = all(h.state == "stopped" and h.stopped_by == "you" for h in team.helpers)
-    if stopped_by_person:
+    if stopped_by_person and not any(h.result or h.partial for h in team.helpers):
+        # Stopped before anyone did anything: nothing to hand over.
         team.state = "stopped"
         team.ended_at = _now()
         _clear_lead_note(team)
@@ -1539,7 +1637,11 @@ async def _watch(team: Team) -> None:
     except Exception as exc:  # noqa: BLE001
         log.warning("Team up: results not delivered", team=team.id, error=str(exc))
     team.delivered = delivered
-    team.state = "done" if any(h.state == "done" for h in team.helpers) else "failed"
+    if stopped_by_person:
+        team.state = "stopped"
+        team.note = "stopped by you · the work so far went to the agent" if delivered else team.note
+    else:
+        team.state = "done" if any(h.state == "done" for h in team.helpers) else "failed"
     team.ended_at = _now()
     if not delivered:
         team.note = "the results couldn't reach the chat; ask the agent for team status"
@@ -1563,16 +1665,26 @@ def _clear_lead_note(team: Team) -> None:
 def result_message(team: Team) -> str:
     """The finishing turn's opening message: every helper's result."""
     elapsed = (max(h.ended_at for h in team.helpers) or _now()) - (team.started_at or _now())
+    stopped = [h for h in team.helpers if h.state == "stopped"]
+    if stopped and len(stopped) == len(team.helpers):
+        how = ("The user stopped the team before it finished. Below is what each helper had done by "
+               "then. Write the user ONE reply from it: lead with what is known, keep what matters from "
+               "each part, and say plainly what was left undone.")
+    else:
+        how = ("Your helpers are done. Write the user ONE reply that brings their work together: lead "
+               "with the answer, keep what matters from each part, and say plainly what's missing or "
+               "failed.")
+        if stopped:
+            how += " Some were stopped before they finished: use the work they had done."
+    head = (f"Team: {len(team.helpers)} helpers · {_duration(elapsed)} · {_k(team.used())} tokens"
+            + (f" (budget {_k(team.budget)})" if team.budget > 0 else ""))
     lines = [
         RESULT_HEAD.format(title=team.title.replace("'", "’"))
-        + " A note from the Team up runner, not a message from the user. Your helpers are done. "
-        "Write the user ONE reply that brings their work together: lead with the answer, keep what "
-        "matters from each part, and say plainly what's missing or failed. The user saw the progress "
-        "but not these results. Helpers changed nothing outside: if their work calls for sending, "
-        "booking, paying or remembering something, offer it — don't do it unasked.",
+        + " A note from the Team up runner, not a message from the user. " + how + " The user saw the "
+        "progress but not these results. Helpers changed nothing outside: if their work calls for "
+        "sending, booking, paying or remembering something, offer it — don't do it unasked.",
         "",
-        f"Team: {len(team.helpers)} helpers · {_duration(elapsed)} · {_k(team.used())} tokens "
-        f"(budget {_k(team.budget)})",
+        head,
     ]
     budget_left = RESULTS_CHARS
     for h in team.helpers:
@@ -1584,6 +1696,14 @@ def result_message(team: Team) -> str:
             text = h.result if len(h.result) <= room else h.result[:room] + "\n… [cut; the full result is in the helper's session]"
             budget_left -= len(text)
             lines += ["Result:", text]
+        elif h.partial:
+            if h.error:
+                lines.append(f"Error: {h.error}")
+            room = max(1500, min(RESULT_CHARS, budget_left))
+            text = h.partial if len(h.partial) <= room else h.partial[:room] + "\n… [cut]"
+            budget_left -= len(text)
+            lines += ["It stopped before writing its result. Its work so far — its own notes, the calls "
+                      "it made (→) and what came back (cut short):", text]
         elif h.error:
             lines.append(f"Error: {h.error}")
         else:
@@ -1752,12 +1872,14 @@ def _save_record(team: Team) -> None:
                      "model": h.model, "step_count": h.step_count, "tool_count": h.tool_count,
                      "started_at": h.started_at, "ended_at": h.ended_at, "stopped_by": h.stopped_by,
                      "error": h.error[:400], "result": h.result[:RECORD_RESULT_CHARS],
+                     "partial": h.partial[:RECORD_RESULT_CHARS],
                      "files": h.files[-12:]} for h in team.helpers],
         "board": [dict(e, text=str(e.get("text") or "")[:RECORD_BOARD_CHARS])
                   for e in team.board.entries[-RECORD_BOARD_ENTRIES:]],
     }
     runs = [r for r in meta.get("team_runs", []) if isinstance(r, dict) and r.get("id") != team.id]
-    meta["team_runs"] = (runs + [record])[-RECORDS_KEPT:]
+    runs = (runs + [record])[-RECORDS_KEPT:]
+    meta["team_runs"] = [_slim_record(r) for r in runs[:-RECORDS_FULL]] + runs[-RECORDS_FULL:]
     # A turn on the lead saves the session as it ends; with none running
     # (a team stopped from the panel) the record is saved here.
     server = _SERVER
@@ -1768,6 +1890,19 @@ def _save_record(team: Team) -> None:
             asyncio.get_running_loop().create_task(get_session_manager().save_session(session))
         except Exception:
             pass
+
+
+def _slim_record(record: dict[str, Any]) -> dict[str, Any]:
+    """An older run in the history: its helpers' results cut short and no
+    board, so the session's metadata stays small. The full results stay in
+    the helpers' sessions (recall and the transcript read them there)."""
+    if record.get("slim"):
+        return record
+    out = dict(record, board=[], slim=True)
+    out["helpers"] = [dict(h, result=str(h.get("result") or "")[:RECORD_SLIM_CHARS],
+                           partial=str(h.get("partial") or "")[:RECORD_SLIM_CHARS], usage={})
+                      for h in record.get("helpers") or [] if isinstance(h, dict)]
+    return out
 
 
 def _lane_agent(lane: str) -> Any:
@@ -1807,7 +1942,8 @@ def record_snapshot(record: dict[str, Any], lane: str = "") -> dict[str, Any]:
             "session_id": h.get("session_id", ""), "step_count": int(h.get("step_count") or 0),
             "tool_count": int(h.get("tool_count") or 0), "tokens": int(h.get("tokens") or 0),
             "usage": dict(h.get("usage") or {}), "last": "", "error": h.get("error", ""), "draft": "",
-            "result": h.get("result", ""), "files": list(h.get("files") or []),
+            "result": h.get("result", ""), "partial": bool(h.get("partial")),
+            "files": list(h.get("files") or []),
             "started_at": h.get("started_at") or 0, "ended_at": h.get("ended_at") or 0,
             "wrap_up": False, "stopped_by": "restart" if stopped else h.get("stopped_by", ""),
             "model": h.get("model", ""), "usd": usd_for(h.get("model", ""), h.get("usage")),
@@ -1944,9 +2080,13 @@ async def recall_text(agent: Any, helper_ref: str = "", query: str = "") -> str:
                     except Exception:
                         session = None
                 if session is not None:
-                    own = list(getattr(session, "messages", None) or [])[int(r.get("fork_len") or 0):]
-                    full = _final_answer(own)
-            result = full or str(h.get("result") or "")
+                    messages = list(getattr(session, "messages", None) or [])
+                    fork_len = int(r.get("fork_len") or 0)
+                    if h.get("state") in ("stopped", "failed") and not h.get("result"):
+                        full = partial_result(messages, fork_len)
+                    else:
+                        full = _final_answer(messages[fork_len:])
+            result = full or str(h.get("result") or h.get("partial") or "")
             lines = [f"{h.get('name')} — part of the team '{r.get('title')}' ({r.get('state')}, "
                      f"{_ago(float(r.get('ended_at') or r.get('started_at') or 0))})",
                      f"Part: {h.get('goal', '')}", f"State: {h.get('state', '')}"]
@@ -2069,6 +2209,55 @@ def transcript_items(messages: list[Any], fork_len: int = 0) -> tuple[list[dict[
                           "text": body, "cut": cut})
     total = len(items)
     return items[-TRANSCRIPT_ITEMS:], total
+
+
+PARTIAL_CHARS = 12_000     # a stopped helper's work so far, for the finishing turn
+PARTIAL_NOTE_CHARS = 1500  # one of its own notes
+PARTIAL_CALL_CHARS = 300   # one call it made
+PARTIAL_TOOL_MIN = 300     # what one call brought back, at least …
+PARTIAL_TOOL_MAX = 2000    # … and at most
+
+
+def partial_result(messages: list[Any], fork_len: int = 0) -> str:
+    """A stopped (or failed) helper's work so far, from its own messages after
+    the conversation it inherited: its notes, the calls it made (→) and what
+    came back, cut so it all fits the finishing turn. "" when it did nothing."""
+    own = [m for m in list(messages or [])[max(0, int(fork_len or 0)):] if isinstance(m, dict)]
+    if own and own[0].get("role") == "user":
+        own = own[1:]  # its brief
+    entries: list[tuple[str, str]] = []
+    for msg in own:
+        role = str(msg.get("role") or "")
+        if role == "assistant":
+            text = _text_of(msg.get("content")).strip()
+            if text:
+                entries.append(("note", text))
+            for call in _calls_of(msg):
+                entries.append(("call", f"{call['name']} {call['args']}".strip()))
+        elif role == "tool":
+            text = _text_of(msg.get("content")).strip()
+            if text:
+                entries.append(("result", text))
+    if not any(kind in ("note", "result") for kind, _ in entries):
+        return ""
+    fixed = sum(min(len(t), PARTIAL_NOTE_CHARS if k == "note" else PARTIAL_CALL_CHARS)
+                for k, t in entries if k != "result")
+    results = sum(1 for k, _ in entries if k == "result")
+    room = max(0, PARTIAL_CHARS - fixed)
+    per = max(PARTIAL_TOOL_MIN, min(PARTIAL_TOOL_MAX, room // max(1, results)))
+    lines = []
+    for kind, text in entries:
+        if kind == "note":
+            lines.append(_cut(text, PARTIAL_NOTE_CHARS)[0])
+        elif kind == "call":
+            lines.append("→ " + _cut(text, PARTIAL_CALL_CHARS)[0])
+        else:
+            lines.append("  " + _cut(text, per)[0].replace("\n", "\n  "))
+    out = "\n".join(lines)
+    if len(out) > PARTIAL_CHARS:
+        half = PARTIAL_CHARS // 2
+        out = out[:half].rstrip() + "\n… [the middle is cut]\n" + out[-half:].lstrip()
+    return out
 
 
 async def transcript(lane: str, team_id: str, helper_ref: str) -> dict[str, Any]:
@@ -2221,7 +2410,9 @@ def labelled_question(agent: Any, arguments: Any) -> Any:
 # ── Status for the tool ──────────────────────────────────────────────────
 
 def status_text(team: Team, helper_ref: str = "", *, for_helper: Helper | None = None) -> str:
-    lines = [f"Team '{team.title}' — {team.state} · {_k(team.used())} of {_k(team.budget)} tokens"]
+    tokens = (f"{_k(team.used())} of {_k(team.budget)} tokens" if team.budget > 0
+              else f"{_k(team.used())} tokens")
+    lines = [f"Team '{team.title}' — {team.state} · {tokens}"]
     if team.board.entries:
         open_asks = sum(1 for e in team.board.entries if e["kind"] == "ask" and not e.get("answered"))
         lines.append(f"Board: {len(team.board.entries)} entries, {open_asks} open asks (team read / map).")

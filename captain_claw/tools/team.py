@@ -21,12 +21,13 @@ from captain_claw.tools.registry import Tool, ToolResult
 class TeamTool(Tool):
     name = "team"
     description = (
-        "Team up: split a big task among 2–4 helpers — copies of you with your memory, tools and "
+        "Team up: split a task among 2–4 helpers — copies of you with your memory, tools and "
         "model — that work on their parts at the same time, in the background, while the user can "
-        "keep talking to you. Propose a team ONLY when the request has 2+ independent, substantial "
-        "parts (research several companies or options, go through a large folder in parts, gather "
-        "data for different sections). Never for a short answer, for steps that depend on each "
-        "other, or for work on one account (one inbox).\n"
+        "keep talking to you. Propose a team, before doing any of the work, whenever the request "
+        "has 2+ independent parts, even quick ones (the user decides): look up, research or "
+        "compare several companies, people or options; go through a large folder in parts; "
+        "gather data for different sections. Never for one subject, a follow-up already "
+        "answered, steps that depend on each other, or work on one account (one inbox).\n"
         "As the agent: 'propose' (`title`, `parts`: [{name, goal, produces}]) — the user usually taps "
         "Team up on a card; end your turn with one short line and don't do the work too. 'start' — "
         "only when the user's message says go ahead. 'status' (`helper` for one in detail), 'tell' "
