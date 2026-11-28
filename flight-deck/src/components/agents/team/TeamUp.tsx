@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, CircleDot, CircleStop, FileText, Globe, Info, Loader2,
-  Megaphone, PanelRightOpen, Sparkles, Users, Wrench, X,
+  AlertTriangle, ArrowLeft, Bookmark, Check, ChevronDown, ChevronRight, CircleDot, CircleStop, CornerDownRight,
+  FileText, Globe, Info, Loader2, Megaphone, MessageCircleQuestion, MessageSquareText, PanelRightOpen, Sparkles,
+  Users, Wrench, X,
 } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../../../stores/chatStore'
 import {
   LIVE_HELPER, LIVE_TEAM, currentTeam, fmtElapsed, fmtTokens, helperTone, useTeamStore,
-  type HelperState, type TeamHelper, type TeamRun, type TeamStep,
+  type BoardEntry, type HelperState, type TeamHelper, type TeamRun, type TeamStep,
 } from '../../../stores/teamStore'
 import { AgentPicture } from '../AgentPicture'
 import { FOCUS } from '../queue/QueueButton'
@@ -108,16 +109,19 @@ function BudgetMeter({ team, compact = false }: { team: TeamRun; compact?: boole
 
 const STEP_ICON: Record<string, typeof Wrench> = {
   tool: Wrench, narration: Sparkles, file: FileText, tell: Megaphone, note: Info, llm: CircleDot,
+  post: MessageSquareText, ask: MessageCircleQuestion, answer: CornerDownRight, remember: Bookmark,
 }
+const BOARD_STEP = new Set(['post', 'ask', 'answer', 'remember'])
 
 function StepLine({ step, fresh }: { step: TeamStep; fresh?: boolean }) {
   const Icon = STEP_ICON[step.kind] ?? Info
   const tell = step.kind === 'tell'
   return (
     <li className={`flex items-start gap-2 text-xs leading-relaxed ${fresh ? 'fd-rise' : ''} ${
-      step.kind === 'narration' ? 'italic text-zinc-400' : tell ? 'text-violet-700 dark:text-violet-300' : step.kind === 'note' ? 'text-zinc-500' : 'text-zinc-300'
+      step.kind === 'narration' ? 'italic text-zinc-400' : tell ? 'text-violet-700 dark:text-violet-300'
+        : BOARD_STEP.has(step.kind) ? 'text-sky-700 dark:text-sky-300' : step.kind === 'note' ? 'text-zinc-500' : 'text-zinc-300'
     }`}>
-      <Icon className={`mt-[3px] h-3 w-3 shrink-0 ${tell ? 'text-violet-500' : 'text-zinc-600'}`} />
+      <Icon className={`mt-[3px] h-3 w-3 shrink-0 ${tell ? 'text-violet-500' : BOARD_STEP.has(step.kind) ? 'text-sky-500' : 'text-zinc-600'}`} />
       <span className="min-w-0 break-words">{tell ? <><span className="font-medium">From the agent:</span> {step.text}</> : step.text}</span>
     </li>
   )
@@ -186,7 +190,8 @@ export function TeamCard({ sessionKey, teamId, title, agentId, agentName }: {
           <div className="mt-0.5 text-xs text-zinc-500">
             {proposed
               ? <>{team.helpers.length} helpers — copies of {agentName}, working side by side</>
-              : <>{team.helpers.length} helpers · {fmtElapsed(elapsedOf(team, now))} · <span className="font-mono tabular-nums">{fmtTokens(team.used)}</span> tokens</>}
+              : <>{team.helpers.length} helpers · {fmtElapsed(elapsedOf(team, now))} · <span className="font-mono tabular-nums">{fmtTokens(team.used)}</span> tokens
+                {team.board.length > 0 && <> · {team.board.length} on the board</>}</>}
           </div>
         </div>
       </div>
@@ -337,7 +342,7 @@ export function TeamPanel({ sessionKey, agentId, agentName, phone = false }: {
   const team = useTeamStore((s) => (s.panel && s.panel.key === sessionKey ? s.byKey[sessionKey]?.[s.panel.teamId] : undefined))
   const closePanel = useTeamStore((s) => s.closePanel)
   const teamAction = useChatStore((s) => s.teamAction)
-  const [tab, setTab] = useState<'helpers' | 'timeline'>('helpers')
+  const [tab, setTab] = useState<'helpers' | 'board' | 'timeline'>('helpers')
   const live = !!team && (team.state === 'running' || team.state === 'finishing')
   const now = useNow(live)
 
@@ -393,17 +398,26 @@ export function TeamPanel({ sessionKey, agentId, agentName, phone = false }: {
       )}
 
       <div className="flex items-center gap-1 border-b border-zinc-800/70 px-3 py-1.5">
-        {(['helpers', 'timeline'] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${FOCUS} ${
-              tab === t ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
-            }`}
-          >
-            {t === 'helpers' ? 'Helpers' : 'Timeline'}
-          </button>
-        ))}
+        {(['helpers', 'board', 'timeline'] as const).map((t) => {
+          const openAsks = t === 'board' ? team.board.filter((e) => e.kind === 'ask' && !e.answered).length : 0
+          return (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              data-team-tab={t}
+              className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${FOCUS} ${
+                tab === t ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
+              }`}
+            >
+              {t === 'helpers' ? 'Helpers' : t === 'board' ? 'Board' : 'Timeline'}
+              {t === 'board' && team.board.length > 0 && (
+                <span className={`min-w-[16px] rounded-full px-1 text-center text-[10px] font-semibold leading-4 tabular-nums ${
+                  openAsks ? 'bg-sky-500/20 text-sky-700 dark:text-sky-300' : 'bg-zinc-700/60 text-zinc-300'
+                }`}>{team.board.length}</span>
+              )}
+            </button>
+          )
+        })}
         {team.state === 'running' && (
           <button
             onClick={() => teamAction(sessionKey, team.id, 'stop')}
@@ -417,7 +431,9 @@ export function TeamPanel({ sessionKey, agentId, agentName, phone = false }: {
       </div>
 
       <div className={`min-h-0 flex-1 ${tab === 'helpers' ? 'overflow-y-auto' : 'flex flex-col'}`}>
-        {tab === 'helpers' ? (
+        {tab === 'board' ? (
+          <BoardView team={team} live={live} agentName={agentName} />
+        ) : tab === 'helpers' ? (
           <div className="space-y-3 p-3">
             {team.helpers.map((h, i) => (
               <HelperCard key={h.id} team={team} helper={h} index={i} sessionKey={sessionKey}
@@ -578,6 +594,157 @@ function HelperCard({ team, helper: h, index, sessionKey, agentId, agentName }: 
           <button onClick={() => setAllSteps(false)} className="text-zinc-500 hover:text-zinc-300">Fewer</button>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── The board: what the helpers share and ask each other ──────────────────
+
+function useFollow(count: number, live: boolean) {
+  // Follows the newest entry while the team works, unless you scrolled up to read.
+  const boxRef = useRef<HTMLDivElement | null>(null)
+  const stick = useRef(true)
+  useEffect(() => {
+    const el = boxRef.current
+    if (el && live && stick.current) el.scrollTop = el.scrollHeight
+  }, [count, live])
+  const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+  }
+  return { boxRef, onScroll }
+}
+
+function BoardView({ team, live, agentName }: { team: TeamRun; live: boolean; agentName: string }) {
+  const { boxRef, onScroll } = useFollow(team.board.length, live)
+  const indexOf = (who: string) => team.helpers.findIndex((h) => h.id === who)
+  // Answers sit under their ask; everything else in the order it came.
+  const answers = useMemo(() => {
+    const m = new Map<number, BoardEntry[]>()
+    for (const e of team.board) if (e.kind === 'answer' && e.ask_id) m.set(e.ask_id, [...(m.get(e.ask_id) ?? []), e])
+    return m
+  }, [team.board])
+  const top = team.board.filter((e) => e.kind !== 'answer' || !e.ask_id || !team.board.some((a) => a.id === e.ask_id))
+  const start = team.started_at || (team.board[0]?.t ?? 0)
+
+  if (team.board.length === 0) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center px-8 text-center">
+        <MessageSquareText className="h-6 w-6 text-zinc-700" />
+        <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+          {live ? 'Nothing shared yet. Findings, questions and notes to remember show here as the helpers post them.'
+            : 'The helpers didn’t use the board.'}
+        </p>
+      </div>
+    )
+  }
+  return (
+    <div ref={boxRef} onScroll={onScroll} className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-3">
+      {top.map((e) => (
+        <BoardItem key={e.id} entry={e} answers={answers.get(e.id) ?? []} indexOf={indexOf}
+          agentName={agentName} since={start} />
+      ))}
+    </div>
+  )
+}
+
+function Author({ who, name, index, agentName }: { who: string; name: string; index: number; agentName: string }) {
+  if (who === 'lead') {
+    return <span className="font-semibold text-zinc-100">{agentName}</span>
+  }
+  const tone = helperTone(Math.max(0, index))
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className={`h-2 w-2 rounded-full ${tone.dot}`} />
+      <span className={`font-semibold ${tone.text}`}>{name}</span>
+    </span>
+  )
+}
+
+function BoardItem({ entry: e, answers, indexOf, agentName, since }: {
+  entry: BoardEntry; answers: BoardEntry[]; indexOf: (who: string) => number; agentName: string; since: number
+}) {
+  const [open, setOpen] = useState(false)
+  const long = e.text.length > 280
+  const when = <span className="font-mono text-[10px] tabular-nums text-zinc-600">{fmtElapsed(Math.max(0, e.t - since))}</span>
+  const body = (
+    <p
+      onClick={() => long && setOpen((o) => !o)}
+      className={`mt-1 whitespace-pre-wrap text-xs leading-relaxed text-zinc-300 ${long ? 'cursor-pointer' : ''} ${
+        long && !open ? 'fd-fade-bottom line-clamp-4' : ''}`}
+    >
+      {e.text}
+    </p>
+  )
+
+  if (e.kind === 'remember') {
+    return (
+      <div className="fd-rise rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-3 py-2.5">
+        <div className="flex items-center gap-2 text-[11px]">
+          <Bookmark className="h-3.5 w-3.5 text-amber-500" />
+          <span className="font-semibold uppercase tracking-wider text-amber-700 dark:text-amber-300">Worth remembering</span>
+          <span className="text-zinc-500">·</span>
+          <Author who={e.who} name={e.who_name} index={indexOf(e.who)} agentName={agentName} />
+          <span className="ml-auto">{when}</span>
+        </div>
+        {body}
+        <p className="mt-1 text-[10px] text-zinc-500">{agentName} decides after the team whether to keep it.</p>
+      </div>
+    )
+  }
+
+  if (e.kind === 'ask') {
+    const to = e.to === 'lead' ? agentName : e.to === 'anyone' ? 'anyone' : e.to_name || e.to || ''
+    const toIndex = e.to && e.to !== 'lead' && e.to !== 'anyone' ? indexOf(e.to) : -1
+    return (
+      <div className="fd-rise rounded-xl border border-sky-500/25 bg-sky-500/[0.05] px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+          <MessageCircleQuestion className="h-3.5 w-3.5 text-sky-500" />
+          <Author who={e.who} name={e.who_name} index={indexOf(e.who)} agentName={agentName} />
+          <span className="text-zinc-500">asks</span>
+          {toIndex >= 0
+            ? <Author who={e.to!} name={to} index={toIndex} agentName={agentName} />
+            : <span className="font-semibold text-zinc-200">{to}</span>}
+          <span className={`ml-auto rounded-full px-1.5 text-[10px] font-medium ${
+            e.answered ? 'bg-emerald-500/12 text-emerald-700 dark:text-emerald-300' : 'bg-sky-500/15 text-sky-700 dark:text-sky-300'
+          }`}>{e.answered ? 'Answered' : 'Open'}</span>
+          {when}
+        </div>
+        {body}
+        {answers.length > 0 && (
+          <div className="mt-2 space-y-2 border-l-2 border-zinc-800 pl-2.5">
+            {answers.map((a) => (
+              <div key={a.id} className="fd-rise">
+                <div className="flex items-center gap-1.5 text-[11px]">
+                  <CornerDownRight className="h-3 w-3 text-zinc-500" />
+                  <Author who={a.who} name={a.who_name} index={indexOf(a.who)} agentName={agentName} />
+                  <span className="ml-auto font-mono text-[10px] tabular-nums text-zinc-600">{fmtElapsed(Math.max(0, a.t - since))}</span>
+                </div>
+                <p className="mt-0.5 whitespace-pre-wrap text-xs leading-relaxed text-zinc-300">{a.text}</p>
+              </div>
+            ))}
+          </div>
+        )}
+        {!e.answered && answers.length === 0 && (
+          <div className="mt-2 flex items-center gap-1.5 text-[11px] text-zinc-500">
+            <span className="fd-shimmer h-1.5 w-10 rounded-full" />
+            {e.to === 'lead' ? `${agentName} is answering…` : 'Waiting for an answer'}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // A post (or an answer whose ask scrolled off).
+  return (
+    <div className="fd-rise rounded-xl border border-zinc-800 bg-zinc-900/50 px-3 py-2.5">
+      <div className="flex items-center gap-1.5 text-[11px]">
+        {e.kind === 'answer' ? <CornerDownRight className="h-3.5 w-3.5 text-zinc-500" /> : <MessageSquareText className="h-3.5 w-3.5 text-zinc-500" />}
+        <Author who={e.who} name={e.who_name} index={indexOf(e.who)} agentName={agentName} />
+        <span className="ml-auto">{when}</span>
+      </div>
+      {e.title && <div className="mt-1 text-[13px] font-semibold leading-snug text-zinc-100">{e.title}</div>}
+      {body}
     </div>
   )
 }

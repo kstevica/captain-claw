@@ -6,7 +6,23 @@ import { create } from 'zustand'
 // on the chat lane; this store keeps each lane's teams for the transcript card,
 // the conversation bar's pill and the Team panel.
 
-export type TeamStepKind = 'narration' | 'tool' | 'llm' | 'note' | 'tell' | 'file'
+export type TeamStepKind = 'narration' | 'tool' | 'llm' | 'note' | 'tell' | 'file' | 'post' | 'ask' | 'answer' | 'remember'
+
+/** An entry on the team board (captain_claw/team_board.py). `who` is a
+ *  helper's id or "lead"; an ask's `to` is a helper's id, "anyone" or "lead". */
+export interface BoardEntry {
+  id: number
+  t: number
+  kind: 'post' | 'ask' | 'answer' | 'remember'
+  who: string
+  who_name: string
+  title: string
+  text: string
+  to?: string
+  to_name?: string
+  ask_id?: number
+  answered?: boolean
+}
 
 export interface TeamStep {
   t: number
@@ -57,6 +73,9 @@ export interface TeamRun {
   browser_holder: string
   note: string
   helpers: TeamHelper[]
+  board: BoardEntry[]
+  /** Tokens the agent spent answering helpers' asks. */
+  lead_tokens: number
   /** Runtime only: the last refusal of a tap (shown on the card). */
   error?: string
   /** Runtime only: a tap sent and not answered yet. */
@@ -64,6 +83,7 @@ export interface TeamRun {
 }
 
 const STEPS_KEPT = 200
+const BOARD_KEPT = 300
 
 export const LIVE_TEAM: TeamState[] = ['proposed', 'running', 'finishing']
 export const LIVE_HELPER: HelperState[] = ['waiting', 'working', 'stopping']
@@ -95,6 +115,30 @@ function toStep(raw: unknown): TeamStep | null {
   const text = str(r.text)
   if (!text) return null
   return { t: num(r.t), kind: (str(r.kind) || 'note') as TeamStepKind, text, ...(r.tool ? { tool: str(r.tool) } : {}) }
+}
+
+function toEntry(raw: unknown): BoardEntry | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const id = num(r.id)
+  const kind = str(r.kind) as BoardEntry['kind']
+  if (!id || !['post', 'ask', 'answer', 'remember'].includes(kind)) return null
+  return {
+    id, t: num(r.t), kind, who: str(r.who), who_name: str(r.who_name), title: str(r.title), text: str(r.text),
+    ...(r.to ? { to: str(r.to), to_name: str(r.to_name) } : {}),
+    ...(r.ask_id ? { ask_id: num(r.ask_id) } : {}),
+    ...(kind === 'ask' ? { answered: !!r.answered } : {}),
+  }
+}
+
+/** The board with one more entry: kept in order, an answer marks its ask. */
+function withEntry(board: BoardEntry[], entry: BoardEntry): BoardEntry[] {
+  if (board.some((e) => e.id === entry.id)) return board
+  let next = [...board, entry].sort((a, b) => a.id - b.id).slice(-BOARD_KEPT)
+  if (entry.kind === 'answer' && entry.ask_id) {
+    next = next.map((e) => (e.id === entry.ask_id && e.kind === 'ask' ? { ...e, answered: true } : e))
+  }
+  return next
 }
 
 function toHelper(raw: Record<string, unknown>, prev?: TeamHelper): TeamHelper {
@@ -142,6 +186,10 @@ function toTeam(raw: Record<string, unknown>, prev?: TeamRun): TeamRun {
     browser_holder: str(raw.browser_holder),
     note: str(raw.note),
     helpers: helpers.map((h) => toHelper(h, prev?.helpers.find((p) => p.id === str(h.id)))),
+    board: Array.isArray(raw.board)
+      ? (raw.board as unknown[]).map(toEntry).filter((e): e is BoardEntry => e !== null)
+      : prev?.board ?? [],
+    lead_tokens: num(raw.lead_tokens),
     // A tap is answered by the state it asked for (or by a refusal).
     pending: prev?.pending && prev.state === str(raw.state) ? prev.pending : '',
     error: prev?.state === str(raw.state) ? prev?.error : undefined,
@@ -231,6 +279,13 @@ export const useTeamStore = create<TeamStoreState>((set) => ({
           draft: step.kind === 'tool' ? '' : h.draft,
         }))
         if (!ok) return state
+        break
+      }
+      case 'board': {
+        const entry = toEntry(frame.entry)
+        const team = teams[teamId]
+        if (!entry || !team) return state
+        teams[teamId] = { ...team, board: withEntry(team.board, entry) }
         break
       }
       case 'draft': {
