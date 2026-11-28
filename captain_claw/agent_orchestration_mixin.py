@@ -24,6 +24,7 @@ from captain_claw import (
     msg_origin,
     task_course,
     turn_deliverables,
+    turn_register,
 )
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
@@ -1730,6 +1731,12 @@ class AgentOrchestrationMixin:
         except Exception:
             pass
 
+    @staticmethod
+    def _note_fabrication(verdict: fabrication_guard.Verdict, outcome: str) -> None:
+        """The turn register's record of what the gate found (each kind) and what came of it."""
+        for kind in verdict.kinds:
+            turn_register.note_check("fabrication", outcome, kind)
+
     def _log_fabrication(self, verdict: fabrication_guard.Verdict, text: str, **extra: Any) -> None:
         log.warning(
             "fabricated_reply",
@@ -1756,7 +1763,9 @@ class AgentOrchestrationMixin:
         if not verdict.false:
             return True
         self._log_fabrication(verdict, text, with_tool_calls=True)
-        if self._fabrication_retry_count < MAX_FABRICATION_RETRIES:
+        retrying = self._fabrication_retry_count < MAX_FABRICATION_RETRIES
+        self._note_fabrication(verdict, "sent_back" if retrying else "blocked")
+        if retrying:
             self._reject_fabrication(text, verdict)
         return False
 
@@ -1771,6 +1780,7 @@ class AgentOrchestrationMixin:
         if not verdict.false or not verdict.backstop:
             return text
         self._log_fabrication(verdict, text, shipped_without_retry=True)
+        self._note_fabrication(verdict, "flagged")
         return str(text).rstrip() + "\n\n" + verdict.backstop
 
     # ------------------------------------------------------------------
@@ -3635,6 +3645,7 @@ class AgentOrchestrationMixin:
                         response.tool_calls, _write_path_counts, _loop_at)
                     if _write_tools_this_iter:
                         _write_loop_nudged = True
+                        turn_register.note_check("write_loop", "sent_back")
                         log.info(
                             "Write-loop detected: agent rewrote same file(s)",
                             paths=list(set(_write_tools_this_iter)),
@@ -4411,6 +4422,7 @@ class AgentOrchestrationMixin:
                     and fabrication_guard.SKIPPED_TOOLS in _fab_verdict.kinds
                 )
                 self._log_fabrication(_fab_verdict, _stall_resp_text, force_tool=_force_tool)
+                self._note_fabrication(_fab_verdict, "sent_back" if _retrying else "flagged")
                 if _retrying:
                     # The reply as written: the corrective may name an ID the
                     # lane-note cut took out.
@@ -4509,7 +4521,7 @@ class AgentOrchestrationMixin:
                 or self._turn_has_successful_tool(turn_start_idx, "colleagues")
             ):
                 _turn_produced_deliverable = True
-            if (
+            _stalled = (
                 not response.tool_calls
                 and not _turn_produced_deliverable
                 and (
@@ -4519,8 +4531,19 @@ class AgentOrchestrationMixin:
                      and not (_stall_resp_text.strip() and _only_thanks(user_input)))
                     or _false_claim or _false_web_claim
                 )
+            )
+            # The turn register's record: a false claim (delegation, web
+            # research) or a step announced and never taken; once the retries
+            # are spent, it went out as it was.
+            _stall_check = ("false_claim", "web_research" if _false_web_claim else "delegation") \
+                if (_false_claim or _false_web_claim) else ("stall", "")
+            if _stalled and self._stall_retry_count >= max(MAX_STALL_RETRIES, drive.current(self).stall_retries):
+                turn_register.note_check(_stall_check[0], "flagged", _stall_check[1])
+            if (
+                _stalled
                 and self._stall_retry_count < max(MAX_STALL_RETRIES, drive.current(self).stall_retries)
             ):
+                turn_register.note_check(_stall_check[0], "sent_back", _stall_check[1])
                 self._stall_retry_count += 1
                 _has_tools = bool(tool_defs)
                 _force_tool = _has_tools

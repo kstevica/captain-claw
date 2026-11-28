@@ -135,6 +135,18 @@ _END_SUMMARY = {"error": "The turn ended in an error", "blocked": "The turn was 
 # ── The turn register ─────────────────────────────────────────────────
 
 
+# What came of one of the agent's checks on a turn (turn_register.CHECK_OUTCOMES).
+CHECK_OUTCOMES = ("sent_back", "fixed", "flagged", "blocked")
+
+
+class TurnCheck(BaseModel):
+    """One of the agent's checks on a turn: which, what it found, what came of it, how often."""
+    check: str = Field(pattern=r"^[a-z0-9_]{1,40}$")
+    kind: str = Field("", pattern=r"^[a-z0-9_]{0,40}$")
+    outcome: Literal["sent_back", "fixed", "flagged", "blocked"]
+    count: int = Field(1, ge=1, le=10_000)
+
+
 class TurnRecord(BaseModel):
     seq: int = Field(ge=1, le=10**12)
     phase: Literal["open", "close"]
@@ -166,6 +178,7 @@ class TurnRecord(BaseModel):
     deliverables: list[str] = Field(default_factory=list, max_length=200)
     tool_calls: int = Field(0, ge=0, le=10**9)
     failed_tool_calls: int = Field(0, ge=0, le=10**9)
+    checks: list[TurnCheck] = Field(default_factory=list, max_length=20)
 
 
 def _mode(raw: str) -> str:
@@ -441,7 +454,8 @@ def _take(boot: str, who: dict[str, str], items: list[tuple[TurnRecord, _Board]]
             outcome = rec.outcome if rec.outcome in OUTCOMES else "error"
             fields = {**agent, "ended_at": at, "outcome": outcome, "reply_head": mask_text(rec.reply_head)[:_HEAD_MAX],
                       "deliverables": _files(rec.deliverables), "tool_calls": rec.tool_calls,
-                      "failed_tool_calls": min(rec.failed_tool_calls, rec.tool_calls)}
+                      "failed_tool_calls": min(rec.failed_tool_calls, rec.tool_calls),
+                      "checks": [c.model_dump() for c in rec.checks]}
         if store.save_turn(rec.turn_id, rec.phase, ref, fields) != "new":
             continue
         uid = settle(store, rec.turn_id, agents=agents, managed=managed, calls=True)
@@ -784,7 +798,8 @@ def _reply(store: TaskboardStore, turn: dict, agents: dict[str, dict], now: floa
                "summary": _head(turn["reply_head"], 500) or _END_SUMMARY.get(outcome, "Answered"),
                "outcome": outcome if outcome in ("ok", "error", "blocked") else "", "private": turn["private"],
                "refs": {"turn_id": tid, "outcome": outcome, "deliverables": turn["deliverables"],
-                        "tool_calls": turn["tool_calls"], "failed_tool_calls": turn["failed_tool_calls"]}})
+                        "tool_calls": turn["tool_calls"], "failed_tool_calls": turn["failed_tool_calls"],
+                        **({"checks": turn["checks"]} if turn.get("checks") else {})}})
     return new, new and not cron and patch is not None
 
 

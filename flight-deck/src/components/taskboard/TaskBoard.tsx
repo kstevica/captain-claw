@@ -35,7 +35,7 @@ import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
   AnswerButtons, ChannelIcon, DateFacet, EvidenceBadge, ExportPanel, FoldHighlight, HistoryChip, InstructionsChip,
   KeyHint, KeySheet, LaneChip, LineChip, LowConfidenceHint, MultiFacet, NextMoveMenu, NoteChip, OwesChip, ProofSection, ProposalButtons, ResultChip, StatusChip,
-  SyncStatus, TaskIcon, TaskText,
+  SyncStatus, TaskIcon, TaskText, TurnChecks, turnChecks,
 } from './taskboardParts'
 import { BatchBar, BatchProgress, PickBox } from './TaskBatch'
 import { BoardSettings } from './TaskboardSettings'
@@ -2038,6 +2038,7 @@ function Timeline({ events, total, terms, reading = false, picked = null, onPick
                     <TaskText text={e.summary} terms={terms} />
                   </p>
                 )}
+                {e.kind === 'reply' && <TurnChecks checks={turnChecks(e.refs)} />}
               </div>
             </li>
           )

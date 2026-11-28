@@ -657,3 +657,49 @@ export function dateBounds(r: DateRange): { from?: number; to?: number } {
   }
   return {}
 }
+
+
+// ── The agent's own checks on a turn (turn_register) ──────────────────
+
+const CHECK_WORDS: Record<string, string> = {
+  'fabrication:false_mail_send': 'Said an email went out that wasn’t sent',
+  'fabrication:false_calendar_change': 'Said the calendar changed when it hadn’t',
+  'fabrication:narrated_lookup': 'Described lookups it never made',
+  'fabrication:fabricated_id': 'Quoted an ID nothing had shown',
+  'fabrication:false_payment': 'Said something was paid when it wasn’t',
+  'fabrication:false_whatsapp_send': 'Said a WhatsApp message went out that wasn’t sent',
+  'fabrication:false_delegation': 'Said other agents did work nobody asked them for',
+  'fabrication:false_schedule_change': 'Said a scheduled task changed when it hadn’t',
+  'fabrication:scheduled_no_tools': 'Ran its scheduled task without the tools it names',
+  'fabrication:claimed_file': 'Handed over a file that doesn’t exist',
+  'false_claim:delegation': 'Said it handed the task on without doing so',
+  'false_claim:web_research': 'Said it searched the web without searching',
+  'stall:': 'Announced a step and stopped there',
+  'completion_gate:write_file_enforcement': 'Had a file to write and hadn’t written it',
+  'completion_gate:script_execution_enforcement': 'Wrote a script and never ran it',
+  'completion_gate:pip_install_retry_enforcement': 'Installed what was missing but never ran the command again',
+  'completion_gate:datastore_save_verification': 'Hadn’t saved its data table',
+  'completion_gate:list_member_coverage': 'Left items of a list out',
+  'completion_gate:validation': 'Hadn’t met what the request asks for',
+  'completion_gate:delivery_check': 'Hadn’t delivered everything asked for',
+  'write_loop:': 'Kept rewriting the same file',
+}
+
+/** What a check found, in words. */
+export function checkWords(check: string, kind: string): string {
+  const known = CHECK_WORDS[`${check}:${kind}`]
+  if (known) return known
+  if (check === 'completion_gate') return 'Wasn’t finished yet'
+  if (check === 'duplicate_call') return `Repeated the same call${kind ? ` (${kind})` : ''}`
+  if (check === 'refused_call') return `Tried a call a guard refused${kind ? ` (${kind.replace(/_/g, ' ')})` : ''}`
+  if (check === 'fabrication') return 'Claimed something no tool did'
+  return check.replace(/_/g, ' ')
+}
+
+/** What came of it. */
+export const CHECK_OUTCOME_LABEL: Record<string, string> = {
+  fixed: 'fixed before it answered',
+  sent_back: 'sent back to fix it',
+  flagged: 'went out anyway',
+  blocked: 'stopped',
+}

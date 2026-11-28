@@ -23,7 +23,7 @@ OPEN_KEYS = {"seq", "phase", "turn_id", "at", "session_id", "session_name", "ori
              "opener", "human", "literal", "text_head", "ext_refs", "automation",
              "cognitive_mode", "drive"}
 CLOSE_KEYS = {"seq", "phase", "turn_id", "at", "outcome", "reply_head", "deliverables", "tool_calls",
-              "failed_tool_calls"}
+              "failed_tool_calls", "checks"}
 
 
 class EchoTool(Tool):
@@ -135,6 +135,46 @@ def test_open_and_close_records_have_the_contract_shape(reg):
     assert opened["origin_detail"] == {"channel": "web"}
     assert closed["outcome"] == "ok" and closed["reply_head"] == "Booked: Friday 20:00."
     assert closed["deliverables"] == [] and closed["tool_calls"] == 0 and closed["failed_tool_calls"] == 0
+
+
+def test_a_turns_checks_are_noted_while_it_runs_and_settled_on_its_close(reg):
+    reg.note_check("fabrication", "sent_back", "false_mail_send")        # outside a turn: nothing to note on
+    turn = reg.open_turn(FakeAgent())
+    reg.note_check("fabrication", "sent_back", "false_mail_send")
+    reg.note_check("completion_gate", "sent_back", "script_execution_enforcement")
+    reg.note_check("fabrication", "sent_back", "false_mail_send")
+    reg.note_check("duplicate_call", "blocked", "Read")
+    reg.note_check("Bad Name!", "blocked")                                # not a check's name
+    reg.note_check("stall", "nope")                                       # not an outcome
+    reg.close_turn(turn, "ok", "Sent.")
+    # Sent back twice, and the reply that ended the turn passed the gate: fixed.
+    # A completion gate never re-judges the end, so it stays as it was.
+    assert _turns()[-1]["checks"] == [
+        {"check": "fabrication", "kind": "false_mail_send", "outcome": "fixed", "count": 2},
+        {"check": "completion_gate", "kind": "script_execution_enforcement", "outcome": "sent_back", "count": 1},
+        {"check": "duplicate_call", "kind": "read", "outcome": "blocked", "count": 1},
+    ]
+    turn = reg.open_turn(FakeAgent())
+    for outcome in ("sent_back", "sent_back", "flagged"):
+        reg.note_check("fabrication", outcome, "fabricated_id")
+    reg.note_check("stall", "sent_back")
+    reg.close_turn(turn, "error")
+    assert _turns()[-1]["checks"] == [
+        {"check": "fabrication", "kind": "fabricated_id", "outcome": "flagged", "count": 3},
+        {"check": "stall", "kind": "", "outcome": "sent_back", "count": 1},   # the turn didn't end ok
+    ]
+    turn = reg.open_turn(FakeAgent())
+    reg.close_turn(turn, "ok")
+    assert _turns()[-1]["checks"] == []
+
+
+def test_a_runaway_turn_notes_a_bounded_number_of_checks(reg):
+    turn = reg.open_turn(FakeAgent())
+    for i in range(500):
+        reg.note_check("duplicate_call", "blocked", f"tool_{i}")
+    reg.close_turn(turn, "ok")
+    checks = _turns()[-1]["checks"]
+    assert len(turn.checks) == reg._CHECK_NOTES_MAX and len(checks) == reg._CHECKS_MAX
 
 
 def test_close_is_once_and_unknown_outcomes_are_errors(reg):

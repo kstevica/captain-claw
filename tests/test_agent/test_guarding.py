@@ -2034,3 +2034,51 @@ async def test_an_event_a_compaction_dropped_still_backs_its_id(_human_turn):
     result = await agent.complete("did you actually create it?")
 
     assert result.startswith(reply) and _correctives(agent) == []
+
+
+
+# ── What the checks tell the turn register (turn_register.note_check) ──
+
+
+@pytest.fixture
+def noted(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
+    from captain_claw import turn_register
+
+    got: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(turn_register, "note_check", lambda check, outcome, kind="": got.append((check, outcome, kind)))
+    return got
+
+
+@pytest.mark.asyncio
+async def test_a_false_send_sent_back_is_noted_and_settles_as_fixed(_human_turn, noted):
+    from captain_claw import turn_register
+
+    agent, _provider, _mail = _mail_agent([
+        LLMResponse(content="**Sent** to Ana — confirming 10:30."),
+        _send_call(),
+        LLMResponse(content="Email sent to Ana — Message ID m-1."),
+    ])
+    await agent.complete("reply to Ana that 10:30 works, send it")
+    assert noted == [("fabrication", "sent_back", "false_mail_send")]
+    assert turn_register.settle_checks([(c, k, o) for c, o, k in noted], "ok") == [
+        {"check": "fabrication", "kind": "false_mail_send", "outcome": "fixed", "count": 1}]
+
+
+@pytest.mark.asyncio
+async def test_a_claim_that_outlasts_its_retries_is_noted_as_flagged(_human_turn, noted):
+    from captain_claw.fabrication_guard import MAX_FABRICATION_RETRIES
+
+    agent, _provider, _mail = _mail_agent(
+        [LLMResponse(content="**Sent** to Ana — confirming 10:30.")] * (MAX_FABRICATION_RETRIES + 1))
+    await agent.complete("send Ana the 10:30 confirmation by mail")
+    assert [o for c, o, k in noted if c == "fabrication"] == ["sent_back"] * MAX_FABRICATION_RETRIES + ["flagged"]
+
+
+def test_a_completion_gate_and_a_refused_call_are_noted(noted):
+    agent = Agent(provider=_ScriptedProvider([]))
+    agent._emit_tool_output("completion_gate", {"step": "script_execution_enforcement", "passed": False}, "run it")
+    agent._emit_tool_output("completion_gate", {"step": "delivery_check", "passed": True, "gaps": 0}, "")
+    agent._audit_refused_tool("shell", {}, "Blast radius: outside the workspace", None)
+    agent._audit_refused_tool("google_mail", {}, "This send needs your OK", None)
+    assert noted == [("completion_gate", "sent_back", "script_execution_enforcement"),
+                     ("refused_call", "blocked", "blast_radius"), ("refused_call", "blocked", "approval")]
