@@ -225,12 +225,20 @@ async def _send_team_transcript(server: Any, ws: Any, data: dict) -> None:
 
 
 async def _handle_team_action(server: Any, ws: Any, data: dict) -> None:
-    """A tap on a team card: start / dismiss / stop (one helper or all)."""
+    """A tap on a team card: start / dismiss / stop (one helper or all), or remove a run
+    from the history."""
     from captain_claw import team_up
 
     team = team_up.find(str(data.get("team_id") or ""))
     lane = server.normalize_lane(getattr(ws, "_lane", ""))
     action = str(data.get("action") or "").strip().lower()
+    if action == "remove":
+        # From the run history: a run in memory or only in its record.
+        error = await team_up.remove(lane, str(data.get("team_id") or ""))
+        if error:
+            await server._send(ws, {"type": "team", "event": "error",
+                                    "team_id": str(data.get("team_id") or ""), "message": error})
+        return
     if team is None or team.lane != lane:
         await server._send(ws, {"type": "team", "event": "error", "team_id": str(data.get("team_id") or ""),
                                 "message": "That team isn't here any more."})
