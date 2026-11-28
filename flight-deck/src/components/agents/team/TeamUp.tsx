@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowLeft, Bookmark, Check, ChevronDown, ChevronRight, CircleDot, CircleStop, CornerDownRight,
   FileText, Globe, Info, Loader2, Megaphone, MessageCircleQuestion, MessageSquareText, PanelRightOpen, RefreshCw,
-  ScrollText, Sparkles, Users, Wrench, X,
+  ScrollText, Send, Sparkles, Users, Wrench, X,
 } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../../../stores/chatStore'
 import {
-  LIVE_HELPER, LIVE_TEAM, currentTeam, fmtElapsed, fmtTokens, fmtUsd, helperTone, transcriptKey, useTeamStore,
+  LIVE_HELPER, LIVE_TEAM, channelName, currentTeam, fmtElapsed, fmtTokens, fmtUsd, helperTone, transcriptKey,
+  useTeamStore,
   type BoardEntry, type HelperState, type TeamHelper, type TeamRun, type TeamStep, type TranscriptItem,
 } from '../../../stores/teamStore'
 import { AgentPicture } from '../AgentPicture'
@@ -55,6 +56,15 @@ function helperLabel(h: TeamHelper): string {
   if (h.stopped_by === 'budget') return 'Stopped at the budget'
   if (h.stopped_by === 'restart') return 'Stopped by a restart'
   return 'Stopped'
+}
+
+function ChannelChip({ channel }: { channel: string }) {
+  return (
+    <span data-team-channel={channel}
+      className="mr-1.5 inline-flex items-center gap-1 rounded-full bg-zinc-800 px-1.5 py-px align-[1px] text-[10px] font-medium text-zinc-300">
+      <Send className="h-2.5 w-2.5" /> {channelName(channel)}
+    </span>
+  )
 }
 
 function StateChip({ team }: { team: TeamRun }) {
@@ -198,6 +208,7 @@ export function TeamCard({ sessionKey, teamId, title, agentId, agentName }: {
           </div>
           <div className="mt-0.5 text-[15px] font-semibold leading-snug text-zinc-100">{team.title}</div>
           <div className="mt-0.5 text-xs text-zinc-500">
+            {channelName(team.channel) && <ChannelChip channel={team.channel} />}
             {proposed
               ? <>{team.helpers.length} helpers — copies of {agentName}, working side by side</>
               : <>{team.helpers.length} helpers · {fmtElapsed(elapsedOf(team, now))} · <span className="font-mono tabular-nums">{fmtTokens(team.used)}</span> tokens
@@ -394,6 +405,7 @@ export function TeamPanel({ sessionKey, agentId, agentName, phone = false }: {
             <StateChip team={team} />
             {team.started_at > 0 && <span className="font-mono tabular-nums">{fmtElapsed(elapsedOf(team, now))}</span>}
             <span>· {team.helpers.length} copies of {agentName}</span>
+            {channelName(team.channel) && <ChannelChip channel={team.channel} />}
           </div>
         </div>
         {!phone && (
@@ -472,9 +484,11 @@ export function TeamPanel({ sessionKey, agentId, agentName, phone = false }: {
       </div>
 
       <div className="border-t border-zinc-800/70 px-4 py-2.5 text-[11px] leading-relaxed text-zinc-500">
-        {live ? <>Keep talking to {agentName} in the chat — it sees the team’s progress and can steer or stop a helper.</>
+        {live && channelName(team.channel) ? <>Started from {channelName(team.channel)}. Keep talking to {agentName} there or here — the results go back to {channelName(team.channel)}.</>
+          : live ? <>Keep talking to {agentName} in the chat — it sees the team’s progress and can steer or stop a helper.</>
           : team.state === 'proposed' ? <>Tap Team up on the card to start them.</>
           : team.from_record ? <>Rebuilt from {agentName}’s record of this team. Each helper’s transcript is still here.</>
+          : channelName(team.channel) && team.state === 'done' ? <>{agentName}’s reply went to {channelName(team.channel)} and is in this chat too.</>
           : <>Helpers changed nothing outside {agentName}; anything to send or book is up to {agentName}, with you.</>}
       </div>
     </aside>

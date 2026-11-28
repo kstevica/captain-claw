@@ -92,6 +92,16 @@ class TeamTool(Tool):
             if team is None:
                 return ToolResult(success=False, error=error)
             names = ", ".join(h.name for h in team.helpers)
+            where = team_up.CHANNEL_NAMES.get(team.channel, "")
+            if team.state == "proposed" and where:
+                return ToolResult(content=(
+                    f"Team offered ({team.id}): {names}. On {where} there is no card to tap: end your turn "
+                    "with one short line asking whether to team up, naming the helpers. If they say yes, "
+                    "call team start; if not, do the task yourself."))
+            if team.state == "running" and where:
+                return ToolResult(content=(
+                    f"Team started ({team.id}): {names}. End your turn with one short line saying they're on "
+                    f"it and the user can keep talking to you. Their results come back to you here on {where}."))
             if team.state == "running":
                 return ToolResult(content=(
                     f"Team started ({team.id}): {names}. They work in the background and the user sees "

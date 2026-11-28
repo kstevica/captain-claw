@@ -237,7 +237,7 @@ async def _handle_team_action(server: Any, ws: Any, data: dict) -> None:
         return
     error = ""
     if action == "start":
-        error = await team_up.start(team, by="person")
+        error = await team_up.start(team, by="person", from_tap=True)
     elif action == "dismiss":
         error = team_up.dismiss(team)
     elif action == "stop":

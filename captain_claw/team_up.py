@@ -310,6 +310,8 @@ class Team:
     routed: set = field(default_factory=set)  # ask ids handed to the lead
     fork_len: int = 0          # how many lead messages the helpers inherited
     learned_at: float = 0.0    # when post-turn learning ran over the team's work
+    channel: str = "web"       # where the person talks to the lead: web, telegram or whatsapp
+    reply_to: dict = field(default_factory=dict)  # telegram {chat_id, user_id} / whatsapp {waid}
 
     def used(self) -> int:
         return sum(h.tokens for h in self.helpers) + self.lead_tokens
@@ -353,6 +355,7 @@ class Team:
             "browser_holder": self.browser_holder,
             "note": self.note,
             "lead_tokens": self.lead_tokens,
+            "channel": self.channel,
             "usd": self.usd(),
             "helpers": [h.snapshot(steps=steps) for h in self.helpers],
             "board": self.board.snapshot(),
@@ -487,12 +490,13 @@ def _unavailable(agent: Any) -> tuple[str, str]:
     lane = lane_of(agent, server)
     if not lane or _lane_refused(server, lane):
         return "lane", "Team up works only in your owner's web chat. Do the task yourself."
-    try:
-        channel = agent._turn_channel()
-    except Exception:
-        channel = ""
-    if channel and channel not in ("web", "flight_deck", "fd", "kiosk", "app"):
-        return "channel", f"Team up works in the web chat, not on {channel}. Do the task yourself."
+    channel, reply_to = turn_place(agent, server)
+    if channel not in WEB_CHANNELS and channel not in LANE_CHANNELS:
+        return "channel", (f"Team up works in the web chat, Telegram and WhatsApp, not on {channel}. "
+                           "Do the task yourself.")
+    if channel in LANE_CHANNELS and not reply_to:
+        return "channel", (f"Team up isn't available in this {CHANNEL_NAMES.get(channel, channel)} chat. "
+                           "Do the task yourself.")
     if getattr(agent, "_tenant_hidden", False):
         return "not_here", "Team up isn't available in this conversation. Do the task yourself."
     if _local_single_slot(agent):
@@ -503,6 +507,43 @@ def _unavailable(agent: Any) -> tuple[str, str]:
         return "busy", (f"A team is already working on '{live.title}'. Check it with team status, or stop it "
                         "with team stop, before starting another.")
     return "", ""
+
+
+WEB_CHANNELS = ("", "web", "flight_deck", "fd", "kiosk", "app")
+LANE_CHANNELS = ("telegram", "whatsapp")
+CHANNEL_NAMES = {"telegram": "Telegram", "whatsapp": "WhatsApp"}
+
+
+def turn_place(agent: Any, server: Any = None) -> tuple[str, dict[str, Any]]:
+    """Where the turn *agent* runs came from: ("web", {}), or the owner's
+    Telegram / WhatsApp chat on the main conversation with where to answer
+    ({chat_id, user_id} / {waid}; {} when it can't be told)."""
+    server = server or _SERVER
+    try:
+        channel = str(agent._turn_channel() or "").strip().lower()
+    except Exception:
+        channel = ""
+    if channel in WEB_CHANNELS:
+        return "web", {}
+    main = server is not None and agent is getattr(server, "agent", None)
+    if channel == "telegram":
+        chat_id = getattr(agent, "_telegram_chat_id", None)
+        if main and chat_id:
+            return "telegram", {"chat_id": int(chat_id), "user_id": str(getattr(agent, "_telegram_user_id", "") or "")}
+        return "telegram", {}
+    if channel == "whatsapp":
+        waid = ""
+        try:
+            from captain_claw.tools.whatsapp_send_file import reply_to as _wa_reply_to
+
+            waid = _wa_reply_to(agent)
+        except Exception:
+            waid = ""
+        if not waid:
+            meta = getattr(getattr(agent, "session", None), "metadata", None)
+            waid = str((meta or {}).get("whatsapp_waid") or "") if isinstance(meta, dict) else ""
+        return "whatsapp", ({"waid": waid.lstrip("+")} if main and waid else {})
+    return channel, {}
 
 
 def why_unavailable(agent: Any) -> str:
@@ -517,7 +558,7 @@ _PERSON_REFUSALS = {
     "not_here": "Team up isn't available in this conversation.",
     "shared": "Team up is off on a shared agent.",
     "lane": "Team up works only in your own chat with the agent.",
-    "channel": "Team up works in the web chat, not here.",
+    "channel": "Team up works in the web chat, Telegram and WhatsApp, not here.",
     "local": ("Team up is off while this agent runs on a model served from this machine: helpers would "
               "take turns on it and finish later than the agent alone."),
 }
@@ -656,6 +697,7 @@ async def propose(agent: Any, title: str, parts: Any) -> tuple[Team | None, str]
         mode=settings["mode"],
     )
     team.budget = team_budget(settings)
+    team.channel, team.reply_to = turn_place(agent)
     _TEAMS[team.id] = team
     _prune()
     agent._team_note_fn = (lambda t=team: lead_note(t))  # type: ignore[attr-defined]
@@ -710,14 +752,22 @@ def _fork_metadata(meta: Any) -> dict[str, Any]:
     return data
 
 
-async def start(team: Team, *, by: str = "person") -> str:
-    """Fork the helpers and run them in the background. "" or why not."""
+async def start(team: Team, *, by: str = "person", from_tap: bool = False) -> str:
+    """Fork the helpers and run them in the background. "" or why not.
+    *from_tap*: the person tapped Team up in the web chat, so the results go
+    there; otherwise they go where the turn that started it came from."""
     if team.state != "proposed":
         return f"That team is {team.state}, not waiting to start."
     server = _SERVER
     if server is None:
         return "Team up works in the web chat, which isn't running here."
     lead = team.lead
+    if from_tap:
+        team.channel, team.reply_to = "web", {}
+    else:
+        channel, reply_to = turn_place(lead)
+        if channel == "web" or reply_to:
+            team.channel, team.reply_to = channel, reply_to
     if active_for(lead) not in (None, team):
         return "Another team of yours is already working."
     from captain_claw.session import get_session_manager
@@ -831,7 +881,9 @@ def helper_brief(team: Team, h: Helper) -> str:
         "  · team inbox (wait) or team wait — block only when your part truly depends on an answer, another "
         "helper's result or post.",
         "- Messages from the lead and the board's news appear while you work. Follow the lead's.",
-        "- Ask the user (ask_user) only if you truly can't go on without them.",
+        ("- Ask the user (ask_user) only if you truly can't go on without them." if team.channel == "web" else
+         f"- The user is on {CHANNEL_NAMES.get(team.channel, team.channel)}, talking to the lead: you can't ask "
+         "them directly. Ask the lead with team ask to='lead'; it knows what the user said."),
         "- When you're done, reply with your result. It goes to the lead, not straight to the user: be "
         "complete and concrete (facts, numbers, sources, file paths), no greeting, no offer of more help.",
     ]
@@ -887,8 +939,9 @@ def lead_note(team: Team) -> str:
     """The live "Team now" block on each of the lead's calls while a team is live."""
     if team.state == "proposed":
         names = ", ".join(h.name for h in team.helpers)
+        how = "answered the card" if team.channel == "web" else "said yes"
         return (f"[Team now — you offered the user a team for '{team.title}' ({names}); they haven't "
-                "answered the card yet. If their message says go ahead, call team start. If they want it "
+                f"{how} yet. If their message says go ahead, call team start. If they want it "
                 "done without a team, do it yourself and don't propose it again.]")
     if team.state not in ("running", "finishing"):
         return ""
@@ -1612,6 +1665,11 @@ async def _deliver(team: Team) -> bool:
     from captain_claw.web.chat_handler import handle_chat
 
     content = result_message(team)
+    if team.channel == "telegram" and team.reply_to.get("chat_id"):
+        return await _deliver_telegram(team, content)
+    extra: dict[str, Any] = {}
+    if team.channel == "whatsapp" and team.reply_to.get("waid"):
+        extra = {"surface": "whatsapp", "whatsapp_media_to": team.reply_to["waid"]}
     deadline = time.monotonic() + LEAD_WAIT_SECONDS
     while time.monotonic() < deadline:
         if _lead_busy(server, team):
@@ -1624,11 +1682,46 @@ async def _deliver(team: Team) -> bool:
             no_rephrase=True,
             source="team",
             source_label="Team up",
+            **extra,
         )
         if launched:
             return True
         await asyncio.sleep(1.0)
     return False
+
+
+async def _deliver_telegram(team: Team, content: str) -> bool:
+    """The finishing turn on the owner's Telegram chat: the lead's turn on the
+    main conversation, its reply sent to Telegram and shown in the web chat."""
+    server = _SERVER
+    from datetime import UTC, datetime
+
+    from captain_claw import mail_authority, msg_origin
+    from captain_claw.web.telegram import _tg_get_user_lock, _tg_owner_lane, _tg_send
+
+    chat_id = int(team.reply_to.get("chat_id") or 0)
+    user_id = str(team.reply_to.get("user_id") or "")
+    lead = team.lead
+    deadline = time.monotonic() + LEAD_WAIT_SECONDS
+    # Wait here, quietly: the owner lane would tell Telegram "yours is next".
+    while _lead_busy(server, team) and time.monotonic() < deadline:
+        await asyncio.sleep(0.5)
+    if _lead_busy(server, team):
+        return False
+    stamp = lambda: datetime.now(UTC).isoformat()  # noqa: E731
+    async with _tg_get_user_lock(server, user_id), _tg_owner_lane(server, chat_id, user_id):
+        server._broadcast({"type": "chat_message", "role": "user", "content": content, "timestamp": stamp(),
+                           "notification": True, "origin": "team_result"})
+        with mail_authority.bound(mail_authority.automated("peer_relay", "", "deny")):
+            msg_origin.hint_turn_provenance(lead, turn_origin="delegated_result", channel="telegram")
+            response = await lead.complete(content)
+    response = str(response or "").strip()
+    if not response:
+        return False
+    await _tg_send(server, chat_id, response)
+    server._broadcast({"type": "chat_message", "role": "assistant", "content": response, "timestamp": stamp(),
+                       "notification": True})
+    return True
 
 
 # ── The record on the lead's session ─────────────────────────────────────
@@ -1649,6 +1742,7 @@ def _save_record(team: Team) -> None:
         return
     record = {
         "id": team.id, "title": team.title, "lane": team.lane, "mode": team.mode, "state": team.state,
+        "channel": team.channel,
         "note": team.note, "created_at": team.created_at, "started_at": team.started_at,
         "ended_at": team.ended_at, "budget": team.budget, "used": team.used(),
         "lead_tokens": team.lead_tokens, "usd": team.usd(), "fork_len": team.fork_len,
@@ -1724,7 +1818,7 @@ def record_snapshot(record: dict[str, Any], lane: str = "") -> dict[str, Any]:
         state = "dismissed" if state == "proposed" else "stopped"
     return {
         "id": record["id"], "title": record.get("title", "Team"), "lane": record.get("lane") or lane,
-        "mode": record.get("mode", "ask"), "state": state,
+        "mode": record.get("mode", "ask"), "state": state, "channel": record.get("channel") or "web",
         "created_at": record.get("created_at") or record.get("started_at") or 0,
         "started_at": record.get("started_at") or 0, "ended_at": record.get("ended_at") or 0,
         "budget": int(record.get("budget") or 0), "used": int(record.get("used") or 0), "warned": False,
@@ -2046,6 +2140,8 @@ KEEP = ("{what} isn't available to a helper: memory and settings are the lead's.
 REFUSED = "{what} isn't available to a helper: helpers don't start other runs, agents or the screen."
 BROWSER_BUSY = ("The browser is in use by {holder} right now (one holder at a time). Use web_search or "
                 "web_fetch, or do other parts of your work and try the browser later.")
+ASK_VIA_LEAD = ("The user is on {channel}, talking to the lead: helpers don't ask them directly. Ask the lead "
+                "with team ask to='lead' — it knows what the user said and answers at once.")
 LEAD_BROWSER_BUSY = ("The browser is in use by your helper {holder} until it finishes. Use web_search or "
                      "web_fetch for now, or stop that helper first.")
 
@@ -2081,6 +2177,8 @@ def tool_block(name: str, arguments: Any, agent: Any) -> str:
             "Only the lead starts, steers or stops the team. Use team status or team map to see the others.")
     if tool in _HELPER_REFUSED_TOOLS:
         return REFUSED.format(what=what)
+    if tool == "ask_user" and team.channel != "web":
+        return ASK_VIA_LEAD.format(channel=CHANNEL_NAMES.get(team.channel, team.channel))
     from captain_claw.flight_deck.tool_risk import risk_for
 
     risk = risk_for(tool, arguments if isinstance(arguments, dict) else {})

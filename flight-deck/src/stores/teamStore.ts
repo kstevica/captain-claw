@@ -100,6 +100,8 @@ export interface TeamRun {
   usd: number | null
   /** Rebuilt from the record on the agent's session (after a restart). */
   from_record?: boolean
+  /** Where the person talks to the agent for this team: web, telegram or whatsapp. */
+  channel: string
   /** Runtime only: the last refusal of a tap (shown on the card). */
   error?: string
   /** Runtime only: a tap sent and not answered yet. */
@@ -237,6 +239,7 @@ function toTeam(raw: Record<string, unknown>, prev?: TeamRun): TeamRun {
     lead_tokens: num(raw.lead_tokens),
     usd: 'usd' in raw ? usd(raw.usd) : prev?.usd ?? null,
     ...(raw.from_record ? { from_record: true } : {}),
+    channel: str(raw.channel) || prev?.channel || 'web',
     // A tap is answered by the state it asked for (or by a refusal).
     pending: prev?.pending && prev.state === str(raw.state) ? prev.pending : '',
     error: prev?.state === str(raw.state) ? prev?.error : undefined,
@@ -400,6 +403,11 @@ export function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1000) return `${Math.round(n / 1000)}k`
   return String(Math.max(0, Math.round(n)))
+}
+
+/** "Telegram" / "WhatsApp" for a team started there ('' for the web chat). */
+export function channelName(channel: string | undefined): string {
+  return channel === 'telegram' ? 'Telegram' : channel === 'whatsapp' ? 'WhatsApp' : ''
 }
 
 export function fmtUsd(v: number | null | undefined): string {

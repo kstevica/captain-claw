@@ -228,8 +228,11 @@ def test_unavailable_without_server_off_helper_and_local():
 def test_unavailable_on_other_channels_and_remote_lanes():
     srv = FakeServer()
     team_up.bind_server(srv)
+    srv.agent._turn_channel = lambda: "glasses"
+    assert "not on glasses" in team_up.why_unavailable(srv.agent)
+    # WhatsApp works (P4), but only with a number to answer.
     srv.agent._turn_channel = lambda: "whatsapp"
-    assert "not on whatsapp" in team_up.why_unavailable(srv.agent)
+    assert "isn't available in this WhatsApp chat" in team_up.why_unavailable(srv.agent)
     remote = FakeAgent()
     srv._lane_agents["BPabc"] = remote
     assert "owner's web chat" in team_up.why_unavailable(remote)
@@ -1003,3 +1006,149 @@ async def test_recall_with_no_team_yet():
 
     res = await TeamTool().execute(action="status", _agent=agent)
     assert not res.success and "no team" in res.error
+
+
+# ── P4: Telegram and WhatsApp ────────────────────────────────────────────
+
+def _on_telegram(agent, chat_id=4242, user_id="77"):
+    agent._turn_channel = lambda: "telegram"
+    agent._telegram_chat_id = chat_id
+    agent._telegram_user_id = user_id
+    return agent
+
+
+def test_where_the_person_is(server, monkeypatch):
+    assert team_up.turn_place(server.agent) == ("web", {})
+    _on_telegram(server.agent)
+    assert team_up.turn_place(server.agent) == ("telegram", {"chat_id": 4242, "user_id": "77"})
+    assert team_up.why_unavailable(server.agent) == ""
+    # Telegram outside a turn of the owner's chat: no chat to answer in.
+    server.agent._telegram_chat_id = None
+    assert "isn't available in this Telegram chat" in team_up.why_unavailable(server.agent)
+    import captain_claw.tools.whatsapp_send_file as wa
+
+    monkeypatch.setattr(wa, "reply_to", lambda agent: "+38591000")
+    server.agent._turn_channel = lambda: "whatsapp"
+    assert team_up.turn_place(server.agent) == ("whatsapp", {"waid": "38591000"})
+    assert team_up.why_unavailable(server.agent) == ""
+    server.agent._turn_channel = lambda: "glasses"
+    assert "not on glasses" in team_up.why_unavailable(server.agent)
+    assert "Telegram and WhatsApp" in team_up.refusal_for_person(server.agent)
+
+
+@pytest.mark.asyncio
+async def test_on_telegram_the_offer_is_a_question_and_helpers_ask_the_lead(server):
+    _on_telegram(server.agent)
+    from captain_claw.tools.team import TeamTool
+
+    res = await TeamTool().execute(action="propose", title="Compare", parts=_parts(2), _agent=server.agent)
+    assert res.success and "On Telegram there is no card" in res.content
+    team = team_up.active_for(server.agent)
+    assert team.channel == "telegram" and team.reply_to == {"chat_id": 4242, "user_id": "77"}
+    assert "haven't said yes yet" in team_up.lead_note(team)
+    assert team.snapshot()["channel"] == "telegram"
+    h = team.helpers[0]
+    assert "you can't ask them directly" in team_up.helper_brief(team, h)
+    agent = FakeAgent()
+    agent._team_helper = (team.id, h.id)
+    assert "Ask the lead with team ask" in team_up.tool_block("ask_user", {"question": "?"}, agent)
+    team.channel = "web"
+    assert team_up.tool_block("ask_user", {"question": "?"}, agent) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_tap_in_the_web_chat_brings_the_results_there(server, monkeypatch):
+    import captain_claw.web.chat_handler as ch
+
+    async def fake_handle_chat(srv, ws, content, **kw):
+        return True
+
+    monkeypatch.setattr(ch, "handle_chat", fake_handle_chat)
+    _on_telegram(server.agent)
+    team, _ = await team_up.propose(server.agent, "Compare", _parts(2))
+    assert team.channel == "telegram"
+    server.agent._turn_channel = lambda: "web"
+    team_up.stop(team)  # dismiss
+    _on_telegram(server.agent)
+    team, _ = await team_up.propose(server.agent, "Compare", _parts(2))
+    await team_up.start(team, by="person", from_tap=True)
+    assert team.channel == "web" and team.reply_to == {}
+    team_up.stop(team, "", by="you")
+    await _until(lambda: team.state in ("stopped", "done", "failed"))
+
+
+@pytest.mark.asyncio
+async def test_results_go_back_to_telegram(server, monkeypatch):
+    import contextlib
+
+    import captain_claw.web.telegram as tg
+
+    sent: list[tuple] = []
+    lanes: list[tuple] = []
+
+    async def fake_send(srv, chat_id, text, **kw):
+        sent.append((chat_id, text))
+
+    @contextlib.asynccontextmanager
+    async def fake_owner_lane(srv, chat_id, user_id, content="", reply_to_message_id=None):
+        lanes.append((chat_id, user_id))
+        srv._busy = True
+        try:
+            yield
+        finally:
+            srv._busy = False
+
+    monkeypatch.setattr(tg, "_tg_send", fake_send)
+    monkeypatch.setattr(tg, "_tg_owner_lane", fake_owner_lane)
+    monkeypatch.setattr(tg, "_tg_get_user_lock", lambda srv, uid: asyncio.Lock())
+    import captain_claw.web.chat_handler as ch
+
+    async def no_web_turn(*a, **kw):  # the web path must not run for a Telegram team
+        raise AssertionError("handle_chat called")
+
+    monkeypatch.setattr(ch, "handle_chat", no_web_turn)
+    _on_telegram(server.agent)
+    server.agent._reply = "FINAL for Telegram"
+    server.agent._telegram_chat_id = 4242
+    team, _ = await team_up.propose(server.agent, "Compare", _parts(2))
+    await team_up.start(team)
+    await _until(lambda: team.state in ("done", "failed"))
+    assert team.state == "done" and team.delivered
+    assert lanes == [(4242, "77")]
+    assert sent == [(4242, "FINAL for Telegram")]
+    assert server.agent.briefs[-1].startswith("[Team 'Compare' finished]")
+    shown = [f for f in server.frames if f.get("type") == "chat_message"]
+    assert shown[0]["role"] == "user" and shown[0]["content"].startswith("[Team 'Compare' finished]")
+    assert shown[-1] == {**shown[-1], "role": "assistant", "content": "FINAL for Telegram"}
+
+
+@pytest.mark.asyncio
+async def test_results_on_whatsapp_carry_the_number_for_files(server, monkeypatch):
+    import captain_claw.tools.whatsapp_send_file as wa
+    import captain_claw.web.chat_handler as ch
+
+    monkeypatch.setattr(wa, "reply_to", lambda agent: "38591000")
+    got: list[dict] = []
+
+    async def fake_handle_chat(srv, ws, content, **kw):
+        got.append(kw)
+        return True
+
+    monkeypatch.setattr(ch, "handle_chat", fake_handle_chat)
+    server.agent._turn_channel = lambda: "whatsapp"
+    team, _ = await team_up.propose(server.agent, "Compare", _parts(2))
+    assert team.reply_to == {"waid": "38591000"}
+    await team_up.start(team)
+    await _until(lambda: team.state in ("done", "failed"))
+    assert got[0]["surface"] == "whatsapp" and got[0]["whatsapp_media_to"] == "38591000"
+
+
+def test_team_command_goes_to_the_agent_on_whatsapp_and_telegram():
+    from captain_claw.flight_deck import whatsapp_bridge
+
+    assert not whatsapp_bridge._is_command({"content": "/team compare A and B"})
+    import inspect
+
+    from captain_claw.web import telegram
+
+    assert '"/team"' in inspect.getsource(telegram)
