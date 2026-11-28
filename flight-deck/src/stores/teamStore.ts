@@ -53,8 +53,8 @@ export interface TeamHelper {
   wrap_up: boolean
   stopped_by: string
   model: string
-  /** Dollars so far; null when the model's price isn't known. */
-  usd: number | null
+  /** Stopped (or failed) before its result: its work so far went to the agent. */
+  partial: boolean
   steps: TeamStep[]
 }
 
@@ -96,8 +96,6 @@ export interface TeamRun {
   board: BoardEntry[]
   /** Tokens the agent spent answering helpers' asks. */
   lead_tokens: number
-  /** Dollars so far; null when no part of it has a known price. */
-  usd: number | null
   /** Rebuilt from the record on the agent's session (after a restart). */
   from_record?: boolean
   /** Where the person talks to the agent for this team: web, telegram or whatsapp. */
@@ -105,7 +103,7 @@ export interface TeamRun {
   /** Runtime only: the last refusal of a tap (shown on the card). */
   error?: string
   /** Runtime only: a tap sent and not answered yet. */
-  pending?: 'start' | 'dismiss' | 'stop' | ''
+  pending?: 'start' | 'dismiss' | 'stop' | 'remove' | ''
 }
 
 const STEPS_KEPT = 200
@@ -133,12 +131,6 @@ function str(v: unknown): string {
 function num(v: unknown): number {
   const n = typeof v === 'number' ? v : Number(v)
   return Number.isFinite(n) ? n : 0
-}
-
-function usd(v: unknown): number | null {
-  if (v == null || v === '') return null
-  const n = typeof v === 'number' ? v : Number(v)
-  return Number.isFinite(n) ? n : null
 }
 
 function toItem(raw: unknown): TranscriptItem | null {
@@ -211,7 +203,7 @@ function toHelper(raw: Record<string, unknown>, prev?: TeamHelper): TeamHelper {
     wrap_up: !!raw.wrap_up,
     stopped_by: str(raw.stopped_by),
     model: str(raw.model),
-    usd: 'usd' in raw ? usd(raw.usd) : prev?.usd ?? null,
+    partial: 'partial' in raw ? !!raw.partial : prev?.partial ?? false,
     steps: steps.slice(-STEPS_KEPT),
   }
 }
@@ -237,7 +229,6 @@ function toTeam(raw: Record<string, unknown>, prev?: TeamRun): TeamRun {
       ? (raw.board as unknown[]).map(toEntry).filter((e): e is BoardEntry => e !== null)
       : prev?.board ?? [],
     lead_tokens: num(raw.lead_tokens),
-    usd: 'usd' in raw ? usd(raw.usd) : prev?.usd ?? null,
     ...(raw.from_record ? { from_record: true } : {}),
     channel: str(raw.channel) || prev?.channel || 'web',
     // A tap is answered by the state it asked for (or by a refusal).
@@ -253,6 +244,8 @@ interface TeamStoreState {
   panel: { key: string; teamId: string } | null
   /** transcriptKey(chat, team, helper) → the helper's transcript, as last read. */
   transcripts: Record<string, HelperTranscript>
+  /** chat key → ids of runs removed from the history (their cards say so). */
+  removed: Record<string, string[]>
   apply: (key: string, frame: Record<string, unknown>) => void
   transcriptLoading: (key: string, teamId: string, helperId: string) => void
   openPanel: (key: string, teamId: string) => void
@@ -266,6 +259,7 @@ export const useTeamStore = create<TeamStoreState>((set) => ({
   byKey: {},
   panel: null,
   transcripts: {},
+  removed: {},
 
   transcriptLoading: (key, teamId, helperId) => set((state) => {
     const k = transcriptKey(key, teamId, helperId)
@@ -285,6 +279,19 @@ export const useTeamStore = create<TeamStoreState>((set) => ({
       return { transcripts: { ...state.transcripts, [k]: {
         items, total: num(frame.total) || items.length, loading: false, error: str(frame.error), at: Date.now(),
       } } }
+    }
+    if (event === 'removed') {
+      // Gone from the history: its card says so; the panel moves to the next run.
+      const id = str(frame.team_id)
+      const teams = { ...(state.byKey[key] ?? {}) }
+      delete teams[id]
+      const removed = { ...state.removed, [key]: [...(state.removed[key] ?? []).filter((x) => x !== id), id] }
+      let panel = state.panel
+      if (panel && panel.key === key && panel.teamId === id) {
+        const next = teamRuns(teams)[0]
+        panel = next ? { key, teamId: next.id } : null
+      }
+      return { byKey: { ...state.byKey, [key]: teams }, removed, panel }
     }
     const teams = { ...(state.byKey[key] ?? {}) }
     const teamId = str(frame.team_id)
@@ -386,6 +393,15 @@ export const useTeamStore = create<TeamStoreState>((set) => ({
   }),
 }))
 
+/** Every run of this chat the person can open, newest first (not the
+ *  offers they turned down). */
+export function teamRuns(teams: Record<string, TeamRun> | undefined): TeamRun[] {
+  if (!teams) return []
+  return Object.values(teams)
+    .filter((t) => t.state !== 'dismissed')
+    .sort((a, b) => (b.created_at || b.started_at) - (a.created_at || a.started_at))
+}
+
 /** The lane's team the pill and panel follow: the live one, else the newest
  *  that ended in the last 15 minutes. */
 export function currentTeam(teams: Record<string, TeamRun> | undefined): TeamRun | null {
@@ -410,12 +426,15 @@ export function channelName(channel: string | undefined): string {
   return channel === 'telegram' ? 'Telegram' : channel === 'whatsapp' ? 'WhatsApp' : ''
 }
 
-export function fmtUsd(v: number | null | undefined): string {
-  if (v == null) return ''
-  if (v === 0) return '$0'
-  if (v < 0.01) return '<$0.01'
-  if (v < 10) return '$' + v.toFixed(2)
-  return '$' + Math.round(v)
+/** "3 min ago", "2 h ago", "4 Nov" — when a run ended (or started). */
+export function fmtAgo(seconds: number): string {
+  if (!seconds) return ''
+  const diff = Math.max(0, Date.now() / 1000 - seconds)
+  if (diff < 60) return 'just now'
+  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`
+  if (diff < 86_400) return `${Math.floor(diff / 3600)} h ago`
+  if (diff < 7 * 86_400) return `${Math.floor(diff / 86_400)} d ago`
+  return new Date(seconds * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
 }
 
 export function fmtElapsed(seconds: number): string {

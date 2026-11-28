@@ -36,6 +36,7 @@ class FakeSession:
 class FakeSM:
     def __init__(self):
         self.created: list[FakeSession] = []
+        self.deleted: list[str] = []
 
     async def create_session(self, name: str = "default", metadata: dict | None = None):
         s = FakeSession(name, metadata)
@@ -48,6 +49,10 @@ class FakeSM:
     async def load_session(self, session_id):
         return next((s for s in self.created if s.id == session_id), None)
 
+    async def delete_session(self, session_id):
+        self.deleted.append(session_id)
+        return True
+
 
 class FakeProvider:
     provider = "anthropic"
@@ -59,7 +64,7 @@ class FakeAgent:
     """Drives one 'turn': a narration, a tool line, usage, then the reply."""
 
     def __init__(self, session=None, send=None, reply: str = "", tokens: int = 1000,
-                 delay: float = 0.0, hang: bool = False):
+                 delay: float = 0.0, hang: bool = False, work: bool = False):
         self.session = session or FakeSession()
         self.provider = FakeProvider()
         self.ws_broadcast = send
@@ -71,6 +76,7 @@ class FakeAgent:
         self._tokens = tokens
         self._delay = delay
         self._hang = hang
+        self._work = work
         self._last_complete_cancelled = False
         self.briefs: list[str] = []
 
@@ -84,6 +90,14 @@ class FakeAgent:
         send({"type": "tool_output_inline", "tool": "web_search", "summary": "Searching the web: prices"})
         send({"type": "turn_usage", "prompt_tokens": self._tokens, "completion_tokens": 100,
               "total_tokens": self._tokens + 100})
+        if self._work:  # some work in its session: a note, a call and what came back
+            self.session.messages += [
+                {"role": "user", "content": text},
+                {"role": "assistant", "content": "Reading the price pages",
+                 "tool_calls": [{"id": "c1", "function": {"name": "web_fetch",
+                                                          "arguments": '{"url": "https://example.com/prices"}'}}]},
+                {"role": "tool", "tool_name": "web_fetch", "content": "Price list: A costs 10, B costs 12"},
+            ]
         if self._hang:
             await self.cancel_event.wait()
             self._last_complete_cancelled = True
@@ -163,7 +177,7 @@ def test_settings_default_and_clamped(tmp_path):
     assert team_up.normalize_settings({"mode": "sometimes"})["mode"] == "ask"
 
 
-def test_normal_turn_median_with_floor_and_default():
+def test_normal_turn_median_with_floor_and_default(monkeypatch):
     assert team_up.normal_turn() == team_up.TURN_DEFAULT
     for n in (10_000, 20_000):
         team_up.note_turn({"prompt_tokens": n})
@@ -171,6 +185,8 @@ def test_normal_turn_median_with_floor_and_default():
     for n in (80_000, 90_000, 100_000):
         team_up.note_turn({"prompt_tokens": n - 1000, "completion_tokens": 1000})
     assert team_up.normal_turn() == 80_000
+    assert team_up.team_budget({"budget_x": 6}) == 0  # no cap for now
+    monkeypatch.setattr(team_up, "BUDGET_CAP", True)
     assert team_up.team_budget({"budget_x": 6}) == 480_000
 
 
@@ -422,6 +438,7 @@ async def test_on_mode_starts_at_once_and_cuts_the_open_turn(server, monkeypatch
     team, err = await team_up.propose(server.agent, "Compare", _parts(2))
     assert err == "" and team.state == "running"
     assert server.sm.created[0].messages[-1]["content"] == "do it"
+    assert team.fork_len == 3  # what the helpers inherited, not the lead's whole session
     server._busy = False
     await _until(lambda: team.state == "done")
 
@@ -1152,3 +1169,156 @@ def test_team_command_goes_to_the_agent_on_whatsapp_and_telegram():
     from captain_claw.web import telegram
 
     assert '"/team"' in inspect.getsource(telegram)
+
+
+# ── No budget cap; a stop hands over the work so far; the run history ───
+
+@pytest.mark.asyncio
+async def test_no_budget_cap_tokens_still_counted(server):
+    team, _ = await team_up.propose(server.agent, "Compare", _parts(2))
+    assert team.budget == 0
+    team.state = "running"
+    h = team.helpers[0]
+    h.state, h.tokens = "working", 10**9
+    team_up._check_budget(team)
+    assert not h.wrap_up and h.state == "working"
+    assert "Tokens so far: " in team_up.lead_note(team)
+    assert " of " not in team_up.status_text(team).splitlines()[0]
+    assert "budget" not in team_up.result_message(team).lower().split("\n\n")[1]
+
+
+def test_partial_result_keeps_notes_calls_and_cut_results():
+    fork = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "earlier answer"}]
+    own = [
+        {"role": "user", "content": "THE BRIEF"},
+        {"role": "assistant", "content": "Reading the firm's site",
+         "tool_calls": [{"id": "1", "function": {"name": "web_fetch", "arguments": '{"url": "https://a.example"}'}}]},
+        {"role": "tool", "tool_name": "web_fetch", "content": "A" * 5000},
+    ]
+    out = team_up.partial_result(fork + own, len(fork))
+    assert "Reading the firm's site" in out and "→ web_fetch" in out and "https://a.example" in out
+    assert "THE BRIEF" not in out and "earlier answer" not in out
+    assert len(out) < 2500  # one result, cut
+    assert team_up.partial_result(fork + own[:1], len(fork)) == ""  # only its brief: nothing done
+    many = fork + [own[0]] + [own[1], own[2]] * 40
+    assert len(team_up.partial_result(many, len(fork))) <= team_up.PARTIAL_CHARS + 40
+
+
+@pytest.mark.asyncio
+async def test_stop_all_hands_the_work_so_far_to_the_lead(monkeypatch):
+    srv = FakeServer(helper_kwargs={"Prices": {"hang": True, "work": True}, "Reviews": {"hang": True, "work": True}})
+    sm = FakeSM()
+    import captain_claw.session as session_mod
+    import captain_claw.web.chat_handler as ch
+
+    monkeypatch.setattr(session_mod, "get_session_manager", lambda: sm)
+    got: list[str] = []
+
+    async def fake_handle_chat(srv_, ws, content, **kw):
+        got.append(content)
+        return True
+
+    monkeypatch.setattr(ch, "handle_chat", fake_handle_chat)
+    team_up.bind_server(srv)
+    team, _ = await team_up.propose(srv.agent, "Compare", _parts(2))
+    await team_up.start(team)
+    await _until(lambda: all(h.step_count >= 2 for h in team.helpers))
+    assert team_up.stop(team, "", by="you") == ""
+    await _until(lambda: team.state == "stopped" and team.ended_at > 0)
+    assert len(got) == 1
+    msg = got[0]
+    assert "The user stopped the team before it finished" in msg
+    assert "## Prices — stopped by you" in msg and "## Reviews — stopped by you" in msg
+    assert msg.count("Its work so far") == 2
+    assert "Reading the price pages" in msg and "A costs 10" in msg
+    assert "Request cancelled" not in msg
+    assert team.delivered and "work so far went to" in team.note
+    snap = team.snapshot()
+    assert all(h["partial"] for h in snap["helpers"])
+    record = srv.agent.session.metadata["team_runs"][-1]
+    assert record["state"] == "stopped" and "A costs 10" in record["helpers"][0]["partial"]
+
+
+@pytest.mark.asyncio
+async def test_recall_reads_a_stopped_helpers_work_so_far(monkeypatch):
+    srv = FakeServer(helper_kwargs={"Prices": {"hang": True, "work": True}, "Reviews": {"delay": 0.01}})
+    sm = FakeSM()
+    import captain_claw.session as session_mod
+    import captain_claw.web.chat_handler as ch
+
+    monkeypatch.setattr(session_mod, "get_session_manager", lambda: sm)
+
+    async def fake_handle_chat(srv_, ws, content, **kw):
+        return True
+
+    monkeypatch.setattr(ch, "handle_chat", fake_handle_chat)
+    team_up.bind_server(srv)
+    team, _ = await team_up.propose(srv.agent, "Compare", _parts(2))
+    await team_up.start(team)
+    await _until(lambda: team.helpers[0].step_count >= 2)
+    team_up.stop(team, "Prices")
+    await _until(lambda: team.state in ("done", "failed") and team.ended_at > 0)
+    text = await team_up.recall_text(srv.agent, "Prices")
+    assert "A costs 10" in text
+
+
+@pytest.mark.asyncio
+async def test_history_keeps_thirty_runs_and_slims_the_older_ones(server):
+    for i in range(32):
+        team, _ = await team_up.propose(server.agent, f"Run {i}", _parts(2))
+        team.state = "done"
+        team.helpers[0].result = "x" * 3000
+        team_up._save_record(team)
+    runs = server.agent.session.metadata["team_runs"]
+    assert len(runs) == team_up.RECORDS_KEPT == 30
+    assert runs[-1]["title"] == "Run 31" and runs[0]["title"] == "Run 2"
+    slim, full = runs[:-team_up.RECORDS_FULL], runs[-team_up.RECORDS_FULL:]
+    assert all(r.get("slim") and r["board"] == [] for r in slim)
+    assert all(len(r["helpers"][0]["result"]) <= team_up.RECORD_SLIM_CHARS for r in slim)
+    assert all(not r.get("slim") and len(r["helpers"][0]["result"]) == team_up.RECORD_RESULT_CHARS for r in full)
+    assert len([f for f in team_up.sync_frames("A") if f["team"]["title"].startswith("Run")]) >= 30
+
+
+@pytest.mark.asyncio
+async def test_remove_a_run_from_the_history(server, monkeypatch):
+    import captain_claw.web.chat_handler as ch
+
+    async def fake_handle_chat(srv_, ws, content, **kw):
+        return True
+
+    monkeypatch.setattr(ch, "handle_chat", fake_handle_chat)
+    team, _ = await team_up.propose(server.agent, "Compare", _parts(2))
+    await team_up.start(team)
+    await _until(lambda: team.state == "done")
+    helper_sessions = {h.session_id for h in team.helpers}
+    assert any(r["id"] == team.id for r in server.agent.session.metadata["team_runs"])
+    assert await team_up.remove("A", team.id) == ""
+    assert team_up.find(team.id) is None
+    assert not any(r["id"] == team.id for r in server.agent.session.metadata["team_runs"])
+    assert set(server.sm.deleted) == helper_sessions
+    assert _events(server, "removed")[-1]["team_id"] == team.id
+    assert not any(f["team_id"] == team.id for f in team_up.sync_frames("A"))
+    assert "isn't in the history" in await team_up.remove("A", team.id)
+    # Only a record (after a restart): removed too, with its helpers' sessions.
+    server.agent.session.metadata["team_runs"].append(
+        {"id": "old1", "title": "Old", "state": "done", "helpers": [{"id": "h1", "name": "P", "session_id": "sx"}]})
+    assert await team_up.remove("A", "old1") == ""
+    assert "sx" in server.sm.deleted and server.agent.session.metadata["team_runs"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_working_team_is_not_removed(monkeypatch):
+    srv = FakeServer(helper_kwargs={"Prices": {"hang": True}, "Reviews": {"hang": True}})
+    sm = FakeSM()
+    import captain_claw.session as session_mod
+
+    monkeypatch.setattr(session_mod, "get_session_manager", lambda: sm)
+    team_up.bind_server(srv)
+    team, _ = await team_up.propose(srv.agent, "Compare", _parts(2))
+    await team_up.start(team)
+    assert "stop it first" in await team_up.remove("A", team.id)
+    assert "isn't here" in await team_up.remove("B", team.id)
+    team_up.stop(team, "", by="you")
+    await _until(lambda: team.state == "stopped")
+    assert await team_up.remove("A", team.id) == ""
+

@@ -1,12 +1,10 @@
 # Team up (mini Vatra): an agent splits a task among copies of itself
 
-Status: **P0 built** on branch `feat/team-up-p0` (PR #818), with the chat UI
-and the per-agent setting pulled in from P2. **P1 (the board)** on
-`feat/team-up-p1` (PR #819), stacked on P0. **P2 (the rest of the chat UI)**
-on `feat/team-up-p2` (PR #820), stacked on P1. **P3 (learning and recall)**
-on `feat/team-up-p3` (PR #821), stacked on P2. **P4 (Telegram and WhatsApp)**
-on `feat/team-up-p4`, stacked on P3. Owner decisions in. See the "as built"
-sections at the end.
+Status: **P0–P4 merged** into main on 2026-11-28 (PRs #818–#822): P0 with
+the chat UI and the per-agent setting pulled in from P2, P1 the board, P2 the
+rest of the chat UI, P3 learning and recall, P4 Telegram and WhatsApp. Then
+**the prompt section** (below), after a deck agent never offered a team.
+Owner decisions in. See the "as built" sections at the end.
 
 ## The idea
 
@@ -598,3 +596,84 @@ person keeps chatting, then one reply)
       `whatsapp_media_to=<waid>`, and its reply went out on lane A, which
       Flight Deck relays to the number.
 - UI: the chip and the footer, in the harness.
+
+## After P4: the prompt section (2026-11-28)
+
+On the staging deck, an agent on Haiku got "compare A and B, do a thorough
+research on both" and did all the research itself. The `team` tool was in its
+tool list, but the plan's "tool description **and prompt**" (When not to
+split) had only got the description. Among 38 tools, and with the prompt's
+"just produce the output, don't ask should I proceed" rules, nothing pointed
+it at a team.
+
+- `section_team_up.md`, as `{team_block}` after `{jev_block}` in
+  `system_prompt.md` and `micro_system_prompt.md` (not nano):
+  - when to offer: several subjects to research or compare, a big folder or
+    list in parts, a large report whose sections each need their own research;
+  - call `team propose` FIRST, before any search or read for the task;
+  - offering a team is not a "should I proceed?" gate;
+  - when not to, what to do on a refusal or a no, and that helpers ignore it.
+- Only while the tool is offered (`team_up.listed()`: a web chat in this
+  process, setting not Off), and never for a shared agent's member. Helpers
+  get the same text, so the cached prompt prefix stays the lead's.
+- Tests: `tests/test_team_up_prompt.py`.
+- Checked on the staging deck: the section reached the prompt (+400 tokens).
+  The owner's test, a short two-company comparison, was answered from the
+  CRM in about 45 seconds without an offer, as "not for a quick lookup" said.
+
+**Offer more (owner, 2026-11-28).** The owner wants a team offered for such
+comparisons too: the person decides, and saying no is one tap. The section
+and the tool description now say to offer one whenever a request covers two
+or more separate subjects or parts, even quick ones, from the agent's own data
+or the web. Still never for one subject, a follow-up already answered,
+dependent steps, or one account. The "Team up" header lost "big".
+
+## Stop, history and no cap (owner, 2026-11-28)
+
+After the first real team on the staging deck the owner asked for four
+changes: no $ in the UI, no budget cap for now, a stop that still gets the
+results done so far to the agent, and the earlier runs within reach (with a
+way to remove one).
+
+- **No $ shown.** The cards and the panel show tokens only. The backend still
+  prices the usage (records keep `usd`); nothing displays it.
+- **No budget cap for now** (`team_up.BUDGET_CAP = False`). `team_budget()`
+  returns 0, so `_check_budget` does nothing: no warning, no wrap-up, no
+  budget stop. Tokens are still counted: "Tokens so far" in the panel, in the
+  lead's live note and in `team status`. Each helper is still one agent turn
+  with the agent's own step limits. The Agent settings no longer show "Team
+  budget"; the stored setting is kept for when the cap comes back.
+- **A stop hands over the work so far.**
+  - Before: Stop all (by the person) ended the team with no finishing turn,
+    and a helper the lead stopped handed over "Request cancelled by user." as
+    its result.
+  - Now: a stopped (or failed) helper with no result gets `partial`:
+    `partial_result()` reads its own messages after the fork (its notes, the
+    calls it made with `→`, and what came back, each cut to fit 12k chars).
+  - The finishing turn runs whenever any helper has a result or work so far.
+    When the person stopped them all, it opens "The user stopped the team
+    before it finished…", and the team ends as `stopped` with the note
+    "stopped by you · the work so far went to the agent". Nothing done at all:
+    no finishing turn, as before.
+  - The record keeps `partial` too; `team recall` reads a stopped helper's
+    work so far from its session.
+  - `fork_len` is now what the helpers inherited (`len(base)`), not the lead's
+    whole session: a team started inside the lead's turn inherits less.
+- **The run history.**
+  - Records: 30 per conversation (was 10). The newest 10 are full; older ones
+    are slimmed (no board, 600 chars per result).
+  - Panel: the title is a picker of every run in this chat (newest first:
+    state, helpers, tokens, when). The Teams button in the conversation bar
+    (the pill) opens the newest run when no team is current.
+  - Remove: a trash icon on each row (not on a working team) → "Remove …?
+    Its card, results and the helpers' transcripts go. The agent's reply stays
+    in the chat." → ws `team_action` `remove` → `team_up.remove(lane, id)`:
+    drops it from memory and from the lead session's records (also when that
+    session isn't the open one), deletes the helpers' sessions, and sends
+    `{"event": "removed"}`. The chat card then says "removed from the team
+    history"; the panel moves to the next run.
+- **Checked:** 97 tests in `tests/test_team_up.py` (13 new). A real-stack
+  run with a scripted model: Stop all while both helpers worked, the
+  finishing turn had both helpers' work so far (file contents they had read,
+  their posts), the record kept it, and removing the run deleted its record
+  and both helper sessions. The UI in the harness, dark, light and phone.
