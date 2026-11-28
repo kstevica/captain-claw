@@ -473,7 +473,7 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/basna",):
             result = await server.agent.run_basna_command(args.strip())
 
-        elif cmd in ("/code", "/publish"):
+        elif cmd in ("/code", "/publish", "/team"):
             # Needs a MODEL turn — the request may reference the conversation
             # ("/code what we talked about", "/publish that as 'weather'"), so
             # route into the normal chat pipeline; agent.complete() rewrites

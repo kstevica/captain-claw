@@ -177,6 +177,7 @@ COMMANDS: list[dict[str, str]] = [
     {"command": "/orchestrate <request>", "description": "Run parallel multi-session orchestration", "category": "Orchestrator"},
     {"command": "/basna <task>", "description": "Run a Basna — parallel multi-agent research ensemble", "category": "Orchestrator"},
     {"command": "/code <task>", "description": "Start an autonomous coding session (Code studio)", "category": "Orchestrator"},
+    {"command": "/team <task>", "description": "Team up: split the task among helpers, copies of the agent", "category": "Orchestrator"},
     {"command": "/publish <folder> as \"<name>\"", "description": "Publish a VFS folder as a hosted site/app", "category": "Orchestrator"},
     {"command": "/screenshot [prompt]", "description": "Capture screen and analyze with vision", "category": "Screen"},
     {"command": "/reflection", "description": "Show latest self-reflection", "category": "Reflections"},
@@ -397,6 +398,10 @@ class WebServer:
         self.agent.peer_consult_approval_callback = self._peer_consult_approval_callback
         self.agent.ws_broadcast = self._broadcast
         await self.agent.initialize()
+        # Team up builds its helpers here, beside the lanes (team_up.py).
+        from captain_claw import team_up as _team_up
+
+        _team_up.bind_server(self)
 
         # Give the game registry access to the LLM provider for AgentSeat.
         from captain_claw.games.registry import get_registry

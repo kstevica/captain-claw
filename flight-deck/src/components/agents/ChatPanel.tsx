@@ -63,6 +63,8 @@ import { useLessonInbox } from '../../stores/lessonInboxStore'
 import { isManagedAgent } from '../../utils/managedAgents'
 import { AttachmentChip } from './AttachmentChip'
 import { AgentPicture } from './AgentPicture'
+import { TeamCard, TeamPanel, TeamPill } from './team/TeamUp'
+import { useTeamStore } from '../../stores/teamStore'
 import { ImageLightbox, MarkdownImage } from './ImageLightbox'
 import { appendAttachmentRefs, useFileAttachments, type AgentConn } from '../../hooks/useFileAttachments'
 import { useAgentSkills } from '../../hooks/useAgentSkills'
@@ -288,6 +290,8 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
   // The active session, keyed — its object identity changes only when THIS
   // session mutates, so other agents' events don't re-render the transcript.
   const session = useChatStore((s) => (s.activeChatId ? s.sessions.get(s.activeChatId) ?? null : null))
+  // Team up: the Team panel docks beside this chat (a view of its own on a phone).
+  const teamPanelKey = useTeamStore((s) => s.panel?.key ?? null)
   // A shared chat's row in the "shared with me" list — only that row, so the
   // list's 10s poll doesn't re-render this pane: what member chats on it can
   // use, and the member's own Google switch.
@@ -575,7 +579,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
           agentName={session.containerName}
           activeLane={session.lane}
           identity={!phoneSimple}
-          trailing={queuePill}
+          trailing={<>{!shared && <TeamPill sessionKey={session.key} />}{queuePill}</>}
         >
           {!phoneSimple && sharedBadge}
           {!phoneSimple && headerTools}
@@ -607,6 +611,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
             </button>
           ))}
         </div>
+        {!shared && <TeamPill sessionKey={session.key} compact />}
         {sharedBadge}
         {headerTools}
         {!simple && (
@@ -735,7 +740,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
               reveal={queueReveal}
             />
           )}
-          {!(isMobile && simpleQueueOpen) && (
+          {!(isMobile && simpleQueueOpen) && !(isMobile && teamPanelKey === session.key) && (
             <ChatContent
               session={session}
               sessionKey={session.key}
@@ -747,6 +752,9 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
               onQueue={queueFromChat}
               onCancel={() => cancelTask(session.key)}
             />
+          )}
+          {teamPanelKey === session.key && !(isMobile && simpleQueueOpen) && (
+            <TeamPanel sessionKey={session.key} agentId={session.containerId} agentName={session.containerName} phone={isMobile} />
           )}
         </div>
       )}
@@ -1177,7 +1185,7 @@ function ChatContent({
         {groups.map((grp, gi) => {
           // The live group is the last one (a payment card, or a question
           // the agent waits on, after it doesn't count).
-          const live = session.busy && groups.slice(gi + 1).every((g) => g.kind === 'payment' || g.kind === 'purchase' || g.kind === 'task'
+          const live = session.busy && groups.slice(gi + 1).every((g) => g.kind === 'payment' || g.kind === 'purchase' || g.kind === 'task' || g.kind === 'team'
             || (g.kind === 'single' && !!g.items[0].approval_request_id && !g.items[0].approval_resolved))
           return grp.kind === 'payment' ? (
             <PaymentCard key={`pay-${grp.paymentId}`} id={grp.paymentId!} compact />
@@ -1185,6 +1193,9 @@ function ChatContent({
             <PurchaseCard key={`pur-${grp.paymentId}`} id={grp.paymentId!} compact />
           ) : grp.kind === 'task' ? (
             <TaskCard key={`task-${grp.paymentId}`} id={grp.paymentId!} />
+          ) : grp.kind === 'team' ? (
+            <TeamCard key={`team-${grp.items[0].team}`} sessionKey={sessionKey} teamId={grp.items[0].team!}
+              title={grp.items[0].content} agentId={session.containerId} agentName={session.containerName} />
           ) : grp.kind === 'activity' ? (
             <ActivityGroup
               key={`act-${grp.items[0].id}`}
@@ -3350,7 +3361,7 @@ function isActivityMessage(m: ChatMessage): boolean {
   return m.role === 'tool' || (m.role === 'system' && !!m.narration)
 }
 
-type ChatGroup = { kind: 'activity' | 'single' | 'payment' | 'purchase' | 'task'; items: ChatMessage[]; paymentId?: string }
+type ChatGroup = { kind: 'activity' | 'single' | 'payment' | 'purchase' | 'task' | 'team'; items: ChatMessage[]; paymentId?: string }
 
 function groupActivity(msgs: ChatMessage[]): ChatGroup[] {
   const groups: ChatGroup[] = []
@@ -3378,6 +3389,9 @@ function groupActivity(msgs: ChatMessage[]): ChatGroup[] {
         seenPayments.add(`bat:${runId}`)
         groups.push({ kind: 'task', items: [m], paymentId: runId })
       }
+    } else if (m.team) {
+      // A Team up card: its own item, live from the team store.
+      groups.push({ kind: 'team', items: [m] })
     } else {
       groups.push({ kind: 'single', items: [m] })
     }

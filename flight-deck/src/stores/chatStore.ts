@@ -11,6 +11,7 @@ import type { QuotaStatus } from '../services/profile'
 import type { TraceSpan } from '../types'
 import { sanitizeAgentContent } from '../utils/sanitizeAgentContent'
 import { asNote, injectedAs, markLegacyNarration, notificationOrigin } from '../utils/chatOrigin'
+import { useTeamStore, TEAM_RESULT_RE } from './teamStore'
 import { scrubUserText } from '../utils/cardScrub'
 import { SHARED_PREFIX, sharedContainerId, sharedSliceId } from '../utils/sharedAgent'
 import { clampLevel, parsePick, parseProfile, type ReasoningProfile } from '../utils/reasoningEffort'
@@ -105,6 +106,7 @@ function logRowToMessage(r: LogRow): ChatMessage {
     ...(meta.narration ? { narration: true } : {}),
     ...(meta.jev ? { jev: true } : {}),
     ...(meta.note ? { note: String(meta.note) } : {}),
+    ...(meta.team ? { team: String(meta.team) } : {}),
     ...(typeof meta.file_size === 'number' ? { fileSize: meta.file_size } : {}),
     // A system row stored before its kind was recorded: narration or not is
     // told by where it sits (markLegacyNarration).
@@ -513,10 +515,11 @@ async function _flushMessages() {
               ...(m.jev ? { jev: true } : {}),
               ...(m.healed ? { healed: true, ...(m.healedFrom ? { agent_session: m.healedFrom } : {}) } : {}),
               ...(m.note ? { note: m.note } : {}),
+              ...(m.team ? { team: m.team } : {}),
               ...(m.fileSize !== undefined ? { file_size: m.fileSize } : {}),
               // Any other system row says it is one, so a reload never takes
               // it for narration stored before the flag was kept.
-              ...(m.role === 'system' && !m.narration && !m.note && !m.topic ? { plain: true } : {}),
+              ...(m.role === 'system' && !m.narration && !m.note && !m.topic && !m.team ? { plain: true } : {}),
             }),
           })),
         }),
@@ -2039,6 +2042,13 @@ interface ChatStore {
   /** Append a local system note to the chat (no agent turn) — e.g. "started flow X". */
   addLocalNote: (containerId: string, content: string) => void
   cancelTask: (containerId: string) => void
+  /** A tap on a Team up card or panel: start / dismiss a proposed team, stop
+   *  one helper (`helper`) or the whole team. */
+  teamAction: (containerId: string, teamId: string, action: 'start' | 'dismiss' | 'stop', helper?: string) => void
+  /** "Do it alone": the proposal goes, and the agent is asked to do it itself. */
+  teamAlone: (containerId: string, teamId: string) => void
+  /** Ask the agent for one helper's transcript (the Team panel's Transcript). */
+  teamTranscript: (containerId: string, teamId: string, helperId: string) => void
   setModel: (containerId: string, selector: string) => void
   /** The chat box's model picker: another model of the agent's provider for
    *  this conversation ("default" goes back to the configured one). */
@@ -2479,7 +2489,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // A message the runtime put in the agent's session as "user" (a relayed
       // result, a fleet notice): a muted note, or nothing — never the user's
       // own bubble.
-      const origin = String(data.origin || (data.notification ? notificationOrigin(rawContent) : ''))
+      // A Team up result opens the agent's finishing turn as a plain user
+      // frame: it is the team's note, not the person's words.
+      const teamResult = data.role === 'user' && TEAM_RESULT_RE.test(rawContent.trimStart())
+      const origin = String(data.origin || (data.notification || teamResult ? notificationOrigin(rawContent) : ''))
       const injected = data.role === 'user' ? injectedAs(origin) : null
       if (injected === 'hide') return
       if (injected === 'note') {
@@ -3124,6 +3137,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     })
 
+    // Team up (captain_claw/team_up.py): helpers working in the background.
+    // Their frames are not the lane's turn — no heardFrom, no busy change.
+    // A newly offered (or started) team gets its card in the transcript.
+    ws.on('team', (data) => {
+      useTeamStore.getState().apply(key, data)
+      const event = String(data.event || '')
+      if (event !== 'proposed' && event !== 'started') return
+      const team = data.team as Record<string, unknown> | undefined
+      const teamId = String(team?.id || data.team_id || '')
+      if (!teamId) return
+      const s = useChatStore.getState().sessions.get(key)
+      if (!s || s.messages.some((m) => m.team === teamId)) return
+      addMessage(key, {
+        id: nextId(), role: 'system', content: String(team?.title || 'Team'),
+        timestamp: new Date().toISOString(), team: teamId,
+      })
+    })
+
     // Token generation speed tracking from usage events
     // Live cumulative token usage for the in-flight turn — drives the
     // input/output/cache counts in the activity-panel header.
@@ -3500,6 +3531,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       content,
       timestamp: new Date().toISOString(),
     })
+  },
+
+  teamAction: (containerId, teamId, action, helper) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    useTeamStore.getState().setPending(containerId, teamId, action)
+    session.ws.sendJSON({ type: 'team_action', team_id: teamId, action, ...(helper ? { helper } : {}) })
+  },
+
+  teamAlone: (containerId, teamId) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    useTeamStore.getState().setPending(containerId, teamId, 'dismiss')
+    session.ws.sendJSON({ type: 'team_action', team_id: teamId, action: 'dismiss' })
+    get().sendMessage(containerId, 'Do it yourself — no team this time.')
+  },
+
+  teamTranscript: (containerId, teamId, helperId) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    useTeamStore.getState().transcriptLoading(containerId, teamId, helperId)
+    session.ws.sendJSON({ type: 'team_transcript', team_id: teamId, helper: helperId })
   },
 
   cancelTask: (containerId) => {
