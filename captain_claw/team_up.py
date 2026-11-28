@@ -202,6 +202,30 @@ def _now() -> float:
     return time.time()
 
 
+def usd_for(model: str, usage: Any) -> float | None:
+    """The dollar cost of *usage* on *model*, None when its price isn't known."""
+    if not model or not isinstance(usage, dict) or not usage:
+        return None
+    try:
+        from captain_claw.flight_deck.pricing import cost_from_usage
+
+        cost = cost_from_usage(model, usage)
+    except Exception:
+        return None
+    return cost.get("usd") if cost.get("priced") else None
+
+
+def _add_usage(into: dict, usage: Any) -> None:
+    if not isinstance(usage, dict):
+        return
+    for key in ("prompt_tokens", "completion_tokens", "cache_read_input_tokens",
+                "cache_creation_input_tokens", "total_tokens"):
+        try:
+            into[key] = int(into.get(key) or 0) + int(usage.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+
+
 @dataclass
 class Helper:
     id: str
@@ -254,6 +278,7 @@ class Helper:
             "wrap_up": self.wrap_up,
             "stopped_by": self.stopped_by,
             "model": self.model,
+            "usd": usd_for(self.model, self.usage),
         }
         if steps:
             data["steps"] = list(self.steps)[-steps:]
@@ -281,11 +306,20 @@ class Team:
     watch: asyncio.Task | None = None
     board: team_board.Board = field(default_factory=team_board.Board)
     lead_tokens: int = 0       # the lead's quiet answers to helpers' asks
+    lead_usage: dict = field(default_factory=dict)
     routed: set = field(default_factory=set)  # ask ids handed to the lead
     fork_len: int = 0          # how many lead messages the helpers inherited
 
     def used(self) -> int:
         return sum(h.tokens for h in self.helpers) + self.lead_tokens
+
+    def usd(self) -> float | None:
+        """Dollars so far ("None" when no part of it has a known price)."""
+        model = self.helpers[0].model if self.helpers else ""
+        parts = [usd_for(h.model, h.usage) for h in self.helpers]
+        parts.append(usd_for(model, self.lead_usage) if self.lead_usage else None)
+        priced = [p for p in parts if p is not None]
+        return round(sum(priced), 4) if priced else None
 
     def helper(self, ref: str) -> Helper | None:
         key = str(ref or "").strip().lower()
@@ -318,6 +352,7 @@ class Team:
             "browser_holder": self.browser_holder,
             "note": self.note,
             "lead_tokens": self.lead_tokens,
+            "usd": self.usd(),
             "helpers": [h.snapshot(steps=steps) for h in self.helpers],
             "board": self.board.snapshot(),
         }
@@ -428,45 +463,81 @@ def _local_single_slot(agent: Any) -> bool:
     return bool(re.search(r"//(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])[:/]", base))
 
 
-def why_unavailable(agent: Any) -> str:
-    """"" when *agent* may team up on this turn, else why not (in words)."""
+def _unavailable(agent: Any) -> tuple[str, str]:
+    """(code, why in words to the agent) — ("", "") when *agent* may team up."""
     if is_helper(agent):
-        return "You're one of the helpers of a team: helpers don't team up. Do your part yourself."
+        return "helper", "You're one of the helpers of a team: helpers don't team up. Do your part yourself."
     server = _SERVER
     if server is None:
-        return "Team up works in your web chat, which isn't running here."
+        return "no_chat", "Team up works in your web chat, which isn't running here."
     settings = read_settings()
     if settings["mode"] == "off":
-        return ("Team up is off for you. Do the task yourself; your owner can turn it on in "
-                "Flight Deck → Agent settings.")
+        return "off", ("Team up is off for you. Do the task yourself; your owner can turn it on in "
+                       "Flight Deck → Agent settings.")
     if getattr(agent, "_public_scoped", False) or getattr(agent, "_speaker_principal", None) is not None:
-        return "Team up isn't available in this conversation. Do the task yourself."
+        return "not_here", "Team up isn't available in this conversation. Do the task yourself."
     try:
         from captain_claw import speaker as _speaker
 
         if _speaker.current() is not None or _speaker.is_speaker_agent(agent):
-            return "Team up is off on a shared agent. Do the task yourself."
+            return "shared", "Team up is off on a shared agent. Do the task yourself."
     except Exception:
         pass
     lane = lane_of(agent, server)
     if not lane or _lane_refused(server, lane):
-        return "Team up works only in your owner's web chat. Do the task yourself."
+        return "lane", "Team up works only in your owner's web chat. Do the task yourself."
     try:
         channel = agent._turn_channel()
     except Exception:
         channel = ""
     if channel and channel not in ("web", "flight_deck", "fd", "kiosk", "app"):
-        return f"Team up works in the web chat, not on {channel}. Do the task yourself."
+        return "channel", f"Team up works in the web chat, not on {channel}. Do the task yourself."
     if getattr(agent, "_tenant_hidden", False):
-        return "Team up isn't available in this conversation. Do the task yourself."
+        return "not_here", "Team up isn't available in this conversation. Do the task yourself."
     if _local_single_slot(agent):
-        return ("Team up is off while you run on a model served from this machine: helpers would "
-                "take turns on it and finish later than you alone. Do the task yourself.")
+        return "local", ("Team up is off while you run on a model served from this machine: helpers would "
+                         "take turns on it and finish later than you alone. Do the task yourself.")
     live = active_for(agent)
     if live is not None and live.state in ("running", "finishing"):
-        return (f"A team is already working on '{live.title}'. Check it with team status, or stop it "
-                "with team stop, before starting another.")
-    return ""
+        return "busy", (f"A team is already working on '{live.title}'. Check it with team status, or stop it "
+                        "with team stop, before starting another.")
+    return "", ""
+
+
+def why_unavailable(agent: Any) -> str:
+    """"" when *agent* may team up on this turn, else why not (in words)."""
+    return _unavailable(agent)[1]
+
+
+_PERSON_REFUSALS = {
+    "helper": "A helper can't team up.",
+    "no_chat": "Team up works in the web chat, which isn't running here.",
+    "off": "Team up is off for this agent. Turn it on in Flight Deck → Agent settings → Team up.",
+    "not_here": "Team up isn't available in this conversation.",
+    "shared": "Team up is off on a shared agent.",
+    "lane": "Team up works only in your own chat with the agent.",
+    "channel": "Team up works in the web chat, not here.",
+    "local": ("Team up is off while this agent runs on a model served from this machine: helpers would "
+              "take turns on it and finish later than the agent alone."),
+}
+
+
+def refusal_for_person(agent: Any) -> str:
+    """Why `/team` can't start here, said to the person ("" when it can)."""
+    code, why = _unavailable(agent)
+    if not code:
+        return ""
+    if code == "busy":
+        live = active_for(agent)
+        title = live.title if live is not None else "another task"
+        return f"A team is already working on '{title}'. Wait for it, or stop it in the Team panel."
+    return _PERSON_REFUSALS.get(code, why)
+
+
+def is_helper_session(session: Any) -> bool:
+    """A helper's own session (kept out of the owner's session lists)."""
+    meta = getattr(session, "metadata", None)
+    return isinstance(meta, dict) and isinstance(meta.get("team_helper"), dict)
 
 
 # ── Events to the lead's chat ────────────────────────────────────────────
@@ -500,9 +571,15 @@ def _emit_helper(team: Team, h: Helper) -> None:
 
 
 def sync_frames(lane: str, *, steps: int = 60) -> list[dict[str, Any]]:
-    """What a chat that just (re)connected to *lane* needs to rebuild its cards."""
-    return [{"type": "team", "event": "snapshot", "team_id": t.id, "team": t.snapshot(steps=steps)}
-            for t in teams_for_lane(lane)]
+    """What a chat that just (re)connected to *lane* needs to rebuild its cards:
+    the teams in memory, and the records of earlier ones (after a restart)."""
+    snaps = [t.snapshot(steps=steps) for t in teams_for_lane(lane)]
+    known = {s["id"] for s in snaps}
+    for record in records_for_lane(lane):
+        if record.get("id") not in known:
+            snaps.append(record_snapshot(record, lane))
+    snaps.sort(key=lambda s: s.get("created_at") or s.get("started_at") or 0)
+    return [{"type": "team", "event": "snapshot", "team_id": s["id"], "team": s} for s in snaps]
 
 
 # ── Proposing and starting ───────────────────────────────────────────────
@@ -582,8 +659,11 @@ async def propose(agent: Any, title: str, parts: Any) -> tuple[Team | None, str]
     _prune()
     agent._team_note_fn = (lambda t=team: lead_note(t))  # type: ignore[attr-defined]
     _emit_team(team, "proposed")
-    if team.mode == "on":
-        error = await start(team, by="agent")
+    # `/team <task>`: the person asked for the team, so it starts without a card.
+    forced = bool(getattr(agent, "_team_forced", False))
+    if team.mode == "on" or forced:
+        agent._team_forced = False  # type: ignore[attr-defined]
+        error = await start(team, by="person" if forced else "agent")
         if error:
             return None, error
     return team, ""
@@ -1241,7 +1321,9 @@ async def _lead_answers(team: Team, ask: dict[str, Any]) -> None:
                 Message(role="user", content=_lead_context(team, ask))]
     response = await asyncio.wait_for(
         provider.complete(messages, tools=None, max_tokens=LEAD_ANSWER_TOKENS), timeout=LEAD_ANSWER_TIMEOUT)
-    team.lead_tokens += turn_tokens(getattr(response, "usage", None) or {})
+    usage = getattr(response, "usage", None) or {}
+    team.lead_tokens += turn_tokens(usage)
+    _add_usage(team.lead_usage, usage)
     answer = str(getattr(response, "content", "") or "").strip()
     if not answer:
         answer = ("I don't know that. Decide yourself and say what you assumed in your result, or ask the user "
@@ -1548,7 +1630,14 @@ async def _deliver(team: Team) -> bool:
 
 # ── The record on the lead's session ─────────────────────────────────────
 
+RECORD_RESULT_CHARS = 2000
+RECORD_BOARD_ENTRIES = 40
+RECORD_BOARD_CHARS = 500
+
+
 def _save_record(team: Team) -> None:
+    """The team on the lead's session: the cards come back from it after a
+    restart, and later turns can look up what each helper found."""
     session = getattr(team.lead, "session", None)
     if session is None or str(getattr(session, "id", "")) != team.lead_session_id:
         return
@@ -1556,17 +1645,202 @@ def _save_record(team: Team) -> None:
     if not isinstance(meta, dict):
         return
     record = {
-        "id": team.id, "title": team.title, "state": team.state,
-        "started_at": team.started_at, "ended_at": team.ended_at,
-        "budget": team.budget, "used": team.used(),
-        "helpers": [{"id": h.id, "name": h.name, "goal": h.goal, "state": h.state,
-                     "session_id": h.session_id, "tokens": h.tokens,
-                     "result": h.result[:1500], "files": h.files[-12:]} for h in team.helpers],
-        "board": [{k: e.get(k) for k in ("id", "kind", "who_name", "to_name", "ask_id", "title")}
-                  | {"text": str(e.get("text") or "")[:300]} for e in team.board.entries[-20:]],
+        "id": team.id, "title": team.title, "lane": team.lane, "mode": team.mode, "state": team.state,
+        "note": team.note, "created_at": team.created_at, "started_at": team.started_at,
+        "ended_at": team.ended_at, "budget": team.budget, "used": team.used(),
+        "lead_tokens": team.lead_tokens, "usd": team.usd(), "fork_len": team.fork_len,
+        "delivered": team.delivered,
+        "helpers": [{"id": h.id, "name": h.name, "goal": h.goal, "produces": h.produces, "state": h.state,
+                     "session_id": h.session_id, "tokens": h.tokens, "usage": dict(h.usage),
+                     "model": h.model, "step_count": h.step_count, "tool_count": h.tool_count,
+                     "started_at": h.started_at, "ended_at": h.ended_at, "stopped_by": h.stopped_by,
+                     "error": h.error[:400], "result": h.result[:RECORD_RESULT_CHARS],
+                     "files": h.files[-12:]} for h in team.helpers],
+        "board": [dict(e, text=str(e.get("text") or "")[:RECORD_BOARD_CHARS])
+                  for e in team.board.entries[-RECORD_BOARD_ENTRIES:]],
     }
     runs = [r for r in meta.get("team_runs", []) if isinstance(r, dict) and r.get("id") != team.id]
     meta["team_runs"] = (runs + [record])[-RECORDS_KEPT:]
+    # A turn on the lead saves the session as it ends; with none running
+    # (a team stopped from the panel) the record is saved here.
+    server = _SERVER
+    if server is not None and not _lead_busy(server, team):
+        try:
+            from captain_claw.session import get_session_manager
+
+            asyncio.get_running_loop().create_task(get_session_manager().save_session(session))
+        except Exception:
+            pass
+
+
+def _lane_agent(lane: str) -> Any:
+    server = _SERVER
+    if server is None:
+        return None
+    if lane == getattr(server, "LANE_MAIN", "A"):
+        return getattr(server, "agent", None)
+    return (getattr(server, "_lane_agents", None) or {}).get(lane)
+
+
+def records_of(session: Any) -> list[dict[str, Any]]:
+    meta = getattr(session, "metadata", None)
+    runs = meta.get("team_runs") if isinstance(meta, dict) else None
+    return [r for r in (runs or []) if isinstance(r, dict) and r.get("id")]
+
+
+def records_for_lane(lane: str) -> list[dict[str, Any]]:
+    """The team records on the session the lane's agent has open now."""
+    agent = _lane_agent(lane)
+    return records_of(getattr(agent, "session", None)) if agent is not None else []
+
+
+def record_snapshot(record: dict[str, Any], lane: str = "") -> dict[str, Any]:
+    """A record in the shape of Team.snapshot, for the chat's cards. A team
+    that was still working when the agent stopped shows as stopped."""
+    cut = record.get("state") in ("proposed", "running", "finishing")
+    helpers = []
+    for h in record.get("helpers") or []:
+        if not isinstance(h, dict):
+            continue
+        state = h.get("state") or "stopped"
+        stopped = cut and state in _LIVE_HELPER
+        helpers.append({
+            "id": h.get("id", ""), "name": h.get("name", ""), "goal": h.get("goal", ""),
+            "produces": h.get("produces", ""), "state": "stopped" if stopped else state,
+            "session_id": h.get("session_id", ""), "step_count": int(h.get("step_count") or 0),
+            "tool_count": int(h.get("tool_count") or 0), "tokens": int(h.get("tokens") or 0),
+            "usage": dict(h.get("usage") or {}), "last": "", "error": h.get("error", ""), "draft": "",
+            "result": h.get("result", ""), "files": list(h.get("files") or []),
+            "started_at": h.get("started_at") or 0, "ended_at": h.get("ended_at") or 0,
+            "wrap_up": False, "stopped_by": "restart" if stopped else h.get("stopped_by", ""),
+            "model": h.get("model", ""), "usd": usd_for(h.get("model", ""), h.get("usage")),
+            "steps": [],
+        })
+    state = record.get("state") or "done"
+    if cut:
+        state = "dismissed" if state == "proposed" else "stopped"
+    return {
+        "id": record["id"], "title": record.get("title", "Team"), "lane": record.get("lane") or lane,
+        "mode": record.get("mode", "ask"), "state": state,
+        "created_at": record.get("created_at") or record.get("started_at") or 0,
+        "started_at": record.get("started_at") or 0, "ended_at": record.get("ended_at") or 0,
+        "budget": int(record.get("budget") or 0), "used": int(record.get("used") or 0), "warned": False,
+        "browser_holder": "",
+        "note": "the agent restarted while the team worked" if cut else (record.get("note") or ""),
+        "lead_tokens": int(record.get("lead_tokens") or 0), "usd": record.get("usd"),
+        "helpers": helpers, "board": [dict(e) for e in record.get("board") or [] if isinstance(e, dict)],
+        "from_record": True,
+    }
+
+
+# ── A helper's transcript (the panel's "Transcript") ─────────────────────
+
+TRANSCRIPT_ITEMS = 150
+TRANSCRIPT_TEXT = 6000
+TRANSCRIPT_TOOL = 1500
+
+
+def _text_of(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") in ("text", "input_text", "output_text"):
+                    out.append(str(part.get("text") or ""))
+                elif part.get("type") in ("image", "image_url", "input_image"):
+                    out.append("[picture]")
+            elif isinstance(part, str):
+                out.append(part)
+        return "\n".join(x for x in out if x)
+    return "" if content is None else str(content)
+
+
+def _cut(text: str, limit: int) -> tuple[str, bool]:
+    text = text.strip()
+    return (text, False) if len(text) <= limit else (text[:limit].rstrip() + " …", True)
+
+
+def _calls_of(msg: dict[str, Any]) -> list[dict[str, str]]:
+    calls = []
+    for call in msg.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        fn = call.get("function") if isinstance(call.get("function"), dict) else call
+        name = str(fn.get("name") or "")
+        args = fn.get("arguments") if "arguments" in fn else fn.get("input")
+        if not isinstance(args, str):
+            try:
+                args = json.dumps(args, ensure_ascii=False)
+            except (TypeError, ValueError):
+                args = str(args)
+        if name:
+            calls.append({"name": name, "args": _cut(args or "", 400)[0]})
+    return calls
+
+
+def transcript_items(messages: list[Any], fork_len: int = 0) -> tuple[list[dict[str, Any]], int]:
+    """A helper's own messages (after the conversation it inherited), made
+    small for the panel: (items, how many there are in all)."""
+    own = [m for m in list(messages or [])[max(0, int(fork_len or 0)):] if isinstance(m, dict)]
+    items: list[dict[str, Any]] = []
+    for i, msg in enumerate(own):
+        role = str(msg.get("role") or "")
+        text = _text_of(msg.get("content"))
+        if role == "user":
+            body, cut = _cut(text, TRANSCRIPT_TEXT)
+            items.append({"role": "user", "kind": "brief" if i == 0 else "note", "text": body, "cut": cut})
+        elif role == "assistant":
+            body, cut = _cut(text, TRANSCRIPT_TEXT)
+            calls = _calls_of(msg)
+            if body or calls:
+                items.append({"role": "assistant", "text": body, "cut": cut, "calls": calls})
+        elif role == "tool":
+            body, cut = _cut(text, TRANSCRIPT_TOOL)
+            items.append({"role": "tool", "name": str(msg.get("tool_name") or msg.get("name") or ""),
+                          "text": body, "cut": cut})
+    total = len(items)
+    return items[-TRANSCRIPT_ITEMS:], total
+
+
+async def transcript(lane: str, team_id: str, helper_ref: str) -> dict[str, Any]:
+    """One helper's work as the panel shows it. A team in memory reads its
+    helper's live session; an older one is found through its record."""
+    team = find(team_id)
+    session = None
+    fork_len = 0
+    helper_id = ""
+    if team is not None and team.lane == lane:
+        h = team.helper(helper_ref)
+        if h is None:
+            return {"error": "No such helper."}
+        helper_id, fork_len = h.id, team.fork_len
+        session = getattr(h.agent, "session", None) if h.agent is not None else None
+        session_id = h.session_id
+    else:
+        record = next((r for r in records_for_lane(lane) if r.get("id") == team_id), None)
+        if record is None:
+            return {"error": "That team isn't here any more."}
+        ref = str(helper_ref or "").strip().lower()
+        h_rec = next((x for x in record.get("helpers") or []
+                      if isinstance(x, dict) and ref in (str(x.get("id", "")).lower(),
+                                                         str(x.get("name", "")).lower())), None)
+        if h_rec is None:
+            return {"error": "No such helper."}
+        helper_id, fork_len = str(h_rec.get("id") or ""), int(record.get("fork_len") or 0)
+        session_id = str(h_rec.get("session_id") or "")
+    if session is None and session_id:
+        try:
+            from captain_claw.session import get_session_manager
+
+            session = await get_session_manager().load_session(session_id)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Team up: helper session not loaded", session=session_id, error=str(exc))
+    if session is None:
+        return {"helper_id": helper_id, "error": "This helper's transcript is gone."}
+    items, total = transcript_items(getattr(session, "messages", None) or [], fork_len)
+    return {"helper_id": helper_id, "messages": items, "total": total}
 
 
 # ── The guard: what a helper may not do ──────────────────────────────────

@@ -2047,6 +2047,8 @@ interface ChatStore {
   teamAction: (containerId: string, teamId: string, action: 'start' | 'dismiss' | 'stop', helper?: string) => void
   /** "Do it alone": the proposal goes, and the agent is asked to do it itself. */
   teamAlone: (containerId: string, teamId: string) => void
+  /** Ask the agent for one helper's transcript (the Team panel's Transcript). */
+  teamTranscript: (containerId: string, teamId: string, helperId: string) => void
   setModel: (containerId: string, selector: string) => void
   /** The chat box's model picker: another model of the agent's provider for
    *  this conversation ("default" goes back to the configured one). */
@@ -3544,6 +3546,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     useTeamStore.getState().setPending(containerId, teamId, 'dismiss')
     session.ws.sendJSON({ type: 'team_action', team_id: teamId, action: 'dismiss' })
     get().sendMessage(containerId, 'Do it yourself — no team this time.')
+  },
+
+  teamTranscript: (containerId, teamId, helperId) => {
+    const session = get().sessions.get(containerId)
+    if (!session) return
+    useTeamStore.getState().transcriptLoading(containerId, teamId, helperId)
+    session.ws.sendJSON({ type: 'team_transcript', team_id: teamId, helper: helperId })
   },
 
   cancelTask: (containerId) => {

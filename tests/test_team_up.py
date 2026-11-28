@@ -45,6 +45,9 @@ class FakeSM:
     async def save_session(self, session):
         return None
 
+    async def load_session(self, session_id):
+        return next((s for s in self.created if s.id == session_id), None)
+
 
 class FakeProvider:
     provider = "anthropic"
@@ -774,3 +777,124 @@ async def test_team_tool_routes_helper_and_lead_verbs():
     assert r.success and "Acme" in r.content
     r = await tool.execute(action="post", text="x", _agent=srv.agent)
     assert not r.success and "for your helpers" in r.error
+
+
+# ── P2: /team, records after a restart, transcripts, session lists, cost ──
+
+async def _done_team(server, monkeypatch, parts=2):
+    import captain_claw.web.chat_handler as ch
+
+    async def fake_handle_chat(srv, ws, content, **kw):
+        return True
+
+    monkeypatch.setattr(ch, "handle_chat", fake_handle_chat)
+    team, err = await team_up.propose(server.agent, "Compare", _parts(parts))
+    assert err == ""
+    if team.state == "proposed":
+        await team_up.start(team)
+    await _until(lambda: team.state in ("done", "failed"))
+    return team
+
+
+@pytest.mark.asyncio
+async def test_team_command_starts_the_team_without_a_card(server, monkeypatch):
+    server.agent._team_forced = True  # complete() sets it for "/team <task>"
+    team = await _done_team(server, monkeypatch)
+    assert team.note == "started by you"
+    assert server.agent._team_forced is False
+    assert [f["event"] for f in _events(server, "proposed")] == ["proposed"]
+    assert _events(server, "started")
+
+
+def test_refusal_for_person_speaks_to_the_person(server, tmp_path):
+    assert team_up.refusal_for_person(server.agent) == ""
+    (tmp_path / team_up.SETTINGS_FILENAME).write_text('{"mode": "off"}')
+    assert team_up.refusal_for_person(server.agent).startswith("Team up is off for this agent.")
+    assert "Do the task yourself" in team_up.why_unavailable(server.agent)
+
+
+@pytest.mark.asyncio
+async def test_record_brings_the_cards_back_after_a_restart(server, monkeypatch):
+    team = await _done_team(server, monkeypatch)
+    record = server.agent.session.metadata["team_runs"][-1]
+    assert record["fork_len"] == 2 and record["lane"] == "A"
+    assert record["helpers"][0]["session_id"] and record["helpers"][0]["result"]
+    monkeypatch.setattr(team_up, "_TEAMS", {})  # the agent restarted
+    snap = team_up.sync_frames("A")[-1]["team"]
+    assert snap["id"] == team.id and snap["from_record"] and snap["state"] == "done"
+    assert [h["state"] for h in snap["helpers"]] == ["done", "done"]
+    assert snap["helpers"][0]["result"].startswith("Result for")
+
+
+def test_a_team_cut_by_a_restart_shows_as_stopped():
+    record = {"id": "t9", "title": "X", "state": "running", "budget": 100, "used": 40,
+              "helpers": [{"id": "h1", "name": "A", "state": "working"},
+                          {"id": "h2", "name": "B", "state": "done", "result": "r"}]}
+    snap = team_up.record_snapshot(record, "A")
+    assert snap["state"] == "stopped" and "restarted" in snap["note"]
+    assert snap["helpers"][0]["state"] == "stopped" and snap["helpers"][0]["stopped_by"] == "restart"
+    assert snap["helpers"][1]["state"] == "done" and snap["helpers"][1]["result"] == "r"
+    assert team_up.record_snapshot({"id": "t8", "state": "proposed"})["state"] == "dismissed"
+
+
+def test_transcript_items_keep_only_the_helpers_own_work():
+    msgs = [
+        {"role": "user", "content": "compare"}, {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "[Team up — brief]"},
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": "c", "function": {"name": "web_search", "arguments": '{"q": "acme"}'}}]},
+        {"role": "tool", "tool_name": "web_search", "content": "x" * 3000},
+        {"role": "assistant", "content": [{"type": "text", "text": "Acme is cheapest"}]},
+    ]
+    items, total = team_up.transcript_items(msgs, fork_len=2)
+    assert total == 4
+    assert items[0] == {"role": "user", "kind": "brief", "text": "[Team up — brief]", "cut": False}
+    assert items[1]["calls"] == [{"name": "web_search", "args": '{"q": "acme"}'}]
+    assert items[2]["name"] == "web_search" and items[2]["cut"]
+    assert len(items[2]["text"]) <= team_up.TRANSCRIPT_TOOL + 2
+    assert items[3]["text"] == "Acme is cheapest"
+
+
+@pytest.mark.asyncio
+async def test_transcript_of_a_live_team_and_of_a_record(server, monkeypatch):
+    team = await _done_team(server, monkeypatch)
+    for s in server.sm.created:  # the helpers' own turns, after the fork
+        s.messages += [{"role": "user", "content": "brief"}, {"role": "assistant", "content": "found it"}]
+    out = await team_up.transcript("A", team.id, "Prices")
+    assert out["helper_id"] == "h1"
+    assert [i["text"] for i in out["messages"]] == ["brief", "found it"]
+    monkeypatch.setattr(team_up, "_TEAMS", {})
+    again = await team_up.transcript("A", team.id, "h2")
+    assert again["helper_id"] == "h2" and again["messages"][-1]["text"] == "found it"
+    assert (await team_up.transcript("A", team.id, "nobody"))["error"] == "No such helper."
+    assert "isn't here" in (await team_up.transcript("A", "zzz", "h1"))["error"]
+
+
+@pytest.mark.asyncio
+async def test_helper_sessions_stay_out_of_the_owners_lists():
+    from captain_claw.speaker import list_owner_sessions
+
+    class SM:
+        async def list_sessions(self, limit=10):
+            return [FakeSession("chat"), FakeSession("chat · team t · Prices", {"team_helper": {"team": "t"}}),
+                    FakeSession("member", {"speaker_id": "u1"})]
+
+    rows = await list_owner_sessions(SM(), limit=5)
+    assert [s.name for s in rows] == ["chat"]
+    assert team_up.is_helper_session(FakeSession("x", {"team_helper": {"team": "t"}}))
+
+
+def test_cost_in_dollars_when_the_price_is_known(monkeypatch):
+    import captain_claw.flight_deck.pricing as pricing
+
+    monkeypatch.setattr(pricing, "cost_from_usage",
+                        lambda model, usage, override=None: {"usd": 0.5, "priced": model == "known"})
+    assert team_up.usd_for("known", {"prompt_tokens": 1}) == 0.5
+    assert team_up.usd_for("other", {"prompt_tokens": 1}) is None
+    assert team_up.usd_for("known", {}) is None
+    team, _a1, _a2 = _helper_agent()
+    assert team.usd() is None
+    for h in team.helpers:
+        h.model, h.usage = "known", {"prompt_tokens": 10}
+    assert team.usd() == 1.0
+    assert team.snapshot()["helpers"][0]["usd"] == 0.5 and team.snapshot()["usd"] == 1.0

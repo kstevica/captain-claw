@@ -211,6 +211,19 @@ async def _send_team_sync(server: Any, ws: Any) -> None:
                             "teams": [f["team"] for f in frames]})
 
 
+async def _send_team_transcript(server: Any, ws: Any, data: dict) -> None:
+    """One helper's transcript for the Team panel (its own messages only)."""
+    from captain_claw import team_up
+
+    lane = server.normalize_lane(getattr(ws, "_lane", ""))
+    team_id = str(data.get("team_id") or "")
+    out = await team_up.transcript(lane, team_id, str(data.get("helper") or ""))
+    await server._send(ws, {"type": "team", "event": "transcript", "team_id": team_id,
+                            "helper_id": out.get("helper_id") or str(data.get("helper") or ""),
+                            "messages": out.get("messages") or [], "total": out.get("total", 0),
+                            **({"error": out["error"]} if out.get("error") else {})})
+
+
 async def _handle_team_action(server: Any, ws: Any, data: dict) -> None:
     """A tap on a team card: start / dismiss / stop (one helper or all)."""
     from captain_claw import team_up
@@ -1060,15 +1073,19 @@ async def handle_ws_message(
             sm = get_session_manager()
             await sm.save_session(session)
 
-    elif msg_type in ("team_action", "team_sync"):
+    elif msg_type in ("team_action", "team_sync", "team_transcript"):
         # Team up (team_up.py): the chat's card and panel — start or dismiss a
-        # proposed team, stop a helper or the whole team, or re-sync the cards.
+        # proposed team, stop a helper or the whole team, re-sync the cards, or
+        # read one helper's transcript.
         # The owner's own chat only: never a public visitor or a member.
         if getattr(ws, "_public_session_id", None) or speaker_key_of(ws) is not None:
             await server._send(ws, {"type": "error", "message": "Team up isn't available here."})
             return
         if msg_type == "team_sync":
             await _send_team_sync(server, ws)
+            return
+        if msg_type == "team_transcript":
+            await _send_team_transcript(server, ws, data)
             return
         await _handle_team_action(server, ws, data)
 

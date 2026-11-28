@@ -1,9 +1,10 @@
 # Team up (mini Vatra): an agent splits a task among copies of itself
 
 Status: **P0 built** on branch `feat/team-up-p0` (PR #818), with the chat UI
-and the per-agent setting pulled in from P2. **P1 (the board) built** on
-`feat/team-up-p1`, stacked on P0. Owner decisions in. See "P0 as built" and
-"P1 as built" at the end.
+and the per-agent setting pulled in from P2. **P1 (the board)** on
+`feat/team-up-p1` (PR #819), stacked on P0. **P2 (the rest of the chat UI)**
+on `feat/team-up-p2`, stacked on P1. Owner decisions in. See "P0 as built",
+"P1 as built" and "P2 as built" at the end.
 
 ## The idea
 
@@ -399,3 +400,71 @@ asks, the lead's `tell` messages, and posts that match its part. It is capped at
   - The lead's `tell` still reached Delivery.
   - The finishing turn saw every result and the remember note.
 - Board UI: the harness in dark and light, desktop and phone.
+
+
+## P2 as built (2026-11-28): the rest of the chat UI
+
+Most of P2 (the card, the pill, the panel, Stop, the budget line, the
+settings) came with P0 and P1. This phase adds the rest.
+
+**`/team <task>`**
+- `complete()` rewrites it into a directive, as `/code` and `/publish` are
+  rewritten: split the task, call `team propose`. It also sets
+  `agent._team_forced`, and `team_up.propose` then starts the team at once,
+  as "started by you", with no card to tap.
+- `/team` with no task gets a short help. Where Team up can't run, the person
+  gets the reason in their own terms (`refusal_for_person`, e.g. "Team up is
+  off for this agent. Turn it on in … Agent settings → Team up.").
+- The web chat routes `/team` like `/code`, and `/help` lists it.
+
+**Helper transcripts**
+- A helper card has **Transcript**. It sends `team_transcript`, and the agent
+  answers with `{"event": "transcript"}`.
+- The agent sends only the helper's own messages, after the conversation it
+  inherited (`fork_len`), in small form:
+  - the brief;
+  - the helper's text, with its tool calls as name + arguments;
+  - tool results, cut to 1,500 characters.
+  At most the last 150 items.
+- The panel shows it in place of the tabs' body. The brief and the tool results
+  fold. While the helper works, the panel re-reads it every 4 s. Esc goes back.
+
+**Cards after a restart**
+- The team record on the lead's session now holds everything a card needs:
+  - each helper's part, state, tokens, usage, model, result (2,000 characters),
+    files and session id;
+  - the board (the last 40 entries);
+  - `fork_len`.
+- `sync_frames` adds the records of teams that are no longer in memory
+  (`record_snapshot`). A team that was working when the agent stopped shows as
+  stopped ("the agent restarted while the team worked"), and its working helpers
+  as "Stopped by a restart". Their transcripts still open from their sessions.
+- A record that changes while no lead turn is running (a team stopped from the
+  panel) is saved right away.
+
+**Cost**
+- Each helper's and the team's dollars come from `flight_deck/pricing.py`,
+  including the lead's quiet answers. They show in the budget line and on each
+  helper card. They are left out when the model has no known price.
+
+**Session lists**
+- Helpers' sessions (`metadata.team_helper`) are left out of the owner's lists:
+  `list_owner_sessions` (used by `/sessions`, `/session list`, the sessions
+  tool and the remote commands), `GET /api/sessions` and the MCP session list.
+  Loading one by id still works.
+
+**Checked**
+- 73 unit tests (8 new).
+- The real-stack run with a scripted model, now with P2:
+  - The transcript of a real helper session lists the brief, the `team` and
+    `send_mail` calls with their results, and the result.
+  - After the in-memory teams were cleared, as a restart would, the card came
+    back from the record, and the transcript opened from the record.
+  - `/team Compare suppliers D and E` went through the slash command,
+    `complete()` and `team propose`. The team started "started by you", ran
+    and delivered.
+  - The owner's session list showed none of the 5 helper sessions.
+  - The cost came out at $0.0022 for the scripted usage.
+- UI: the harness in dark and light, desktop and phone: the cost, the
+  transcript view, and a card rebuilt from a record.
+

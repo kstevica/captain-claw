@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle, ArrowLeft, Bookmark, Check, ChevronDown, ChevronRight, CircleDot, CircleStop, CornerDownRight,
-  FileText, Globe, Info, Loader2, Megaphone, MessageCircleQuestion, MessageSquareText, PanelRightOpen, Sparkles,
-  Users, Wrench, X,
+  FileText, Globe, Info, Loader2, Megaphone, MessageCircleQuestion, MessageSquareText, PanelRightOpen, RefreshCw,
+  ScrollText, Sparkles, Users, Wrench, X,
 } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../../../stores/chatStore'
 import {
-  LIVE_HELPER, LIVE_TEAM, currentTeam, fmtElapsed, fmtTokens, helperTone, useTeamStore,
-  type BoardEntry, type HelperState, type TeamHelper, type TeamRun, type TeamStep,
+  LIVE_HELPER, LIVE_TEAM, currentTeam, fmtElapsed, fmtTokens, fmtUsd, helperTone, transcriptKey, useTeamStore,
+  type BoardEntry, type HelperState, type TeamHelper, type TeamRun, type TeamStep, type TranscriptItem,
 } from '../../../stores/teamStore'
 import { AgentPicture } from '../AgentPicture'
 import { FOCUS } from '../queue/QueueButton'
@@ -48,6 +48,13 @@ const TEAM_LOOK: Record<TeamRun['state'], { label: string; cls: string }> = {
 
 const HELPER_LOOK: Record<HelperState, string> = {
   waiting: 'Waiting', working: 'Working', stopping: 'Stopping', done: 'Done', failed: 'Failed', stopped: 'Stopped',
+}
+
+function helperLabel(h: TeamHelper): string {
+  if (h.state !== 'stopped') return HELPER_LOOK[h.state]
+  if (h.stopped_by === 'budget') return 'Stopped at the budget'
+  if (h.stopped_by === 'restart') return 'Stopped by a restart'
+  return 'Stopped'
 }
 
 function StateChip({ team }: { team: TeamRun }) {
@@ -97,7 +104,10 @@ function BudgetMeter({ team, compact = false }: { team: TeamRun; compact?: boole
       {!compact && (
         <div className="mb-1 flex items-center justify-between text-[11px] text-zinc-500">
           <span>Budget</span>
-          <span className="font-mono tabular-nums">{fmtTokens(team.used)} / {fmtTokens(team.budget)}</span>
+          <span className="font-mono tabular-nums">
+            {fmtTokens(team.used)} / {fmtTokens(team.budget)}
+            {team.usd != null && <span className="text-zinc-400" data-team-usd> · {fmtUsd(team.usd)}</span>}
+          </span>
         </div>
       )}
       <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800">
@@ -343,15 +353,21 @@ export function TeamPanel({ sessionKey, agentId, agentName, phone = false }: {
   const closePanel = useTeamStore((s) => s.closePanel)
   const teamAction = useChatStore((s) => s.teamAction)
   const [tab, setTab] = useState<'helpers' | 'board' | 'timeline'>('helpers')
+  const [reading, setReading] = useState<{ teamId: string; helperId: string } | null>(null)
   const live = !!team && (team.state === 'running' || team.state === 'finishing')
   const now = useNow(live)
+  const readingHelper = team && reading?.teamId === team.id ? team.helpers.find((h) => h.id === reading.helperId) : undefined
 
-  // Esc closes it (unless a dialog has the key).
+  // Esc closes the transcript first, then the panel (unless a dialog has the key).
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) closePanel() }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (reading) setReading(null)
+      else closePanel()
+    }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [closePanel])
+  }, [closePanel, reading])
 
   if (!panel || panel.key !== sessionKey || !team) return null
 
@@ -430,14 +446,18 @@ export function TeamPanel({ sessionKey, agentId, agentName, phone = false }: {
         )}
       </div>
 
-      <div className={`min-h-0 flex-1 ${tab === 'helpers' ? 'overflow-y-auto' : 'flex flex-col'}`}>
-        {tab === 'board' ? (
+      <div className={`min-h-0 flex-1 ${tab === 'helpers' && !readingHelper ? 'overflow-y-auto' : 'flex flex-col'}`}>
+        {readingHelper ? (
+          <TranscriptView team={team} helper={readingHelper} index={team.helpers.indexOf(readingHelper)}
+            sessionKey={sessionKey} agentId={agentId} agentName={agentName} onBack={() => setReading(null)} />
+        ) : tab === 'board' ? (
           <BoardView team={team} live={live} agentName={agentName} />
         ) : tab === 'helpers' ? (
           <div className="space-y-3 p-3">
             {team.helpers.map((h, i) => (
               <HelperCard key={h.id} team={team} helper={h} index={i} sessionKey={sessionKey}
-                agentId={agentId} agentName={agentName} />
+                agentId={agentId} agentName={agentName}
+                onTranscript={() => setReading({ teamId: team.id, helperId: h.id })} />
             ))}
             {team.state === 'finishing' && (
               <div className="flex items-center gap-2 rounded-xl border border-sky-500/25 bg-sky-500/10 px-3 py-2.5 text-xs text-sky-700 dark:text-sky-300">
@@ -454,14 +474,16 @@ export function TeamPanel({ sessionKey, agentId, agentName, phone = false }: {
       <div className="border-t border-zinc-800/70 px-4 py-2.5 text-[11px] leading-relaxed text-zinc-500">
         {live ? <>Keep talking to {agentName} in the chat — it sees the team’s progress and can steer or stop a helper.</>
           : team.state === 'proposed' ? <>Tap Team up on the card to start them.</>
+          : team.from_record ? <>Rebuilt from {agentName}’s record of this team. Each helper’s transcript is still here.</>
           : <>Helpers changed nothing outside {agentName}; anything to send or book is up to {agentName}, with you.</>}
       </div>
     </aside>
   )
 }
 
-function HelperCard({ team, helper: h, index, sessionKey, agentId, agentName }: {
+function HelperCard({ team, helper: h, index, sessionKey, agentId, agentName, onTranscript }: {
   team: TeamRun; helper: TeamHelper; index: number; sessionKey: string; agentId: string; agentName: string
+  onTranscript: () => void
 }) {
   const teamAction = useChatStore((s) => s.teamAction)
   const [allSteps, setAllSteps] = useState(false)
@@ -494,9 +516,10 @@ function HelperCard({ team, helper: h, index, sessionKey, agentId, agentName }: 
           </div>
           <div className="flex items-center gap-1.5 text-[11px] text-zinc-500">
             <HelperStateIcon state={h.state} className="h-3 w-3" />
-            <span>{HELPER_LOOK[h.state]}{h.state === 'stopped' && h.stopped_by === 'budget' ? ' at the budget' : ''}</span>
+            <span>{helperLabel(h)}</span>
             <span>·</span>
             <span className="font-mono tabular-nums">{fmtTokens(h.tokens)}</span>
+            {h.usd != null && <span className="font-mono tabular-nums">· {fmtUsd(h.usd)}</span>}
             {h.tool_count > 0 && <><span>·</span><span>{h.tool_count} tool{h.tool_count === 1 ? '' : 's'}</span></>}
           </div>
         </div>
@@ -588,12 +611,134 @@ function HelperCard({ team, helper: h, index, sessionKey, agentId, agentName }: 
         </div>
       )}
 
-      <div className="flex items-center justify-between px-3 pb-2.5 pt-2 text-[11px] text-zinc-600">
-        <span>{h.step_count} step{h.step_count === 1 ? '' : 's'}{h.model ? ` · ${h.model.split('/').pop()}` : ''}</span>
+      <div className="flex items-center gap-3 px-3 pb-2.5 pt-2 text-[11px] text-zinc-600">
+        <span className="min-w-0 flex-1 truncate">
+          {[h.step_count > 0 ? `${h.step_count} step${h.step_count === 1 ? '' : 's'}` : '', h.model.split('/').pop()]
+            .filter(Boolean).join(' · ')}
+        </span>
         {allSteps && steps.length > 6 && (
           <button onClick={() => setAllSteps(false)} className="text-zinc-500 hover:text-zinc-300">Fewer</button>
         )}
+        {(h.session_id || live) && (
+          <button
+            onClick={onTranscript}
+            data-transcript={h.id}
+            className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 font-medium text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 ${FOCUS}`}
+          >
+            <ScrollText className="h-3 w-3" /> Transcript
+          </button>
+        )}
       </div>
+    </div>
+  )
+}
+
+// ── A helper's transcript (its own session, read-only) ────────────────────
+
+function TranscriptView({ team, helper: h, index, sessionKey, agentId, agentName, onBack }: {
+  team: TeamRun; helper: TeamHelper; index: number; sessionKey: string; agentId: string; agentName: string
+  onBack: () => void
+}) {
+  const teamTranscript = useChatStore((s) => s.teamTranscript)
+  const data = useTeamStore((s) => s.transcripts[transcriptKey(sessionKey, team.id, h.id)])
+  const live = LIVE_HELPER.includes(h.state)
+  const tone = helperTone(index)
+  const items = data?.items ?? []
+  const { boxRef, onScroll } = useFollow(items.length, true)
+
+  // Read it on open, and again every few seconds while the helper works.
+  useEffect(() => {
+    teamTranscript(sessionKey, team.id, h.id)
+    if (!live) return
+    const t = setInterval(() => teamTranscript(sessionKey, team.id, h.id), 4000)
+    return () => clearInterval(t)
+  }, [teamTranscript, sessionKey, team.id, h.id, live])
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" data-transcript-view={h.id}>
+      <div className="flex items-center gap-2.5 border-b border-zinc-800/70 px-3 py-2">
+        <button onClick={onBack} className={`rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ${FOCUS}`} aria-label="Back to the helpers">
+          <ArrowLeft className="h-4 w-4" />
+        </button>
+        <HelperAvatar agentId={agentId} agentName={agentName} index={index} size="sm" live={h.state === 'working'} />
+        <div className="min-w-0 flex-1">
+          <div className={`truncate text-[13px] font-semibold ${tone.text}`}>{h.name} · transcript</div>
+          <div className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+            <HelperStateIcon state={h.state} className="h-3 w-3" /> {helperLabel(h)}
+            {data && data.total > items.length && <span>· last {items.length} of {data.total}</span>}
+          </div>
+        </div>
+        <button
+          onClick={() => teamTranscript(sessionKey, team.id, h.id)}
+          className={`rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 ${FOCUS}`}
+          aria-label="Refresh the transcript" title="Refresh"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${data?.loading ? 'animate-spin' : ''}`} />
+        </button>
+      </div>
+      <div ref={boxRef} onScroll={onScroll} className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
+        {!data || (data.loading && items.length === 0) ? (
+          <div className="space-y-2 pt-1">
+            {[0, 1, 2].map((i) => <div key={i} className="fd-shimmer h-10 rounded-lg" />)}
+          </div>
+        ) : data.error && items.length === 0 ? (
+          <div className="flex flex-col items-center justify-center px-6 py-10 text-center">
+            <ScrollText className="h-6 w-6 text-zinc-700" />
+            <p className="mt-2 text-xs text-zinc-500">{data.error}</p>
+          </div>
+        ) : (
+          items.map((item, i) => <TranscriptLine key={i} item={item} name={h.name} toneText={tone.text} />)
+        )}
+        {live && items.length > 0 && (
+          <div className="flex items-center gap-2 px-1 py-1 text-[11px] text-zinc-500">
+            <span className="fd-shimmer h-1.5 w-16 rounded-full" /> Still working…
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function TranscriptLine({ item, name, toneText }: { item: TranscriptItem; name: string; toneText: string }) {
+  const [open, setOpen] = useState(false)
+  if (item.role === 'user') {
+    const brief = item.kind === 'brief'
+    return (
+      <div className="rounded-lg border border-dashed border-zinc-800 px-2.5 py-2">
+        <button onClick={() => setOpen((o) => !o)} className={`flex w-full items-center gap-1 text-left text-[10px] font-semibold uppercase tracking-wider text-zinc-500 ${FOCUS}`}>
+          {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          {brief ? 'Its part, as briefed' : 'Note from the runner'}
+        </button>
+        {open && <p className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed text-zinc-400">{item.text}</p>}
+      </div>
+    )
+  }
+  if (item.role === 'tool') {
+    return (
+      <div className="ml-4 rounded-lg bg-zinc-900/60 px-2.5 py-1.5">
+        <button onClick={() => setOpen((o) => !o)} className={`flex w-full items-center gap-1.5 text-left text-[11px] text-zinc-500 ${FOCUS}`}>
+          {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+          <span className="font-mono text-zinc-400">{item.name || 'tool'}</span>
+          <span className="truncate">{open ? '' : item.text.slice(0, 90)}</span>
+        </button>
+        {open && <p className="mt-1 max-h-64 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-zinc-400">{item.text}{item.cut ? ' …' : ''}</p>}
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-1.5">
+      {item.text && (
+        <div className="rounded-lg bg-zinc-800/40 px-2.5 py-2">
+          <div className={`mb-0.5 text-[10px] font-semibold uppercase tracking-wider ${toneText}`}>{name}</div>
+          <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-zinc-300">{item.text}</p>
+        </div>
+      )}
+      {(item.calls ?? []).map((c, i) => (
+        <div key={i} className="ml-4 flex items-start gap-1.5 text-[11px] text-zinc-500">
+          <Wrench className="mt-[2px] h-3 w-3 shrink-0 text-zinc-600" />
+          <span className="min-w-0 break-words"><span className="font-mono text-zinc-300">{c.name}</span> <span className="font-mono">{c.args}</span></span>
+        </div>
+      ))}
     </div>
   )
 }
