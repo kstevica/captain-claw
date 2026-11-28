@@ -1501,7 +1501,7 @@ async def _write_turn(ch: Any, st: _AgentState, turn: _SentTurn) -> bool:
 
 # Slash commands the agent runs as a chat turn (they can be busy-refused and
 # are answered by id like any message), so they keep their place in line.
-_CHAT_COMMANDS = ("/code", "/publish", "/orchestrate")
+_CHAT_COMMANDS = ("/code", "/publish", "/orchestrate", "/team")
 
 
 def _is_command(payload: dict[str, Any]) -> bool:

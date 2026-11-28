@@ -4,7 +4,8 @@ Status: **P0 built** on branch `feat/team-up-p0` (PR #818), with the chat UI
 and the per-agent setting pulled in from P2. **P1 (the board)** on
 `feat/team-up-p1` (PR #819), stacked on P0. **P2 (the rest of the chat UI)**
 on `feat/team-up-p2` (PR #820), stacked on P1. **P3 (learning and recall)**
-on `feat/team-up-p3`, stacked on P2. Owner decisions in. See the "as built"
+on `feat/team-up-p3` (PR #821), stacked on P2. **P4 (Telegram and WhatsApp)**
+on `feat/team-up-p4`, stacked on P3. Owner decisions in. See the "as built"
 sections at the end.
 
 ## The idea
@@ -517,3 +518,83 @@ settings) came with P0 and P1. This phase adds the rest.
     helper=Prices`. The tool returned Prices' full result from its session,
     and its board post, and the reply was built from it.
 
+
+## P4 as built (2026-11-28): Telegram and WhatsApp
+
+Team up now works in the owner's own Telegram and WhatsApp chats with the
+agent, as well as in the web chat. Both are turns on the main conversation
+(lane A).
+
+**Where the person is (`turn_place`)**
+- A turn's channel decides:
+  - **web**;
+  - **telegram**: the owner's private chat. It answers with `{chat_id, user_id}`,
+    captured during the turn, since the agent holds them only then;
+  - **whatsapp**: it answers with `{waid}`, the number of the turn being
+    answered, else the session's `whatsapp_waid`.
+- Refused elsewhere, in the agent's words and the person's:
+  - other surfaces (glasses, Messenger, devices);
+  - Telegram users who aren't the owner (their agents aren't lanes);
+  - Telegram groups and shared agents.
+- The team keeps `channel` and `reply_to`. They are in the snapshot and the
+  record.
+  - A start from a turn (the agent's `team start`, mode On, or `/team`) follows
+    that turn's channel.
+  - A **tap in the web chat** moves the results to the web chat.
+
+**The run on Telegram / WhatsApp** (as planned: one line at the start, the
+person keeps chatting, then one reply)
+- **No card to tap.** Under "Ask me", `team propose` tells the lead to ask in
+  one short line, naming the helpers; "yes" → `team start`. The web chat still
+  shows the card, so a tap there works too. Under "On" and with `/team`, the
+  team starts at once, and the lead ends with one line.
+- **The person keeps talking to the lead on the same chat.** Every lead call
+  gets "Team now". The web chat shows the live panel, since the frames go to
+  lane A. There is no per-helper narration on the phone.
+- **Questions go through the lead.** A helper's `ask_user` is refused with
+  "ask the lead with team ask to='lead'". Its brief says the user is on
+  Telegram/WhatsApp. The lead answers at once from what the user said (P1).
+- **The reply**
+  - **Telegram** (`_deliver_telegram`):
+    - It waits quietly until the main conversation is free. The owner lane
+      would otherwise post "yours is next".
+    - It takes the user's lock and the owner lane, and runs the lead's turn on
+      the results message, as `peer_relay`/`delegated_result`.
+    - The reply is sent with `_tg_send`. The web chat gets the "Team results"
+      note and the reply.
+    - Files are not sent to Telegram in v1; the reply names them.
+  - **WhatsApp**: the finishing turn is the usual lane-A turn, which Flight
+    Deck's channel bus already relays to the person's number. It runs with
+    `surface="whatsapp"`, so the reply is written for WhatsApp, and with
+    `whatsapp_media_to=<waid>`, so files the turn produces go to that number.
+- **`/team <task>`** passes through to the agent's turn on both: Telegram's
+  command handler lets it fall through, as `/code` does, and Flight Deck's
+  WhatsApp bridge queues it as a chat command.
+- **Flight Deck:** a small "Telegram" / "WhatsApp" chip on the card and the
+  panel. The footer says where the results go.
+
+**Checked**
+- Unit tests for each part: where the person is, the offer as a question,
+  `ask_user` refused, a web tap bringing the results to the web, the reply
+  going to Telegram (owner lane, send, web mirror), and WhatsApp's surface and
+  number.
+  84 unit tests in all.
+- Real-stack runs with a scripted model:
+  - **Telegram.** The run went through the real owner turn path
+    (`_tg_process_with_typing`), with a fake bridge:
+    - The proposal recorded `{chat_id, user_id}`, and the lead asked on
+      Telegram.
+    - "Go ahead with the team" made the lead call `team start`. The team
+      followed the Telegram turn.
+    - The finishing turn saw every result. Its reply went to the Telegram chat,
+      and the web chat got the "Team results" note and the reply.
+    - `/team …` on Telegram fell through the command handler to the agent and
+      started a team at once, which was delivered to Telegram.
+    - Both records say `telegram`.
+  - **WhatsApp.** The turns went through `handle_chat` with the person's number,
+    as Flight Deck sends them:
+    - The team recorded `{waid}`.
+    - The finishing turn ran with `surface="whatsapp"` and
+      `whatsapp_media_to=<waid>`, and its reply went out on lane A, which
+      Flight Deck relays to the number.
+- UI: the chip and the footer, in the harness.

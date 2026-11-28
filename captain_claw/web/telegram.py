@@ -925,10 +925,10 @@ async def execute_telegram_command(
         if cmd in ("/basna",):
             return await user_agent.run_basna_command(args.strip())
 
-        if cmd in ("/code", "/publish"):
+        if cmd in ("/code", "/publish", "/team"):
             # Fall through to the normal agent turn — complete() rewrites /code
-            # (code tool) and /publish (hosting tool) into the right directive;
-            # both may need conversation context to resolve the target.
+            # (code tool), /publish (hosting tool) and /team (Team up) into the
+            # right directive; each may need conversation context.
             return None
 
         if cmd in ("/orchestrate",):
