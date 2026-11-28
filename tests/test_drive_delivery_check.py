@@ -218,8 +218,51 @@ def test_the_prompts_exist_and_take_their_fields():
     assert '"complete"' in system
     # A deliberate, explained refusal is not a gap: the check must never push toward it.
     assert "declined on purpose" in system and "never ask for that part to be done" in system
-    text = loader.render("delivery_check_user_prompt.md", user_input="ASK {x}", work_log="LOG", candidate_response="REPLY")
-    assert "ASK {x}" in text and "LOG" in text and "REPLY" in text
+    # Which thing a short request points back to is read from the exchange before it.
+    assert "Which thing the request is about" in system and "compare them" in system
+    text = loader.render("delivery_check_user_prompt.md", user_input="ASK {x}", earlier="BEFORE", work_log="LOG",
+                         candidate_response="REPLY")
+    assert "ASK {x}" in text and "BEFORE" in text and "LOG" in text and "REPLY" in text
+    assert "{earlier}" not in text
+
+
+def test_the_checker_sees_the_exchange_before_the_request():
+    from captain_claw import agent_completion_mixin as m
+
+    before = [
+        {"role": "user", "origin": "human", "content": "Old question about two funds"},
+        {"role": "assistant", "content": "Fund comparison: A vs B."},
+        {"role": "user", "origin": "human", "content": "Find business conferences in Zagreb in Q1 and Q2"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+        _tool("web_search", "results"),
+        {"role": "assistant", "content": [{"type": "text", "text": "Three fit: Money Motion, Future Tense, MEETEX."}]},
+        {"role": "assistant", "content": "[Autonomous Work — from the AUTO lane]\nOn the fund comparison: …"},
+    ]
+    turn = [{"role": "user", "origin": "human", "content": "compare them"}, _tool("read", "Fund comparison file")]
+    stub = _Stub(before + turn, "")
+    earlier = stub._delivery_earlier(len(before))
+    assert "Find business conferences in Zagreb" in earlier and "Money Motion, Future Tense, MEETEX" in earlier
+    assert "Autonomous Work" not in earlier and "two funds" not in earlier
+    assert _Stub([], "")._delivery_earlier(0) == "(nothing before it)"
+    long = _Stub([{"role": "user", "origin": "human", "content": "q " * 5000},
+                  {"role": "assistant", "content": "a " * 5000}], "")._delivery_earlier(2)
+    assert len(long) < 2 * m._DELIVERY_EARLIER_CHARS + 60 and long.count(" …") == 2
+
+
+async def test_the_check_is_given_the_exchange_before_the_request():
+    before = [{"role": "user", "origin": "human", "content": "Find conferences"},
+              {"role": "assistant", "content": "Money Motion and MEETEX."}]
+    stub = _Stub(before + list(WORK), json.dumps({"complete": True, "gaps": []}))
+    with drive.turn_drive("persistent"):
+        await stub._attempt_finalize_response(
+            output_text="Compared: Money Motion vs MEETEX.", iteration=3, hard_turn_iterations=80,
+            finish_success=True, effective_user_input="compare them", user_input="compare them",
+            turn_start_idx=len(before), turn_usage={}, session_tool_policy=None, planning_pipeline=None,
+            list_task_plan={}, task_contract=None, completion_requirements=[], completion_feedback="",
+            enforce_python_worker_mode=False, python_worker_attempted=False,
+        )
+    seen = json.loads(stub.checker_calls[0][1].content)
+    assert "Find conferences" in seen["earlier"] and "Money Motion and MEETEX." in seen["earlier"]
 
 
 async def test_a_check_that_runs_out_thinking_is_asked_again_with_thinking_off():
