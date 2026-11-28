@@ -2044,7 +2044,7 @@ interface ChatStore {
   cancelTask: (containerId: string) => void
   /** A tap on a Team up card or panel: start / dismiss a proposed team, stop
    *  one helper (`helper`) or the whole team. */
-  teamAction: (containerId: string, teamId: string, action: 'start' | 'dismiss' | 'stop', helper?: string) => void
+  teamAction: (containerId: string, teamId: string, action: 'start' | 'dismiss' | 'stop' | 'remove', helper?: string) => void
   /** "Do it alone": the proposal goes, and the agent is asked to do it itself. */
   teamAlone: (containerId: string, teamId: string) => void
   /** Ask the agent for one helper's transcript (the Team panel's Transcript). */
